@@ -1,5 +1,13 @@
 # Contributing to Shipyard
 
+## Philosophy: AI-Authored Code
+
+Shipyard is built entirely by AI agents directed by human intent. We believe the future of software development is humans deciding *what* to build and *why*, while AI handles the *how*. Every line of code in this repo was written by an AI assistant, and we intend to keep it that way.
+
+**We accept pull requests authored by AI tools only.** This includes code written with Claude Code, GitHub Copilot, Cursor, Aider, or any other AI coding assistant. The human's role is to define the problem, review the output, and decide whether to merge — not to write the implementation by hand.
+
+This isn't a limitation — it's a design choice. AI-authored code is reproducible, spec-driven, and testable by default. It also means anyone can contribute regardless of their programming experience, as long as they can clearly describe what needs to change.
+
 ## Workflow
 
 Shipyard changes should be scoped to a spec or bugfix request. For non-trivial work, start from a Nightshift spec in `.nightshift/specs/` and keep implementation aligned with its acceptance criteria.
@@ -8,8 +16,9 @@ Shipyard changes should be scoped to a spec or bugfix request. For non-trivial w
 
 1. Keep each pull request focused on one spec or bugfix.
 2. Describe the problem, the files changed, and how you validated the result.
-3. Include screenshots for UI changes when relevant.
-4. Call out any follow-up work explicitly instead of silently expanding scope.
+3. State which AI tool was used to author the code.
+4. Include screenshots for UI changes when relevant.
+5. Call out any follow-up work explicitly instead of silently expanding scope.
 
 ## Code Style
 

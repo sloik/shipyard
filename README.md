@@ -84,4 +84,6 @@ Start here if the bridge is not connecting, a child MCP will not start, or socke
 
 ## Contributing
 
-Contribution guidelines live in [CONTRIBUTING.md](CONTRIBUTING.md). Keep changes scoped, avoid machine-specific paths, and anchor non-trivial work to a Nightshift spec.
+Shipyard is an **AI-authored project** — every line of code is written by AI agents, directed by human intent. We accept PRs authored by AI tools only (Claude Code, Copilot, Cursor, Aider, etc.). Humans decide what to build and review the results; AI writes the code.
+
+Full guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
