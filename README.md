@@ -15,8 +15,8 @@ Shipyard is a native macOS app for running and organizing multiple MCP servers b
 ```mermaid
 flowchart LR
     Client["Any MCP Client"]
-    Bridge["ShipyardBridge<br/>stdio MCP server"]
-    App["Shipyard.app<br/>macOS orchestrator"]
+    Bridge["ShipyardBridge\nstdio MCP server"]
+    App["Shipyard.app\nmacOS orchestrator"]
     Socket["Unix socket"]
     MCP1["child MCP A"]
     MCP2["child MCP B"]
