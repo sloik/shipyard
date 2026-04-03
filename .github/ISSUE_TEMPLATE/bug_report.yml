@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible Shipyard bug that can be converted into a BUGFIX spec.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this.
+
+        Fill in the sections below as concretely as possible. Maintainers use this issue to create a BUGFIX spec, so clear reproduction steps and observed behavior matter more than long narratives.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Summarize the problem and when it happens.
+      placeholder: Shipyard shows the MCP as connected, but tool calls fail immediately after startup.
+    validations:
+      required: true
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest set of steps needed to trigger the bug.
+      placeholder: |
+        1. Launch Shipyard
+        2. Enable the MCP
+        3. Open the Gateway tab
+        4. Trigger a tool call
+        5. Observe the failure
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+      placeholder: The MCP should accept the tool call and return a normal result.
+    validations:
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      description: What happened in reality? Include visible errors or side effects.
+      placeholder: The tool call fails with a timeout and the MCP status flips back to disconnected.
+    validations:
+      required: true
+  - type: input
+    id: shipyard_version
+    attributes:
+      label: Shipyard version
+      description: App version, tag, or commit if known.
+      placeholder: 0.26.0 or main@abcdef1
+    validations:
+      required: true
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      description: macOS release and hardware if relevant.
+      placeholder: macOS 15.4 on Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: log_output
+    attributes:
+      label: Log output
+      description: Paste relevant Shipyard, bridge, or MCP logs. Redact secrets before submitting.
+      render: shell
+      placeholder: |
+        [error] MCP handshake failed
+        [debug] socket connection closed unexpectedly
+    validations:
+      required: false

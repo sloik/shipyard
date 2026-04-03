@@ -1,0 +1,354 @@
+================================================================================
+                 SHIPYARD TOOL EXECUTION QUEUE — VISUAL SUMMARY
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            FINAL LAYOUT MOCKUP                              │
+├────────────────────────────────────┬────────────────────────────────────────┤
+│ SIDEBAR (Servers/Tools)            │ DETAIL PANE                            │
+│                                    │ (Tools or Execution Details)           │
+│ ▼ Gateway                          │                                        │
+│   ├─ Shipyard (6)  [✓]             │ Shipyard Tools / Executions           │
+│   ├─ mac-runner (3)[✓]             │ ─────────────────────────────────     │
+│   ├─ lmstudio (5)  [✗]             │                                        │
+│   └─ hear-me-say (2)               │ shipyard__gateway_call                 │
+│                                    │ Call a tool from a managed MCP        │
+│ ▼ Servers                          │ [Enable toggle] [▶ Execute]            │
+│   ├─ lmac-run (4)  [✓]             │                                        │
+│   └─ ...                           │ ... more tools or execution details    │
+├────────────────────────────────────┴────────────────────────────────────────┤
+│ ▼ Execution Queue (2 active, 5 done)                       [Clear history]  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ⏳ shipyard__gateway_call        [2.4s] 14:35:42                           │
+│  ⏳ shipyard__logs                [1.8s] 14:34:50                           │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  ✓ shipyard__status               [0.5s] 14:32:15  [View]                  │
+│  ✓ shipyard__health               [1.2s] 14:30:44  [View]                  │
+│  ✗ mac-runner__run_command        [3.7s] 14:28:22  [View] [Retry]         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+KEY ELEMENTS:
+
+  ⏳ = EXECUTING (running right now)
+  ✓ = SUCCESS (completed successfully)
+  ✗ = FAILED (error occurred, can retry)
+
+  [2.4s] = Elapsed time
+  14:35:42 = Timestamp when execution started
+  [View] = Show request/response in detail pane
+  [Retry] = Re-run with same parameters
+  [Clear history] = Remove all completed entries
+
+
+================================================================================
+                              EXECUTION FLOW
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                    HOW THE USER INTERACTS WITH THE QUEUE                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+STEP 1: User clicks ▶ on a tool in the detail pane
+  └─> Sheet modal opens with parameter form
+
+STEP 2: User fills in JSON parameters and clicks "Execute"
+  └─> Sheet closes IMMEDIATELY (~100ms)
+  └─> User returns to tool list
+  └─> Execution starts in background (non-blocking)
+
+STEP 3: Queue entry appears in bottom panel
+  └─> Status: ⏳ (hourglass icon)
+  └─> Shows tool name, elapsed time, timestamp
+  └─> No action buttons while executing
+
+STEP 4a: Execution completes successfully
+  └─> Status changes: ⏳ → ✓ (checkmark icon)
+  └─> Moves to history section
+  └─> [View] button becomes available
+  └─> User can click [View] to see response
+
+STEP 4b: Execution fails
+  └─> Status changes: ⏳ → ✗ (X icon)
+  └─> Error message shown in detail pane if clicked
+  └─> [Retry] button available to re-run
+
+STEP 5: User can start another tool while executions run
+  └─> No blocking
+  └─> All executions run concurrently
+  └─> User can watch queue grow
+
+
+================================================================================
+                            STATE TRANSITIONS
+================================================================================
+
+                         [User clicks ▶ Execute]
+                               │
+                               ▼
+                        ┌────────────┐
+                        │  PENDING   │ < 100ms
+                        │ ⏳ Starting │
+                        └────────────┘
+                               │
+                               ▼
+                        ┌────────────┐
+                        │ EXECUTING  │ (async running)
+                        │ ⏳ Running  │
+                        └─┬──────────┘
+                          │
+                      ┌───┴───┐
+                      │       │
+                   [OK]     [ERROR]
+                      │       │
+                      ▼       ▼
+                   ┌──────┐ ┌──────────┐
+                   │ ✓    │ │ ✗        │
+                   │ Done │ │ Failed   │
+                   └──────┘ └──────────┘
+                      │       │
+                      └───┬───┘
+                          │
+                   (moves to history)
+                          │
+                   Can view, retry, clear
+
+
+================================================================================
+                        DESIGN HIGHLIGHTS
+================================================================================
+
+✅ NON-BLOCKING EXECUTION
+   • Sheet closes immediately after Execute clicked
+   • Execution continues in background
+   • User can start multiple tools at once
+   • All run in parallel
+
+✅ PERSISTENT VISIBILITY
+   • Bottom panel always visible
+   • Can collapse/expand with arrow button
+   • Draggable divider to resize
+   • Shows both active and completed executions
+
+✅ DETAILED INSPECTION
+   • Click queue entry to see request/response
+   • Detail pane switches to execution view
+   • Show parameters (request) and response body
+   • Copy response, retry, or return to tools
+
+✅ ERROR HANDLING
+   • Failed execution shows ✗ icon
+   • Error message displayed
+   • [Retry] button to re-run with same params
+
+✅ HISTORY MANAGEMENT
+   • Last 20 executions kept
+   • Can view any old execution
+   • [Clear history] button to clean up
+   • Users control what to delete
+
+✅ FOLLOWS SHIPYARD PATTERNS
+   • Reuses @Observable @MainActor architecture
+   • Sidebar selection → detail pane pattern
+   • Environment injection for dependencies
+   • Matches existing design language
+
+
+================================================================================
+                      KEY DESIGN DECISIONS
+================================================================================
+
+❓ Why a bottom panel?
+   → Persistent visibility without stealing sidebar space
+   → Follows Terminal, Xcode, Safari pattern (native macOS)
+   → Can be resized and collapsed
+   → Always accessible while using other tabs
+
+❓ Why does the sheet close immediately?
+   → Non-blocking: user doesn't wait for execution
+   → Allows starting multiple tools concurrently
+   → Cleaner UX: execute → return to work instantly
+   → Execution continues invisibly in background
+
+❓ Why show execution details in the main detail pane?
+   → Consistent with existing design
+   → Executions are "items" just like servers/tools
+   → Single source of truth for what's visible
+   → No extra modal windows cluttering the interface
+
+❓ Why keep history (don't auto-discard)?
+   → Users want to inspect old responses
+   → Helps with debugging (what ran before?)
+   → Limit to 20 to avoid memory bloat
+   → Users can manually clear when done
+
+❓ Why use icons (⏳✓✗)?
+   → Instant visual feedback (no reading needed)
+   → Accessible via VoiceOver labels
+   → Consistent with system design
+   → Scalable: works in narrow and wide windows
+
+
+================================================================================
+                        IMPLEMENTATION PLAN
+================================================================================
+
+PHASE 1: Data Model (2-3 days)
+  ✦ Create ExecutionQueueManager.swift
+  ✦ Create ToolExecution.swift
+  ✦ Create ToolExecutionRequest.swift
+  ✦ Create ToolExecutionResponse.swift
+  ✦ Write unit tests
+
+PHASE 2: UI Components (2-3 days)
+  ✦ Create ExecutionQueuePanelView.swift (bottom panel container)
+  ✦ Create ExecutionQueueRowView.swift (each queue entry)
+  ✦ Create ToolExecutionSheet.swift (parameter form)
+  ✦ Create ExecutionDetailView.swift (request/response display)
+  ✦ Create CodeBlockView.swift (JSON syntax highlighting)
+  ✦ Create JSONEditorView.swift (parameter form builder)
+
+PHASE 3: Integration (1-2 days)
+  ✦ Modify GatewayView.swift (add environment, state, views, sheet)
+  ✦ Modify ShipyardApp.swift (inject ExecutionQueueManager)
+  ✦ Modify SocketServer.swift (add callTool method)
+  ✦ Connect all pieces, test manually
+
+PHASE 4: Polish (1 day)
+  ✦ Draggable divider with resize gesture
+  ✦ Persist panel height to UserDefaults
+  ✦ Keyboard shortcuts (⌘E, ⌘W, ↑↓)
+  ✦ Accessibility labels and VoiceOver support
+  ✦ Test on narrow windows
+
+
+================================================================================
+                        FILE STRUCTURE
+================================================================================
+
+Shipyard/Models/
+  ├── ExecutionQueueManager.swift      NEW
+  ├── ToolExecution.swift              NEW
+  ├── ToolExecutionRequest.swift       NEW
+  └── ToolExecutionResponse.swift      NEW
+
+Shipyard/Views/
+  ├── ExecutionQueuePanelView.swift    NEW
+  ├── ExecutionQueueRowView.swift      NEW
+  ├── ToolExecutionSheet.swift         NEW
+  ├── ExecutionDetailView.swift        NEW
+  ├── CodeBlockView.swift              NEW (helper)
+  ├── JSONEditorView.swift             NEW (helper)
+  ├── GatewayView.swift                MODIFY (add queue + sheet)
+  └── ...
+
+Shipyard/
+  ├── ShipyardApp.swift                MODIFY (inject queueManager)
+  └── ...
+
+Shipyard/Models/
+  └── SocketServer.swift               MODIFY (add callTool method)
+
+
+================================================================================
+                            HOW TO USE DOCS
+================================================================================
+
+README.md (START HERE)
+  → Overview of all documents and how to read them
+
+EXECUTION_QUEUE_SUMMARY.md
+  → Quick overview (5 min)
+  → Read if you want the big picture
+  → Implementation roadmap and effort estimate
+
+shipyard-execution-queue-design.md
+  → Main specification (30 min)
+  → Detailed UI layouts, data models, flows
+  → Code examples for all components
+  → Rationale for each design decision
+  → Complete implementation checklist
+
+shipyard-execution-architecture.md
+  → Technical details (20 min)
+  → Component dependencies, data flow
+  → Threading model and concurrency
+  → Integration points with existing code
+  → Testing strategy
+
+shipyard-execution-ui-states.md
+  → Visual reference (15 min)
+  → ASCII mockups of 10 different UI states
+  → Responsive behavior, gestures, accessibility
+  → Reference while implementing UI
+
+
+================================================================================
+                          QUICK REFERENCE
+================================================================================
+
+NEW TYPES TO CREATE:
+
+  ExecutionQueueManager
+    ├── activeExecutions: [ToolExecution]
+    ├── history: [ToolExecution]
+    ├── executeToolAsync(tool, request) → ToolExecution
+    └── retryExecution(execution)
+
+  ToolExecution
+    ├── status: ExecutionStatus (pending, executing, success, failure)
+    ├── request: ToolExecutionRequest
+    ├── response: ToolExecutionResponse?
+    ├── error: String?
+    ├── startedAt, completedAt: Date?
+    └── elapsedSeconds (computed)
+
+  ToolExecutionRequest
+    └── toolName: String
+    └── arguments: [String: AnyCodable]
+
+  ToolExecutionResponse
+    ├── rawJSON: String
+    ├── parsedValue: [String: Any]?
+    └── contentLength: Int
+
+
+STATUS INDICATORS:
+
+  ⏳ = PENDING/EXECUTING (hourglass, orange)
+  ✓ = SUCCESS (checkmark, green)
+  ✗ = FAILED (X, red)
+
+
+MODIFIED FILES:
+
+  GatewayView.swift
+    + Add @Environment(ExecutionQueueManager)
+    + Add @State selectedExecution, showExecutionSheet, sheetTool
+    + Modify detailView to check selectedExecution first
+    + Add ▶ play button to toolRow
+    + Add ExecutionQueuePanelView at bottom
+    + Add .sheet(ToolExecutionSheet)
+
+  ShipyardApp.swift
+    + @State var queueManager = ExecutionQueueManager()
+    + .environment(queueManager)
+
+  SocketServer.swift
+    + func callTool(name: String, arguments: [String: AnyCodable]) async throws -> ToolExecutionResponse
+
+
+================================================================================
+                          READY TO BUILD
+================================================================================
+
+This design is COMPLETE and PRODUCTION-READY.
+
+All decisions are documented with rationale.
+All components are specified with code examples.
+All integration points are detailed with exact changes.
+All UI states are shown with ASCII mockups.
+
+Next step: Start Phase 1 (data model). Good luck! 🚀
+
+================================================================================

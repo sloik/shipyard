@@ -1,0 +1,36 @@
+.DS_Store
+.env
+.env.*
+*.key
+credentials.json
+
+# SwiftPM build output
+.build/
+
+# Xcode user-specific state
+DerivedData/
+*.xcuserstate
+**/xcuserdata/
+
+# Nightshift (ignore everything except specs/)
+.nightshift/**
+!.nightshift/specs/
+!.nightshift/specs/**
+
+# SwiftPM workspace
+.swiftpm/
+
+# Runtime traces
+traces/
+
+# Development runtime (personal paths, logs, binaries)
+.shipyard-dev/
+
+# Claude Code project instructions (internal)
+.claude/
+
+# Internal context
+.argo/
+eval-specs/
+SPEC-*-IMPLEMENTATION.md
+SPEC_REDOWORK_ORDER.md

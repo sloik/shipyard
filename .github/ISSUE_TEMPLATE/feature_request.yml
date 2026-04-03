@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a feature that can be evaluated and turned into a FEATURE spec.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for product ideas, workflow improvements, or new capabilities.
+
+        Maintainers translate strong requests into FEATURE specs. Focus on the problem, the proposed solution, and concrete requirements.
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem statement
+      description: What user problem or workflow gap should this feature solve?
+      placeholder: Managing multiple MCP environments is error-prone because Shipyard does not surface environment-specific profiles clearly enough.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want and how it should work.
+      placeholder: Add an environment profile switcher with explicit labels, last-used persistence, and quick actions per profile.
+    validations:
+      required: true
+  - type: checkboxes
+    id: requirements_checklist
+    attributes:
+      label: Requirements checklist
+      description: Check the requirements you believe this feature should satisfy.
+      options:
+        - label: Solves a real Shipyard user workflow or pain point
+        - label: Has clear user-facing behavior that can be validated
+        - label: Preserves current behavior unless explicitly changed
+        - label: Includes edge cases or failure states worth considering
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Write the concrete outcomes that would make this request complete.
+      placeholder: |
+        - Users can switch environments without editing config files manually
+        - The active profile is visible in the main UI
+        - Restart behavior is explicit and predictable
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider, and why are they worse?
+      placeholder: Editing mcps.json manually works today, but it is slower and easier to misuse than an in-app profile switcher.
+    validations:
+      required: false

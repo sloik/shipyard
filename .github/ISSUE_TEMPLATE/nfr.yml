@@ -1,0 +1,53 @@
+name: Non-functional concern
+description: Report a performance, reliability, security, usability, or operational constraint that may map to an NFR spec.
+title: "[NFR]: "
+labels:
+  - nfr
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for concerns about constraints rather than new product behavior.
+
+        Good reports here describe the constraint, where it shows up, and how success should be measured.
+  - type: textarea
+    id: constraint_description
+    attributes:
+      label: Constraint description
+      description: Describe the non-functional concern and why it matters.
+      placeholder: Startup time is too slow when multiple MCPs auto-start, making the app feel unreliable.
+    validations:
+      required: true
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area
+      description: Pick the main area most affected by this concern.
+      options:
+        - Performance
+        - Reliability
+        - Security
+        - Usability
+        - Observability
+        - Installation and setup
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: measurement_criteria
+    attributes:
+      label: Measurement criteria
+      description: Define how maintainers should evaluate whether this concern is addressed.
+      placeholder: |
+        - Cold launch to responsive UI should stay under 3 seconds with 5 configured MCPs
+        - Failures should be visible in logs and status UI within 1 second
+    validations:
+      required: true
+  - type: textarea
+    id: current_impact
+    attributes:
+      label: Current impact
+      description: Explain the present risk, severity, or operational cost.
+      placeholder: Users restart the app repeatedly because it is unclear whether startup is progressing or stuck.
+    validations:
+      required: false

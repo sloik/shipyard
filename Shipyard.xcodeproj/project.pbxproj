@@ -1,0 +1,896 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		11A4AB1001D3125C319564AF /* HealthChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40AF6F0A7AA564EDE87C88CA /* HealthChecker.swift */; };
+		147C55F1680385A337773100 /* InstructionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D5325A19164FD6BBA2240B2 /* InstructionsView.swift */; };
+		240893BAF8D279076C3F7F35 /* MCPNotificationParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515F054A7EEA963290175FB2 /* MCPNotificationParser.swift */; };
+		249AB2B511CD8A9573D2F46A /* LogFileWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26BC693488B8C03FA19ED88E /* LogFileWriter.swift */; };
+		30035202BFA94B1CA3B36336 /* MCPRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B23408DCAB5351713BA59C61 /* MCPRowView.swift */; };
+		38C1C9368C7CAAE4830FDB3A /* ProcessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CCB09C3FAA24A96D13676AA /* ProcessManager.swift */; };
+		39A28EAF7968CC839D70B850 /* DependencyChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176DA8813332D9DAF7DA4678 /* DependencyChecker.swift */; };
+		3A6F4BC95BE8FBA688B18D2A /* KeychainManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 944256C8146F8A204C8D1952 /* KeychainManager.swift */; };
+		51C2BE30C6AA9A4EF39E043E /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB0E10D4CB58A61D94DE277 /* AboutView.swift */; };
+		52CCA79EED3BDD7B4169230E /* ConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC206E3A1EB6F21910580D6 /* ConfigView.swift */; };
+		5CCAADD731F3F5C6F339752F /* ConfigGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4558AB184189DC13775B6B49 /* ConfigGenerator.swift */; };
+		643781732F631A9E0054326A /* BridgeLogEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781722F631A9E0054326A /* BridgeLogEntry.swift */; };
+		643781752F631AA90054326A /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781742F631AA90054326A /* AppLogger.swift */; };
+		643781772F631AB80054326A /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781762F631AB80054326A /* LogStore.swift */; };
+		643781792F631ACF0054326A /* SystemLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781782F631ACF0054326A /* SystemLogView.swift */; };
+		643781AE2F63EB3B0054326A /* ShipyardCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781AD2F63EB3B0054326A /* ShipyardCommands.swift */; };
+		643781B02F63EB9A0054326A /* NavigationTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 643781AF2F63EB9A0054326A /* NavigationTab.swift */; };
+		6445395E2F61580400440ED2 /* SocketServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6445395D2F61580400440ED2 /* SocketServer.swift */; };
+		644539602F61B67400440ED2 /* MCPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6445395F2F61B67400440ED2 /* MCPBridge.swift */; };
+		644539622F61B68000440ED2 /* GatewayRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 644539612F61B68000440ED2 /* GatewayRegistry.swift */; };
+		644539642F61CA7800440ED2 /* GatewayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 644539632F61CA7800440ED2 /* GatewayView.swift */; };
+		645D40F22F63055E009FFB42 /* ShipyardBridgeLib in Frameworks */ = {isa = PBXBuildFile; productRef = 645D40F12F63055E009FFB42 /* ShipyardBridgeLib */; };
+		64AA7DD32F77D9F00049DCFC /* ConfigEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64AA7DD22F77D9F00049DCFC /* ConfigEditorSheet.swift */; };
+		64AA7DD52F77E0210049DCFC /* JSONFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64AA7DD42F77E0210049DCFC /* JSONFormatter.swift */; };
+		64B41DE72F74002700FDF75B /* DirectoryWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DE62F74002700FDF75B /* DirectoryWatcher.swift */; };
+		64B41DEF2F74089300FDF75B /* AutoStartManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DEE2F74089300FDF75B /* AutoStartManager.swift */; };
+		64B41DF12F74089700FDF75B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DF02F74089700FDF75B /* SettingsView.swift */; };
+		64B41DF32F751D3200FDF75B /* LogMetadataHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DF22F751D3200FDF75B /* LogMetadataHelper.swift */; };
+		64B41DF92F75CF7D00FDF75B /* ToolExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DF82F75CF7D00FDF75B /* ToolExecution.swift */; };
+		64B41DFB2F75CF8100FDF75B /* ToolExecutionRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DFA2F75CF8100FDF75B /* ToolExecutionRequest.swift */; };
+		64B41DFD2F75CF8400FDF75B /* ToolExecutionResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DFC2F75CF8400FDF75B /* ToolExecutionResponse.swift */; };
+		64B41DFF2F75CF9300FDF75B /* ExecutionQueueManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41DFE2F75CF9300FDF75B /* ExecutionQueueManager.swift */; };
+		64B41E032F75D06900FDF75B /* ExecutionQueuePanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E022F75D06900FDF75B /* ExecutionQueuePanelView.swift */; };
+		64B41E052F75D06F00FDF75B /* ToolExecutionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E042F75D06F00FDF75B /* ToolExecutionSheet.swift */; };
+		64B41E072F75D07200FDF75B /* ExecutionQueueRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E062F75D07200FDF75B /* ExecutionQueueRowView.swift */; };
+		64B41E092F75D07C00FDF75B /* DynamicFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E082F75D07C00FDF75B /* DynamicFormView.swift */; };
+		64B41E0B2F75D08000FDF75B /* ExecutionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E0A2F75D08000FDF75B /* ExecutionDetailView.swift */; };
+		64B41E102F75D49400FDF75B /* CodeBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E0F2F75D49400FDF75B /* CodeBlockView.swift */; };
+		64B41E122F75D49D00FDF75B /* JSONEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E112F75D49D00FDF75B /* JSONEditorView.swift */; };
+		64B41E142F75D4F200FDF75B /* JSONHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E132F75D4F100FDF75B /* JSONHighlighter.swift */; };
+		64B41E162F75D4F900FDF75B /* JSONSchemaValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41E152F75D4F900FDF75B /* JSONSchemaValidator.swift */; };
+		64B41F542F771FA000FDF75B /* MCPConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41F532F771FA000FDF75B /* MCPConfig.swift */; };
+		64B41F562F771FAD00FDF75B /* ConfigFileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41F552F771FAD00FDF75B /* ConfigFileWatcher.swift */; };
+		64B41F5C2F7723EE00FDF75B /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41F5B2F7723EE00FDF75B /* BridgeProtocol.swift */; };
+		64B41F5E2F77241000FDF75B /* HTTPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B41F5D2F77241000FDF75B /* HTTPBridge.swift */; };
+		64D0E98A2F7D8ED900CCB3C4 /* L10n.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64D0E9892F7D8ED900CCB3C4 /* L10n.swift */; };
+		64D0E98B2F7D8EF200CCB3C4 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 64D0E9882F7D8E9400CCB3C4 /* Localizable.xcstrings */; };
+		64D0EB112F7EF88700CCB3C4 /* PathManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64D0EB102F7EF88700CCB3C4 /* PathManager.swift */; };
+		64F831CF2F7ABF0400AF74CD /* StartupProfiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F831CE2F7ABF0400AF74CD /* StartupProfiler.swift */; };
+		7A1C0AAE8A6C4C30A80F2A11 /* ManifestImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1C0AAD8A6C4C30A80F2A11 /* ManifestImporter.swift */; };
+		6807BD6A3D218D42CCEDAA40 /* ShipyardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9792FB2CC8AEF991D98290BD /* ShipyardApp.swift */; };
+		7C16358B2CE0CE20FF9C01C0 /* LogViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876963FCBA9F4EC093DDE1DD /* LogViewer.swift */; };
+		84620C663721399EFACC5CDA /* MCPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2998DB1DB4603F1954E8DFE /* MCPServer.swift */; };
+		8FA2824F82A5D1EBE2DD469E /* SecretsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD408005BC9A66E040CAA870 /* SecretsView.swift */; };
+		A8118407C62542F81E9D7513 /* MCPManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B2698699F57B3FEF28133E8 /* MCPManifest.swift */; };
+		C1376A34DFF945FD1EF7D81D /* MCPRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E359DA8E6206F8F688C66B22 /* MCPRegistry.swift */; };
+		C34E5A474E9C6A8D15287CBC /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E996DA8ADB40ECF97FE65CB /* AppDelegate.swift */; };
+		CC7F5D4DCAA07714CE3C4189 /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F941E7C1ED55BC00DD5DC3 /* MainWindow.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		6445396D2F61DF9500440ED2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B4952D4DA36455C67CA0B378 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 488C6BCC2F523F27A27A6850;
+			remoteInfo = Shipyard;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		644539802F62201100440ED2 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = /usr/share/man/man1/;
+			dstSubfolderSpec = 0;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		12F941E7C1ED55BC00DD5DC3 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
+		176DA8813332D9DAF7DA4678 /* DependencyChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DependencyChecker.swift; sourceTree = "<group>"; };
+		1D5325A19164FD6BBA2240B2 /* InstructionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsView.swift; sourceTree = "<group>"; };
+		26BC693488B8C03FA19ED88E /* LogFileWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogFileWriter.swift; sourceTree = "<group>"; };
+		40AF6F0A7AA564EDE87C88CA /* HealthChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthChecker.swift; sourceTree = "<group>"; };
+		4558AB184189DC13775B6B49 /* ConfigGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigGenerator.swift; sourceTree = "<group>"; };
+		515F054A7EEA963290175FB2 /* MCPNotificationParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPNotificationParser.swift; sourceTree = "<group>"; };
+		5CCB09C3FAA24A96D13676AA /* ProcessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessManager.swift; sourceTree = "<group>"; };
+		5E996DA8ADB40ECF97FE65CB /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		643781722F631A9E0054326A /* BridgeLogEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLogEntry.swift; sourceTree = "<group>"; };
+		643781742F631AA90054326A /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogger.swift; sourceTree = "<group>"; };
+		643781762F631AB80054326A /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
+		643781782F631ACF0054326A /* SystemLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemLogView.swift; sourceTree = "<group>"; };
+		643781AD2F63EB3B0054326A /* ShipyardCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipyardCommands.swift; sourceTree = "<group>"; };
+		643781AF2F63EB9A0054326A /* NavigationTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationTab.swift; sourceTree = "<group>"; };
+		6445395D2F61580400440ED2 /* SocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketServer.swift; sourceTree = "<group>"; };
+		6445395F2F61B67400440ED2 /* MCPBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPBridge.swift; sourceTree = "<group>"; };
+		644539612F61B68000440ED2 /* GatewayRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayRegistry.swift; sourceTree = "<group>"; };
+		644539632F61CA7800440ED2 /* GatewayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayView.swift; sourceTree = "<group>"; };
+		644539692F61DF9500440ED2 /* ShipyardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ShipyardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		644539822F62201100440ED2 /* ShipyardBridge */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = ShipyardBridge; sourceTree = BUILT_PRODUCTS_DIR; };
+		64AA7DD22F77D9F00049DCFC /* ConfigEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigEditorSheet.swift; sourceTree = "<group>"; };
+		64AA7DD42F77E0210049DCFC /* JSONFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONFormatter.swift; sourceTree = "<group>"; };
+		64B41DE62F74002700FDF75B /* DirectoryWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectoryWatcher.swift; sourceTree = "<group>"; };
+		64B41DEE2F74089300FDF75B /* AutoStartManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoStartManager.swift; sourceTree = "<group>"; };
+		64B41DF02F74089700FDF75B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		64B41DF22F751D3200FDF75B /* LogMetadataHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogMetadataHelper.swift; sourceTree = "<group>"; };
+		64B41DF82F75CF7D00FDF75B /* ToolExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecution.swift; sourceTree = "<group>"; };
+		64B41DFA2F75CF8100FDF75B /* ToolExecutionRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecutionRequest.swift; sourceTree = "<group>"; };
+		64B41DFC2F75CF8400FDF75B /* ToolExecutionResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecutionResponse.swift; sourceTree = "<group>"; };
+		64B41DFE2F75CF9300FDF75B /* ExecutionQueueManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionQueueManager.swift; sourceTree = "<group>"; };
+		64B41E022F75D06900FDF75B /* ExecutionQueuePanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionQueuePanelView.swift; sourceTree = "<group>"; };
+		64B41E042F75D06F00FDF75B /* ToolExecutionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecutionSheet.swift; sourceTree = "<group>"; };
+		64B41E062F75D07200FDF75B /* ExecutionQueueRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionQueueRowView.swift; sourceTree = "<group>"; };
+		64B41E082F75D07C00FDF75B /* DynamicFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicFormView.swift; sourceTree = "<group>"; };
+		64B41E0A2F75D08000FDF75B /* ExecutionDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionDetailView.swift; sourceTree = "<group>"; };
+		64B41E0E2F75D48900FDF75B /* JSONSchemaValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONSchemaValidator.swift; sourceTree = "<group>"; };
+		64B41E0F2F75D49400FDF75B /* CodeBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockView.swift; sourceTree = "<group>"; };
+		64B41E112F75D49D00FDF75B /* JSONEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONEditorView.swift; sourceTree = "<group>"; };
+		64B41E132F75D4F100FDF75B /* JSONHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONHighlighter.swift; sourceTree = "<group>"; };
+		64B41E152F75D4F900FDF75B /* JSONSchemaValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONSchemaValidator.swift; sourceTree = "<group>"; };
+		64B41F532F771FA000FDF75B /* MCPConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPConfig.swift; sourceTree = "<group>"; };
+		64B41F552F771FAD00FDF75B /* ConfigFileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigFileWatcher.swift; sourceTree = "<group>"; };
+		64B41F5B2F7723EE00FDF75B /* BridgeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeProtocol.swift; sourceTree = "<group>"; };
+		64B41F5D2F77241000FDF75B /* HTTPBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPBridge.swift; sourceTree = "<group>"; };
+		64D0E9882F7D8E9400CCB3C4 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		64D0E9892F7D8ED900CCB3C4 /* L10n.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = L10n.swift; sourceTree = "<group>"; };
+		64D0EB102F7EF88700CCB3C4 /* PathManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathManager.swift; sourceTree = "<group>"; };
+		64F831CE2F7ABF0400AF74CD /* StartupProfiler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupProfiler.swift; sourceTree = "<group>"; };
+		7A1C0AAD8A6C4C30A80F2A11 /* ManifestImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestImporter.swift; sourceTree = "<group>"; };
+		876963FCBA9F4EC093DDE1DD /* LogViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogViewer.swift; sourceTree = "<group>"; };
+		8B2698699F57B3FEF28133E8 /* MCPManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPManifest.swift; sourceTree = "<group>"; };
+		8FDA769BFFC126D8B618809B /* Shipyard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Shipyard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		944256C8146F8A204C8D1952 /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
+		9792FB2CC8AEF991D98290BD /* ShipyardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipyardApp.swift; sourceTree = "<group>"; };
+		B23408DCAB5351713BA59C61 /* MCPRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPRowView.swift; sourceTree = "<group>"; };
+		BD408005BC9A66E040CAA870 /* SecretsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsView.swift; sourceTree = "<group>"; };
+		C2998DB1DB4603F1954E8DFE /* MCPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServer.swift; sourceTree = "<group>"; };
+		DDB0E10D4CB58A61D94DE277 /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
+		E359DA8E6206F8F688C66B22 /* MCPRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPRegistry.swift; sourceTree = "<group>"; };
+		EAC206E3A1EB6F21910580D6 /* ConfigView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		6445396A2F61DF9500440ED2 /* ShipyardTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ShipyardTests;
+			sourceTree = "<group>";
+		};
+		644539832F62201100440ED2 /* ShipyardBridge */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ShipyardBridge;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		644539662F61DF9500440ED2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6445397F2F62201100440ED2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				645D40F22F63055E009FFB42 /* ShipyardBridgeLib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		097927A83253CC442BF5F4A5 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				4558AB184189DC13775B6B49 /* ConfigGenerator.swift */,
+				176DA8813332D9DAF7DA4678 /* DependencyChecker.swift */,
+				40AF6F0A7AA564EDE87C88CA /* HealthChecker.swift */,
+				944256C8146F8A204C8D1952 /* KeychainManager.swift */,
+				26BC693488B8C03FA19ED88E /* LogFileWriter.swift */,
+				7A1C0AAD8A6C4C30A80F2A11 /* ManifestImporter.swift */,
+				515F054A7EEA963290175FB2 /* MCPNotificationParser.swift */,
+				E359DA8E6206F8F688C66B22 /* MCPRegistry.swift */,
+				5CCB09C3FAA24A96D13676AA /* ProcessManager.swift */,
+				6445395D2F61580400440ED2 /* SocketServer.swift */,
+				6445395F2F61B67400440ED2 /* MCPBridge.swift */,
+				643781742F631AA90054326A /* AppLogger.swift */,
+				643781762F631AB80054326A /* LogStore.swift */,
+				64B41DE62F74002700FDF75B /* DirectoryWatcher.swift */,
+				64B41DEE2F74089300FDF75B /* AutoStartManager.swift */,
+				64B41DF22F751D3200FDF75B /* LogMetadataHelper.swift */,
+				64B41F552F771FAD00FDF75B /* ConfigFileWatcher.swift */,
+				64B41F5B2F7723EE00FDF75B /* BridgeProtocol.swift */,
+				64B41F5D2F77241000FDF75B /* HTTPBridge.swift */,
+				64F831CE2F7ABF0400AF74CD /* StartupProfiler.swift */,
+				64D0EB102F7EF88700CCB3C4 /* PathManager.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		172D28CD1077180FEFA1BD7D /* App */ = {
+			isa = PBXGroup;
+			children = (
+				5E996DA8ADB40ECF97FE65CB /* AppDelegate.swift */,
+				9792FB2CC8AEF991D98290BD /* ShipyardApp.swift */,
+				643781AD2F63EB3B0054326A /* ShipyardCommands.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		3C04754658B6B40CB92B9DF6 = {
+			isa = PBXGroup;
+			children = (
+				3F9D03F85BB32EDF94F17916 /* Shipyard */,
+				6445396A2F61DF9500440ED2 /* ShipyardTests */,
+				644539832F62201100440ED2 /* ShipyardBridge */,
+				7BF6DCFAF08A1D9B58338C73 /* Products */,
+				6445397C2F621EA300440ED2 /* ShipyardBridge */,
+				64B41E0C2F75D47300FDF75B /* Utilities */,
+				64D0E9872F7D8E8300CCB3C4 /* Shipyard/Resources */,
+			);
+			sourceTree = "<group>";
+		};
+		3F9D03F85BB32EDF94F17916 /* Shipyard */ = {
+			isa = PBXGroup;
+			children = (
+				172D28CD1077180FEFA1BD7D /* App */,
+				4D412EF6ADFF58063916AE4C /* Models */,
+				097927A83253CC442BF5F4A5 /* Services */,
+				6BC3F2A0B8713A6C7D64B89C /* Views */,
+			);
+			path = Shipyard;
+			sourceTree = "<group>";
+		};
+		4D412EF6ADFF58063916AE4C /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				8B2698699F57B3FEF28133E8 /* MCPManifest.swift */,
+				C2998DB1DB4603F1954E8DFE /* MCPServer.swift */,
+				644539612F61B68000440ED2 /* GatewayRegistry.swift */,
+				643781722F631A9E0054326A /* BridgeLogEntry.swift */,
+				643781AF2F63EB9A0054326A /* NavigationTab.swift */,
+				64B41DF82F75CF7D00FDF75B /* ToolExecution.swift */,
+				64B41DFA2F75CF8100FDF75B /* ToolExecutionRequest.swift */,
+				64B41DFC2F75CF8400FDF75B /* ToolExecutionResponse.swift */,
+				64B41DFE2F75CF9300FDF75B /* ExecutionQueueManager.swift */,
+				64B41F532F771FA000FDF75B /* MCPConfig.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		6445397C2F621EA300440ED2 /* ShipyardBridge */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = ShipyardBridge;
+			sourceTree = "<group>";
+		};
+		64B41E0C2F75D47300FDF75B /* Utilities */ = {
+			isa = PBXGroup;
+			children = (
+				64B41E0E2F75D48900FDF75B /* JSONSchemaValidator.swift */,
+				64AA7DD42F77E0210049DCFC /* JSONFormatter.swift */,
+				64D0E9892F7D8ED900CCB3C4 /* L10n.swift */,
+			);
+			path = Utilities;
+			sourceTree = "<group>";
+		};
+		64D0E9872F7D8E8300CCB3C4 /* Shipyard/Resources */ = {
+			isa = PBXGroup;
+			children = (
+				64D0E9882F7D8E9400CCB3C4 /* Localizable.xcstrings */,
+			);
+			path = Shipyard/Resources;
+			sourceTree = "<group>";
+		};
+		6BC3F2A0B8713A6C7D64B89C /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				DDB0E10D4CB58A61D94DE277 /* AboutView.swift */,
+				EAC206E3A1EB6F21910580D6 /* ConfigView.swift */,
+				1D5325A19164FD6BBA2240B2 /* InstructionsView.swift */,
+				876963FCBA9F4EC093DDE1DD /* LogViewer.swift */,
+				12F941E7C1ED55BC00DD5DC3 /* MainWindow.swift */,
+				B23408DCAB5351713BA59C61 /* MCPRowView.swift */,
+				BD408005BC9A66E040CAA870 /* SecretsView.swift */,
+				644539632F61CA7800440ED2 /* GatewayView.swift */,
+				643781782F631ACF0054326A /* SystemLogView.swift */,
+				64B41DF02F74089700FDF75B /* SettingsView.swift */,
+				64B41E022F75D06900FDF75B /* ExecutionQueuePanelView.swift */,
+				64B41E042F75D06F00FDF75B /* ToolExecutionSheet.swift */,
+				64B41E062F75D07200FDF75B /* ExecutionQueueRowView.swift */,
+				64B41E082F75D07C00FDF75B /* DynamicFormView.swift */,
+				64B41E0A2F75D08000FDF75B /* ExecutionDetailView.swift */,
+				64B41E0F2F75D49400FDF75B /* CodeBlockView.swift */,
+				64B41E112F75D49D00FDF75B /* JSONEditorView.swift */,
+				64B41E132F75D4F100FDF75B /* JSONHighlighter.swift */,
+				64B41E152F75D4F900FDF75B /* JSONSchemaValidator.swift */,
+				64AA7DD22F77D9F00049DCFC /* ConfigEditorSheet.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		7BF6DCFAF08A1D9B58338C73 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8FDA769BFFC126D8B618809B /* Shipyard.app */,
+				644539692F61DF9500440ED2 /* ShipyardTests.xctest */,
+				644539822F62201100440ED2 /* ShipyardBridge */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		488C6BCC2F523F27A27A6850 /* Shipyard */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D790FF57C0459906D2CB2ED9 /* Build configuration list for PBXNativeTarget "Shipyard" */;
+			buildPhases = (
+				4FDA31E299ABD630E7966C4B /* Sources */,
+				64D0E98C2F7D8F0400CCB3C4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Shipyard;
+			packageProductDependencies = (
+			);
+			productName = Shipyard;
+			productReference = 8FDA769BFFC126D8B618809B /* Shipyard.app */;
+			productType = "com.apple.product-type.application";
+		};
+		644539682F61DF9500440ED2 /* ShipyardTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6445396F2F61DF9500440ED2 /* Build configuration list for PBXNativeTarget "ShipyardTests" */;
+			buildPhases = (
+				644539652F61DF9500440ED2 /* Sources */,
+				644539662F61DF9500440ED2 /* Frameworks */,
+				644539672F61DF9500440ED2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6445396E2F61DF9500440ED2 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				6445396A2F61DF9500440ED2 /* ShipyardTests */,
+			);
+			name = ShipyardTests;
+			packageProductDependencies = (
+			);
+			productName = ShipyardTests;
+			productReference = 644539692F61DF9500440ED2 /* ShipyardTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		644539812F62201100440ED2 /* ShipyardBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 644539862F62201100440ED2 /* Build configuration list for PBXNativeTarget "ShipyardBridge" */;
+			buildPhases = (
+				6445397E2F62201100440ED2 /* Sources */,
+				6445397F2F62201100440ED2 /* Frameworks */,
+				644539802F62201100440ED2 /* CopyFiles */,
+				6445398B2F6220A000440ED2 /* Symlink to stable path */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				644539832F62201100440ED2 /* ShipyardBridge */,
+			);
+			name = ShipyardBridge;
+			packageProductDependencies = (
+				645D40F12F63055E009FFB42 /* ShipyardBridgeLib */,
+			);
+			productName = ShipyardBridge;
+			productReference = 644539822F62201100440ED2 /* ShipyardBridge */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B4952D4DA36455C67CA0B378 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					644539682F61DF9500440ED2 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 488C6BCC2F523F27A27A6850;
+					};
+					644539812F62201100440ED2 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+				};
+			};
+			buildConfigurationList = C1C5A8B181DFF2BEFFF2FCBF /* Build configuration list for PBXProject "Shipyard" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 3C04754658B6B40CB92B9DF6;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				645D40F02F63055E009FFB42 /* XCLocalSwiftPackageReference "../shipyard" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 7BF6DCFAF08A1D9B58338C73 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				488C6BCC2F523F27A27A6850 /* Shipyard */,
+				644539682F61DF9500440ED2 /* ShipyardTests */,
+				644539812F62201100440ED2 /* ShipyardBridge */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		644539672F61DF9500440ED2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		64D0E98C2F7D8F0400CCB3C4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				64D0E98B2F7D8EF200CCB3C4 /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		6445398B2F6220A000440ED2 /* Symlink to stable path */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_PATH)",
+			);
+			name = "Symlink to stable path";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(HOME)/.shipyard/bin/ShipyardBridge",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSTABLE_DIR=\"${HOME}/.shipyard/bin\"\nmkdir -p \"${STABLE_DIR}\"\nrm -f \"${STABLE_DIR}/ShipyardBridge\"\ncp -f \"${BUILT_PRODUCTS_DIR}/${EXECUTABLE_PATH}\" \"${STABLE_DIR}/ShipyardBridge\"\n# Sign stable binary after copy so macOS policy allows execution.\ncodesign --force --sign - --timestamp=none \"${STABLE_DIR}/ShipyardBridge\"\necho \"📦 binary copied\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		4FDA31E299ABD630E7966C4B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6445395E2F61580400440ED2 /* SocketServer.swift in Sources */,
+				644539642F61CA7800440ED2 /* GatewayView.swift in Sources */,
+				51C2BE30C6AA9A4EF39E043E /* AboutView.swift in Sources */,
+				643781772F631AB80054326A /* LogStore.swift in Sources */,
+				643781752F631AA90054326A /* AppLogger.swift in Sources */,
+				64B41DE72F74002700FDF75B /* DirectoryWatcher.swift in Sources */,
+				64B41E0B2F75D08000FDF75B /* ExecutionDetailView.swift in Sources */,
+				64B41E102F75D49400FDF75B /* CodeBlockView.swift in Sources */,
+				64B41E052F75D06F00FDF75B /* ToolExecutionSheet.swift in Sources */,
+				64AA7DD32F77D9F00049DCFC /* ConfigEditorSheet.swift in Sources */,
+				64B41DFD2F75CF8400FDF75B /* ToolExecutionResponse.swift in Sources */,
+				C34E5A474E9C6A8D15287CBC /* AppDelegate.swift in Sources */,
+				64B41DF32F751D3200FDF75B /* LogMetadataHelper.swift in Sources */,
+				5CCAADD731F3F5C6F339752F /* ConfigGenerator.swift in Sources */,
+				643781AE2F63EB3B0054326A /* ShipyardCommands.swift in Sources */,
+				52CCA79EED3BDD7B4169230E /* ConfigView.swift in Sources */,
+				64B41DFF2F75CF9300FDF75B /* ExecutionQueueManager.swift in Sources */,
+				643781792F631ACF0054326A /* SystemLogView.swift in Sources */,
+				64B41E142F75D4F200FDF75B /* JSONHighlighter.swift in Sources */,
+				64B41DFB2F75CF8100FDF75B /* ToolExecutionRequest.swift in Sources */,
+				64F831CF2F7ABF0400AF74CD /* StartupProfiler.swift in Sources */,
+				644539622F61B68000440ED2 /* GatewayRegistry.swift in Sources */,
+				64B41F5E2F77241000FDF75B /* HTTPBridge.swift in Sources */,
+				39A28EAF7968CC839D70B850 /* DependencyChecker.swift in Sources */,
+				11A4AB1001D3125C319564AF /* HealthChecker.swift in Sources */,
+				64B41E162F75D4F900FDF75B /* JSONSchemaValidator.swift in Sources */,
+				64AA7DD52F77E0210049DCFC /* JSONFormatter.swift in Sources */,
+				147C55F1680385A337773100 /* InstructionsView.swift in Sources */,
+				64B41F542F771FA000FDF75B /* MCPConfig.swift in Sources */,
+				64B41E072F75D07200FDF75B /* ExecutionQueueRowView.swift in Sources */,
+				3A6F4BC95BE8FBA688B18D2A /* KeychainManager.swift in Sources */,
+				249AB2B511CD8A9573D2F46A /* LogFileWriter.swift in Sources */,
+				7A1C0AAE8A6C4C30A80F2A11 /* ManifestImporter.swift in Sources */,
+				7C16358B2CE0CE20FF9C01C0 /* LogViewer.swift in Sources */,
+				64D0EB112F7EF88700CCB3C4 /* PathManager.swift in Sources */,
+				643781B02F63EB9A0054326A /* NavigationTab.swift in Sources */,
+				64B41DF92F75CF7D00FDF75B /* ToolExecution.swift in Sources */,
+				64B41DEF2F74089300FDF75B /* AutoStartManager.swift in Sources */,
+				A8118407C62542F81E9D7513 /* MCPManifest.swift in Sources */,
+				64B41DF12F74089700FDF75B /* SettingsView.swift in Sources */,
+				64D0E98A2F7D8ED900CCB3C4 /* L10n.swift in Sources */,
+				643781732F631A9E0054326A /* BridgeLogEntry.swift in Sources */,
+				64B41E032F75D06900FDF75B /* ExecutionQueuePanelView.swift in Sources */,
+				240893BAF8D279076C3F7F35 /* MCPNotificationParser.swift in Sources */,
+				64B41E122F75D49D00FDF75B /* JSONEditorView.swift in Sources */,
+				64B41F562F771FAD00FDF75B /* ConfigFileWatcher.swift in Sources */,
+				64B41E092F75D07C00FDF75B /* DynamicFormView.swift in Sources */,
+				644539602F61B67400440ED2 /* MCPBridge.swift in Sources */,
+				C1376A34DFF945FD1EF7D81D /* MCPRegistry.swift in Sources */,
+				64B41F5C2F7723EE00FDF75B /* BridgeProtocol.swift in Sources */,
+				30035202BFA94B1CA3B36336 /* MCPRowView.swift in Sources */,
+				84620C663721399EFACC5CDA /* MCPServer.swift in Sources */,
+				CC7F5D4DCAA07714CE3C4189 /* MainWindow.swift in Sources */,
+				38C1C9368C7CAAE4830FDB3A /* ProcessManager.swift in Sources */,
+				8FA2824F82A5D1EBE2DD469E /* SecretsView.swift in Sources */,
+				6807BD6A3D218D42CCEDAA40 /* ShipyardApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		644539652F61DF9500440ED2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6445397E2F62201100440ED2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6445396E2F61DF9500440ED2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 488C6BCC2F523F27A27A6850 /* Shipyard */;
+			targetProxy = 6445396D2F61DF9500440ED2 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		32BB8D108A3FB392F31B8A70 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_DEBUG_DYLIB = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedFile;
+				INFOPLIST_KEY_NSMainStoryboardFile = "";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lekko.shipyard;
+				PRODUCT_NAME = Shipyard;
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		5DB3F4163C4B497864692A7D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_DEBUG_DYLIB = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		644539702F61DF9500440ED2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = lekko.techno.ShipyardTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Shipyard.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Shipyard";
+			};
+			name = Debug;
+		};
+		644539712F61DF9500440ED2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = lekko.techno.ShipyardTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Shipyard.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Shipyard";
+			};
+			name = Release;
+		};
+		644539872F62201100440ED2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		644539882F62201100440ED2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		CF02C350CD006A11C883F452 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_DEBUG_DYLIB = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedFile;
+				INFOPLIST_KEY_NSMainStoryboardFile = "";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lekko.shipyard;
+				PRODUCT_NAME = Shipyard;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E8261A03150E19D56A46644C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_DEBUG_DYLIB = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		6445396F2F61DF9500440ED2 /* Build configuration list for PBXNativeTarget "ShipyardTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				644539702F61DF9500440ED2 /* Debug */,
+				644539712F61DF9500440ED2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		644539862F62201100440ED2 /* Build configuration list for PBXNativeTarget "ShipyardBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				644539872F62201100440ED2 /* Debug */,
+				644539882F62201100440ED2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C1C5A8B181DFF2BEFFF2FCBF /* Build configuration list for PBXProject "Shipyard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E8261A03150E19D56A46644C /* Debug */,
+				5DB3F4163C4B497864692A7D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D790FF57C0459906D2CB2ED9 /* Build configuration list for PBXNativeTarget "Shipyard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CF02C350CD006A11C883F452 /* Debug */,
+				32BB8D108A3FB392F31B8A70 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		645D40F02F63055E009FFB42 /* XCLocalSwiftPackageReference "../shipyard" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../shipyard;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		645D40F12F63055E009FFB42 /* ShipyardBridgeLib */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ShipyardBridgeLib;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = B4952D4DA36455C67CA0B378 /* Project object */;
+}
