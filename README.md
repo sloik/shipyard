@@ -1,11 +1,11 @@
 # Shipyard
 
-Shipyard is a native macOS app for running and organizing multiple MCP servers behind one Claude-facing bridge. Claude talks to `ShipyardBridge` over stdio, the bridge talks to `Shipyard.app` over a local Unix socket, and Shipyard starts, stops, and routes requests to your child MCPs.
+Shipyard is a native macOS app for running and organizing multiple MCP servers behind a single bridge. Any MCP client talks to `ShipyardBridge` over stdio, the bridge talks to `Shipyard.app` over a local Unix socket, and Shipyard starts, stops, and routes requests to your child MCPs.
 
 ## Overview
 
 - Native macOS SwiftUI app for MCP orchestration
-- Single Claude connection instead of one config entry per child server
+- Single MCP connection instead of one config entry per child server
 - Centralized runtime paths under `~/.shipyard/`
 - JSON-based child server configuration in `~/.shipyard/config/mcps.json`
 - Built-in logs, restart flow, and gateway discovery
@@ -14,15 +14,15 @@ Shipyard is a native macOS app for running and organizing multiple MCP servers b
 
 ```mermaid
 flowchart LR
-    Claude["Claude Desktop / Claude Code"]
+    Client["Any MCP Client"]
     Bridge["ShipyardBridge<br/>stdio MCP server"]
     App["Shipyard.app<br/>macOS orchestrator"]
-    Socket["~/.shipyard/data/shipyard.sock"]
+    Socket["Unix socket"]
     MCP1["child MCP A"]
     MCP2["child MCP B"]
     MCP3["child MCP C"]
 
-    Claude <--> Bridge
+    Client <--> Bridge
     Bridge <--> Socket
     Socket <--> App
     App <--> MCP1
@@ -46,8 +46,8 @@ Full instructions: [docs/how-to/install.md](docs/how-to/install.md)
 1. Install and launch Shipyard once so it creates `~/.shipyard/` and installs `ShipyardBridge`.
 2. Add one child MCP to `~/.shipyard/config/mcps.json`.
 3. Restart Shipyard or refresh its config.
-4. Add one `shipyard` entry to Claude Desktop or Claude Code that runs `~/.shipyard/bin/ShipyardBridge`.
-5. Open Claude and verify the child MCP tools appear through Shipyard.
+4. Add one `shipyard` entry to your MCP client config that runs `~/.shipyard/bin/ShipyardBridge`.
+5. Open your client and verify the child MCP tools appear through Shipyard.
 
 A full walk-through with copy-paste examples lives in [docs/tutorial/getting-started.md](docs/tutorial/getting-started.md).
 
