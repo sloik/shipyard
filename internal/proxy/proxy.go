@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,16 +24,20 @@ type Proxy struct {
 	name    string
 	command string
 	args    []string
+	env     map[string]string
+	cwd     string
 	store   *capture.Store
 	hub     *web.Hub
 }
 
 // NewProxy creates a new stdio proxy.
-func NewProxy(name, command string, args []string, store *capture.Store, hub *web.Hub) *Proxy {
+func NewProxy(name, command string, args []string, env map[string]string, cwd string, store *capture.Store, hub *web.Hub) *Proxy {
 	return &Proxy{
 		name:    name,
 		command: command,
 		args:    args,
+		env:     env,
+		cwd:     cwd,
 		store:   store,
 		hub:     hub,
 	}
@@ -256,6 +262,8 @@ func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWri
 
 func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) error {
 	cmd := exec.CommandContext(ctx, p.command, p.args...)
+	cmd.Env = mergeEnv(os.Environ(), p.env)
+	cmd.Dir = p.cwd
 
 	childStdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -306,6 +314,30 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	}
 
 	return err
+}
+
+func mergeEnv(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+
+	env := make(map[string]string, len(base)+len(overrides))
+	for _, entry := range base {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) == 2 {
+			env[parts[0]] = parts[1]
+		}
+	}
+	for key, value := range overrides {
+		env[key] = value
+	}
+
+	merged := make([]string, 0, len(env))
+	for key, value := range env {
+		merged = append(merged, key+"="+value)
+	}
+	sort.Strings(merged)
+	return merged
 }
 
 func (p *Proxy) waitForClientInput(clientDone <-chan error) error {
