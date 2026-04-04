@@ -54,6 +54,16 @@ The design covers all four phases of the dashboard, designed together for visual
 - Per-server controls: start/stop/restart buttons
 - Server config display: command, args, env
 
+## Design System Gate
+
+**Before any UI spec can start implementation**, verify that every UI element it requires exists as a reusable component in the `.pen` design system frame. If a component is missing, it must be added to the design system first — this is a blocker, not a nice-to-have.
+
+Checklist for each spec:
+1. List all UI elements the spec needs
+2. Cross-reference against the design system components in the `.pen` file
+3. If any are missing → create them in the design system frame before designing screens
+4. Only then compose the screen using those components
+
 ## Implementation Rules
 
 1. **Read the .pen file** via Pencil MCP tools before writing any HTML/CSS/JS
@@ -61,7 +71,8 @@ The design covers all four phases of the dashboard, designed together for visual
 3. **No external dependencies** — all CSS/JS inline in `internal/web/ui/index.html`
 4. **JSON syntax highlighting** uses the existing `highlightJSON()` from BUG-001
 5. **Dark theme** — the design defines the color palette; implementation uses CSS variables
-6. **Responsive** — dashboard should work at 1024px+ width (no mobile needed)
+6. **Light theme** — all variables have dark/light values; implementation uses CSS variables with theme switching
+7. **Responsive** — dashboard should work at 1024px+ width (no mobile needed)
 
 ## Target Files
 

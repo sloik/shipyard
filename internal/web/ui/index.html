@@ -1,365 +1,310 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Shipyard — MCP Traffic Inspector</title>
-<style>
-  :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --text: #e6edf3;
-    --text-muted: #8b949e;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --red: #f85149;
-    --yellow: #d29922;
-    --orange: #db6d28;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    font-size: 14px;
-    line-height: 1.5;
-  }
-  header {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  header h1 {
-    font-size: 18px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-  }
-  header h1 span { color: var(--text-muted); font-weight: 400; }
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--red);
-  }
-  .status-dot.connected { background: var(--green); }
-
-  .filters {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 8px 24px;
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
-  .filters label {
-    font-size: 12px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .filters input, .filters select {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-    outline: none;
-  }
-  .filters input:focus, .filters select:focus {
-    border-color: var(--accent);
-  }
-  .filters .count {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  main { padding: 0; }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  thead th {
-    position: sticky;
-    top: 0;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 8px 12px;
-    text-align: left;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    cursor: pointer;
-    user-select: none;
-  }
-  tbody tr {
-    cursor: pointer;
-    transition: background 0.1s;
-  }
-  tbody tr:hover { background: rgba(88,166,255,0.06); }
-  tbody tr.expanded { background: rgba(88,166,255,0.04); }
-  td {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-    white-space: nowrap;
-  }
-
-  .dir-badge {
-    display: inline-block;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .dir-badge.client-to-server {
-    background: rgba(88,166,255,0.15);
-    color: var(--accent);
-  }
-  .dir-badge.server-to-client {
-    background: rgba(63,185,80,0.15);
-    color: var(--green);
-  }
-
-  .status-badge {
-    display: inline-block;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .status-badge.ok {
-    background: rgba(63,185,80,0.15);
-    color: var(--green);
-  }
-  .status-badge.error {
-    background: rgba(248,81,73,0.15);
-    color: var(--red);
-  }
-  .status-badge.request {
-    background: rgba(88,166,255,0.15);
-    color: var(--accent);
-  }
-
-  .method { color: var(--accent); font-family: monospace; }
-  .latency { color: var(--text-muted); font-family: monospace; }
-  .latency.slow { color: var(--yellow); }
-  .latency.very-slow { color: var(--red); }
-
-  .detail-row td {
-    padding: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .detail-content {
-    padding: 12px 24px;
-    background: var(--bg);
-  }
-  .detail-content h3 {
-    font-size: 12px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 6px;
-  }
-  .detail-content h3:not(:first-child) { margin-top: 16px; }
-  .payload {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 12px;
-    line-height: 1.6;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 400px;
-    overflow-y: auto;
-  }
-
-  .pagination {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 12px;
-    padding: 16px;
-    border-top: 1px solid var(--border);
-  }
-  .pagination button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .pagination button:hover { border-color: var(--accent); }
-  .pagination button:disabled { opacity: 0.4; cursor: default; }
-  .pagination span { font-size: 13px; color: var(--text-muted); }
-
-  .empty-state {
-    text-align: center;
-    padding: 80px 24px;
-    color: var(--text-muted);
-  }
-  .empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text); }
-  .empty-state p { max-width: 400px; margin: 0 auto; }
-</style>
+<link rel="stylesheet" href="/ds.css">
 </head>
 <body>
-<header>
-  <h1>Shipyard <span>MCP Traffic Inspector</span></h1>
-  <div class="status">
-    <div class="status-dot" id="ws-status"></div>
-    <span id="ws-label">Disconnected</span>
-  </div>
+
+<!-- ================================================================
+     App Bar (persistent across all routes)
+     ================================================================ -->
+<header class="app-bar">
+  <span class="empty-icon">&#9875;</span>
+  <strong>Shipyard</strong>
+  <nav id="tab-nav">
+    <a class="tab tab-active" href="#/timeline" data-route="timeline">Timeline</a>
+    <a class="tab tab-default" href="#/tools" data-route="tools">Tools</a>
+    <a class="tab tab-default" href="#/history" data-route="history">History</a>
+    <a class="tab tab-default" href="#/servers" data-route="servers">Servers</a>
+  </nav>
+  <span id="ws-indicator" class="ws-indicator ws-disconnected">Disconnected</span>
+  <span id="server-count" class="badge badge-neutral">0 servers</span>
 </header>
 
-<div class="filters">
-  <label>Server</label>
-  <input type="text" id="filter-server" placeholder="all servers">
-  <label>Method</label>
-  <input type="text" id="filter-method" placeholder="all methods">
-  <div class="count" id="traffic-count"></div>
+<!-- ================================================================
+     Disconnected Banner
+     ================================================================ -->
+<div id="ws-banner" class="detail-panel">
+  <span class="badge badge-error">Connection lost. Reconnecting...</span>
+  <button class="btn btn-danger btn-sm" id="retry-btn">Retry now</button>
 </div>
 
-<main>
-  <table>
-    <thead>
-      <tr>
-        <th style="width:180px">Time</th>
-        <th style="width:120px">Direction</th>
-        <th style="width:120px">Server</th>
-        <th>Method</th>
-        <th style="width:80px">Status</th>
-        <th style="width:100px">Latency</th>
-      </tr>
-    </thead>
-    <tbody id="traffic-body"></tbody>
-  </table>
-  <div class="empty-state" id="empty-state">
-    <h2>No traffic yet</h2>
-    <p>Waiting for MCP messages. Make sure your client is connected through Shipyard.</p>
+<!-- ================================================================
+     View: Timeline (#/timeline)
+     ================================================================ -->
+<main id="view-timeline">
+
+  <!-- Empty State -->
+  <div id="timeline-empty" class="empty-state">
+    <div class="empty-icon">&#128229;</div>
+    <div class="empty-title">No traffic yet</div>
+    <div class="empty-desc">Waiting for MCP messages. Configure a client to connect through Shipyard.</div>
+    <div id="onboard-cards">
+      <div class="onboard-step">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <strong>Point your MCP client at Shipyard</strong><br>
+          Configure your client (Claude Desktop, VS Code, etc.) to route through the Shipyard proxy.
+        </div>
+      </div>
+      <div class="onboard-step">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <strong>Make an MCP call</strong><br>
+          Once a tool call flows through, traffic will appear here in real time.
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="pagination" id="pagination" style="display:none">
-    <button id="prev-btn" disabled>Previous</button>
-    <span id="page-info"></span>
-    <button id="next-btn" disabled>Next</button>
+
+  <!-- Traffic Content (hidden until data arrives) -->
+  <div id="timeline-content">
+
+    <!-- Filter Bar -->
+    <div id="filter-bar" class="app-bar">
+      <div class="input-group">
+        <label class="input-label">Server</label>
+        <select id="filter-server" class="input">
+          <option value="">All servers</option>
+        </select>
+      </div>
+      <div class="input-group">
+        <label class="input-label">Method</label>
+        <select id="filter-method" class="input">
+          <option value="">All methods</option>
+        </select>
+      </div>
+      <div class="seg-toggle" id="dir-toggle">
+        <button class="seg-active" data-value="">All</button>
+        <button class="seg-inactive" data-value="client%E2%86%92server">REQ &#8594;</button>
+        <button class="seg-inactive" data-value="server%E2%86%92client">&#8592; RES</button>
+      </div>
+      <button class="btn btn-ghost" id="clear-filters-btn">Clear</button>
+      <span id="traffic-count" class="badge badge-neutral"></span>
+    </div>
+
+    <!-- Table Header -->
+    <div class="table-header">
+      <span data-col="time">Time</span>
+      <span data-col="dir">Dir</span>
+      <span data-col="server">Server</span>
+      <span data-col="method">Method</span>
+      <span data-col="status">Status</span>
+      <span data-col="latency">Latency</span>
+      <span data-col="chevron"></span>
+    </div>
+
+    <!-- Table Body (rows injected here) -->
+    <div id="traffic-body"></div>
+
+    <!-- Pagination -->
+    <div id="pagination" class="pagination">
+      <button class="btn btn-default btn-sm" id="prev-btn" disabled>&#8592; Prev</button>
+      <span id="page-nums"></span>
+      <button class="btn btn-default btn-sm" id="next-btn" disabled>Next &#8594;</button>
+      <span id="page-info" class="badge badge-neutral"></span>
+    </div>
+
+  </div><!-- /timeline-content -->
+</main>
+
+<!-- ================================================================
+     View: Tools (#/tools) — Placeholder
+     ================================================================ -->
+<main id="view-tools">
+  <div class="empty-state">
+    <div class="empty-icon">&#128295;</div>
+    <div class="empty-title">Tool Browser</div>
+    <div class="empty-desc">Coming in Phase 1 — browse and invoke MCP tools</div>
   </div>
 </main>
 
+<!-- ================================================================
+     View: History (#/history) — Placeholder
+     ================================================================ -->
+<main id="view-history">
+  <div class="empty-state">
+    <div class="empty-icon">&#128337;</div>
+    <div class="empty-title">History &amp; Replay</div>
+    <div class="empty-desc">Coming in Phase 2 — search, replay, and compare executions</div>
+  </div>
+</main>
+
+<!-- ================================================================
+     View: Servers (#/servers) — Placeholder
+     ================================================================ -->
+<main id="view-servers">
+  <div class="empty-state">
+    <div class="empty-icon">&#128421;</div>
+    <div class="empty-title">Server Management</div>
+    <div class="empty-desc">Coming in Phase 3 — monitor and control MCP servers</div>
+  </div>
+</main>
+
+<script src="/ds.js"></script>
 <script>
 (function() {
-  const tbody = document.getElementById('traffic-body');
-  const emptyState = document.getElementById('empty-state');
-  const pagination = document.getElementById('pagination');
-  const prevBtn = document.getElementById('prev-btn');
-  const nextBtn = document.getElementById('next-btn');
-  const pageInfo = document.getElementById('page-info');
-  const trafficCount = document.getElementById('traffic-count');
-  const wsDot = document.getElementById('ws-status');
-  const wsLabel = document.getElementById('ws-label');
-  const filterServer = document.getElementById('filter-server');
-  const filterMethod = document.getElementById('filter-method');
+  'use strict';
 
-  let currentPage = 1;
-  const pageSize = 50;
-  let totalCount = 0;
-  let expandedId = null;
-  let liveEvents = [];
-  let ws = null;
+  /* ======================================================================
+     DOM References
+     ====================================================================== */
+  var tabNav        = document.getElementById('tab-nav');
+  var views         = {
+    timeline: document.getElementById('view-timeline'),
+    tools:    document.getElementById('view-tools'),
+    history:  document.getElementById('view-history'),
+    servers:  document.getElementById('view-servers')
+  };
+  var timelineEmpty   = document.getElementById('timeline-empty');
+  var timelineContent = document.getElementById('timeline-content');
+  var trafficBody     = document.getElementById('traffic-body');
+  var filterServer    = document.getElementById('filter-server');
+  var filterMethod    = document.getElementById('filter-method');
+  var dirToggle       = document.getElementById('dir-toggle');
+  var clearFiltersBtn = document.getElementById('clear-filters-btn');
+  var trafficCount    = document.getElementById('traffic-count');
+  var prevBtn         = document.getElementById('prev-btn');
+  var nextBtn         = document.getElementById('next-btn');
+  var pageNums        = document.getElementById('page-nums');
+  var pageInfo        = document.getElementById('page-info');
+  var wsIndicator     = document.getElementById('ws-indicator');
+  var wsBanner        = document.getElementById('ws-banner');
+  var retryBtn        = document.getElementById('retry-btn');
+  var serverCountEl   = document.getElementById('server-count');
 
-  function formatTime(tsMs) {
-    const d = new Date(tsMs);
-    return d.toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  /* ======================================================================
+     State
+     ====================================================================== */
+  var currentPage   = 1;
+  var pageSize      = 25;
+  var totalCount    = 0;
+  var expandedRowId = null;
+  var ws            = null;
+  var wsBackoff     = 1000;
+  var wsMaxBackoff  = 30000;
+  var wsTimer       = null;
+  var knownServers  = {};
+  var knownMethods  = {};
+  var dirFilter     = '';
+  var filterTimer   = null;
+
+  /* ======================================================================
+     Routing
+     ====================================================================== */
+  function getRoute() {
+    var hash = location.hash.replace(/^#\/?/, '') || 'timeline';
+    if (!views[hash]) hash = 'timeline';
+    return hash;
   }
 
-  function dirClass(dir) {
-    return dir.includes('\u2192') && dir.startsWith('client') ? 'client-to-server' : 'server-to-client';
-  }
+  function navigate(route) {
+    // Hide all views
+    Object.keys(views).forEach(function(key) {
+      views[key].style.display = 'none';
+    });
+    views[route].style.display = '';
 
-  function dirLabel(dir) {
-    if (dir.includes('client')) return '\u2192 server';
-    return '\u2190 client';
-  }
-
-  function latencyText(ms) {
-    if (ms === null || ms === undefined) return '\u2014';
-    if (ms < 100) return ms + 'ms';
-    if (ms < 1000) return ms + 'ms';
-    return (ms / 1000).toFixed(1) + 's';
-  }
-
-  function latencyClass(ms) {
-    if (ms === null || ms === undefined) return 'latency';
-    if (ms > 5000) return 'latency very-slow';
-    if (ms > 1000) return 'latency slow';
-    return 'latency';
-  }
-
-  function prettyJSON(str) {
-    try {
-      return JSON.stringify(JSON.parse(str), null, 2);
-    } catch {
-      return str;
+    // Update tabs
+    var tabs = tabNav.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      if (t.getAttribute('data-route') === route) {
+        t.classList.remove('tab-default');
+        t.classList.add('tab-active');
+      } else {
+        t.classList.remove('tab-active');
+        t.classList.add('tab-default');
+      }
     }
   }
 
+  window.addEventListener('hashchange', function() { navigate(getRoute()); });
+  tabNav.addEventListener('click', function(e) {
+    var tab = e.target.closest('.tab');
+    if (tab) {
+      e.preventDefault();
+      location.hash = tab.getAttribute('href');
+    }
+  });
+
+  /* ======================================================================
+     Helpers
+     ====================================================================== */
   function escapeHtml(s) {
-    const div = document.createElement('div');
+    var div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
   }
 
-  function highlightJSON(str) {
-    let obj;
-    try {
-      obj = JSON.parse(str);
-    } catch {
-      return escapeHtml(str);
+  function relativeTime(tsMs) {
+    var delta = Date.now() - tsMs;
+    if (delta < 1000) return 'just now';
+    if (delta < 60000) return Math.floor(delta / 1000) + 's ago';
+    if (delta < 3600000) return Math.floor(delta / 60000) + 'm ago';
+    if (delta < 86400000) return Math.floor(delta / 3600000) + 'h ago';
+    return Math.floor(delta / 86400000) + 'd ago';
+  }
+
+  function absoluteTime(tsMs) {
+    var d = new Date(tsMs);
+    return d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+  }
+
+  function dirBadge(direction) {
+    if (direction.indexOf('client') === 0 || direction.indexOf('client') !== -1 && direction.indexOf('\u2192') !== -1) {
+      return '<span class="dir dir-req">REQ \u2192</span>';
     }
-    const pretty = JSON.stringify(obj, null, 2);
-    // Single-pass tokenizer to avoid span-in-span issues
-    const token = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|([{}\[\]:,])/g;
-    let result = '';
-    let lastIndex = 0;
-    let m;
+    return '<span class="dir dir-res">\u2190 RES</span>';
+  }
+
+  function isRequest(direction) {
+    return direction.indexOf('client') !== -1 && direction.indexOf('\u2192') !== -1;
+  }
+
+  function statusBadge(status) {
+    if (status === 'ok') return '<span class="badge badge-success"><span class="badge-dot"></span>ok</span>';
+    if (status === 'error') return '<span class="badge badge-error"><span class="badge-dot"></span>error</span>';
+    return '<span class="badge badge-info"><span class="badge-dot"></span>' + escapeHtml(status) + '</span>';
+  }
+
+  function latencyPill(ms) {
+    if (ms === null || ms === undefined) return '<span class="pill pill-timeout">\u2014</span>';
+    var text = ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+    if (ms < 100) return '<span class="pill pill-fast">' + text + '</span>';
+    if (ms < 1000) return '<span class="pill pill-moderate">' + text + '</span>';
+    if (ms < 5000) return '<span class="pill pill-slow">' + text + '</span>';
+    return '<span class="pill pill-timeout">' + text + '</span>';
+  }
+
+  /* ======================================================================
+     JSON Syntax Highlighting
+     ====================================================================== */
+  function highlightJSON(str) {
+    var obj;
+    try { obj = JSON.parse(str); } catch(e) { return escapeHtml(str); }
+    var pretty = JSON.stringify(obj, null, 2);
+    var token = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|([{}\[\]:,])/g;
+    var result = '';
+    var lastIndex = 0;
+    var m;
     while ((m = token.exec(pretty)) !== null) {
-      // Append any whitespace/newlines between tokens
       result += escapeHtml(pretty.slice(lastIndex, m.index));
       if (m[1] !== undefined) {
         if (m[2] !== undefined) {
-          // Key (string followed by colon)
-          result += '<span style="color:var(--accent)">' + escapeHtml(m[1]) + '</span>' + m[2];
+          result += '<span class="jt-key">' + escapeHtml(m[1]) + '</span>' + m[2];
         } else {
-          // String value
-          result += '<span style="color:var(--green)">' + escapeHtml(m[1]) + '</span>';
+          result += '<span class="jt-string">' + escapeHtml(m[1]) + '</span>';
         }
       } else if (m[3] !== undefined) {
-        // boolean or null
-        result += '<span style="color:var(--yellow)">' + escapeHtml(m[3]) + '</span>';
+        result += '<span class="jt-boolean">' + escapeHtml(m[3]) + '</span>';
       } else if (m[4] !== undefined) {
-        // number
-        result += '<span style="color:var(--orange)">' + escapeHtml(m[4]) + '</span>';
+        result += '<span class="jt-number">' + escapeHtml(m[4]) + '</span>';
       } else if (m[5] !== undefined) {
-        // structural character
-        result += '<span style="color:var(--text-muted)">' + escapeHtml(m[5]) + '</span>';
+        result += '<span class="jt-bracket">' + escapeHtml(m[5]) + '</span>';
       }
       lastIndex = token.lastIndex;
     }
@@ -367,153 +312,475 @@
     return result;
   }
 
-  function renderRow(evt) {
-    return `<tr data-id="${evt.id}" onclick="window.__toggleDetail(${evt.id})">
-      <td>${formatTime(evt.timestamp)}</td>
-      <td><span class="dir-badge ${dirClass(evt.direction)}">${dirLabel(evt.direction)}</span></td>
-      <td>${escapeHtml(evt.server_name)}</td>
-      <td class="method">${escapeHtml(evt.method || '\u2014')}</td>
-      <td><span class="status-badge ${evt.status}">${evt.status}</span></td>
-      <td class="${latencyClass(evt.latency_ms)}">${latencyText(evt.latency_ms)}</td>
-    </tr>`;
+  /* ======================================================================
+     Row Rendering
+     ====================================================================== */
+  function renderRow(evt, idx) {
+    var altClass = idx % 2 === 1 ? ' row-alt' : '';
+    var expandedClass = expandedRowId === evt.id ? ' row-expanded' : '';
+    var chevronClass = expandedRowId === evt.id ? ' is-expanded' : '';
+
+    return '<div class="table-row' + altClass + expandedClass + '" data-id="' + evt.id + '">' +
+      '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time">' + relativeTime(evt.timestamp) + '</span>' +
+      '<span data-col="dir">' + dirBadge(evt.direction) + '</span>' +
+      '<span data-col="server">' + escapeHtml(evt.server_name) + '</span>' +
+      '<span class="code-inline" data-col="method">' + escapeHtml(evt.method || '\u2014') + '</span>' +
+      '<span data-col="status">' + statusBadge(evt.status) + '</span>' +
+      '<span data-col="latency">' + latencyPill(evt.latency_ms) + '</span>' +
+      '<span class="row-chevron' + chevronClass + '" data-col="chevron"></span>' +
+    '</div>';
   }
 
-  function renderDetailRow(entry, matched) {
-    let html = `<tr class="detail-row" data-detail-for="${entry.id}"><td colspan="6"><div class="detail-content">`;
-    html += `<h3>${entry.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
-    html += `<div class="payload">${highlightJSON(entry.payload)}</div>`;
-    if (matched) {
-      html += `<h3>${matched.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
-      html += `<div class="payload">${highlightJSON(matched.payload)}</div>`;
+  function renderDetailPanel(entry, matched) {
+    var reqEntry = null;
+    var resEntry = null;
+
+    if (isRequest(entry.direction)) {
+      reqEntry = entry;
+      resEntry = matched || null;
+    } else {
+      resEntry = entry;
+      reqEntry = matched || null;
     }
-    html += `</div></td></tr>`;
+
+    var html = '<div class="detail-panel is-visible" data-detail-for="' + entry.id + '">';
+
+    // Metadata bar
+    html += '<div class="table-row">';
+    html += '<span class="badge badge-neutral">ID: ' + entry.id + '</span>';
+    html += '<span class="timestamp">' + absoluteTime(entry.timestamp) + '</span>';
+    if (entry.latency_ms != null) {
+      html += '<span>' + latencyPill(entry.latency_ms) + '</span>';
+    }
+    html += '</div>';
+
+    // Combined filter
+    html += '<div class="json-filter" id="combined-filter-' + entry.id + '">';
+    html += '<input type="text" placeholder="Filter JSON...">';
+    html += '<div class="mode-toggle">';
+    html += '<button class="is-active" data-mode="text">Text</button>';
+    html += '<button data-mode="jq">JQ</button>';
+    html += '</div>';
+    html += '</div>';
+
+    // Split view
+    html += '<div class="split-view" id="split-' + entry.id + '">';
+
+    // REQUEST panel
+    html += '<div>';
+    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter request..."></div>';
+    html += '<div class="code-block">';
+    html += '<div class="code-header" data-req-header>' +
+      '<span>REQUEST</span>' +
+      '<button class="btn btn-copy">Copy</button>' +
+    '</div>';
+    html += '<div class="json-viewer code-body">' + (reqEntry ? highlightJSON(reqEntry.payload) : '<span class="spinner">No request data</span>') + '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // RESPONSE panel
+    html += '<div>';
+    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter response..."></div>';
+    html += '<div class="code-block">';
+    if (resEntry && resEntry.status === 'error') {
+      html += '<div class="code-header" data-res-header>' +
+        '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
+        '<button class="btn btn-copy">Copy</button>' +
+      '</div>';
+      html += '<div class="json-viewer code-body">' + highlightJSON(resEntry.payload) + '</div>';
+    } else if (resEntry) {
+      html += '<div class="code-header" data-res-header>' +
+        '<span>RESPONSE</span>' +
+        '<button class="btn btn-copy">Copy</button>' +
+      '</div>';
+      html += '<div class="json-viewer code-body">' + highlightJSON(resEntry.payload) + '</div>';
+    } else {
+      html += '<div class="code-header" data-res-header><span>RESPONSE</span></div>';
+      html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
+    }
+    html += '</div>';
+    html += '</div>';
+
+    html += '</div>'; // /split-view
+
+    // Resize handle
+    html += '<div class="resize-handle"></div>';
+    html += '</div>'; // /detail-panel
+
     return html;
   }
 
-  window.__toggleDetail = async function(id) {
-    const existing = document.querySelector(`tr[data-detail-for="${id}"]`);
+  /* ======================================================================
+     Copy Button Wiring for Detail Panels
+     ====================================================================== */
+  function wireCopyButtons(panelEl) {
+    var copyBtns = panelEl.querySelectorAll('.btn-copy');
+    for (var i = 0; i < copyBtns.length; i++) {
+      (function(btn) {
+        var viewer = btn.closest('.code-block');
+        if (!viewer) return;
+        var jv = viewer.querySelector('.json-viewer');
+        if (jv) {
+          btn.setAttribute('data-copy', jv.textContent);
+        }
+      })(copyBtns[i]);
+    }
+  }
+
+  /* ======================================================================
+     Mode Toggle in Detail Panels
+     ====================================================================== */
+  trafficBody.addEventListener('click', function(e) {
+    var modeBtn = e.target.closest('.mode-toggle button');
+    if (modeBtn) {
+      var siblings = modeBtn.parentNode.querySelectorAll('button');
+      for (var i = 0; i < siblings.length; i++) {
+        siblings[i].classList.remove('is-active');
+      }
+      modeBtn.classList.add('is-active');
+      return;
+    }
+  });
+
+  /* ======================================================================
+     Row Click → Expand / Collapse
+     ====================================================================== */
+  trafficBody.addEventListener('click', function(e) {
+    var row = e.target.closest('.table-row');
+    if (!row || !row.dataset.id) return;
+    // Ignore clicks inside detail panels
+    if (e.target.closest('.detail-panel')) return;
+
+    var id = parseInt(row.dataset.id, 10);
+    toggleDetail(id, row);
+  });
+
+  function toggleDetail(id, row) {
+    // Collapse existing
+    var existing = trafficBody.querySelector('.detail-panel[data-detail-for="' + id + '"]');
     if (existing) {
-      existing.remove();
-      document.querySelector(`tr[data-id="${id}"]`).classList.remove('expanded');
-      expandedId = null;
+      existing.parentNode.removeChild(existing);
+      row.classList.remove('row-expanded');
+      var chev = row.querySelector('.row-chevron');
+      if (chev) chev.classList.remove('is-expanded');
+      expandedRowId = null;
       return;
     }
 
-    // Collapse any open detail
-    const old = document.querySelector('tr.detail-row');
-    if (old) {
-      const oldId = old.dataset.detailFor;
-      old.remove();
-      document.querySelector(`tr[data-id="${oldId}"]`)?.classList.remove('expanded');
-    }
-
-    expandedId = id;
-    document.querySelector(`tr[data-id="${id}"]`)?.classList.add('expanded');
-
-    try {
-      const resp = await fetch(`/api/traffic/${id}`);
-      const data = await resp.json();
-      const row = document.querySelector(`tr[data-id="${id}"]`);
-      if (row) {
-        row.insertAdjacentHTML('afterend', renderDetailRow(data.entry, data.matched));
+    // Collapse any other open detail
+    var oldPanel = trafficBody.querySelector('.detail-panel.is-visible');
+    if (oldPanel) {
+      var oldId = oldPanel.getAttribute('data-detail-for');
+      var oldRow = trafficBody.querySelector('.table-row[data-id="' + oldId + '"]');
+      if (oldRow) {
+        oldRow.classList.remove('row-expanded');
+        var oldChev = oldRow.querySelector('.row-chevron');
+        if (oldChev) oldChev.classList.remove('is-expanded');
       }
-    } catch (e) {
-      console.error('Failed to load detail:', e);
+      oldPanel.parentNode.removeChild(oldPanel);
     }
-  };
 
-  async function loadPage() {
-    const params = new URLSearchParams({
-      page: currentPage,
-      page_size: pageSize,
-    });
-    const sv = filterServer.value.trim();
-    const mt = filterMethod.value.trim();
+    expandedRowId = id;
+    row.classList.add('row-expanded');
+    var chevron = row.querySelector('.row-chevron');
+    if (chevron) chevron.classList.add('is-expanded');
+
+    // Fetch detail
+    fetch('/api/traffic/' + id)
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        var html = renderDetailPanel(data.entry, data.matched || null);
+        row.insertAdjacentHTML('afterend', html);
+        var panel = row.nextElementSibling;
+        if (panel) wireCopyButtons(panel);
+      })
+      .catch(function(err) {
+        console.error('Failed to load detail:', err);
+        DS.toast('Failed to load details', 'error');
+      });
+  }
+
+  /* ======================================================================
+     Filter Dropdowns — Dynamic Population
+     ====================================================================== */
+  function trackFilters(items) {
+    var serversChanged = false;
+    var methodsChanged = false;
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (item.server_name && !knownServers[item.server_name]) {
+        knownServers[item.server_name] = true;
+        serversChanged = true;
+      }
+      if (item.method && !knownMethods[item.method]) {
+        knownMethods[item.method] = true;
+        methodsChanged = true;
+      }
+    }
+    if (serversChanged) rebuildDropdown(filterServer, knownServers, 'All servers');
+    if (methodsChanged) rebuildDropdown(filterMethod, knownMethods, 'All methods');
+
+    var serverNames = Object.keys(knownServers);
+    serverCountEl.textContent = serverNames.length + ' server' + (serverNames.length !== 1 ? 's' : '');
+  }
+
+  function rebuildDropdown(select, map, allLabel) {
+    var current = select.value;
+    var html = '<option value="">' + allLabel + '</option>';
+    var keys = Object.keys(map).sort();
+    for (var i = 0; i < keys.length; i++) {
+      var sel = keys[i] === current ? ' selected' : '';
+      html += '<option value="' + escapeHtml(keys[i]) + '"' + sel + '>' + escapeHtml(keys[i]) + '</option>';
+    }
+    select.innerHTML = html;
+  }
+
+  /* ======================================================================
+     Filters
+     ====================================================================== */
+  function getDirectionFilter() {
+    return dirFilter;
+  }
+
+  dirToggle.addEventListener('change', function(e) {
+    dirFilter = e.detail ? decodeURIComponent(e.detail.value || '') : '';
+    currentPage = 1;
+    loadPage();
+  });
+
+  filterServer.addEventListener('change', function() {
+    currentPage = 1;
+    loadPage();
+  });
+
+  filterMethod.addEventListener('change', function() {
+    currentPage = 1;
+    loadPage();
+  });
+
+  clearFiltersBtn.addEventListener('click', function() {
+    filterServer.value = '';
+    filterMethod.value = '';
+    dirFilter = '';
+    // Reset seg-toggle to All
+    var segs = dirToggle.querySelectorAll('button');
+    for (var i = 0; i < segs.length; i++) {
+      segs[i].classList.remove('seg-active');
+      segs[i].classList.add('seg-inactive');
+    }
+    segs[0].classList.remove('seg-inactive');
+    segs[0].classList.add('seg-active');
+    currentPage = 1;
+    loadPage();
+  });
+
+  /* ======================================================================
+     API — Load Page
+     ====================================================================== */
+  function loadPage() {
+    var params = new URLSearchParams();
+    params.set('page', currentPage);
+    params.set('page_size', pageSize);
+
+    var sv = filterServer.value;
+    var mt = filterMethod.value;
     if (sv) params.set('server', sv);
     if (mt) params.set('method', mt);
+    // Note: direction filter is client-side since the API doesn't support it
 
-    try {
-      const resp = await fetch('/api/traffic?' + params);
-      const data = await resp.json();
-      totalCount = data.total_count;
+    fetch('/api/traffic?' + params)
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        totalCount = data.total_count;
 
-      if (totalCount === 0 && liveEvents.length === 0) {
-        emptyState.style.display = '';
-        pagination.style.display = 'none';
-        tbody.innerHTML = '';
-        trafficCount.textContent = '';
-        return;
-      }
+        if (totalCount === 0) {
+          timelineEmpty.style.display = '';
+          timelineContent.style.display = 'none';
+          return;
+        }
 
-      emptyState.style.display = 'none';
-      trafficCount.textContent = totalCount + ' messages';
+        timelineEmpty.style.display = 'none';
+        timelineContent.style.display = '';
 
-      tbody.innerHTML = (data.items || []).map(renderRow).join('');
+        var items = data.items || [];
+        trackFilters(items);
 
-      const totalPages = Math.ceil(totalCount / pageSize);
-      if (totalPages > 1) {
-        pagination.style.display = '';
-        pageInfo.textContent = `Page ${currentPage} of ${totalPages}`;
-        prevBtn.disabled = currentPage <= 1;
-        nextBtn.disabled = currentPage >= totalPages;
-      } else {
-        pagination.style.display = 'none';
-      }
-    } catch (e) {
-      console.error('Failed to load traffic:', e);
+        // Apply client-side direction filter
+        var dirVal = getDirectionFilter();
+        if (dirVal) {
+          items = items.filter(function(item) {
+            return item.direction === dirVal;
+          });
+        }
+
+        trafficCount.textContent = totalCount + ' entries';
+
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+          html += renderRow(items[i], i);
+        }
+        trafficBody.innerHTML = html;
+
+        renderPagination(data.total_count, data.page, data.page_size);
+      })
+      .catch(function(err) {
+        console.error('Failed to load traffic:', err);
+      });
+  }
+
+  /* ======================================================================
+     Pagination
+     ====================================================================== */
+  function renderPagination(total, page, size) {
+    var totalPages = Math.ceil(total / size);
+    if (totalPages <= 1) {
+      document.getElementById('pagination').style.display = 'none';
+      return;
+    }
+
+    document.getElementById('pagination').style.display = '';
+
+    prevBtn.disabled = page <= 1;
+    nextBtn.disabled = page >= totalPages;
+
+    var start = (page - 1) * size + 1;
+    var end = Math.min(page * size, total);
+    pageInfo.textContent = 'Showing ' + start + '\u2013' + end + ' of ' + total;
+
+    // Page numbers
+    var nums = '';
+    var startPage = Math.max(1, page - 2);
+    var endPage = Math.min(totalPages, page + 2);
+    for (var p = startPage; p <= endPage; p++) {
+      var activeClass = p === page ? ' is-active' : '';
+      nums += '<button class="page-num' + activeClass + '" data-page="' + p + '">' + p + '</button>';
+    }
+    pageNums.innerHTML = nums;
+  }
+
+  prevBtn.addEventListener('click', function() {
+    if (currentPage > 1) { currentPage--; loadPage(); }
+  });
+
+  nextBtn.addEventListener('click', function() {
+    currentPage++;
+    loadPage();
+  });
+
+  pageNums.addEventListener('click', function(e) {
+    var btn = e.target.closest('.page-num');
+    if (btn && btn.dataset.page) {
+      currentPage = parseInt(btn.dataset.page, 10);
+      loadPage();
+    }
+  });
+
+  /* ======================================================================
+     WebSocket
+     ====================================================================== */
+  function setWsState(state) {
+    wsIndicator.classList.remove('ws-live', 'ws-disconnected', 'ws-reconnecting');
+    if (state === 'live') {
+      wsIndicator.classList.add('ws-live');
+      wsIndicator.textContent = 'Live';
+      wsBanner.classList.remove('is-visible');
+    } else if (state === 'disconnected') {
+      wsIndicator.classList.add('ws-disconnected');
+      wsIndicator.textContent = 'Disconnected';
+      wsBanner.classList.add('is-visible');
+    } else if (state === 'reconnecting') {
+      wsIndicator.classList.add('ws-reconnecting');
+      wsIndicator.textContent = 'Reconnecting\u2026';
+      wsBanner.classList.add('is-visible');
     }
   }
 
-  prevBtn.onclick = () => { if (currentPage > 1) { currentPage--; loadPage(); } };
-  nextBtn.onclick = () => { currentPage++; loadPage(); };
-
-  let filterTimer = null;
-  function onFilterChange() {
-    clearTimeout(filterTimer);
-    filterTimer = setTimeout(() => { currentPage = 1; loadPage(); }, 300);
-  }
-  filterServer.addEventListener('input', onFilterChange);
-  filterMethod.addEventListener('input', onFilterChange);
-
   function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
 
-    ws.onopen = () => {
-      wsDot.classList.add('connected');
-      wsLabel.textContent = 'Connected';
+    ws.onopen = function() {
+      setWsState('live');
+      wsBackoff = 1000; // reset backoff
     };
 
-    ws.onclose = () => {
-      wsDot.classList.remove('connected');
-      wsLabel.textContent = 'Disconnected';
-      setTimeout(connectWS, 2000);
+    ws.onclose = function() {
+      setWsState('reconnecting');
+      wsTimer = setTimeout(function() {
+        wsBackoff = Math.min(wsBackoff * 2, wsMaxBackoff);
+        connectWS();
+      }, wsBackoff);
     };
 
-    ws.onerror = () => {
+    ws.onerror = function() {
       ws.close();
     };
 
-    ws.onmessage = (e) => {
+    ws.onmessage = function(e) {
       try {
-        const evt = JSON.parse(e.data);
-        liveEvents.unshift(evt);
+        var evt = JSON.parse(e.data);
 
-        // If on page 1 with no filters, prepend the row
-        if (currentPage === 1 && !filterServer.value.trim() && !filterMethod.value.trim()) {
-          emptyState.style.display = 'none';
-          tbody.insertAdjacentHTML('afterbegin', renderRow(evt));
+        // Track filters
+        trackFilters([evt]);
+
+        // If on page 1 with no filters active, prepend
+        if (currentPage === 1 && !filterServer.value && !filterMethod.value && !getDirectionFilter()) {
+          timelineEmpty.style.display = 'none';
+          timelineContent.style.display = '';
+
+          var existingRows = trafficBody.querySelectorAll('.table-row:not([data-detail-for])');
+          var newIdx = 0; // new row is always first
+          trafficBody.insertAdjacentHTML('afterbegin', renderRow(evt, newIdx));
+
           totalCount++;
-          trafficCount.textContent = totalCount + ' messages';
+          trafficCount.textContent = totalCount + ' entries';
         }
-      } catch (err) {
+      } catch(err) {
         console.error('WS parse error:', err);
       }
     };
   }
 
+  retryBtn.addEventListener('click', function() {
+    clearTimeout(wsTimer);
+    wsBackoff = 1000;
+    connectWS();
+  });
+
+  /* ======================================================================
+     Resize Handle — re-init after dynamic content
+     ====================================================================== */
+  // ds.js MutationObserver handles this automatically
+
+  /* ======================================================================
+     Init
+     ====================================================================== */
+  // Initial view state: hide content, show empty
+  timelineContent.style.display = 'none';
+
+  // Initialize routing
+  navigate(getRoute());
+
+  // Load initial data
   loadPage();
+
+  // Connect WebSocket
   connectWS();
+
+  // Periodically refresh relative timestamps (every 30s)
+  setInterval(function() {
+    var timestamps = trafficBody.querySelectorAll('.timestamp[title]');
+    for (var i = 0; i < timestamps.length; i++) {
+      var title = timestamps[i].getAttribute('title');
+      if (title) {
+        var ms = new Date(title).getTime();
+        if (!isNaN(ms)) {
+          timestamps[i].textContent = relativeTime(ms);
+        }
+      }
+    }
+  }, 30000);
+
 })();
 </script>
 </body>
