@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -45,74 +46,147 @@ type jsonRPCMessage struct {
 	Error   json.RawMessage `json:"error,omitempty"`
 }
 
+const (
+	initialRestartBackoff = time.Second
+	maxRestartBackoff     = 30 * time.Second
+	maxCrashCount         = 5
+	crashWindow           = 60 * time.Second
+)
+
+type childInputWriter struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	writer io.WriteCloser
+	closed bool
+}
+
+func newChildInputWriter() *childInputWriter {
+	cw := &childInputWriter{}
+	cw.cond = sync.NewCond(&cw.mu)
+	return cw
+}
+
+func (cw *childInputWriter) attach(writer io.WriteCloser) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	if cw.closed {
+		if writer != nil {
+			_ = writer.Close()
+		}
+		return
+	}
+
+	cw.writer = writer
+	cw.cond.Broadcast()
+}
+
+func (cw *childInputWriter) detach(writer io.WriteCloser) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	if cw.writer == writer {
+		cw.writer = nil
+		cw.cond.Broadcast()
+	}
+}
+
+func (cw *childInputWriter) close() {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	cw.closed = true
+	cw.writer = nil
+	cw.cond.Broadcast()
+}
+
+func (cw *childInputWriter) writeLine(ctx context.Context, line []byte) error {
+	for {
+		writer, err := cw.waitForWriter(ctx)
+		if err != nil {
+			return err
+		}
+
+		if _, err := writer.Write(line); err != nil {
+			slog.Warn("child stdin write failed; waiting for restart", "error", err)
+			cw.detach(writer)
+			continue
+		}
+		if _, err := writer.Write([]byte("\n")); err != nil {
+			slog.Warn("child stdin newline write failed; waiting for restart", "error", err)
+			cw.detach(writer)
+			continue
+		}
+		return nil
+	}
+}
+
+func (cw *childInputWriter) waitForWriter(ctx context.Context) (io.WriteCloser, error) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	for cw.writer == nil && !cw.closed {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		cw.cond.Wait()
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if cw.closed {
+		return nil, io.EOF
+	}
+
+	return cw.writer, nil
+}
+
 // Run starts the child process and proxies stdio. It blocks until the context
 // is cancelled or the child exits.
 func (p *Proxy) Run(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, p.command, p.args...)
+	inputWriter := newChildInputWriter()
+	defer inputWriter.close()
 
-	childStdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
-	}
-	childStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-	childStderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	slog.Info("starting child process", "name", p.name, "command", p.command, "args", p.args)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start child: %w", err)
-	}
-
-	var wg sync.WaitGroup
-
-	// Drain child stderr to prevent deadlock
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(childStderr)
-		buf := make([]byte, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-		for scanner.Scan() {
-			slog.Debug("child stderr", "name", p.name, "line", scanner.Text())
-		}
-	}()
-
-	// Parent stdin → child stdin (client→server direction)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer childStdin.Close()
-		p.pipeAndTap(ctx, os.Stdin, childStdin, capture.DirectionClientToServer)
-	}()
-
-	// Child stdout → parent stdout (server→client direction)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.pipeAndTap(ctx, childStdout, os.Stdout, capture.DirectionServerToClient)
-	}()
-
-	// Wait for child to exit
-	err = cmd.Wait()
-	if err != nil {
-		slog.Warn("child process exited with error", "name", p.name, "error", err)
-	} else {
-		slog.Info("child process exited normally", "name", p.name)
-	}
-
-	// If context is still active (child crashed), stay running
-	if ctx.Err() == nil {
-		slog.Info("child crashed, proxy remains running — waiting for shutdown signal", "name", p.name)
 		<-ctx.Done()
-	}
+		inputWriter.close()
+	}()
 
-	wg.Wait()
-	return err
+	clientDone := make(chan error, 1)
+	go func() {
+		clientDone <- p.proxyClientInput(ctx, inputWriter)
+	}()
+
+	var crashTimes []time.Time
+
+	for {
+		runErr := p.runChild(ctx, inputWriter)
+		if runErr == nil {
+			return p.waitForClientInput(clientDone)
+		}
+		if ctx.Err() != nil {
+			return p.waitForClientInput(clientDone)
+		}
+
+		exitCode := exitCodeFromError(runErr)
+		crashAt := time.Now()
+		crashTimes = append(crashTimes, crashAt)
+		crashTimes = filterRecentCrashes(crashTimes, crashAt)
+
+		slog.Warn("child process crashed", "name", p.name, "exit_code", exitCode, "error", runErr)
+		if len(crashTimes) >= maxCrashCount {
+			err := fmt.Errorf("fatal: child crashed %d times within %s; stopping restarts", len(crashTimes), crashWindow)
+			slog.Error(err.Error(), "name", p.name, "exit_code", exitCode)
+			return err
+		}
+
+		backoff := restartBackoff(len(crashTimes))
+		slog.Info("restarting child process after crash", "name", p.name, "exit_code", exitCode, "backoff", backoff)
+		if err := waitForBackoff(ctx, backoff); err != nil {
+			return p.waitForClientInput(clientDone)
+		}
+	}
 }
 
 // pipeAndTap reads newline-delimited messages from src, writes them to dst,
@@ -153,6 +227,142 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		slog.Error("scanner error", "direction", direction, "error", err)
 	}
+}
+
+func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWriter) error {
+	scanner := bufio.NewScanner(os.Stdin)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		if err := inputWriter.writeLine(ctx, line); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		go p.captureMessage(line, capture.DirectionClientToServer, time.Now())
+	}
+
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		slog.Error("scanner error", "direction", capture.DirectionClientToServer, "error", err)
+		return err
+	}
+
+	return nil
+}
+
+func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) error {
+	cmd := exec.CommandContext(ctx, p.command, p.args...)
+
+	childStdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	childStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	childStderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	slog.Info("starting child process", "name", p.name, "command", p.command, "args", p.args)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start child: %w", err)
+	}
+
+	inputWriter.attach(childStdin)
+	defer inputWriter.detach(childStdin)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(childStderr)
+		buf := make([]byte, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			slog.Debug("child stderr", "name", p.name, "line", scanner.Text())
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.pipeAndTap(ctx, childStdout, os.Stdout, capture.DirectionServerToClient)
+	}()
+
+	err = cmd.Wait()
+	inputWriter.detach(childStdin)
+	wg.Wait()
+
+	if err == nil {
+		slog.Info("child process exited normally", "name", p.name)
+	}
+
+	return err
+}
+
+func (p *Proxy) waitForClientInput(clientDone <-chan error) error {
+	select {
+	case err := <-clientDone:
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	default:
+		return nil
+	}
+}
+
+func exitCodeFromError(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func filterRecentCrashes(crashTimes []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-crashWindow)
+	kept := crashTimes[:0]
+	for _, crashTime := range crashTimes {
+		if crashTime.After(cutoff) {
+			kept = append(kept, crashTime)
+		}
+	}
+	return kept
+}
+
+func waitForBackoff(ctx context.Context, backoff time.Duration) error {
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func restartBackoff(crashCount int) time.Duration {
+	backoff := initialRestartBackoff
+	for i := 1; i < crashCount; i++ {
+		if backoff >= maxRestartBackoff {
+			return maxRestartBackoff
+		}
+		backoff *= 2
+	}
+	if backoff > maxRestartBackoff {
+		return maxRestartBackoff
+	}
+	return backoff
 }
 
 // captureMessage parses and stores a captured JSON-RPC message.
