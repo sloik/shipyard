@@ -1,0 +1,38 @@
+.DS_Store
+.env
+.env.*
+*.key
+credentials.json
+
+# Go build output
+/shipyard
+/shipyard-v2
+*.exe
+dist/
+
+# Nightshift (ignore everything except specs/)
+.nightshift/**
+!.nightshift/specs/
+!.nightshift/specs/**
+
+# Development runtime
+.shipyard-dev/
+
+# Claude Code project instructions (internal)
+.claude/
+
+# Internal context
+.argo/
+
+# Xcode (legacy — v0.x was SwiftUI)
+**/xcuserdata/
+*.xcuserstate
+.swiftpm/
+DerivedData/
+.build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
