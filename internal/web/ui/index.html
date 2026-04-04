@@ -327,6 +327,46 @@
     return div.innerHTML;
   }
 
+  function highlightJSON(str) {
+    let obj;
+    try {
+      obj = JSON.parse(str);
+    } catch {
+      return escapeHtml(str);
+    }
+    const pretty = JSON.stringify(obj, null, 2);
+    // Single-pass tokenizer to avoid span-in-span issues
+    const token = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|([{}\[\]:,])/g;
+    let result = '';
+    let lastIndex = 0;
+    let m;
+    while ((m = token.exec(pretty)) !== null) {
+      // Append any whitespace/newlines between tokens
+      result += escapeHtml(pretty.slice(lastIndex, m.index));
+      if (m[1] !== undefined) {
+        if (m[2] !== undefined) {
+          // Key (string followed by colon)
+          result += '<span style="color:var(--accent)">' + escapeHtml(m[1]) + '</span>' + m[2];
+        } else {
+          // String value
+          result += '<span style="color:var(--green)">' + escapeHtml(m[1]) + '</span>';
+        }
+      } else if (m[3] !== undefined) {
+        // boolean or null
+        result += '<span style="color:var(--yellow)">' + escapeHtml(m[3]) + '</span>';
+      } else if (m[4] !== undefined) {
+        // number
+        result += '<span style="color:var(--orange)">' + escapeHtml(m[4]) + '</span>';
+      } else if (m[5] !== undefined) {
+        // structural character
+        result += '<span style="color:var(--text-muted)">' + escapeHtml(m[5]) + '</span>';
+      }
+      lastIndex = token.lastIndex;
+    }
+    result += escapeHtml(pretty.slice(lastIndex));
+    return result;
+  }
+
   function renderRow(evt) {
     return `<tr data-id="${evt.id}" onclick="window.__toggleDetail(${evt.id})">
       <td>${formatTime(evt.timestamp)}</td>
@@ -341,10 +381,10 @@
   function renderDetailRow(entry, matched) {
     let html = `<tr class="detail-row" data-detail-for="${entry.id}"><td colspan="6"><div class="detail-content">`;
     html += `<h3>${entry.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
-    html += `<div class="payload">${escapeHtml(prettyJSON(entry.payload))}</div>`;
+    html += `<div class="payload">${highlightJSON(entry.payload)}</div>`;
     if (matched) {
       html += `<h3>${matched.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
-      html += `<div class="payload">${escapeHtml(prettyJSON(matched.payload))}</div>`;
+      html += `<div class="payload">${highlightJSON(matched.payload)}</div>`;
     }
     html += `</div></td></tr>`;
     return html;
