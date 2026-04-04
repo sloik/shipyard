@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shipyard — MCP Traffic Inspector</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --orange: #db6d28;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  header h1 span { color: var(--text-muted); font-weight: 400; }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .status-dot.connected { background: var(--green); }
+
+  .filters {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 24px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .filters label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .filters input, .filters select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    outline: none;
+  }
+  .filters input:focus, .filters select:focus {
+    border-color: var(--accent);
+  }
+  .filters .count {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  main { padding: 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    user-select: none;
+  }
+  tbody tr {
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  tbody tr:hover { background: rgba(88,166,255,0.06); }
+  tbody tr.expanded { background: rgba(88,166,255,0.04); }
+  td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .dir-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .dir-badge.client-to-server {
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+  }
+  .dir-badge.server-to-client {
+    background: rgba(63,185,80,0.15);
+    color: var(--green);
+  }
+
+  .status-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .status-badge.ok {
+    background: rgba(63,185,80,0.15);
+    color: var(--green);
+  }
+  .status-badge.error {
+    background: rgba(248,81,73,0.15);
+    color: var(--red);
+  }
+  .status-badge.request {
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+  }
+
+  .method { color: var(--accent); font-family: monospace; }
+  .latency { color: var(--text-muted); font-family: monospace; }
+  .latency.slow { color: var(--yellow); }
+  .latency.very-slow { color: var(--red); }
+
+  .detail-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-content {
+    padding: 12px 24px;
+    background: var(--bg);
+  }
+  .detail-content h3 {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .detail-content h3:not(:first-child) { margin-top: 16px; }
+  .payload {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .pagination button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button:disabled { opacity: 0.4; cursor: default; }
+  .pagination span { font-size: 13px; color: var(--text-muted); }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 24px;
+    color: var(--text-muted);
+  }
+  .empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text); }
+  .empty-state p { max-width: 400px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shipyard <span>MCP Traffic Inspector</span></h1>
+  <div class="status">
+    <div class="status-dot" id="ws-status"></div>
+    <span id="ws-label">Disconnected</span>
+  </div>
+</header>
+
+<div class="filters">
+  <label>Server</label>
+  <input type="text" id="filter-server" placeholder="all servers">
+  <label>Method</label>
+  <input type="text" id="filter-method" placeholder="all methods">
+  <div class="count" id="traffic-count"></div>
+</div>
+
+<main>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:180px">Time</th>
+        <th style="width:120px">Direction</th>
+        <th style="width:120px">Server</th>
+        <th>Method</th>
+        <th style="width:80px">Status</th>
+        <th style="width:100px">Latency</th>
+      </tr>
+    </thead>
+    <tbody id="traffic-body"></tbody>
+  </table>
+  <div class="empty-state" id="empty-state">
+    <h2>No traffic yet</h2>
+    <p>Waiting for MCP messages. Make sure your client is connected through Shipyard.</p>
+  </div>
+  <div class="pagination" id="pagination" style="display:none">
+    <button id="prev-btn" disabled>Previous</button>
+    <span id="page-info"></span>
+    <button id="next-btn" disabled>Next</button>
+  </div>
+</main>
+
+<script>
+(function() {
+  const tbody = document.getElementById('traffic-body');
+  const emptyState = document.getElementById('empty-state');
+  const pagination = document.getElementById('pagination');
+  const prevBtn = document.getElementById('prev-btn');
+  const nextBtn = document.getElementById('next-btn');
+  const pageInfo = document.getElementById('page-info');
+  const trafficCount = document.getElementById('traffic-count');
+  const wsDot = document.getElementById('ws-status');
+  const wsLabel = document.getElementById('ws-label');
+  const filterServer = document.getElementById('filter-server');
+  const filterMethod = document.getElementById('filter-method');
+
+  let currentPage = 1;
+  const pageSize = 50;
+  let totalCount = 0;
+  let expandedId = null;
+  let liveEvents = [];
+  let ws = null;
+
+  function formatTime(tsMs) {
+    const d = new Date(tsMs);
+    return d.toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+
+  function dirClass(dir) {
+    return dir.includes('\u2192') && dir.startsWith('client') ? 'client-to-server' : 'server-to-client';
+  }
+
+  function dirLabel(dir) {
+    if (dir.includes('client')) return '\u2192 server';
+    return '\u2190 client';
+  }
+
+  function latencyText(ms) {
+    if (ms === null || ms === undefined) return '\u2014';
+    if (ms < 100) return ms + 'ms';
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function latencyClass(ms) {
+    if (ms === null || ms === undefined) return 'latency';
+    if (ms > 5000) return 'latency very-slow';
+    if (ms > 1000) return 'latency slow';
+    return 'latency';
+  }
+
+  function prettyJSON(str) {
+    try {
+      return JSON.stringify(JSON.parse(str), null, 2);
+    } catch {
+      return str;
+    }
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function renderRow(evt) {
+    return `<tr data-id="${evt.id}" onclick="window.__toggleDetail(${evt.id})">
+      <td>${formatTime(evt.timestamp)}</td>
+      <td><span class="dir-badge ${dirClass(evt.direction)}">${dirLabel(evt.direction)}</span></td>
+      <td>${escapeHtml(evt.server_name)}</td>
+      <td class="method">${escapeHtml(evt.method || '\u2014')}</td>
+      <td><span class="status-badge ${evt.status}">${evt.status}</span></td>
+      <td class="${latencyClass(evt.latency_ms)}">${latencyText(evt.latency_ms)}</td>
+    </tr>`;
+  }
+
+  function renderDetailRow(entry, matched) {
+    let html = `<tr class="detail-row" data-detail-for="${entry.id}"><td colspan="6"><div class="detail-content">`;
+    html += `<h3>${entry.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
+    html += `<div class="payload">${escapeHtml(prettyJSON(entry.payload))}</div>`;
+    if (matched) {
+      html += `<h3>${matched.direction.includes('client') ? 'Request' : 'Response'} Payload</h3>`;
+      html += `<div class="payload">${escapeHtml(prettyJSON(matched.payload))}</div>`;
+    }
+    html += `</div></td></tr>`;
+    return html;
+  }
+
+  window.__toggleDetail = async function(id) {
+    const existing = document.querySelector(`tr[data-detail-for="${id}"]`);
+    if (existing) {
+      existing.remove();
+      document.querySelector(`tr[data-id="${id}"]`).classList.remove('expanded');
+      expandedId = null;
+      return;
+    }
+
+    // Collapse any open detail
+    const old = document.querySelector('tr.detail-row');
+    if (old) {
+      const oldId = old.dataset.detailFor;
+      old.remove();
+      document.querySelector(`tr[data-id="${oldId}"]`)?.classList.remove('expanded');
+    }
+
+    expandedId = id;
+    document.querySelector(`tr[data-id="${id}"]`)?.classList.add('expanded');
+
+    try {
+      const resp = await fetch(`/api/traffic/${id}`);
+      const data = await resp.json();
+      const row = document.querySelector(`tr[data-id="${id}"]`);
+      if (row) {
+        row.insertAdjacentHTML('afterend', renderDetailRow(data.entry, data.matched));
+      }
+    } catch (e) {
+      console.error('Failed to load detail:', e);
+    }
+  };
+
+  async function loadPage() {
+    const params = new URLSearchParams({
+      page: currentPage,
+      page_size: pageSize,
+    });
+    const sv = filterServer.value.trim();
+    const mt = filterMethod.value.trim();
+    if (sv) params.set('server', sv);
+    if (mt) params.set('method', mt);
+
+    try {
+      const resp = await fetch('/api/traffic?' + params);
+      const data = await resp.json();
+      totalCount = data.total_count;
+
+      if (totalCount === 0 && liveEvents.length === 0) {
+        emptyState.style.display = '';
+        pagination.style.display = 'none';
+        tbody.innerHTML = '';
+        trafficCount.textContent = '';
+        return;
+      }
+
+      emptyState.style.display = 'none';
+      trafficCount.textContent = totalCount + ' messages';
+
+      tbody.innerHTML = (data.items || []).map(renderRow).join('');
+
+      const totalPages = Math.ceil(totalCount / pageSize);
+      if (totalPages > 1) {
+        pagination.style.display = '';
+        pageInfo.textContent = `Page ${currentPage} of ${totalPages}`;
+        prevBtn.disabled = currentPage <= 1;
+        nextBtn.disabled = currentPage >= totalPages;
+      } else {
+        pagination.style.display = 'none';
+      }
+    } catch (e) {
+      console.error('Failed to load traffic:', e);
+    }
+  }
+
+  prevBtn.onclick = () => { if (currentPage > 1) { currentPage--; loadPage(); } };
+  nextBtn.onclick = () => { currentPage++; loadPage(); };
+
+  let filterTimer = null;
+  function onFilterChange() {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => { currentPage = 1; loadPage(); }, 300);
+  }
+  filterServer.addEventListener('input', onFilterChange);
+  filterMethod.addEventListener('input', onFilterChange);
+
+  function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+      wsDot.classList.add('connected');
+      wsLabel.textContent = 'Connected';
+    };
+
+    ws.onclose = () => {
+      wsDot.classList.remove('connected');
+      wsLabel.textContent = 'Disconnected';
+      setTimeout(connectWS, 2000);
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        liveEvents.unshift(evt);
+
+        // If on page 1 with no filters, prepend the row
+        if (currentPage === 1 && !filterServer.value.trim() && !filterMethod.value.trim()) {
+          emptyState.style.display = 'none';
+          tbody.insertAdjacentHTML('afterbegin', renderRow(evt));
+          totalCount++;
+          trafficCount.textContent = totalCount + ' messages';
+        }
+      } catch (err) {
+        console.error('WS parse error:', err);
+      }
+    };
+  }
+
+  loadPage();
+  connectWS();
+})();
+</script>
+</body>
+</html>
