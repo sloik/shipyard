@@ -1,0 +1,162 @@
+# Nightshift Configuration
+# Version: 2.2.0 (2026-03-30)
+
+---
+
+## Kit Version
+
+kit_version: "2.2.0"
+
+---
+
+## Project Metadata
+
+project:
+  name: "shipyard"
+  description: "MCP traffic inspector — stdio proxy with web dashboard for debugging Model Context Protocol servers"
+  language: [go, javascript, css]
+
+---
+
+## Build & Test Commands
+
+commands:
+  build: "go build ./cmd/shipyard/"
+  test: "go test ./..."
+  test_timeout_s: 120
+  lint: "go vet ./..."
+  type_check: "go build ./..."          # Compile all packages before commit
+  format: "gofmt -l ."
+  format_fix: "gofmt -w ."
+
+---
+
+## Project Conventions
+
+conventions:
+  - "Single HTML file (internal/web/ui/index.html) — all UI in one file, no external JS frameworks"
+  - "Design system in ds.css + ds.js — all UI uses DS classes, zero custom component CSS in index.html"
+  - "Vanilla JS only — .then() callbacks, var declarations, no async/await for browser compat"
+  - "UX-002-dashboard-design.pen is the design source of truth — implementation must match pixel-for-pixel"
+  - "Go stdlib-first — prefer net/http, log/slog, embed over external packages"
+  - "Traffic capture uses SQLite (internal/capture/store.go) with JSONL append-only backup"
+
+---
+
+## Review Configuration
+
+review:
+  mode: "self"
+  enabled: [architect, security, performance, domain, quality, user]
+  extra_criteria:
+    - "All UI changes must use existing ds.css classes — no inline styles except layout"
+    - "JSON-RPC messages must be captured in traffic timeline (AC-5 pattern)"
+
+---
+
+## Knowledge Injection
+
+knowledge:
+  injection: true
+  max_patterns: 5
+  match_strategy: "domain+tags"
+
+---
+
+## DevKB — External Development Knowledge Base
+
+devkb:
+  path: "/Users/ed/Dropbox/Argo/DevKB"
+  writeback: true
+  mappings:
+    go: ["go.md"]
+    javascript: ["javascript.md"]
+    css: ["css.md"]
+  always_include: ["git.md", "architecture.md"]
+
+---
+
+## Metrics Collection
+
+metrics:
+  enabled: true
+  track: [duration, test_results, review_cycles, build_errors, files_changed]
+
+---
+
+## Circuit Breaker (Stall Detection)
+
+circuit_breaker:
+  max_same_error: 3
+  max_review_cycles: 5
+  max_spec_duration_min: 120
+  phase_duration_multiplier: 3
+
+---
+
+## Runner Mode
+
+runner:
+  mode: "orchestrator"
+  domain: "code"
+  model_selection: "auto"
+  harness: "claude-code"
+
+  tiers:
+    tier-1:
+      model: "claude-sonnet-4-6"
+      harness: "claude-code"
+    tier-2:
+      model: "claude-sonnet-4-6"
+      harness: "claude-code"
+    tier-3:
+      model: "claude-opus-4-6"
+      harness: "claude-code"
+
+---
+
+## Multi-Model Comparison
+
+comparison:
+  enabled: false
+
+---
+
+## Runtime Traceability
+
+runtime:
+  loop_version: "2026-03-30"
+  model: ""
+  harness: "claude-code"
+  tier: ""
+
+---
+
+## Git Configuration
+
+git:
+  main_branch: "v2/main"
+  branch_prefix: "nightshift"
+  commit_style: "conventional"
+  worktrees: "auto"
+  merge_strategy: "no-ff"
+
+---
+
+## Checkpointing
+
+checkpointing:
+  enabled: true
+  dir: "checkpoints"
+  clear_on_completion: true
+
+---
+
+## Watcher Configuration
+
+watcher:
+  enabled: false
+  poll_interval_min: 5
+  idle_timeout_min: 30
+  review_file: "WATCHER-REVIEW.md"
+  lens: "general"

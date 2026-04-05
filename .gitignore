@@ -12,6 +12,9 @@ dist/
 
 # Nightshift (only specs and templates are public)
 .nightshift/**
+!.nightshift/config.yaml
+!.nightshift/hooks/
+!.nightshift/hooks/pre-commit
 !.nightshift/specs/
 !.nightshift/specs/**
 
