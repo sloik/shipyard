@@ -595,6 +595,219 @@ func TestHandleTrafficDetail_Success(t *testing.T) {
 	}
 }
 
+// --- POST /api/replay (SPEC-003 AC-1) ---
+
+func TestHandleReplay_Success(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Insert a request traffic entry (tools/call for "read_file" on server "alpha")
+	id, _ := srv.store.Insert(&capture.TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  capture.DirectionClientToServer,
+		ServerName: "alpha",
+		Method:     "tools/call",
+		MessageID:  "1",
+		Payload:    `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`,
+		Status:     "pending",
+	})
+
+	rpcResponse := `{"jsonrpc":"2.0","id":"shipyard-1","result":{"content":[{"type":"text","text":"hello"}]}}`
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "alpha", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			if server != "alpha" {
+				t.Fatalf("expected server alpha, got %s", server)
+			}
+			if method != "tools/call" {
+				t.Fatalf("expected method tools/call, got %s", method)
+			}
+			return json.RawMessage(rpcResponse), nil
+		},
+	})
+
+	body := fmt.Sprintf(`{"id":%d}`, id)
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleReplay(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := result["result"]; !ok {
+		t.Fatal("expected 'result' key")
+	}
+	if _, ok := result["latency_ms"]; !ok {
+		t.Fatal("expected 'latency_ms' key")
+	}
+}
+
+func TestHandleReplay_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	body := `{"id":99999}`
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleReplay(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleReplay_NoProxyManager(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{"id":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleReplay(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestHandleReplay_InvalidJSON(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(`not json`))
+	w := httptest.NewRecorder()
+	srv.handleReplay(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleReplay_SendRequestError(t *testing.T) {
+	srv := newTestServer(t)
+
+	id, _ := srv.store.Insert(&capture.TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  capture.DirectionClientToServer,
+		ServerName: "alpha",
+		Method:     "tools/call",
+		MessageID:  "1",
+		Payload:    `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`,
+		Status:     "pending",
+	})
+
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			return nil, fmt.Errorf("connection refused")
+		},
+	})
+
+	body := fmt.Sprintf(`{"id":%d}`, id)
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleReplay(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+// --- GET /api/traffic with extended filters (SPEC-003 AC-4) ---
+
+func TestHandleTraffic_SearchFilter(t *testing.T) {
+	srv := newTestServer(t)
+
+	now := time.Now()
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now, Direction: capture.DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{"name":"read_file"}`, Status: "pending",
+	})
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now, Direction: capture.DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{"name":"write_file"}`, Status: "pending",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/traffic?search=read_file", nil)
+	w := httptest.NewRecorder()
+	srv.handleTraffic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var page capture.TrafficPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 result for search=read_file, got %d", page.TotalCount)
+	}
+}
+
+func TestHandleTraffic_DirectionFilter(t *testing.T) {
+	srv := newTestServer(t)
+
+	now := time.Now()
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now, Direction: capture.DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{}`, Status: "pending",
+	})
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now.Add(10 * time.Millisecond), Direction: capture.DirectionServerToClient,
+		ServerName: "srv", Method: "", Payload: `{"result":{}}`, Status: "ok", IsResponse: true,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/traffic?direction="+capture.DirectionClientToServer, nil)
+	w := httptest.NewRecorder()
+	srv.handleTraffic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var page capture.TrafficPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 request entry, got %d", page.TotalCount)
+	}
+}
+
+func TestHandleTraffic_TimeRangeFilter(t *testing.T) {
+	srv := newTestServer(t)
+
+	now := time.Now()
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now.Add(-2 * time.Hour), Direction: capture.DirectionClientToServer,
+		ServerName: "srv", Method: "old", Payload: `{}`, Status: "pending",
+	})
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp: now, Direction: capture.DirectionClientToServer,
+		ServerName: "srv", Method: "new", Payload: `{}`, Status: "pending",
+	})
+
+	fromTs := now.Add(-1 * time.Hour).UnixMilli()
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/traffic?from_ts=%d", fromTs), nil)
+	w := httptest.NewRecorder()
+	srv.handleTraffic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var page capture.TrafficPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 recent entry, got %d", page.TotalCount)
+	}
+}
+
 func TestHandleTrafficDetail_InvalidID(t *testing.T) {
 	srv := newTestServer(t)
 

@@ -213,7 +213,108 @@ func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 	return rowID, latencyMs
 }
 
+// QueryFilter defines all filter options for querying traffic entries.
+type QueryFilter struct {
+	Page      int
+	PageSize  int
+	Server    string
+	Method    string
+	Direction string
+	Search    string  // free-text search in payload (SQL LIKE)
+	FromTs    *int64  // unix milliseconds, inclusive
+	ToTs      *int64  // unix milliseconds, inclusive
+}
+
+// QueryFiltered retrieves paginated traffic entries with extended filters.
+func (s *Store) QueryFiltered(f QueryFilter) (*TrafficPage, error) {
+	where := "WHERE 1=1"
+	args := []interface{}{}
+
+	if f.Server != "" {
+		where += " AND server_name = ?"
+		args = append(args, f.Server)
+	}
+	if f.Method != "" {
+		where += " AND method = ?"
+		args = append(args, f.Method)
+	}
+	if f.Direction != "" {
+		where += " AND direction = ?"
+		args = append(args, f.Direction)
+	}
+	if f.Search != "" {
+		where += " AND payload LIKE ?"
+		args = append(args, "%"+f.Search+"%")
+	}
+	if f.FromTs != nil {
+		fromTime := time.UnixMilli(*f.FromTs).UTC().Format(time.RFC3339Nano)
+		where += " AND ts >= ?"
+		args = append(args, fromTime)
+	}
+	if f.ToTs != nil {
+		toTime := time.UnixMilli(*f.ToTs).UTC().Format(time.RFC3339Nano)
+		where += " AND ts <= ?"
+		args = append(args, toTime)
+	}
+
+	// Count total
+	var total int
+	countArgs := make([]interface{}, len(args))
+	copy(countArgs, args)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM traffic "+where, countArgs...).Scan(&total)
+	if err != nil {
+		return nil, fmt.Errorf("count: %w", err)
+	}
+
+	// Fetch page
+	page := f.Page
+	pageSize := f.PageSize
+	offset := (page - 1) * pageSize
+	queryArgs := append(args, pageSize, offset)
+	rows, err := queryTrafficRows(
+		s.db,
+		"SELECT id, ts, direction, server_name, method, message_id, payload, status, latency_ms, matched_id FROM traffic "+
+			where+" ORDER BY id DESC LIMIT ? OFFSET ?",
+		queryArgs...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	var items []TrafficEvent
+	for rows.Next() {
+		var (
+			evt       TrafficEvent
+			tsStr     string
+			latency   sql.NullInt64
+			matchedID sql.NullInt64
+		)
+		if err := rows.Scan(&evt.ID, &tsStr, &evt.Direction, &evt.ServerName, &evt.Method,
+			&evt.MessageID, &evt.Payload, &evt.Status, &latency, &matchedID); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		t, _ := time.Parse(time.RFC3339Nano, tsStr)
+		evt.Timestamp = t.UnixMilli()
+		if latency.Valid {
+			evt.LatencyMs = &latency.Int64
+		}
+		if matchedID.Valid {
+			evt.MatchedID = matchedID.Int64
+		}
+		items = append(items, evt)
+	}
+
+	return &TrafficPage{
+		Items:      items,
+		TotalCount: total,
+		Page:       page,
+		PageSize:   pageSize,
+	}, nil
+}
+
 // Query retrieves paginated traffic entries, optionally filtered.
+// Deprecated: Use QueryFiltered for new code.
 func (s *Store) Query(page, pageSize int, serverFilter, methodFilter string) (*TrafficPage, error) {
 	where := "WHERE 1=1"
 	args := []interface{}{}

@@ -79,6 +79,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/servers", s.handleServers)
 	mux.HandleFunc("GET /api/tools", s.handleTools)
 	mux.HandleFunc("POST /api/tools/call", s.handleToolCall)
+	mux.HandleFunc("POST /api/replay", s.handleReplay)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 
 	srv := &http.Server{
@@ -112,10 +113,27 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		pageSize = 50
 	}
 
-	serverFilter := r.URL.Query().Get("server")
-	methodFilter := r.URL.Query().Get("method")
+	f := capture.QueryFilter{
+		Page:      page,
+		PageSize:  pageSize,
+		Server:    r.URL.Query().Get("server"),
+		Method:    r.URL.Query().Get("method"),
+		Direction: r.URL.Query().Get("direction"),
+		Search:    r.URL.Query().Get("search"),
+	}
 
-	result, err := s.store.Query(page, pageSize, serverFilter, methodFilter)
+	if fromStr := r.URL.Query().Get("from_ts"); fromStr != "" {
+		if v, err := strconv.ParseInt(fromStr, 10, 64); err == nil {
+			f.FromTs = &v
+		}
+	}
+	if toStr := r.URL.Query().Get("to_ts"); toStr != "" {
+		if v, err := strconv.ParseInt(toStr, 10, 64); err == nil {
+			f.ToTs = &v
+		}
+	}
+
+	result, err := s.store.QueryFiltered(f)
 	if err != nil {
 		slog.Error("query traffic", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -124,6 +142,92 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// Fetch the original traffic entry
+	entry, _, err := s.store.GetByID(req.ID)
+	if err != nil {
+		http.Error(w, "traffic entry not found", http.StatusNotFound)
+		return
+	}
+
+	// Parse the original payload to extract params
+	var rpcMsg struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(entry.Payload), &rpcMsg); err != nil {
+		http.Error(w, "invalid payload in traffic entry", http.StatusBadRequest)
+		return
+	}
+
+	// Use the method from the traffic entry if not in payload
+	method := rpcMsg.Method
+	if method == "" {
+		method = entry.Method
+	}
+
+	params := rpcMsg.Params
+	if params == nil {
+		params = json.RawMessage("{}")
+	}
+
+	start := time.Now()
+	result, err := s.proxies.SendRequest(r.Context(), entry.ServerName, method, params)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		slog.Error("replay failed", "server", entry.ServerName, "method", method, "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      err.Error(),
+			"latency_ms": elapsed.Milliseconds(),
+		})
+		return
+	}
+
+	// Parse the JSON-RPC response
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(result, &rpcResp); err != nil {
+		http.Error(w, "invalid response from server", http.StatusBadGateway)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"latency_ms": elapsed.Milliseconds(),
+	}
+	if rpcResp.Error != nil {
+		resp["error"] = json.RawMessage(rpcResp.Error)
+	} else {
+		resp["result"] = json.RawMessage(rpcResp.Result)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleTrafficDetail(w http.ResponseWriter, r *http.Request) {

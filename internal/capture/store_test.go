@@ -740,3 +740,129 @@ func TestQuery_ScanFailure(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// --- QueryFiltered tests (SPEC-003 AC-4: search, direction, time range) ---
+
+func TestQueryFiltered_SearchByPayload(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{"name":"read_file","arguments":{"path":"/tmp/foo"}}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{"name":"write_file","arguments":{"path":"/tmp/bar"}}`, Status: "pending",
+	})
+
+	page, err := s.QueryFiltered(QueryFilter{Page: 1, PageSize: 50, Search: "read_file"})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 entry matching 'read_file', got %d", page.TotalCount)
+	}
+}
+
+func TestQueryFiltered_FilterByDirection(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(10 * time.Millisecond), Direction: DirectionServerToClient,
+		ServerName: "srv", Method: "tools/call", Payload: `{"result":{}}`, Status: "ok", IsResponse: true,
+	})
+
+	page, err := s.QueryFiltered(QueryFilter{Page: 1, PageSize: 50, Direction: DirectionClientToServer})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 request entry, got %d", page.TotalCount)
+	}
+}
+
+func TestQueryFiltered_TimeRange(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(-2 * time.Hour), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "old", Payload: `{}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(-30 * time.Minute), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "recent", Payload: `{}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "now", Payload: `{}`, Status: "pending",
+	})
+
+	fromTs := now.Add(-1 * time.Hour).UnixMilli()
+	toTs := now.Add(time.Minute).UnixMilli()
+	page, err := s.QueryFiltered(QueryFilter{Page: 1, PageSize: 50, FromTs: &fromTs, ToTs: &toTs})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 2 {
+		t.Fatalf("expected 2 entries in time range, got %d", page.TotalCount)
+	}
+}
+
+func TestQueryFiltered_CombinedFilters(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "alpha", Method: "tools/call", Payload: `{"name":"read_file"}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "beta", Method: "tools/call", Payload: `{"name":"read_file"}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "alpha", Method: "tools/list", Payload: `{}`, Status: "pending",
+	})
+
+	page, err := s.QueryFiltered(QueryFilter{
+		Page: 1, PageSize: 50,
+		Server: "alpha", Method: "tools/call", Search: "read_file",
+	})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 combined-filter entry, got %d", page.TotalCount)
+	}
+}
+
+func TestQueryFiltered_DefaultPagination(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		s.Insert(&TrafficEntry{
+			Timestamp: now.Add(time.Duration(i) * time.Second), Direction: DirectionClientToServer,
+			ServerName: "srv", Method: "test", Payload: `{}`, Status: "pending",
+		})
+	}
+
+	page, err := s.QueryFiltered(QueryFilter{Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 3 {
+		t.Fatalf("expected 3, got %d", page.TotalCount)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(page.Items))
+	}
+}
