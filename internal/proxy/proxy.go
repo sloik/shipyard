@@ -19,6 +19,22 @@ import (
 	"github.com/sloik/shipyard/internal/web"
 )
 
+var proxyInputWriteLine = func(cw *childInputWriter, ctx context.Context, line []byte) error {
+	return cw.writeLine(ctx, line)
+}
+
+var cmdStdinPipe = func(cmd *exec.Cmd) (io.WriteCloser, error) {
+	return cmd.StdinPipe()
+}
+
+var cmdStdoutPipe = func(cmd *exec.Cmd) (io.ReadCloser, error) {
+	return cmd.StdoutPipe()
+}
+
+var cmdStderrPipe = func(cmd *exec.Cmd) (io.ReadCloser, error) {
+	return cmd.StderrPipe()
+}
+
 // Proxy manages a child MCP server process and proxies stdio bidirectionally.
 type Proxy struct {
 	name    string
@@ -29,6 +45,12 @@ type Proxy struct {
 	store   *capture.Store
 	hub     *web.Hub
 	managed *managedProxy // set when running under a Manager
+
+	// Narrow test seams for deterministic lifecycle coverage of Run.
+	runChildFn         func(context.Context, *childInputWriter) error
+	proxyClientInputFn func(context.Context, *childInputWriter) error
+	nowFn              func() time.Time
+	waitForBackoffFn   func(context.Context, time.Duration) error
 }
 
 // NewProxy creates a new stdio proxy.
@@ -172,13 +194,13 @@ func (p *Proxy) Run(ctx context.Context) error {
 
 	clientDone := make(chan error, 1)
 	go func() {
-		clientDone <- p.proxyClientInput(ctx, inputWriter)
+		clientDone <- p.proxyClientInputWithSeams(ctx, inputWriter)
 	}()
 
 	var crashTimes []time.Time
 
 	for {
-		runErr := p.runChild(ctx, inputWriter)
+		runErr := p.runChildWithSeams(ctx, inputWriter)
 		if runErr == nil {
 			return p.waitForClientInput(clientDone)
 		}
@@ -187,7 +209,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 		}
 
 		exitCode := exitCodeFromError(runErr)
-		crashAt := time.Now()
+		crashAt := p.now()
 		crashTimes = append(crashTimes, crashAt)
 		crashTimes = filterRecentCrashes(crashTimes, crashAt)
 
@@ -200,10 +222,38 @@ func (p *Proxy) Run(ctx context.Context) error {
 
 		backoff := restartBackoff(len(crashTimes))
 		slog.Info("restarting child process after crash", "name", p.name, "exit_code", exitCode, "backoff", backoff)
-		if err := waitForBackoff(ctx, backoff); err != nil {
+		if err := p.waitForBackoffWithSeams(ctx, backoff); err != nil {
 			return p.waitForClientInput(clientDone)
 		}
 	}
+}
+
+func (p *Proxy) runChildWithSeams(ctx context.Context, inputWriter *childInputWriter) error {
+	if p.runChildFn != nil {
+		return p.runChildFn(ctx, inputWriter)
+	}
+	return p.runChild(ctx, inputWriter)
+}
+
+func (p *Proxy) proxyClientInputWithSeams(ctx context.Context, inputWriter *childInputWriter) error {
+	if p.proxyClientInputFn != nil {
+		return p.proxyClientInputFn(ctx, inputWriter)
+	}
+	return p.proxyClientInput(ctx, inputWriter)
+}
+
+func (p *Proxy) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
+}
+
+func (p *Proxy) waitForBackoffWithSeams(ctx context.Context, backoff time.Duration) error {
+	if p.waitForBackoffFn != nil {
+		return p.waitForBackoffFn(ctx, backoff)
+	}
+	return waitForBackoff(ctx, backoff)
 }
 
 // pipeAndTap reads newline-delimited messages from src, writes them to dst,
@@ -266,8 +316,8 @@ func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWri
 	scanner.Buffer(buf, 10*1024*1024)
 
 	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		if err := inputWriter.writeLine(ctx, line); err != nil {
+			line := append([]byte(nil), scanner.Bytes()...)
+			if err := proxyInputWriteLine(inputWriter, ctx, line); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -290,15 +340,15 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	cmd.Env = mergeEnv(os.Environ(), p.env)
 	cmd.Dir = p.cwd
 
-	childStdin, err := cmd.StdinPipe()
+	childStdin, err := cmdStdinPipe(cmd)
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
-	childStdout, err := cmd.StdoutPipe()
+	childStdout, err := cmdStdoutPipe(cmd)
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	childStderr, err := cmd.StderrPipe()
+	childStderr, err := cmdStderrPipe(cmd)
 	if err != nil {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}

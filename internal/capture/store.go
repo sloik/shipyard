@@ -13,6 +13,18 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
+var openSQLiteDB = func(path string) (*sql.DB, error) {
+	return sql.Open("sqlite3", path)
+}
+
+var openJSONLFile = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+}
+
+var queryTrafficRows = func(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
+	return db.Query(query, args...)
+}
+
 // Direction constants
 const (
 	DirectionClientToServer = "client→server"
@@ -70,7 +82,7 @@ type pendingRequest struct {
 
 // NewStore creates a new capture store backed by SQLite and a JSONL file.
 func NewStore(dbPath, jsonlPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := openSQLiteDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -102,7 +114,7 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 	// Enable WAL mode for better concurrent read/write
 	_, _ = db.Exec("PRAGMA journal_mode=WAL")
 
-	jsonlF, err := os.OpenFile(jsonlPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	jsonlF, err := openJSONLFile(jsonlPath)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open jsonl: %w", err)
@@ -227,7 +239,8 @@ func (s *Store) Query(page, pageSize int, serverFilter, methodFilter string) (*T
 	// Fetch page
 	offset := (page - 1) * pageSize
 	queryArgs := append(args, pageSize, offset)
-	rows, err := s.db.Query(
+	rows, err := queryTrafficRows(
+		s.db,
 		"SELECT id, ts, direction, server_name, method, message_id, payload, status, latency_ms, matched_id FROM traffic "+
 			where+" ORDER BY id DESC LIMIT ? OFFSET ?",
 		queryArgs...,

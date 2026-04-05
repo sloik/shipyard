@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewResponseTracker(t *testing.T) {
@@ -264,6 +268,17 @@ func TestHandleChildOutput_Notification(t *testing.T) {
 	}
 }
 
+func TestHandleChildOutput_ResponseWithoutID(t *testing.T) {
+	rt := newResponseTracker()
+	mp := &managedProxy{responses: rt}
+
+	line := []byte(`{"jsonrpc":"2.0","result":{"tools":[]}}`)
+	ok := mp.HandleChildOutput(line)
+	if ok {
+		t.Fatal("expected HandleChildOutput to return false when response has no id")
+	}
+}
+
 func TestHandleChildOutput_MalformedJSON(t *testing.T) {
 	rt := newResponseTracker()
 	mp := &managedProxy{responses: rt}
@@ -314,5 +329,118 @@ func TestHandleChildOutput_NumericID(t *testing.T) {
 		// success
 	default:
 		t.Fatal("expected message on channel for numeric ID")
+	}
+}
+
+func TestManagerSendRequest_ContextCanceled(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	cw.attach(&trackedWriteCloser{})
+	mp.SetInputWriter(cw)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := m.SendRequest(ctx, "alpha", "tools/list", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestManagerSendRequest_ContextCanceledWhileWaiting(t *testing.T) {
+	origTimeout := requestTimeout
+	requestTimeout = 5 * time.Second
+	t.Cleanup(func() { requestTimeout = origTimeout })
+
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	cw.attach(&trackedWriteCloser{})
+	mp.SetInputWriter(cw)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.SendRequest(ctx, "alpha", "tools/list", nil)
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled SendRequest")
+	}
+}
+
+func TestManagerSendRequest_Timeout(t *testing.T) {
+	origTimeout := requestTimeout
+	requestTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = origTimeout })
+
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	cw.attach(&trackedWriteCloser{})
+	mp.SetInputWriter(cw)
+
+	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if got := err.Error(); got == "" || got[:7] != "timeout" {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestManagerSendRequest_MarshalFailure(t *testing.T) {
+	origMarshal := marshalRequest
+	marshalRequest = func(v any) ([]byte, error) {
+		return nil, errors.New("marshal failed")
+	}
+	t.Cleanup(func() { marshalRequest = origMarshal })
+
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
+	if err == nil {
+		t.Fatal("expected marshal failure")
+	}
+	if got := err.Error(); got != "marshal request: marshal failed" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestManagerSendRequest_WriteFailure(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	cw.close()
+	mp.SetInputWriter(cw)
+
+	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
+	if err == nil {
+		t.Fatal("expected write failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "write to child: EOF") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

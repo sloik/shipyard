@@ -3,13 +3,11 @@ package web
 import (
 	"context"
 	"sync"
-
-	"github.com/coder/websocket"
 )
 
 // Client represents a connected WebSocket client.
 type Client struct {
-	conn *websocket.Conn
+	conn wsConn
 	send chan []byte
 }
 

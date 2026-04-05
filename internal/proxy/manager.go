@@ -99,6 +99,8 @@ func (m *Manager) Servers() []web.ServerInfo {
 }
 
 var requestIDCounter int64
+var requestTimeout = 30 * time.Second
+var marshalRequest = json.Marshal
 
 // SendRequest sends a JSON-RPC request to a child server and waits for the response.
 func (m *Manager) SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (json.RawMessage, error) {
@@ -121,7 +123,7 @@ func (m *Manager) SendRequest(ctx context.Context, serverName, method string, pa
 		"method":  method,
 		"params":  params,
 	}
-	reqBytes, err := json.Marshal(req)
+	reqBytes, err := marshalRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -142,7 +144,7 @@ func (m *Manager) SendRequest(ctx context.Context, serverName, method string, pa
 	go mp.proxy.captureMessage(reqBytes, capture.DirectionClientToServer, time.Now())
 
 	// Wait for response with timeout
-	timeout := 30 * time.Second
+	timeout := requestTimeout
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 

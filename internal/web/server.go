@@ -20,6 +20,18 @@ import (
 //go:embed ui
 var uiFS embed.FS
 
+type wsConn interface {
+	Read(context.Context) (websocket.MessageType, []byte, error)
+	Write(context.Context, websocket.MessageType, []byte) error
+	CloseNow() error
+}
+
+var subUIFS = fs.Sub
+
+var acceptWebSocket = func(w http.ResponseWriter, r *http.Request, opts *websocket.AcceptOptions) (wsConn, error) {
+	return websocket.Accept(w, r, opts)
+}
+
 // ProxyManager defines the interface the web server uses to interact with proxies.
 type ProxyManager interface {
 	Servers() []ServerInfo
@@ -55,7 +67,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
 	// Serve embedded UI
-	uiContent, err := fs.Sub(uiFS, "ui")
+	uiContent, err := subUIFS(uiFS, "ui")
 	if err != nil {
 		return fmt.Errorf("embed ui: %w", err)
 	}
@@ -268,7 +280,7 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	conn, err := acceptWebSocket(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
 	if err != nil {

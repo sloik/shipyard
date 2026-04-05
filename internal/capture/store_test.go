@@ -1,6 +1,8 @@
 package capture
 
 import (
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -371,6 +373,59 @@ func TestGetByID_WithMatchedPair(t *testing.T) {
 	}
 }
 
+func TestQuery_IncludesLatencyAndMatchedID(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	reqID, _ := s.Insert(&TrafficEntry{
+		Timestamp:  now,
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "tools/call",
+		MessageID:  "latency-1",
+		Payload:    `{"jsonrpc":"2.0","method":"tools/call","id":"latency-1"}`,
+		Status:     "pending",
+	})
+
+	resID, latency := s.Insert(&TrafficEntry{
+		Timestamp:  now.Add(25 * time.Millisecond),
+		Direction:  DirectionServerToClient,
+		ServerName: "srv",
+		MessageID:  "latency-1",
+		Payload:    `{"jsonrpc":"2.0","id":"latency-1","result":{}}`,
+		Status:     "ok",
+		IsResponse: true,
+	})
+	if latency == nil {
+		t.Fatal("expected response latency to be populated")
+	}
+
+	page, err := s.Query(1, 10, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(page.Items))
+	}
+
+	var foundResponse bool
+	for _, item := range page.Items {
+		if item.ID != resID {
+			continue
+		}
+		foundResponse = true
+		if item.LatencyMs == nil || *item.LatencyMs != 25 {
+			t.Fatalf("expected latency 25ms on response, got %v", item.LatencyMs)
+		}
+		if item.MatchedID != reqID {
+			t.Fatalf("expected matched ID %d, got %d", reqID, item.MatchedID)
+		}
+	}
+	if !foundResponse {
+		t.Fatalf("expected to find response row %d in query results", resID)
+	}
+}
+
 func TestInsert_ConcurrentInserts(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now()
@@ -469,5 +524,179 @@ func TestJSONLAppend(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatal("expected non-empty JSONL file")
+	}
+}
+
+func TestNewStore_SQLiteOpenFailure(t *testing.T) {
+	orig := openSQLiteDB
+	openSQLiteDB = func(path string) (*sql.DB, error) {
+		return nil, errors.New("sqlite open failed")
+	}
+	t.Cleanup(func() { openSQLiteDB = orig })
+
+	_, err := NewStore("ignored.db", "ignored.jsonl")
+	if err == nil {
+		t.Fatal("expected sqlite open error")
+	}
+	if !strings.Contains(err.Error(), "open sqlite: sqlite open failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewStore_JSONLOpenFailure(t *testing.T) {
+	orig := openJSONLFile
+	openJSONLFile = func(path string) (*os.File, error) {
+		return nil, errors.New("jsonl open failed")
+	}
+	t.Cleanup(func() { openJSONLFile = orig })
+
+	_, err := NewStore(filepath.Join(t.TempDir(), "test.db"), "ignored.jsonl")
+	if err == nil {
+		t.Fatal("expected jsonl open error")
+	}
+	if !strings.Contains(err.Error(), "open jsonl: jsonl open failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewStore_SchemaFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	orig := openSQLiteDB
+	openSQLiteDB = func(path string) (*sql.DB, error) {
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := db.Exec(`CREATE TABLE traffic (id TEXT)`); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+	t.Cleanup(func() { openSQLiteDB = orig })
+
+	_, err := NewStore(dbPath, jsonlPath)
+	if err == nil {
+		t.Fatal("expected schema creation error")
+	}
+	if !strings.Contains(err.Error(), "create schema:") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInsert_ReturnsZeroOnExecFailure(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("Close db: %v", err)
+	}
+
+	id, latency := s.Insert(&TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "broken",
+		Payload:    `{}`,
+		Status:     "pending",
+	})
+
+	if id != 0 {
+		t.Fatalf("expected zero row ID on exec failure, got %d", id)
+	}
+	if latency != nil {
+		t.Fatalf("expected nil latency on exec failure, got %v", latency)
+	}
+}
+
+func TestQuery_CountFailure(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("Close db: %v", err)
+	}
+
+	_, err := s.Query(1, 10, "", "")
+	if err == nil {
+		t.Fatal("expected count failure")
+	}
+	if !strings.Contains(err.Error(), "count:") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestQuery_SelectFailureAfterCount(t *testing.T) {
+	s := newTestStore(t)
+
+	s.Insert(&TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "test",
+		Payload:    `{}`,
+		Status:     "pending",
+	})
+
+	orig := queryTrafficRows
+	queryTrafficRows = func(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
+		return nil, errors.New("query rows failed")
+	}
+	t.Cleanup(func() { queryTrafficRows = orig })
+
+	_, err := s.Query(1, 10, "", "")
+	if err == nil {
+		t.Fatal("expected query failure after dropping table")
+	}
+	if !strings.Contains(err.Error(), "query: query rows failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestQuery_ScanFailure(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`DROP TABLE traffic`); err != nil {
+		t.Fatalf("drop traffic table: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		CREATE TABLE traffic (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts BLOB NOT NULL,
+			direction TEXT NOT NULL,
+			server_name TEXT NOT NULL,
+			method TEXT NOT NULL DEFAULT '',
+			message_id TEXT NOT NULL DEFAULT '',
+			payload TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'ok',
+			latency_ms TEXT,
+			matched_id TEXT
+		)
+	`); err != nil {
+		t.Fatalf("create malformed traffic table: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO traffic (ts, direction, server_name, method, message_id, payload, status, latency_ms, matched_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		DirectionClientToServer,
+		"srv",
+		"test",
+		"1",
+		`{}`,
+		"pending",
+		"not-an-int",
+		"also-not-an-int",
+	); err != nil {
+		t.Fatalf("insert malformed row: %v", err)
+	}
+
+	_, err := s.Query(1, 10, "", "")
+	if err == nil {
+		t.Fatal("expected scan failure")
+	}
+	if !strings.Contains(err.Error(), "scan:") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

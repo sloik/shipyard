@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,6 +133,44 @@ func TestConfigUnmarshal_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestConfigUnmarshal_InvalidTopLevelBytes(t *testing.T) {
+	var cfg Config
+	if err := cfg.UnmarshalJSON([]byte(`not json at all`)); err == nil {
+		t.Fatal("expected direct UnmarshalJSON error")
+	}
+}
+
+func TestConfigUnmarshal_NoServersField(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"web":{"port":9000}}`), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Web.Port != 9000 {
+		t.Fatalf("expected port 9000, got %d", cfg.Web.Port)
+	}
+	if cfg.Servers != nil {
+		t.Fatalf("expected nil servers when field is absent, got %v", cfg.Servers)
+	}
+	if len(cfg.ServerOrder) != 0 {
+		t.Fatalf("expected empty server order, got %v", cfg.ServerOrder)
+	}
+}
+
+func TestConfigUnmarshal_ServersMustBeJSONObject(t *testing.T) {
+	data := `{
+		"servers": []
+	}`
+
+	var cfg Config
+	err := json.Unmarshal([]byte(data), &cfg)
+	if err == nil {
+		t.Fatal("expected error for non-object servers field")
+	}
+	if got := err.Error(); !strings.Contains(got, "parse servers:") {
+		t.Fatalf("expected parse servers error, got %q", got)
+	}
+}
+
 func TestConfigUnmarshal_EmptyServers(t *testing.T) {
 	data := `{
 		"servers": {}
@@ -239,5 +279,71 @@ func TestLoadConfig_InvalidJSON(t *testing.T) {
 	_, err := loadConfig(path)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON file")
+	}
+}
+
+func TestConfigUnmarshal_ParseServerOrderErrors(t *testing.T) {
+	orig := parseServerOrder
+	t.Cleanup(func() { parseServerOrder = orig })
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"read servers object", errors.New("bad open"), "bad open"},
+		{"servers must be object", errors.New("servers must be a JSON object"), "servers must be a JSON object"},
+		{"read server name", errors.New("read server name: bad key"), "read server name: bad key"},
+		{"server name must be string", errors.New("server name must be a string"), "server name must be a string"},
+		{"read server value", errors.New(`read server "alpha": bad value`), `read server "alpha": bad value`},
+		{"close servers object", errors.New("close servers object: bad close"), "close servers object: bad close"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parseServerOrder = func(raw json.RawMessage, appendName func(string), consumeValue func(*json.Decoder, string) error) error {
+				return tc.err
+			}
+
+			var cfg Config
+			err := json.Unmarshal([]byte(`{"servers":{"alpha":{"command":"x"}}}`), &cfg)
+			if err == nil {
+				t.Fatal("expected unmarshal error")
+			}
+			if got := err.Error(); !strings.Contains(got, tc.want) {
+				t.Fatalf("expected %q in %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConfigUnmarshal_ReadServerValueError(t *testing.T) {
+	orig := parseServerOrder
+	t.Cleanup(func() { parseServerOrder = orig })
+
+	parseServerOrder = func(raw json.RawMessage, appendName func(string), consumeValue func(*json.Decoder, string) error) error {
+		appendName("alpha")
+		return consumeValue(json.NewDecoder(strings.NewReader("")), "alpha")
+	}
+
+	var cfg Config
+	err := json.Unmarshal([]byte(`{"servers":{"alpha":{"command":"x"}}}`), &cfg)
+	if err == nil {
+		t.Fatal("expected decode error")
+	}
+	if !strings.Contains(err.Error(), `read server "alpha": EOF`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_ReadErrorForDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := loadConfig(dir)
+	if err == nil {
+		t.Fatal("expected error when reading a directory as a config file")
+	}
+	if got := err.Error(); !strings.Contains(got, "read config file") {
+		t.Fatalf("expected read config file error, got %q", got)
 	}
 }

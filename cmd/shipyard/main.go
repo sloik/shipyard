@@ -17,6 +17,54 @@ import (
 	"github.com/sloik/shipyard/internal/web"
 )
 
+var parseServerOrder = func(raw json.RawMessage, appendName func(string), consumeValue func(*json.Decoder, string) error) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("read servers object: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("servers must be a JSON object")
+	}
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("read server name: %w", err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("server name must be a string")
+		}
+		appendName(name)
+		if err := consumeValue(dec, name); err != nil {
+			return err
+		}
+	}
+
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("close servers object: %w", err)
+	}
+
+	return nil
+}
+
+var captureNewStore = capture.NewStore
+var webNewHub = web.NewHub
+var proxyNewManager = proxy.NewManager
+var exitFn = os.Exit
+var startWebServer = func(ctx context.Context, srv *web.Server) error {
+	return srv.Start(ctx)
+}
+var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, command string, args []string, env map[string]string, cwd string, store *capture.Store, hub *web.Hub) error {
+	p := proxy.NewProxy(name, command, args, env, cwd, store, hub)
+	mp := mgr.Register(name, p)
+	p.SetManaged(mp)
+	return p.Run(ctx)
+}
+var runProxyFn = runProxy
+
 type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
 	ServerOrder []string                `json:"-"`
@@ -52,35 +100,16 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("parse servers: %w", err)
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(raw.Servers))
-	tok, err := dec.Token()
-	if err != nil {
-		return fmt.Errorf("read servers object: %w", err)
-	}
-	delim, ok := tok.(json.Delim)
-	if !ok || delim != '{' {
-		return fmt.Errorf("servers must be a JSON object")
-	}
-
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return fmt.Errorf("read server name: %w", err)
-		}
-		name, ok := keyTok.(string)
-		if !ok {
-			return fmt.Errorf("server name must be a string")
-		}
+	if err := parseServerOrder(raw.Servers, func(name string) {
 		c.ServerOrder = append(c.ServerOrder, name)
-
+	}, func(dec *json.Decoder, name string) error {
 		var discard json.RawMessage
 		if err := dec.Decode(&discard); err != nil {
 			return fmt.Errorf("read server %q: %w", name, err)
 		}
-	}
-
-	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("close servers object: %w", err)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return nil
@@ -96,7 +125,8 @@ func main() {
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
 		fmt.Fprintln(os.Stderr, "   or: shipyard --config <servers.json>")
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
 	if *configPath != "" {
@@ -108,28 +138,32 @@ func main() {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
 		fmt.Fprintln(os.Stderr, "   or: shipyard --config <servers.json>")
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
 	switch args[0] {
 	case "wrap":
 		runWrap(args[1:])
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-		os.Exit(1)
-	}
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+			exitFn(1)
+			return
+		}
 }
 
 func runConfig(configPath string) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", configPath, "error", err)
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
 	if len(cfg.ServerOrder) == 0 {
 		slog.Error("config does not define any servers", "path", configPath)
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
 	serverName := cfg.ServerOrder[0]
@@ -145,10 +179,11 @@ func runConfig(configPath string) {
 
 	if server.Command == "" {
 		slog.Error("config server is missing command", "server", serverName, "path", configPath)
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
-	runProxy(serverName, port, server.Command, server.Args, server.Env, server.Cwd)
+	runProxyFn(serverName, port, server.Command, server.Args, server.Env, server.Cwd)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -182,34 +217,32 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	}()
 
 	// Initialize capture store
-	store, err := capture.NewStore("shipyard.db", "shipyard.jsonl")
+	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
 	if err != nil {
 		slog.Error("failed to initialize capture store", "error", err)
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 	defer store.Close()
 
 	// Start web dashboard
-	hub := web.NewHub()
+	hub := webNewHub()
 	go hub.Run(ctx)
 
 	// Create proxy manager
-	mgr := proxy.NewManager()
+	mgr := proxyNewManager()
 
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
-		if err := srv.Start(ctx); err != nil {
+		if err := startWebServer(ctx, srv); err != nil {
 			slog.Error("web server error", "error", err)
 		}
 	}()
 
 	// Start proxy with manager
-	p := proxy.NewProxy(name, command, args, env, cwd, store, hub)
-	mp := mgr.Register(name, p)
-	p.SetManaged(mp)
-	if err := p.Run(ctx); err != nil {
+	if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
 		slog.Error("proxy error", "error", err)
 	}
 }
@@ -221,25 +254,14 @@ func runWrap(args []string) {
 	fs.Parse(args)
 
 	remaining := fs.Args()
-
-	// Find the command after "--"
-	var childCmd []string
-	for i, a := range remaining {
-		if a == "--" {
-			childCmd = remaining[i+1:]
-			break
-		}
-	}
-	// If no "--" found, treat all remaining as the command
-	if childCmd == nil {
-		childCmd = remaining
-	}
+	childCmd := remaining
 
 	if len(childCmd) == 0 {
 		fmt.Fprintln(os.Stderr, "error: no child command specified")
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
-		os.Exit(1)
+		exitFn(1)
+		return
 	}
 
-	runProxy(*name, *port, childCmd[0], childCmd[1:], nil, "")
+	runProxyFn(*name, *port, childCmd[0], childCmd[1:], nil, "")
 }
