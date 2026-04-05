@@ -198,14 +198,118 @@
 </main>
 
 <!-- ================================================================
-     View: History (#/history) — Placeholder
+     View: History (#/history)
      ================================================================ -->
 <main id="view-history">
-  <div class="empty-state">
+
+  <!-- Empty State -->
+  <div id="history-empty" class="empty-state">
     <div class="empty-icon">&#128337;</div>
-    <div class="empty-title">History &amp; Replay</div>
-    <div class="empty-desc">Coming in Phase 2 — search, replay, and compare executions</div>
+    <div class="empty-title">No history yet</div>
+    <div class="empty-desc">Traffic will appear here as MCP messages flow through Shipyard.</div>
   </div>
+
+  <!-- No Search Results -->
+  <div id="history-no-results" class="empty-state" style="display:none;">
+    <div class="empty-icon">&#128269;</div>
+    <div class="empty-title">No results found</div>
+    <div class="empty-desc">Try adjusting your search filters.</div>
+    <button class="btn btn-default" id="history-clear-search-btn">Clear search</button>
+  </div>
+
+  <!-- History Content -->
+  <div id="history-content" style="display:none;">
+
+    <!-- Filter Bar -->
+    <div id="history-filter-bar" class="app-bar" style="flex-wrap:wrap; gap:8px;">
+      <div class="search-bar" id="history-search-bar" style="min-width:200px; flex:1; max-width:320px;">
+        <span class="search-icon">&#128269;</span>
+        <input type="text" id="history-search" placeholder="Search payload...">
+        <span id="history-search-count" class="badge badge-neutral" style="display:none;"></span>
+        <button class="search-clear" id="history-search-clear" style="display:none;">&#10005;</button>
+      </div>
+      <div class="seg-toggle" id="history-time-toggle">
+        <button class="seg-active" data-value="">All</button>
+        <button class="seg-inactive" data-value="3600000">1h</button>
+        <button class="seg-inactive" data-value="21600000">6h</button>
+        <button class="seg-inactive" data-value="86400000">24h</button>
+        <button class="seg-inactive" data-value="604800000">7d</button>
+      </div>
+      <div class="input-group">
+        <select id="history-server-filter" class="input" style="min-width:110px;">
+          <option value="">All servers</option>
+        </select>
+      </div>
+      <div class="input-group">
+        <select id="history-method-filter" class="input" style="min-width:110px;">
+          <option value="">All methods</option>
+        </select>
+      </div>
+      <div class="seg-toggle" id="history-dir-toggle">
+        <button class="seg-active" data-value="">All</button>
+        <button class="seg-inactive" data-value="client%E2%86%92server">REQ &#8594;</button>
+        <button class="seg-inactive" data-value="server%E2%86%92client">&#8592; RES</button>
+      </div>
+      <span id="history-count" class="badge badge-neutral"></span>
+      <button class="btn btn-default btn-sm" id="history-compare-btn" disabled>Compare (0/2)</button>
+    </div>
+
+    <!-- Table Header -->
+    <div class="table-header">
+      <span data-col="checkbox" style="width:30px;"></span>
+      <span data-col="time" style="width:90px;">Time</span>
+      <span data-col="dir" style="width:55px;">Dir</span>
+      <span data-col="server" style="width:110px;">Server</span>
+      <span data-col="method" style="flex:1;">Method</span>
+      <span data-col="status" style="width:90px;">Status</span>
+      <span data-col="latency" style="width:70px;">Latency</span>
+      <span data-col="actions" style="width:180px;">Actions</span>
+    </div>
+
+    <!-- Table Body -->
+    <div id="history-body"></div>
+
+    <!-- Pagination -->
+    <div id="history-pagination" class="pagination">
+      <button class="btn btn-default btn-sm" id="history-prev-btn" disabled>&#8592; Prev</button>
+      <span id="history-page-nums"></span>
+      <button class="btn btn-default btn-sm" id="history-next-btn" disabled>Next &#8594;</button>
+      <div class="input-group" style="margin-left:8px;">
+        <input type="number" id="history-goto-input" class="input" style="width:60px;" min="1" placeholder="#">
+        <button class="btn btn-default btn-sm" id="history-goto-btn">Go</button>
+      </div>
+      <span id="history-page-info" class="badge badge-neutral"></span>
+    </div>
+
+  </div><!-- /history-content -->
+
+  <!-- Diff View -->
+  <div id="history-diff" style="display:none; padding:16px;">
+    <div class="app-bar" style="margin-bottom:16px;">
+      <strong style="color:var(--text-primary);">Response Diff</strong>
+      <span id="diff-tool-name" class="code-inline"></span>
+      <span id="diff-server" class="badge badge-neutral"></span>
+      <div style="flex:1;"></div>
+      <button class="btn btn-default btn-sm" id="diff-back-btn">Back to History</button>
+    </div>
+    <div id="diff-meta" style="font-size:var(--font-size-sm); color:var(--text-secondary); margin-bottom:12px;"></div>
+    <div id="diff-summary" style="font-size:var(--font-size-sm); margin-bottom:12px;"></div>
+    <div class="split-view" id="diff-panels">
+      <div>
+        <div class="code-block">
+          <div class="code-header"><span id="diff-left-label">Run #1</span></div>
+          <div class="json-viewer code-body" id="diff-left-body" style="max-height:60vh; overflow:auto;"></div>
+        </div>
+      </div>
+      <div>
+        <div class="code-block">
+          <div class="code-header"><span id="diff-right-label">Run #2</span></div>
+          <div class="json-viewer code-body" id="diff-right-body" style="max-height:60vh; overflow:auto;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <!-- ================================================================
@@ -1391,7 +1495,533 @@
     if (route === 'tools' && !toolsLoaded) {
       loadTools();
     }
+    if (route === 'history' && !historyLoaded) {
+      historyLoadPage();
+    }
   };
+
+  /* ======================================================================
+     History View — State (SPEC-003)
+     ====================================================================== */
+  var historyEmpty       = document.getElementById('history-empty');
+  var historyNoResults   = document.getElementById('history-no-results');
+  var historyContent     = document.getElementById('history-content');
+  var historyBody        = document.getElementById('history-body');
+  var historySearchInput = document.getElementById('history-search');
+  var historySearchCount = document.getElementById('history-search-count');
+  var historySearchClear = document.getElementById('history-search-clear');
+  var historyServerFilter = document.getElementById('history-server-filter');
+  var historyMethodFilter = document.getElementById('history-method-filter');
+  var historyTimeToggle  = document.getElementById('history-time-toggle');
+  var historyDirToggle   = document.getElementById('history-dir-toggle');
+  var historyCountEl     = document.getElementById('history-count');
+  var historyCompareBtn  = document.getElementById('history-compare-btn');
+  var historyPrevBtn     = document.getElementById('history-prev-btn');
+  var historyNextBtn     = document.getElementById('history-next-btn');
+  var historyPageNums    = document.getElementById('history-page-nums');
+  var historyPageInfo    = document.getElementById('history-page-info');
+  var historyGotoInput   = document.getElementById('history-goto-input');
+  var historyGotoBtn     = document.getElementById('history-goto-btn');
+  var historyClearSearchBtn = document.getElementById('history-clear-search-btn');
+  var historyDiff        = document.getElementById('history-diff');
+  var diffBackBtn        = document.getElementById('diff-back-btn');
+
+  var historyPage     = 1;
+  var historyPageSize = 100;
+  var historyTotal    = 0;
+  var historyLoaded   = false;
+  var historyDirFilter = '';
+  var historyTimeRange = '';
+  var historyChecked  = {}; // { id: TrafficEvent }
+  var historyKnownServers = {};
+  var historyKnownMethods = {};
+  var historySearchTimer  = null;
+
+  /* ======================================================================
+     History — Load Page
+     ====================================================================== */
+  function historyLoadPage() {
+    var params = new URLSearchParams();
+    params.set('page', historyPage);
+    params.set('page_size', historyPageSize);
+
+    var sv = historyServerFilter.value;
+    var mt = historyMethodFilter.value;
+    var search = historySearchInput.value.trim();
+    var dir = historyDirFilter;
+
+    if (sv) params.set('server', sv);
+    if (mt) params.set('method', mt);
+    if (search) params.set('search', search);
+    if (dir) params.set('direction', dir);
+
+    if (historyTimeRange) {
+      var fromTs = Date.now() - parseInt(historyTimeRange, 10);
+      params.set('from_ts', fromTs);
+    }
+
+    fetch('/api/traffic?' + params)
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        historyTotal = data.total_count;
+        historyLoaded = true;
+
+        var items = data.items || [];
+
+        // Track servers/methods for filter dropdowns
+        historyTrackFilters(items);
+
+        if (historyTotal === 0 && !search && !sv && !mt && !dir && !historyTimeRange) {
+          historyEmpty.style.display = '';
+          historyNoResults.style.display = 'none';
+          historyContent.style.display = 'none';
+          return;
+        }
+
+        historyEmpty.style.display = 'none';
+
+        if (historyTotal === 0) {
+          historyNoResults.style.display = '';
+          historyContent.style.display = 'none';
+          return;
+        }
+
+        historyNoResults.style.display = 'none';
+        historyContent.style.display = '';
+
+        historyCountEl.textContent = historyTotal + ' entries';
+
+        if (search) {
+          historySearchCount.textContent = historyTotal + ' found';
+          historySearchCount.style.display = '';
+          historySearchClear.style.display = '';
+        } else {
+          historySearchCount.style.display = 'none';
+          historySearchClear.style.display = 'none';
+        }
+
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+          html += historyRenderRow(items[i], i);
+        }
+        historyBody.innerHTML = html;
+
+        historyRenderPagination(data.total_count, data.page, data.page_size);
+      })
+      .catch(function(err) {
+        console.error('Failed to load history:', err);
+      });
+  }
+
+  /* ======================================================================
+     History — Render Row
+     ====================================================================== */
+  function historyRenderRow(evt, idx) {
+    var altClass = idx % 2 === 1 ? ' row-alt' : '';
+    var isChecked = !!historyChecked[evt.id];
+    var checkboxHtml = '<input type="checkbox" class="history-check" data-id="' + evt.id + '"' +
+      (isChecked ? ' checked' : '') + '>';
+
+    return '<div class="table-row' + altClass + '" data-id="' + evt.id + '" data-evt=\'' + escapeHtml(JSON.stringify(evt)) + '\'>' +
+      '<span data-col="checkbox" style="width:30px;">' + checkboxHtml + '</span>' +
+      '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time" style="width:90px;">' + relativeTime(evt.timestamp) + '</span>' +
+      '<span data-col="dir" style="width:55px;">' + dirBadge(evt.direction) + '</span>' +
+      '<span data-col="server" style="width:110px;">' + escapeHtml(evt.server_name) + '</span>' +
+      '<span class="code-inline" data-col="method" style="flex:1;">' + escapeHtml(evt.method || '\u2014') + '</span>' +
+      '<span data-col="status" style="width:90px;">' + statusBadge(evt.status) + '</span>' +
+      '<span data-col="latency" style="width:70px;">' + latencyPill(evt.latency_ms) + '</span>' +
+      '<span data-col="actions" style="width:180px;">' +
+        '<button class="btn btn-ghost btn-sm history-replay-btn" data-id="' + evt.id + '" style="color:var(--accent-fg);">Replay</button>' +
+        '<button class="btn btn-ghost btn-sm history-edit-btn" data-id="' + evt.id + '" style="color:var(--text-secondary);">Edit</button>' +
+      '</span>' +
+    '</div>';
+  }
+
+  /* ======================================================================
+     History — Pagination
+     ====================================================================== */
+  function historyRenderPagination(total, page, size) {
+    var totalPages = Math.ceil(total / size);
+    if (totalPages <= 1) {
+      document.getElementById('history-pagination').style.display = 'none';
+      return;
+    }
+
+    document.getElementById('history-pagination').style.display = '';
+
+    historyPrevBtn.disabled = page <= 1;
+    historyNextBtn.disabled = page >= totalPages;
+
+    var start = (page - 1) * size + 1;
+    var end = Math.min(page * size, total);
+    historyPageInfo.textContent = 'Showing ' + start + '\u2013' + end + ' of ' + total;
+
+    var nums = '';
+    var startPage = Math.max(1, page - 2);
+    var endPage = Math.min(totalPages, page + 2);
+    for (var p = startPage; p <= endPage; p++) {
+      var activeClass = p === page ? ' is-active' : '';
+      nums += '<button class="page-num' + activeClass + '" data-page="' + p + '">' + p + '</button>';
+    }
+    historyPageNums.innerHTML = nums;
+  }
+
+  historyPrevBtn.addEventListener('click', function() {
+    if (historyPage > 1) { historyPage--; historyLoadPage(); }
+  });
+
+  historyNextBtn.addEventListener('click', function() {
+    historyPage++;
+    historyLoadPage();
+  });
+
+  historyPageNums.addEventListener('click', function(e) {
+    var btn = e.target.closest('.page-num');
+    if (btn && btn.dataset.page) {
+      historyPage = parseInt(btn.dataset.page, 10);
+      historyLoadPage();
+    }
+  });
+
+  historyGotoBtn.addEventListener('click', function() {
+    var val = parseInt(historyGotoInput.value, 10);
+    if (val >= 1) {
+      historyPage = val;
+      historyLoadPage();
+    }
+  });
+
+  /* ======================================================================
+     History — Filters
+     ====================================================================== */
+  function historyTrackFilters(items) {
+    var sChanged = false;
+    var mChanged = false;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].server_name && !historyKnownServers[items[i].server_name]) {
+        historyKnownServers[items[i].server_name] = true;
+        sChanged = true;
+      }
+      if (items[i].method && !historyKnownMethods[items[i].method]) {
+        historyKnownMethods[items[i].method] = true;
+        mChanged = true;
+      }
+    }
+    if (sChanged) rebuildDropdown(historyServerFilter, historyKnownServers, 'All servers');
+    if (mChanged) rebuildDropdown(historyMethodFilter, historyKnownMethods, 'All methods');
+  }
+
+  historySearchInput.addEventListener('input', function() {
+    clearTimeout(historySearchTimer);
+    historySearchTimer = setTimeout(function() {
+      historyPage = 1;
+      historyLoadPage();
+    }, 300);
+  });
+
+  historySearchClear.addEventListener('click', function() {
+    historySearchInput.value = '';
+    historyPage = 1;
+    historyLoadPage();
+  });
+
+  historyClearSearchBtn.addEventListener('click', function() {
+    historyResetFilters();
+    historyLoadPage();
+  });
+
+  historyServerFilter.addEventListener('change', function() {
+    historyPage = 1;
+    historyLoadPage();
+  });
+
+  historyMethodFilter.addEventListener('change', function() {
+    historyPage = 1;
+    historyLoadPage();
+  });
+
+  historyTimeToggle.addEventListener('change', function(e) {
+    historyTimeRange = e.detail ? e.detail.value || '' : '';
+    historyPage = 1;
+    historyLoadPage();
+  });
+
+  historyDirToggle.addEventListener('change', function(e) {
+    historyDirFilter = e.detail ? decodeURIComponent(e.detail.value || '') : '';
+    historyPage = 1;
+    historyLoadPage();
+  });
+
+  function historyResetFilters() {
+    historySearchInput.value = '';
+    historyServerFilter.value = '';
+    historyMethodFilter.value = '';
+    historyDirFilter = '';
+    historyTimeRange = '';
+    // Reset seg-toggles
+    var toggles = [historyTimeToggle, historyDirToggle];
+    for (var t = 0; t < toggles.length; t++) {
+      var segs = toggles[t].querySelectorAll('button');
+      for (var i = 0; i < segs.length; i++) {
+        segs[i].classList.remove('seg-active');
+        segs[i].classList.add('seg-inactive');
+      }
+      segs[0].classList.remove('seg-inactive');
+      segs[0].classList.add('seg-active');
+    }
+    historyPage = 1;
+  }
+
+  /* ======================================================================
+     History — Checkbox & Compare (AC-6)
+     ====================================================================== */
+  historyBody.addEventListener('change', function(e) {
+    var cb = e.target.closest('.history-check');
+    if (!cb) return;
+    var id = parseInt(cb.dataset.id, 10);
+
+    if (cb.checked) {
+      if (Object.keys(historyChecked).length >= 2) {
+        cb.checked = false;
+        DS.toast('Maximum 2 entries can be selected for comparison', 'info');
+        return;
+      }
+      // Parse the event data from the row
+      var row = cb.closest('.table-row');
+      if (row) {
+        try {
+          historyChecked[id] = JSON.parse(row.getAttribute('data-evt'));
+        } catch(ex) {
+          historyChecked[id] = { id: id };
+        }
+      }
+    } else {
+      delete historyChecked[id];
+    }
+
+    var count = Object.keys(historyChecked).length;
+    historyCompareBtn.textContent = 'Compare (' + count + '/2)';
+    historyCompareBtn.disabled = count !== 2;
+  });
+
+  historyCompareBtn.addEventListener('click', function() {
+    var ids = Object.keys(historyChecked);
+    if (ids.length !== 2) return;
+    showDiffView(parseInt(ids[0], 10), parseInt(ids[1], 10));
+  });
+
+  /* ======================================================================
+     History — Replay (AC-1)
+     ====================================================================== */
+  historyBody.addEventListener('click', function(e) {
+    var replayBtn = e.target.closest('.history-replay-btn');
+    if (replayBtn) {
+      var id = parseInt(replayBtn.dataset.id, 10);
+      replayEntry(id, replayBtn);
+      return;
+    }
+
+    var editBtn = e.target.closest('.history-edit-btn');
+    if (editBtn) {
+      var editId = parseInt(editBtn.dataset.id, 10);
+      editAndReplay(editId);
+      return;
+    }
+  });
+
+  function replayEntry(id, btn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Replaying\u2026';
+    }
+
+    fetch('/api/replay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id })
+    })
+      .then(function(resp) { return resp.json().then(function(d) { return { ok: resp.ok, data: d }; }); })
+      .then(function(result) {
+        if (result.data.error) {
+          DS.toast('Replay failed \u2014 ' + (typeof result.data.error === 'string' ? result.data.error : JSON.stringify(result.data.error)), 'error');
+        } else {
+          var latText = result.data.latency_ms !== undefined ? ' \u2014 ' + result.data.latency_ms + 'ms' : '';
+          DS.toast('Replay succeeded' + latText, 'success');
+        }
+      })
+      .catch(function(err) {
+        DS.toast('Replay network error: ' + err.message, 'error');
+      })
+      .then(function() {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Replay';
+        }
+        // Refresh history to show new entry
+        historyLoadPage();
+      });
+  }
+
+  /* ======================================================================
+     History — Edit & Replay (AC-2)
+     ====================================================================== */
+  function editAndReplay(id) {
+    fetch('/api/traffic/' + id)
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        var entry = data.entry;
+        if (!entry) {
+          DS.toast('Failed to load traffic entry', 'error');
+          return;
+        }
+
+        // Parse the payload to extract tool name and arguments
+        var payload;
+        try { payload = JSON.parse(entry.payload); } catch(ex) { payload = {}; }
+        var params = payload.params || {};
+        var toolName = params.name || entry.method || '';
+        var args = params.arguments || {};
+
+        // Navigate to tools view
+        location.hash = '#/tools';
+
+        // Wait for tools to load, then pre-fill
+        var waitCount = 0;
+        var waitForTools = function() {
+          waitCount++;
+          if (toolsLoaded && allTools[entry.server_name]) {
+            selectTool(entry.server_name, toolName);
+
+            // Pre-fill form fields after rendering
+            setTimeout(function() {
+              var fields = toolParamsForm.querySelectorAll('[data-field]');
+              for (var i = 0; i < fields.length; i++) {
+                var name = fields[i].getAttribute('data-field');
+                if (args[name] !== undefined) {
+                  if (fields[i].classList.contains('switch')) {
+                    if (args[name]) fields[i].classList.add('is-on');
+                    else fields[i].classList.remove('is-on');
+                  } else {
+                    fields[i].value = typeof args[name] === 'object' ? JSON.stringify(args[name]) : String(args[name]);
+                  }
+                }
+              }
+
+              // Update button text
+              toolExecuteBtn.innerHTML = '<span>&#9654;</span> Replay';
+            }, 100);
+          } else if (waitCount < 50) {
+            setTimeout(waitForTools, 100);
+          }
+        };
+        waitForTools();
+      })
+      .catch(function(err) {
+        DS.toast('Failed to load entry: ' + err.message, 'error');
+      });
+  }
+
+  /* ======================================================================
+     History — Diff View (AC-6)
+     ====================================================================== */
+  function showDiffView(id1, id2) {
+    historyContent.style.display = 'none';
+    historyDiff.style.display = '';
+
+    // Fetch both entries
+    var entry1, entry2;
+    Promise.all([
+      fetch('/api/traffic/' + id1).then(function(r) { return r.json(); }),
+      fetch('/api/traffic/' + id2).then(function(r) { return r.json(); })
+    ]).then(function(results) {
+      entry1 = results[0].entry;
+      entry2 = results[1].entry;
+
+      // Meta info
+      var toolName = entry1.method || entry2.method || 'unknown';
+      var serverName = entry1.server_name || entry2.server_name || 'unknown';
+      document.getElementById('diff-tool-name').textContent = toolName;
+      document.getElementById('diff-server').textContent = serverName;
+
+      var meta = 'Run #1 \u00B7 ' + absoluteTime(entry1.timestamp) + ' \u00B7 ' + (entry1.status || 'unknown') +
+        '  <strong>vs</strong>  ' +
+        'Run #2 \u00B7 ' + absoluteTime(entry2.timestamp) + ' \u00B7 ' + (entry2.status || 'unknown');
+      document.getElementById('diff-meta').innerHTML = meta;
+
+      // Labels
+      document.getElementById('diff-left-label').innerHTML = 'Run #1 <span class="badge ' +
+        (entry1.status === 'error' ? 'badge-error' : 'badge-success') + '">' + (entry1.status || 'ok') + '</span>';
+      document.getElementById('diff-right-label').innerHTML = 'Run #2 <span class="badge ' +
+        (entry2.status === 'error' ? 'badge-error' : 'badge-success') + '">' + (entry2.status || 'ok') + '</span>';
+
+      // Diff the payloads
+      var left = formatPayload(entry1.payload);
+      var right = formatPayload(entry2.payload);
+
+      var diffResult = computeLineDiff(left, right);
+
+      document.getElementById('diff-left-body').innerHTML = diffResult.leftHtml;
+      document.getElementById('diff-right-body').innerHTML = diffResult.rightHtml;
+
+      // Summary
+      var summary = '<span style="color:var(--success-fg);">' + diffResult.added + ' added</span>, ' +
+        '<span style="color:var(--danger-fg);">' + diffResult.removed + ' removed</span>, ' +
+        diffResult.unchanged + ' unchanged';
+      if (diffResult.added === 0 && diffResult.removed === 0) {
+        summary = 'Responses are identical';
+      }
+      document.getElementById('diff-summary').innerHTML = summary;
+    }).catch(function(err) {
+      DS.toast('Failed to load entries for diff: ' + err.message, 'error');
+    });
+  }
+
+  function formatPayload(payload) {
+    try {
+      var obj = JSON.parse(payload);
+      return JSON.stringify(obj, null, 2);
+    } catch(e) {
+      return payload || '';
+    }
+  }
+
+  function computeLineDiff(leftText, rightText) {
+    var leftLines = leftText.split('\n');
+    var rightLines = rightText.split('\n');
+    var maxLen = Math.max(leftLines.length, rightLines.length);
+    var leftHtml = '';
+    var rightHtml = '';
+    var added = 0;
+    var removed = 0;
+    var unchanged = 0;
+
+    for (var i = 0; i < maxLen; i++) {
+      var l = i < leftLines.length ? leftLines[i] : null;
+      var r = i < rightLines.length ? rightLines[i] : null;
+
+      if (l === r) {
+        leftHtml += '<div class="json-line">' + escapeHtml(l) + '</div>';
+        rightHtml += '<div class="json-line">' + escapeHtml(r) + '</div>';
+        unchanged++;
+      } else {
+        if (l !== null) {
+          leftHtml += '<div class="json-line" style="background:var(--danger-subtle);">' + escapeHtml(l) + '</div>';
+          removed++;
+        }
+        if (r !== null) {
+          rightHtml += '<div class="json-line" style="background:var(--success-subtle);">' + escapeHtml(r) + '</div>';
+          added++;
+        }
+      }
+    }
+
+    return { leftHtml: leftHtml, rightHtml: rightHtml, added: added, removed: removed, unchanged: unchanged };
+  }
+
+  diffBackBtn.addEventListener('click', function() {
+    historyDiff.style.display = 'none';
+    historyContent.style.display = '';
+  });
 
   /* ======================================================================
      Init

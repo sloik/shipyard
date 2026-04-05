@@ -150,6 +150,80 @@ func TestBUG008_ModeToggleSmCSS(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// SPEC-003: Phase 2 History View Layout Tests
+// ---------------------------------------------------------------------------
+
+// TestSPEC003_HistoryViewElements verifies that the History view contains
+// all required structural elements for search, replay, and diff.
+func TestSPEC003_HistoryViewElements(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC-1: Replay button must exist in the JS
+	if !strings.Contains(content, "history-replay-btn") {
+		t.Error("AC-1 FAIL: expected history-replay-btn class for replay buttons")
+	}
+	if !strings.Contains(content, "/api/replay") {
+		t.Error("AC-1 FAIL: expected /api/replay fetch call")
+	}
+
+	// AC-2: Edit & Replay button
+	if !strings.Contains(content, "history-edit-btn") {
+		t.Error("AC-2 FAIL: expected history-edit-btn class for edit buttons")
+	}
+	if !strings.Contains(content, "editAndReplay") {
+		t.Error("AC-2 FAIL: expected editAndReplay function")
+	}
+
+	// AC-4: Search input
+	if !strings.Contains(content, `id="history-search"`) {
+		t.Error("AC-4 FAIL: expected history-search input")
+	}
+	// Time range filter
+	if !strings.Contains(content, `id="history-time-toggle"`) {
+		t.Error("AC-4 FAIL: expected history-time-toggle")
+	}
+	// Server filter
+	if !strings.Contains(content, `id="history-server-filter"`) {
+		t.Error("AC-4 FAIL: expected history-server-filter")
+	}
+	// Method filter
+	if !strings.Contains(content, `id="history-method-filter"`) {
+		t.Error("AC-4 FAIL: expected history-method-filter")
+	}
+
+	// AC-5: Pagination elements
+	if !strings.Contains(content, `id="history-pagination"`) {
+		t.Error("AC-5 FAIL: expected history-pagination container")
+	}
+	if !strings.Contains(content, `id="history-goto-input"`) {
+		t.Error("AC-5 FAIL: expected history-goto-input for 'Go to page'")
+	}
+
+	// AC-6: Compare/diff elements
+	if !strings.Contains(content, `id="history-compare-btn"`) {
+		t.Error("AC-6 FAIL: expected history-compare-btn")
+	}
+	if !strings.Contains(content, `id="history-diff"`) {
+		t.Error("AC-6 FAIL: expected history-diff container")
+	}
+	if !strings.Contains(content, "computeLineDiff") {
+		t.Error("AC-6 FAIL: expected computeLineDiff function for diff computation")
+	}
+
+	// Empty states
+	if !strings.Contains(content, `id="history-empty"`) {
+		t.Error("expected history-empty state")
+	}
+	if !strings.Contains(content, `id="history-no-results"`) {
+		t.Error("expected history-no-results state")
+	}
+}
+
 // TestBUG007_ResponseSectionFillsHeight verifies the response section can
 // grow vertically to fill remaining viewport height (AC-4).
 func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {
