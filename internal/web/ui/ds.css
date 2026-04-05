@@ -1012,6 +1012,10 @@ body {
   max-height: 60vh;
 }
 
+.json-line {
+  white-space: pre;
+}
+
 .json-viewer .jt-key,
 .code-body .jt-key     { color: var(--json-key); }
 .json-viewer .jt-string,

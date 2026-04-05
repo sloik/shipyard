@@ -384,7 +384,14 @@
       lastIndex = token.lastIndex;
     }
     result += escapeHtml(pretty.slice(lastIndex));
-    return result;
+
+    // Wrap each line in a div for line-level filtering
+    var lines = result.split('\n');
+    var wrapped = '';
+    for (var i = 0; i < lines.length; i++) {
+      wrapped += '<div class="json-line">' + lines[i] + '</div>';
+    }
+    return wrapped;
   }
 
   /* ======================================================================
@@ -503,16 +510,82 @@
   }
 
   /* ======================================================================
+     JSON Filter Logic
+     ====================================================================== */
+  function filterJsonLines(viewer, query) {
+    var lines = viewer.querySelectorAll('.json-line');
+    var lowerQuery = query.toLowerCase();
+    for (var i = 0; i < lines.length; i++) {
+      var text = lines[i].textContent;
+      if (!query || text.toLowerCase().indexOf(lowerQuery) !== -1) {
+        lines[i].style.display = '';
+        // Highlight match
+        if (query && lines[i].getAttribute('data-original') === null) {
+          lines[i].setAttribute('data-original', lines[i].innerHTML);
+        }
+      } else {
+        lines[i].style.display = 'none';
+      }
+    }
+    // Restore all lines when query is cleared
+    if (!query) {
+      for (var j = 0; j < lines.length; j++) {
+        var orig = lines[j].getAttribute('data-original');
+        if (orig !== null) {
+          lines[j].innerHTML = orig;
+          lines[j].removeAttribute('data-original');
+        }
+      }
+    }
+  }
+
+  function wireFilterInputs(container) {
+    // Combined filter — filters all json-viewers in the container
+    var combinedFilter = container.querySelector('.json-filter:not(.panel-filter)');
+    if (combinedFilter) {
+      var combinedInput = combinedFilter.querySelector('input');
+      if (combinedInput) {
+        combinedInput.addEventListener('input', function() {
+          var viewers = container.querySelectorAll('.split-view .json-viewer');
+          for (var i = 0; i < viewers.length; i++) {
+            filterJsonLines(viewers[i], combinedInput.value.trim());
+          }
+        });
+      }
+    }
+
+    // Per-panel filters
+    var panelFilters = container.querySelectorAll('.json-filter.panel-filter');
+    for (var p = 0; p < panelFilters.length; p++) {
+      (function(pf) {
+        var input = pf.querySelector('input');
+        if (!input) return;
+        var codeBlock = pf.nextElementSibling;
+        if (!codeBlock) return;
+        var viewer = codeBlock.querySelector('.json-viewer');
+        if (!viewer) return;
+        input.addEventListener('input', function() {
+          filterJsonLines(viewer, input.value.trim());
+        });
+      })(panelFilters[p]);
+    }
+  }
+
+  /* ======================================================================
      Mode Toggle in Detail Panels
      ====================================================================== */
   trafficBody.addEventListener('click', function(e) {
     var modeBtn = e.target.closest('.mode-toggle button');
     if (modeBtn) {
+      var mode = modeBtn.getAttribute('data-mode');
       var siblings = modeBtn.parentNode.querySelectorAll('button');
       for (var i = 0; i < siblings.length; i++) {
         siblings[i].classList.remove('is-active');
       }
       modeBtn.classList.add('is-active');
+      if (mode === 'jq') {
+        DS.toast('JQ mode is not yet implemented', 'info');
+      }
       return;
     }
   });
@@ -567,7 +640,10 @@
         var html = renderDetailPanel(data.entry, data.matched || null);
         row.insertAdjacentHTML('afterend', html);
         var panel = row.nextElementSibling;
-        if (panel) wireCopyButtons(panel);
+        if (panel) {
+          wireCopyButtons(panel);
+          wireFilterInputs(panel);
+        }
       })
       .catch(function(err) {
         console.error('Failed to load detail:', err);
@@ -1226,6 +1302,15 @@
     var str = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     toolResponseJson.innerHTML = highlightJSON(str);
     toolResponseCopy.setAttribute('data-copy', typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+
+    // Wire tool response filter
+    var toolFilter = document.getElementById('tool-response-filter');
+    if (toolFilter) {
+      toolFilter.value = '';
+      toolFilter.oninput = function() {
+        filterJsonLines(toolResponseJson, toolFilter.value.trim());
+      };
+    }
   }
 
   /* ======================================================================
@@ -1252,6 +1337,24 @@
   toolResponseRetry.addEventListener('click', function() {
     executeTool();
   });
+
+  // Tool browser mode toggle
+  var toolModeToggle = document.querySelector('#tool-response-section .mode-toggle');
+  if (toolModeToggle) {
+    toolModeToggle.addEventListener('click', function(e) {
+      var btn = e.target.closest('button');
+      if (!btn) return;
+      var mode = btn.getAttribute('data-mode');
+      var siblings = toolModeToggle.querySelectorAll('button');
+      for (var i = 0; i < siblings.length; i++) {
+        siblings[i].classList.remove('is-active');
+      }
+      btn.classList.add('is-active');
+      if (mode === 'jq') {
+        DS.toast('JQ mode is not yet implemented', 'info');
+      }
+    });
+  }
 
   // Array field: add item
   toolParamsForm.addEventListener('click', function(e) {
