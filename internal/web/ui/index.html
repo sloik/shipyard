@@ -362,36 +362,33 @@
     var obj;
     try { obj = JSON.parse(str); } catch(e) { return escapeHtml(str); }
     var pretty = JSON.stringify(obj, null, 2);
-    var token = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|([{}\[\]:,])/g;
+    var lines = pretty.split('\n');
     var result = '';
-    var lastIndex = 0;
-    var m;
-    while ((m = token.exec(pretty)) !== null) {
-      result += escapeHtml(pretty.slice(lastIndex, m.index));
-      if (m[1] !== undefined) {
-        if (m[2] !== undefined) {
-          result += '<span class="jt-key">' + escapeHtml(m[1]) + '</span>' + m[2];
-        } else {
-          result += '<span class="jt-string">' + escapeHtml(m[1]) + '</span>';
-        }
-      } else if (m[3] !== undefined) {
-        result += '<span class="jt-boolean">' + escapeHtml(m[3]) + '</span>';
-      } else if (m[4] !== undefined) {
-        result += '<span class="jt-number">' + escapeHtml(m[4]) + '</span>';
-      } else if (m[5] !== undefined) {
-        result += '<span class="jt-bracket">' + escapeHtml(m[5]) + '</span>';
-      }
-      lastIndex = token.lastIndex;
-    }
-    result += escapeHtml(pretty.slice(lastIndex));
 
-    // Wrap each line in a div for line-level filtering
-    var lines = result.split('\n');
-    var wrapped = '';
+    // Design uses line-level coloring: entire line gets one color
+    // based on the dominant value type on that line.
+    var keyValueRe = /^(\s*)"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*(.*)$/;
+    var trailingComma = /,\s*$/;
+
     for (var i = 0; i < lines.length; i++) {
-      wrapped += '<div class="json-line">' + lines[i] + '</div>';
+      var line = lines[i];
+      var cls = 'jt-bracket'; // default: brackets, braces, commas
+      var kv = keyValueRe.exec(line);
+      if (kv) {
+        var val = kv[3].replace(trailingComma, '').trim();
+        if (val === '{' || val === '[') {
+          cls = 'jt-key';          // key opening an object/array
+        } else if (val === 'true' || val === 'false' || val === 'null') {
+          cls = 'jt-boolean';
+        } else if (/^-?\d/.test(val)) {
+          cls = 'jt-number';
+        } else {
+          cls = 'jt-string';       // string value (or key: string)
+        }
+      }
+      result += '<div class="json-line ' + cls + '">' + escapeHtml(line) + '</div>';
     }
-    return wrapped;
+    return result;
   }
 
   /* ======================================================================
