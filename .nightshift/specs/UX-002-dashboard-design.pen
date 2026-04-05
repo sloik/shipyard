@@ -12479,8 +12479,8 @@
                   "name": "p1Brand",
                   "fill": "$text-primary",
                   "content": "Shipyard",
-                  "fontFamily": "Inter",
-                  "fontSize": 16,
+                  "fontFamily": "$font-sans",
+                  "fontSize": "$font-size-xl",
                   "fontWeight": "700"
                 },
                 {
@@ -12524,9 +12524,9 @@
                           "id": "rlWW9",
                           "name": "p1T1Lbl",
                           "fill": "$text-muted",
-                          "content": "Timeline",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
+                          "content": "Traffic",
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-md",
                           "fontWeight": "500"
                         }
                       ]
@@ -12558,7 +12558,7 @@
                           "height": 14,
                           "iconFontName": "wrench",
                           "iconFontFamily": "lucide",
-                          "fill": "$text-primary"
+                          "fill": "$accent-fg"
                         },
                         {
                           "type": "text",
@@ -12566,9 +12566,9 @@
                           "name": "p1T2Lbl",
                           "fill": "$text-primary",
                           "content": "Tools",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
-                          "fontWeight": "600"
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-md",
+                          "fontWeight": "500"
                         }
                       ]
                     },
@@ -12600,8 +12600,8 @@
                           "name": "p1T3Lbl",
                           "fill": "$text-muted",
                           "content": "History",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-md",
                           "fontWeight": "500"
                         }
                       ]
@@ -12634,8 +12634,42 @@
                           "name": "p1T4Lbl",
                           "fill": "$text-muted",
                           "content": "Servers",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-md",
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "HXMN6",
+                      "name": "t5",
+                      "height": 48,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon_font",
+                          "id": "zqteD",
+                          "name": "t5i",
+                          "width": 14,
+                          "height": 14,
+                          "iconFontName": "settings",
+                          "iconFontFamily": "lucide",
+                          "fill": "$text-muted"
+                        },
+                        {
+                          "type": "text",
+                          "id": "CIJo5",
+                          "name": "t5l",
+                          "fill": "$text-muted",
+                          "content": "Settings",
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-md",
                           "fontWeight": "500"
                         }
                       ]
@@ -12672,8 +12706,8 @@
                       "name": "p1LiveLbl",
                       "fill": "$success-fg",
                       "content": "Live",
-                      "fontFamily": "Inter",
-                      "fontSize": 12,
+                      "fontFamily": "$font-sans",
+                      "fontSize": "$font-size-base",
                       "fontWeight": "500"
                     }
                   ]
@@ -12712,8 +12746,8 @@
                       "name": "p1SrvNum",
                       "fill": "$text-secondary",
                       "content": "2 servers",
-                      "fontFamily": "Inter",
-                      "fontSize": 11,
+                      "fontFamily": "$font-sans",
+                      "fontSize": "$font-size-sm",
                       "fontWeight": "500"
                     }
                   ]
@@ -12780,8 +12814,8 @@
                       "name": "sbSearchText",
                       "fill": "$text-muted",
                       "content": "Search tools...",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
+                      "fontFamily": "$font-sans",
+                      "fontSize": "$font-size-md",
                       "fontWeight": "normal"
                     }
                   ]
@@ -12837,8 +12871,8 @@
                               "name": "grp1Name",
                               "fill": "$text-primary",
                               "content": "filesystem",
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-md",
                               "fontWeight": "600"
                             },
                             {
@@ -12847,8 +12881,8 @@
                               "name": "grp1Count",
                               "fill": "$text-muted",
                               "content": "8",
-                              "fontFamily": "Inter",
-                              "fontSize": 11,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-sm",
                               "fontWeight": "normal"
                             }
                           ]
@@ -12884,8 +12918,8 @@
                               "name": "tool1Name",
                               "fill": "$text-primary",
                               "content": "read_file",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "500"
                             }
                           ]
@@ -12920,8 +12954,8 @@
                               "name": "tool2Name",
                               "fill": "$text-secondary",
                               "content": "write_file",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -12956,8 +12990,8 @@
                               "name": "tool3Name",
                               "fill": "$text-secondary",
                               "content": "list_directory",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -12992,8 +13026,8 @@
                               "name": "tool4Name",
                               "fill": "$text-secondary",
                               "content": "create_directory",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13028,8 +13062,8 @@
                               "name": "tool5Name",
                               "fill": "$text-secondary",
                               "content": "move_file",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13079,8 +13113,8 @@
                               "name": "grp2Name",
                               "fill": "$text-primary",
                               "content": "github",
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-md",
                               "fontWeight": "600"
                             },
                             {
@@ -13089,8 +13123,8 @@
                               "name": "grp2Count",
                               "fill": "$text-muted",
                               "content": "3",
-                              "fontFamily": "Inter",
-                              "fontSize": 11,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-sm",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13125,8 +13159,8 @@
                               "name": "g2t1Name",
                               "fill": "$text-secondary",
                               "content": "search_repos",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13161,8 +13195,8 @@
                               "name": "g2t2Name",
                               "fill": "$text-secondary",
                               "content": "create_issue",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13197,8 +13231,8 @@
                               "name": "g2t3Name",
                               "fill": "$text-secondary",
                               "content": "list_commits",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13251,8 +13285,8 @@
                           "name": "toolTitle",
                           "fill": "$text-primary",
                           "content": "read_file",
-                          "fontFamily": "JetBrains Mono",
-                          "fontSize": 20,
+                          "fontFamily": "$font-mono",
+                          "fontSize": "$font-size-2xl",
                           "fontWeight": "600"
                         },
                         {
@@ -13287,8 +13321,8 @@
                               "name": "toolServerLbl",
                               "fill": "$text-secondary",
                               "content": "filesystem",
-                              "fontFamily": "Inter",
-                              "fontSize": 11,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-sm",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13303,8 +13337,8 @@
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
                       "content": "Read the complete contents of a file from the file system. Only works within allowed directories.",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
+                      "fontFamily": "$font-sans",
+                      "fontSize": "$font-size-md",
                       "fontWeight": "normal"
                     }
                   ]
@@ -13331,8 +13365,8 @@
                       "name": "formTitle",
                       "fill": "$text-primary",
                       "content": "Input Parameters",
-                      "fontFamily": "Inter",
-                      "fontSize": 14,
+                      "fontFamily": "$font-sans",
+                      "fontSize": "$font-size-lg",
                       "fontWeight": "600"
                     },
                     {
@@ -13364,8 +13398,8 @@
                                   "name": "f1Label",
                                   "fill": "$text-primary",
                                   "content": "path",
-                                  "fontFamily": "Inter",
-                                  "fontSize": 12,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": "$font-size-base",
                                   "fontWeight": "500"
                                 },
                                 {
@@ -13374,8 +13408,8 @@
                                   "name": "f1Required",
                                   "fill": "$danger-fg",
                                   "content": "*",
-                                  "fontFamily": "Inter",
-                                  "fontSize": 12,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": "$font-size-base",
                                   "fontWeight": "600"
                                 },
                                 {
@@ -13396,8 +13430,8 @@
                                       "name": "f1TypeLbl",
                                       "fill": "$text-muted",
                                       "content": "string",
-                                      "fontFamily": "JetBrains Mono",
-                                      "fontSize": 10,
+                                      "fontFamily": "$font-mono",
+                                      "fontSize": "$font-size-xs",
                                       "fontWeight": "normal"
                                     }
                                   ]
@@ -13428,8 +13462,8 @@
                                   "name": "f1Value",
                                   "fill": "$text-primary",
                                   "content": "/home/user/project/README.md",
-                                  "fontFamily": "Inter",
-                                  "fontSize": 13,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": "$font-size-md",
                                   "fontWeight": "normal"
                                 }
                               ]
@@ -13440,8 +13474,8 @@
                               "name": "f1Help",
                               "fill": "$text-muted",
                               "content": "Absolute path to the file to read",
-                              "fontFamily": "Inter",
-                              "fontSize": 11,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-sm",
                               "fontWeight": "normal"
                             }
                           ]
@@ -13485,8 +13519,8 @@
                               "name": "execLbl",
                               "fill": "$text-on-emphasis",
                               "content": "Execute",
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-md",
                               "fontWeight": "600"
                             }
                           ]
@@ -13497,8 +13531,8 @@
                           "name": "execHint",
                           "fill": "$text-muted",
                           "content": "Sends tools/call to filesystem server",
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
+                          "fontFamily": "$font-sans",
+                          "fontSize": "$font-size-base",
                           "fontWeight": "normal"
                         }
                       ]
@@ -13543,8 +13577,8 @@
                               "name": "respTitleLbl",
                               "fill": "$text-primary",
                               "content": "Response",
-                              "fontFamily": "Inter",
-                              "fontSize": 14,
+                              "fontFamily": "$font-sans",
+                              "fontSize": "$font-size-lg",
                               "fontWeight": "600"
                             },
                             {
@@ -13574,8 +13608,8 @@
                                   "name": "respBadgeLbl",
                                   "fill": "$success-fg",
                                   "content": "200 OK",
-                                  "fontFamily": "Inter",
-                                  "fontSize": 10,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": "$font-size-xs",
                                   "fontWeight": "500"
                                 }
                               ]
@@ -13607,8 +13641,8 @@
                                   "name": "respLatVal",
                                   "fill": "$success-fg",
                                   "content": "34ms",
-                                  "fontFamily": "JetBrains Mono",
-                                  "fontSize": 11,
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-sm",
                                   "fontWeight": "500"
                                 }
                               ]
@@ -13646,8 +13680,8 @@
                                   "name": "respCopyLbl",
                                   "fill": "$text-secondary",
                                   "content": "Copy",
-                                  "fontFamily": "Inter",
-                                  "fontSize": 11,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": "$font-size-sm",
                                   "fontWeight": "500"
                                 }
                               ]
@@ -13688,8 +13722,8 @@
                               "name": "rl1",
                               "fill": "$json-bracket",
                               "content": "{",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13698,8 +13732,8 @@
                               "name": "rl2",
                               "fill": "$json-key",
                               "content": "  \"content\": [",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13708,8 +13742,8 @@
                               "name": "rl3",
                               "fill": "$json-bracket",
                               "content": "    {",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13718,8 +13752,8 @@
                               "name": "rl4",
                               "fill": "$json-string",
                               "content": "      \"type\": \"text\",",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13728,8 +13762,8 @@
                               "name": "rl5",
                               "fill": "$json-string",
                               "content": "      \"text\": \"# Project README\\n\\nThis is...\",",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13738,8 +13772,8 @@
                               "name": "rl6",
                               "fill": "$json-string",
                               "content": "      \"mimeType\": \"text/plain\"",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13748,8 +13782,8 @@
                               "name": "rl7",
                               "fill": "$json-bracket",
                               "content": "    }",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13758,8 +13792,8 @@
                               "name": "rl8",
                               "fill": "$json-bracket",
                               "content": "  ],",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13768,8 +13802,8 @@
                               "name": "rl9",
                               "fill": "$json-boolean",
                               "content": "  \"isError\": false",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             },
                             {
@@ -13778,8 +13812,8 @@
                               "name": "rl10",
                               "fill": "$json-bracket",
                               "content": "}",
-                              "fontFamily": "JetBrains Mono",
-                              "fontSize": 12,
+                              "fontFamily": "$font-mono",
+                              "fontSize": "$font-size-base",
                               "fontWeight": "normal"
                             }
                           ]
