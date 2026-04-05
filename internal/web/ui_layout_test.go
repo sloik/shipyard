@@ -80,6 +80,8 @@ func TestBUG008_PanelFiltersHaveModeToggle(t *testing.T) {
 	if reqFilterIdx == -1 {
 		t.Fatal("AC-1: expected 'Filter request...' placeholder in renderDetailPanel")
 	}
+	// The mode-toggle must appear AFTER the request filter input and BEFORE
+	// the response filter input
 	resFilterIdx := strings.Index(fnBody, `placeholder="Filter response..."`)
 	if resFilterIdx == -1 {
 		t.Fatal("AC-2: expected 'Filter response...' placeholder in renderDetailPanel")
@@ -103,6 +105,7 @@ func TestBUG008_PanelFiltersHaveModeToggle(t *testing.T) {
 	}
 
 	// AC-3: Per-panel toggles must be separate from combined filter toggle
+	// Combined filter uses id="combined-filter-..." and its own mode-toggle
 	combinedIdx := strings.Index(fnBody, "combined-filter-")
 	if combinedIdx == -1 {
 		t.Fatal("AC-5: expected combined filter to exist in renderDetailPanel")
@@ -111,6 +114,11 @@ func TestBUG008_PanelFiltersHaveModeToggle(t *testing.T) {
 	if strings.Contains(combinedSlice, "mode-toggle-sm") {
 		t.Error("AC-5 FAIL: combined filter toggle should NOT use mode-toggle-sm variant")
 	}
+	// Combined toggle should NOT have mode-toggle-sm
+	if strings.Contains(combinedSlice, "mode-toggle-sm") {
+		t.Error("AC-5 FAIL: combined filter toggle should NOT use mode-toggle-sm variant")
+	}
+	// Combined toggle should still exist
 	if !strings.Contains(combinedSlice, "mode-toggle") {
 		t.Error("AC-5 FAIL: combined filter is missing its mode-toggle")
 	}
@@ -125,14 +133,17 @@ func TestBUG008_ModeToggleSmCSS(t *testing.T) {
 	}
 	content := string(css)
 
+	// AC-4: .mode-toggle-sm class must exist with smaller padding
 	if !strings.Contains(content, ".mode-toggle-sm") {
 		t.Fatal("AC-4 FAIL: ds.css is missing .mode-toggle-sm class")
 	}
 
+	// It should use radius-s (which the base already does, but verify)
 	smIdx := strings.Index(content, ".mode-toggle-sm")
 	if smIdx == -1 {
 		t.Fatal("AC-4 FAIL: .mode-toggle-sm not found")
 	}
+	// Check for the smaller padding in the vicinity of the rule
 	smSlice := content[smIdx : smIdx+300]
 	if !strings.Contains(smSlice, "2px 6px") {
 		t.Errorf("AC-4 FAIL: .mode-toggle-sm should have padding 2px 6px, got: %s", smSlice)
