@@ -33,17 +33,17 @@ type TrafficEntry struct {
 
 // TrafficEvent is the JSON shape sent to the web UI.
 type TrafficEvent struct {
-	ID              int64  `json:"id"`
-	Timestamp       int64  `json:"timestamp"`
-	Direction       string `json:"direction"`
-	ServerName      string `json:"server_name"`
-	Method          string `json:"method"`
-	MessageID       string `json:"message_id"`
-	Status          string `json:"status"`
-	LatencyMs       *int64 `json:"latency_ms"`
-	Payload         string `json:"payload"`
-	MatchedPayload  string `json:"matched_payload,omitempty"`
-	MatchedID       int64  `json:"matched_id,omitempty"`
+	ID             int64  `json:"id"`
+	Timestamp      int64  `json:"timestamp"`
+	Direction      string `json:"direction"`
+	ServerName     string `json:"server_name"`
+	Method         string `json:"method"`
+	MessageID      string `json:"message_id"`
+	Status         string `json:"status"`
+	LatencyMs      *int64 `json:"latency_ms"`
+	Payload        string `json:"payload"`
+	MatchedPayload string `json:"matched_payload,omitempty"`
+	MatchedID      int64  `json:"matched_id,omitempty"`
 }
 
 // TrafficPage represents a paginated result of traffic events.
@@ -56,10 +56,10 @@ type TrafficPage struct {
 
 // Store handles traffic persistence in SQLite and JSONL.
 type Store struct {
-	db       *sql.DB
-	jsonlF   *os.File
-	mu       sync.Mutex
-	pending  map[string]pendingRequest // keyed by message_id
+	db      *sql.DB
+	jsonlF  *os.File
+	mu      sync.Mutex
+	pending map[string]pendingRequest // keyed by message_id
 }
 
 type pendingRequest struct {
