@@ -1012,11 +1012,16 @@ body {
   max-height: 60vh;
 }
 
-.jt-key { color: var(--json-key); }
-.jt-string { color: var(--json-string); }
-.jt-number { color: var(--json-number); }
-.jt-boolean { color: var(--json-boolean); }
-.jt-bracket { color: var(--json-bracket); }
+.json-viewer .jt-key,
+.code-body .jt-key     { color: var(--json-key); }
+.json-viewer .jt-string,
+.code-body .jt-string  { color: var(--json-string); font-style: italic; }
+.json-viewer .jt-number,
+.code-body .jt-number  { color: var(--json-number); }
+.json-viewer .jt-boolean,
+.code-body .jt-boolean { color: var(--json-boolean); }
+.json-viewer .jt-bracket,
+.code-body .jt-bracket { color: var(--json-bracket); }
 
 /* ==========================================================================
    18. JSON Controls (3)
