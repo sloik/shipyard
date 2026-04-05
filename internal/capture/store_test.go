@@ -3,6 +3,8 @@ package capture
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -235,6 +237,216 @@ func TestDirectionConstants(t *testing.T) {
 	}
 	if DirectionServerToClient != "server→client" {
 		t.Fatalf("unexpected server→client constant: %s", DirectionServerToClient)
+	}
+}
+
+func TestQuery_CombinedFilters(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "alpha", Method: "tools/list", Payload: `{}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "alpha", Method: "tools/call", Payload: `{}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "beta", Method: "tools/call", Payload: `{}`, Status: "pending",
+	})
+
+	// Filter by both server and method
+	page, err := s.Query(1, 10, "alpha", "tools/call")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 entry matching alpha+tools/call, got %d", page.TotalCount)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(page.Items))
+	}
+	if page.Items[0].ServerName != "alpha" {
+		t.Fatalf("expected server 'alpha', got '%s'", page.Items[0].ServerName)
+	}
+	if page.Items[0].Method != "tools/call" {
+		t.Fatalf("expected method 'tools/call', got '%s'", page.Items[0].Method)
+	}
+}
+
+func TestQuery_NoResults(t *testing.T) {
+	s := newTestStore(t)
+
+	page, err := s.Query(1, 10, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if page.TotalCount != 0 {
+		t.Fatalf("expected total_count 0, got %d", page.TotalCount)
+	}
+	if page.Items != nil {
+		// Items may be nil when there are no results — that's acceptable
+		if len(page.Items) != 0 {
+			t.Fatalf("expected 0 items, got %d", len(page.Items))
+		}
+	}
+}
+
+func TestQuery_PageBeyondTotal(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	s.Insert(&TrafficEntry{
+		Timestamp: now, Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "test", Payload: `{}`, Status: "pending",
+	})
+
+	// Page 100 should return no items but correct total
+	page, err := s.Query(100, 10, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected total_count 1, got %d", page.TotalCount)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("expected 0 items on page 100, got %d", len(page.Items))
+	}
+}
+
+func TestGetByID_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, _, err := s.GetByID(99999)
+	if err == nil {
+		t.Fatal("expected error for non-existent ID")
+	}
+}
+
+func TestGetByID_WithMatchedPair(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	// Insert request
+	reqID, _ := s.Insert(&TrafficEntry{
+		Timestamp:  now,
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "tools/call",
+		MessageID:  "match-1",
+		Payload:    `{"jsonrpc":"2.0","method":"tools/call","id":"match-1"}`,
+		Status:     "pending",
+	})
+
+	// Insert correlated response
+	resID, lat := s.Insert(&TrafficEntry{
+		Timestamp:  now.Add(25 * time.Millisecond),
+		Direction:  DirectionServerToClient,
+		ServerName: "srv",
+		MessageID:  "match-1",
+		Payload:    `{"jsonrpc":"2.0","id":"match-1","result":{}}`,
+		Status:     "ok",
+		IsResponse: true,
+	})
+
+	if lat == nil {
+		t.Fatal("expected non-nil latency for correlated response")
+	}
+
+	// GetByID on the response should include the matched request
+	evt, matched, err := s.GetByID(resID)
+	if err != nil {
+		t.Fatalf("GetByID(response): %v", err)
+	}
+	if evt.ID != resID {
+		t.Fatalf("expected ID %d, got %d", resID, evt.ID)
+	}
+	if matched == nil {
+		t.Fatal("expected matched entry for correlated response")
+	}
+	if matched.ID != reqID {
+		t.Fatalf("expected matched ID %d, got %d", reqID, matched.ID)
+	}
+}
+
+func TestInsert_ConcurrentInserts(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	const n = 10
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			s.Insert(&TrafficEntry{
+				Timestamp:  now.Add(time.Duration(i) * time.Millisecond),
+				Direction:  DirectionClientToServer,
+				ServerName: "srv",
+				Method:     "concurrent/test",
+				Payload:    `{}`,
+				Status:     "pending",
+			})
+		}()
+	}
+
+	wg.Wait()
+
+	page, err := s.Query(1, 100, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if page.TotalCount != n {
+		t.Fatalf("expected %d entries after concurrent inserts, got %d", n, page.TotalCount)
+	}
+}
+
+func TestStore_Close(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(
+		filepath.Join(dir, "test.db"),
+		filepath.Join(dir, "test.jsonl"),
+	)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	err = s.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestInsert_LargePayload(t *testing.T) {
+	s := newTestStore(t)
+
+	// 100KB payload
+	largePayload := `{"data":"` + strings.Repeat("x", 100*1024) + `"}`
+
+	id, _ := s.Insert(&TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "large/test",
+		Payload:    largePayload,
+		Status:     "pending",
+	})
+
+	if id == 0 {
+		t.Fatal("expected non-zero row ID for large payload")
+	}
+
+	// Verify we can retrieve it
+	evt, _, err := s.GetByID(id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if len(evt.Payload) != len(largePayload) {
+		t.Fatalf("expected payload length %d, got %d", len(largePayload), len(evt.Payload))
 	}
 }
 
