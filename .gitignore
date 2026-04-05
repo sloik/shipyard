@@ -10,10 +10,13 @@ credentials.json
 *.exe
 dist/
 
-# Nightshift (ignore everything except specs/)
-.nightshift/**
-!.nightshift/specs/
-!.nightshift/specs/**
+# Nightshift — track protocol + specs + config, ignore runtime artifacts
+.nightshift/metrics/_wip/
+.nightshift/reports/_wip/
+.nightshift/checkpoints/
+.nightshift/knowledge/devkb-updates/
+.nightshift/*.profraw
+.nightshift/pytest-cache-files-*
 
 # Development runtime
 .shipyard-dev/
