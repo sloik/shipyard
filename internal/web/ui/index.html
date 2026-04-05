@@ -177,7 +177,14 @@
           <button class="btn btn-copy btn-sm" id="tool-response-copy">Copy</button>
           <button class="btn btn-default btn-sm" id="tool-response-retry">Retry</button>
         </div>
-        <div id="tool-response-body" class="code-block">
+        <div class="json-filter" style="margin-bottom:8px;">
+          <input type="text" id="tool-response-filter" placeholder="Filter JSON...">
+          <div class="mode-toggle">
+            <button class="is-active" data-mode="text">Text</button>
+            <button data-mode="jq">JQ</button>
+          </div>
+        </div>
+        <div id="tool-response-body" class="code-block" style="border:1px solid var(--border-default); border-radius:var(--radius-m);">
           <div class="json-viewer code-body" id="tool-response-json" style="max-height:400px; overflow:auto;"></div>
         </div>
       </div>
@@ -274,7 +281,7 @@
     Object.keys(views).forEach(function(key) {
       views[key].style.display = 'none';
     });
-    views[route].style.display = '';
+    views[route].style.display = route === 'tools' ? 'flex' : '';
 
     // Update tabs
     var tabs = tabNav.querySelectorAll('.tab');
