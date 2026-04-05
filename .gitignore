@@ -17,6 +17,8 @@ dist/
 
 # Development runtime
 .shipyard-dev/
+shipyard.db
+shipyard.jsonl
 
 # Claude Code project instructions (internal)
 .claude/
