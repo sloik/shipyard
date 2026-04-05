@@ -193,7 +193,11 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	hub := web.NewHub()
 	go hub.Run(ctx)
 
+	// Create proxy manager
+	mgr := proxy.NewManager()
+
 	srv := web.NewServer(port, store, hub)
+	srv.SetProxyManager(mgr)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := srv.Start(ctx); err != nil {
@@ -201,8 +205,10 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 		}
 	}()
 
-	// Start proxy
+	// Start proxy with manager
 	p := proxy.NewProxy(name, command, args, env, cwd, store, hub)
+	mp := mgr.Register(name, p)
+	p.SetManaged(mp)
 	if err := p.Run(ctx); err != nil {
 		slog.Error("proxy error", "error", err)
 	}

@@ -112,13 +112,81 @@
 </main>
 
 <!-- ================================================================
-     View: Tools (#/tools) — Placeholder
+     View: Tools (#/tools)
      ================================================================ -->
-<main id="view-tools">
-  <div class="empty-state">
-    <div class="empty-icon">&#128295;</div>
-    <div class="empty-title">Tool Browser</div>
-    <div class="empty-desc">Coming in Phase 1 — browse and invoke MCP tools</div>
+<main id="view-tools" style="display:flex; height:calc(100vh - 48px);">
+
+  <!-- Sidebar -->
+  <div id="tools-sidebar" style="width:260px; min-width:260px; border-right:1px solid var(--border-default); display:flex; flex-direction:column; background:var(--bg-surface); overflow:hidden;">
+    <div style="padding:8px;">
+      <div class="search-bar" id="tool-search-bar">
+        <span class="search-icon">&#128269;</span>
+        <input type="text" id="tool-search" placeholder="Search tools...">
+        <button class="search-clear">&#10005;</button>
+      </div>
+    </div>
+    <div id="tool-groups" style="flex:1; overflow-y:auto; padding:0 4px 8px 4px;"></div>
+  </div>
+
+  <!-- Main Content -->
+  <div id="tools-main" style="flex:1; overflow-y:auto; padding:0;">
+
+    <!-- Empty State (no tool selected) -->
+    <div id="tools-empty" class="empty-state" style="height:100%;">
+      <div class="empty-icon">&#128295;</div>
+      <div class="empty-title">No tool selected</div>
+      <div class="empty-desc">Select a tool from the sidebar to view its schema and execute it.</div>
+    </div>
+
+    <!-- Tool Detail (hidden by default) -->
+    <div id="tool-detail" style="display:none; padding:24px; max-width:720px;">
+
+      <!-- Tool Header -->
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <span style="font-size:18px;">&#128295;</span>
+        <span id="tool-detail-name" style="font-family:var(--font-mono); font-size:var(--font-size-2xl); font-weight:700; color:var(--text-primary);"></span>
+        <span id="tool-detail-server" class="badge badge-neutral"></span>
+      </div>
+      <div id="tool-detail-desc" style="font-size:var(--font-size-md); color:var(--text-secondary); margin-bottom:16px;"></div>
+
+      <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
+
+      <!-- Input Parameters -->
+      <div id="tool-params-section" style="margin-bottom:16px;">
+        <div style="font-size:var(--font-size-lg); font-weight:600; color:var(--text-primary); margin-bottom:12px;">Input Parameters</div>
+        <div id="tool-params-form" style="display:flex; flex-direction:column; gap:12px;"></div>
+      </div>
+
+      <!-- Execute Button Row -->
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <button class="btn btn-primary" id="tool-execute-btn" style="display:inline-flex; align-items:center; gap:6px;">
+          <span>&#9654;</span> Execute
+        </button>
+        <span style="font-size:var(--font-size-sm); color:var(--text-muted);">Sends tools/call to the child server</span>
+      </div>
+
+      <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
+
+      <!-- Response Section -->
+      <div id="tool-response-section" style="display:none;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+          <span style="font-size:var(--font-size-lg); font-weight:600; color:var(--text-primary);">Response</span>
+          <span id="tool-response-status" class="badge"></span>
+          <span id="tool-response-latency" class="pill"></span>
+          <div style="flex:1;"></div>
+          <button class="btn btn-copy btn-sm" id="tool-response-copy">Copy</button>
+          <button class="btn btn-default btn-sm" id="tool-response-retry">Retry</button>
+        </div>
+        <div id="tool-response-body" class="code-block">
+          <div class="json-viewer code-body" id="tool-response-json" style="max-height:400px; overflow:auto;"></div>
+        </div>
+      </div>
+
+      <!-- Loading State (hidden by default) -->
+      <div id="tool-response-loading" style="display:none; padding:24px; text-align:center;">
+        <span class="spinner">Executing...</span>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -702,6 +770,11 @@
     ws.onopen = function() {
       setWsState('live');
       wsBackoff = 1000; // reset backoff
+      // Refresh tool list on reconnect (server may have restarted, AC-7)
+      if (toolsLoaded) {
+        toolsLoaded = false;
+        if (getRoute() === 'tools') loadTools();
+      }
     };
 
     ws.onclose = function() {
@@ -751,6 +824,459 @@
      Resize Handle — re-init after dynamic content
      ====================================================================== */
   // ds.js MutationObserver handles this automatically
+
+  /* ======================================================================
+     Tool Browser — State
+     ====================================================================== */
+  var toolGroups       = document.getElementById('tool-groups');
+  var toolSearch       = document.getElementById('tool-search');
+  var toolsEmpty       = document.getElementById('tools-empty');
+  var toolDetail       = document.getElementById('tool-detail');
+  var toolDetailName   = document.getElementById('tool-detail-name');
+  var toolDetailServer = document.getElementById('tool-detail-server');
+  var toolDetailDesc   = document.getElementById('tool-detail-desc');
+  var toolParamsForm   = document.getElementById('tool-params-form');
+  var toolParamsSection = document.getElementById('tool-params-section');
+  var toolExecuteBtn   = document.getElementById('tool-execute-btn');
+  var toolResponseSection = document.getElementById('tool-response-section');
+  var toolResponseLoading = document.getElementById('tool-response-loading');
+  var toolResponseStatus  = document.getElementById('tool-response-status');
+  var toolResponseLatency = document.getElementById('tool-response-latency');
+  var toolResponseJson    = document.getElementById('tool-response-json');
+  var toolResponseCopy    = document.getElementById('tool-response-copy');
+  var toolResponseRetry   = document.getElementById('tool-response-retry');
+
+  var allTools         = {}; // { serverName: [{ name, description, inputSchema }] }
+  var selectedTool     = null; // { server, name, description, inputSchema }
+  var toolsLoaded      = false;
+
+  /* ======================================================================
+     Tool Browser — Load Tools
+     ====================================================================== */
+  function loadTools() {
+    fetch('/api/servers')
+      .then(function(resp) { return resp.json(); })
+      .then(function(servers) {
+        if (!servers || servers.length === 0) {
+          toolGroups.innerHTML = '<div style="padding:16px; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center;">No servers connected</div>';
+          return;
+        }
+
+        var pending = servers.length;
+        allTools = {};
+
+        servers.forEach(function(srv) {
+          fetch('/api/tools?server=' + encodeURIComponent(srv.name))
+            .then(function(resp) {
+              if (!resp.ok) throw new Error('Failed to fetch tools');
+              return resp.json();
+            })
+            .then(function(data) {
+              var tools = data.tools || [];
+              allTools[srv.name] = { status: srv.status, tools: tools };
+            })
+            .catch(function(err) {
+              console.error('Failed to load tools for', srv.name, err);
+              allTools[srv.name] = { status: 'offline', tools: [] };
+            })
+            .then(function() {
+              pending--;
+              if (pending <= 0) {
+                toolsLoaded = true;
+                renderToolSidebar();
+              }
+            });
+        });
+      })
+      .catch(function(err) {
+        console.error('Failed to load servers:', err);
+        toolGroups.innerHTML = '<div style="padding:16px; color:var(--danger-fg); font-size:var(--font-size-sm); text-align:center;">Failed to load servers</div>';
+      });
+  }
+
+  /* ======================================================================
+     Tool Browser — Render Sidebar
+     ====================================================================== */
+  function renderToolSidebar() {
+    var searchVal = toolSearch ? toolSearch.value.trim().toLowerCase() : '';
+    var html = '';
+    var serverNames = Object.keys(allTools);
+
+    for (var s = 0; s < serverNames.length; s++) {
+      var srvName = serverNames[s];
+      var srvData = allTools[srvName];
+      var tools = srvData.tools || [];
+      var isOffline = srvData.status === 'offline';
+      var isRestarting = srvData.status === 'restarting';
+
+      // Filter tools by search
+      var filteredTools = tools;
+      if (searchVal) {
+        filteredTools = tools.filter(function(t) {
+          return t.name.toLowerCase().indexOf(searchVal) !== -1 ||
+                 (t.description && t.description.toLowerCase().indexOf(searchVal) !== -1);
+        });
+        if (filteredTools.length === 0) continue;
+      }
+
+      var groupClass = 'tool-group';
+      if (isOffline || isRestarting) groupClass += ' is-collapsed';
+
+      var statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
+      var statusLabel = '';
+      if (isOffline) {
+        statusDot = '<span class="badge-dot" style="background:var(--danger-fg);"></span>';
+        statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--danger-fg);">offline</span>';
+      } else if (isRestarting) {
+        statusDot = '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
+        statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--warning-fg);">restarting</span>';
+      }
+
+      html += '<div class="' + groupClass + '" style="' + (isOffline ? 'opacity:0.5;' : '') + '">';
+      html += '<div class="tool-group-header">';
+      html += '<span style="display:flex; align-items:center; gap:6px;">';
+      html += statusDot;
+      html += escapeHtml(srvName);
+      html += statusLabel;
+      html += '</span>';
+      html += '<span style="display:flex; align-items:center; gap:6px;">';
+      html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">' + filteredTools.length + '</span>';
+      html += '<span class="tool-group-chevron">&#9660;</span>';
+      html += '</span>';
+      html += '</div>';
+      html += '<div class="tool-group-items">';
+
+      for (var t = 0; t < filteredTools.length; t++) {
+        var tool = filteredTools[t];
+        var isActive = selectedTool && selectedTool.server === srvName && selectedTool.name === tool.name;
+        var itemClass = 'tool-item' + (isActive ? ' is-active' : '');
+        html += '<div class="' + itemClass + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '">';
+        html += '<span style="color:var(--text-muted);">&#128295;</span>';
+        html += '<span style="font-family:var(--font-mono); font-size:var(--font-size-sm);">' + escapeHtml(tool.name) + '</span>';
+        html += '</div>';
+      }
+
+      html += '</div>';
+      html += '</div>';
+    }
+
+    if (!html) {
+      html = '<div style="padding:16px; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center;">No tools found</div>';
+    }
+
+    toolGroups.innerHTML = html;
+  }
+
+  /* ======================================================================
+     Tool Browser — Select Tool
+     ====================================================================== */
+  function selectTool(serverName, toolName) {
+    var srvData = allTools[serverName];
+    if (!srvData) return;
+
+    var tool = null;
+    for (var i = 0; i < srvData.tools.length; i++) {
+      if (srvData.tools[i].name === toolName) {
+        tool = srvData.tools[i];
+        break;
+      }
+    }
+    if (!tool) return;
+
+    selectedTool = {
+      server: serverName,
+      name: tool.name,
+      description: tool.description || '',
+      inputSchema: tool.inputSchema || null
+    };
+
+    // Update sidebar active state
+    renderToolSidebar();
+
+    // Show detail view
+    toolsEmpty.style.display = 'none';
+    toolDetail.style.display = '';
+
+    toolDetailName.textContent = tool.name;
+    toolDetailServer.textContent = serverName;
+    toolDetailDesc.textContent = tool.description || 'No description available.';
+
+    // Render form
+    renderToolForm(tool.inputSchema);
+
+    // Hide response section
+    toolResponseSection.style.display = 'none';
+    toolResponseLoading.style.display = 'none';
+  }
+
+  /* ======================================================================
+     Tool Browser — Render Schema Form
+     ====================================================================== */
+  function renderToolForm(schema) {
+    if (!schema || !schema.properties || Object.keys(schema.properties).length === 0) {
+      toolParamsSection.style.display = 'none';
+      toolParamsForm.innerHTML = '';
+      return;
+    }
+
+    toolParamsSection.style.display = '';
+    var required = schema.required || [];
+    var props = schema.properties;
+    var keys = Object.keys(props);
+    var html = '';
+
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var prop = props[key];
+      var isRequired = required.indexOf(key) !== -1;
+      html += renderField(key, prop, isRequired);
+    }
+
+    toolParamsForm.innerHTML = html;
+  }
+
+  function renderField(name, prop, isRequired) {
+    var type = prop.type || 'string';
+    var desc = prop.description || '';
+    var reqMark = isRequired ? '<span class="field-required">*</span>' : '';
+
+    // Type badge
+    var typeBadge = '<span class="badge badge-neutral" style="font-size:var(--font-size-xs); margin-left:4px;">' + escapeHtml(type) + '</span>';
+
+    if (type === 'boolean') {
+      return '<div class="field field-boolean">' +
+        '<div class="switch" data-field="' + escapeHtml(name) + '"></div>' +
+        '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
+        (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
+        '</div>';
+    }
+
+    if (type === 'number' || type === 'integer') {
+      return '<div class="field field-number">' +
+        '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
+        '<input class="input" type="number" data-field="' + escapeHtml(name) + '" placeholder="' + escapeHtml(desc || name) + '"' + (prop.default !== undefined ? ' value="' + escapeHtml(String(prop.default)) + '"' : '') + '>' +
+        (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
+        '</div>';
+    }
+
+    if (prop.enum && prop.enum.length > 0) {
+      var options = '';
+      options += '<option value="">Select...</option>';
+      for (var e = 0; e < prop.enum.length; e++) {
+        var val = prop.enum[e];
+        var sel = prop.default === val ? ' selected' : '';
+        options += '<option value="' + escapeHtml(String(val)) + '"' + sel + '>' + escapeHtml(String(val)) + '</option>';
+      }
+      return '<div class="field field-enum">' +
+        '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
+        '<select class="input" data-field="' + escapeHtml(name) + '">' + options + '</select>' +
+        (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
+        '</div>';
+    }
+
+    if (type === 'array') {
+      return '<div class="field field-array" data-field="' + escapeHtml(name) + '">' +
+        '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
+        (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
+        '<div class="field-array-items"></div>' +
+        '<button class="btn btn-default btn-sm field-array-add" data-array-field="' + escapeHtml(name) + '">+ Add item</button>' +
+        '</div>';
+    }
+
+    // Default: text/string
+    return '<div class="field field-text">' +
+      '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
+      '<input class="input" type="text" data-field="' + escapeHtml(name) + '" placeholder="' + escapeHtml(desc || name) + '"' + (prop.default !== undefined ? ' value="' + escapeHtml(String(prop.default)) + '"' : '') + '>' +
+      (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
+      '</div>';
+  }
+
+  /* ======================================================================
+     Tool Browser — Collect Form Arguments
+     ====================================================================== */
+  function collectArguments() {
+    if (!selectedTool || !selectedTool.inputSchema || !selectedTool.inputSchema.properties) {
+      return {};
+    }
+    var props = selectedTool.inputSchema.properties;
+    var keys = Object.keys(props);
+    var args = {};
+
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var prop = props[key];
+      var type = prop.type || 'string';
+
+      if (type === 'boolean') {
+        var sw = toolParamsForm.querySelector('.switch[data-field="' + key + '"]');
+        if (sw) args[key] = sw.classList.contains('is-on');
+      } else if (type === 'array') {
+        var container = toolParamsForm.querySelector('.field-array[data-field="' + key + '"]');
+        if (container) {
+          var inputs = container.querySelectorAll('.field-array-items input');
+          var arr = [];
+          for (var j = 0; j < inputs.length; j++) {
+            var v = inputs[j].value.trim();
+            if (v) arr.push(v);
+          }
+          if (arr.length > 0) args[key] = arr;
+        }
+      } else if (type === 'number' || type === 'integer') {
+        var input = toolParamsForm.querySelector('input[data-field="' + key + '"]');
+        if (input && input.value !== '') {
+          args[key] = type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value);
+        }
+      } else if (prop.enum) {
+        var sel = toolParamsForm.querySelector('select[data-field="' + key + '"]');
+        if (sel && sel.value !== '') args[key] = sel.value;
+      } else {
+        var inp = toolParamsForm.querySelector('input[data-field="' + key + '"]');
+        if (inp && inp.value !== '') args[key] = inp.value;
+      }
+    }
+
+    return args;
+  }
+
+  /* ======================================================================
+     Tool Browser — Execute Tool
+     ====================================================================== */
+  function executeTool() {
+    if (!selectedTool) return;
+
+    var args = collectArguments();
+
+    // Show loading state
+    toolExecuteBtn.disabled = true;
+    toolExecuteBtn.innerHTML = '<span class="spinner">Executing...</span>';
+    toolResponseSection.style.display = 'none';
+    toolResponseLoading.style.display = '';
+
+    var body = JSON.stringify({
+      server: selectedTool.server,
+      tool: selectedTool.name,
+      arguments: args
+    });
+
+    fetch('/api/tools/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body
+    })
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        toolResponseLoading.style.display = 'none';
+        toolResponseSection.style.display = '';
+
+        var isError = !!data.error;
+        var latencyMs = data.latency_ms;
+
+        // Status badge
+        if (isError) {
+          toolResponseStatus.className = 'badge badge-error';
+          toolResponseStatus.innerHTML = '<span class="badge-dot"></span>Error';
+          toolResponseBody(data.error);
+        } else {
+          toolResponseStatus.className = 'badge badge-success';
+          toolResponseStatus.innerHTML = '<span class="badge-dot"></span>OK';
+          toolResponseBody(data.result);
+        }
+
+        // Latency pill
+        if (latencyMs !== undefined && latencyMs !== null) {
+          toolResponseLatency.style.display = '';
+          var text = latencyMs < 1000 ? latencyMs + 'ms' : (latencyMs / 1000).toFixed(1) + 's';
+          toolResponseLatency.textContent = text;
+          toolResponseLatency.className = 'pill ' + (latencyMs < 100 ? 'pill-fast' : latencyMs < 1000 ? 'pill-moderate' : latencyMs < 5000 ? 'pill-slow' : 'pill-timeout');
+        } else {
+          toolResponseLatency.style.display = 'none';
+        }
+
+        // Error styling on response body
+        var bodyBlock = document.getElementById('tool-response-body');
+        if (isError) {
+          bodyBlock.style.borderColor = 'var(--danger-fg)';
+        } else {
+          bodyBlock.style.borderColor = '';
+        }
+      })
+      .catch(function(err) {
+        toolResponseLoading.style.display = 'none';
+        toolResponseSection.style.display = '';
+        toolResponseStatus.className = 'badge badge-error';
+        toolResponseStatus.innerHTML = '<span class="badge-dot"></span>Error';
+        toolResponseLatency.style.display = 'none';
+        toolResponseJson.textContent = 'Network error: ' + err.message;
+      })
+      .then(function() {
+        // Reset button
+        toolExecuteBtn.disabled = false;
+        toolExecuteBtn.innerHTML = '<span>&#9654;</span> Execute';
+      });
+  }
+
+  function toolResponseBody(data) {
+    var str = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    toolResponseJson.innerHTML = highlightJSON(str);
+    toolResponseCopy.setAttribute('data-copy', typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+  }
+
+  /* ======================================================================
+     Tool Browser — Event Handlers
+     ====================================================================== */
+  toolGroups.addEventListener('click', function(e) {
+    var item = e.target.closest('.tool-item');
+    if (item) {
+      var server = item.getAttribute('data-server');
+      var tool = item.getAttribute('data-tool');
+      if (server && tool) selectTool(server, tool);
+      return;
+    }
+  });
+
+  toolSearch.addEventListener('input', function() {
+    renderToolSidebar();
+  });
+
+  toolExecuteBtn.addEventListener('click', function() {
+    executeTool();
+  });
+
+  toolResponseRetry.addEventListener('click', function() {
+    executeTool();
+  });
+
+  // Array field: add item
+  toolParamsForm.addEventListener('click', function(e) {
+    var addBtn = e.target.closest('.field-array-add');
+    if (!addBtn) return;
+
+    var fieldName = addBtn.getAttribute('data-array-field');
+    var container = toolParamsForm.querySelector('.field-array[data-field="' + fieldName + '"] .field-array-items');
+    if (!container) return;
+
+    var itemDiv = document.createElement('div');
+    itemDiv.style.cssText = 'display:flex; align-items:center; gap:4px;';
+    itemDiv.innerHTML = '<input class="input" type="text" style="flex:1;" placeholder="Item value">' +
+      '<button class="btn btn-ghost btn-sm" style="color:var(--danger-fg); padding:2px 6px;">&times;</button>';
+    container.appendChild(itemDiv);
+
+    // Remove button
+    itemDiv.querySelector('button').addEventListener('click', function() {
+      container.removeChild(itemDiv);
+    });
+  });
+
+  /* ======================================================================
+     Tool Browser — Load on Tab Switch
+     ====================================================================== */
+  var origNavigate = navigate;
+  navigate = function(route) {
+    origNavigate(route);
+    if (route === 'tools' && !toolsLoaded) {
+      loadTools();
+    }
+  };
 
   /* ======================================================================
      Init

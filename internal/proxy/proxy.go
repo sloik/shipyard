@@ -28,6 +28,7 @@ type Proxy struct {
 	cwd     string
 	store   *capture.Store
 	hub     *web.Hub
+	managed *managedProxy // set when running under a Manager
 }
 
 // NewProxy creates a new stdio proxy.
@@ -148,11 +149,21 @@ func (cw *childInputWriter) waitForWriter(ctx context.Context) (io.WriteCloser, 
 	return cw.writer, nil
 }
 
+// SetManaged associates this proxy with a managed proxy entry.
+func (p *Proxy) SetManaged(mp *managedProxy) {
+	p.managed = mp
+}
+
 // Run starts the child process and proxies stdio. It blocks until the context
 // is cancelled or the child exits.
 func (p *Proxy) Run(ctx context.Context) error {
 	inputWriter := newChildInputWriter()
 	defer inputWriter.close()
+
+	// If managed, share the input writer so the Manager can send requests
+	if p.managed != nil {
+		p.managed.SetInputWriter(inputWriter)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -205,6 +216,23 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
+		// Make a copy for potential interception and capture
+		raw := make([]byte, len(line))
+		copy(raw, line)
+
+		// If managed and this is from the child (server→client), check if it's
+		// a response to a manager-initiated request. If so, route it to the
+		// response tracker instead of the parent client's stdout.
+		if p.managed != nil && direction == capture.DirectionServerToClient {
+			if p.managed.HandleChildOutput(raw) {
+				// Response was claimed by the manager; still capture it but
+				// don't forward to the parent client.
+				ts := time.Now()
+				go p.captureMessage(raw, direction, ts)
+				continue
+			}
+		}
+
 		// Write to destination first (don't delay the proxy)
 		_, err := dst.Write(line)
 		if err != nil {
@@ -224,9 +252,6 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 
 		// Capture the message
 		ts := time.Now()
-		raw := make([]byte, len(line))
-		copy(raw, line)
-
 		go p.captureMessage(raw, direction, ts)
 	}
 
