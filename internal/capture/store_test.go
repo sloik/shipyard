@@ -296,6 +296,46 @@ func TestQuery_NoResults(t *testing.T) {
 	}
 }
 
+func TestQuery_ReturnsNewestEntriesFirst(t *testing.T) {
+	s := newTestStore(t)
+
+	id1, _ := s.Insert(&TrafficEntry{
+		Timestamp:  time.Now().Add(-2 * time.Minute),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "one",
+		Payload:    `{}`,
+		Status:     "pending",
+	})
+	id2, _ := s.Insert(&TrafficEntry{
+		Timestamp:  time.Now().Add(-time.Minute),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "two",
+		Payload:    `{}`,
+		Status:     "pending",
+	})
+	id3, _ := s.Insert(&TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "three",
+		Payload:    `{}`,
+		Status:     "pending",
+	})
+
+	page, err := s.Query(1, 10, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(page.Items))
+	}
+	if page.Items[0].ID != id3 || page.Items[1].ID != id2 || page.Items[2].ID != id1 {
+		t.Fatalf("expected newest-first order %d,%d,%d; got %d,%d,%d", id3, id2, id1, page.Items[0].ID, page.Items[1].ID, page.Items[2].ID)
+	}
+}
+
 func TestQuery_PageBeyondTotal(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now()

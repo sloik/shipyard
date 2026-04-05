@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -442,5 +443,108 @@ func TestManagerSendRequest_WriteFailure(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "write to child: EOF") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	sink := &trackedWriteCloser{}
+	cw.attach(sink)
+	mp.SetInputWriter(cw)
+
+	type result struct {
+		raw json.RawMessage
+		err error
+	}
+	responses := map[string]chan result{
+		"tools/list": make(chan result, 1),
+		"tools/call": make(chan result, 1),
+	}
+
+	send := func(method string, params json.RawMessage) {
+		raw, err := m.SendRequest(context.Background(), "alpha", method, params)
+		responses[method] <- result{raw: raw, err: err}
+	}
+
+	go send("tools/list", json.RawMessage(`{"kind":"list"}`))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.Count(sink.String(), "\n") < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first request write")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	go send("tools/call", json.RawMessage(`{"kind":"call"}`))
+
+	deadline = time.Now().Add(2 * time.Second)
+	for strings.Count(sink.String(), "\n") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for second request write")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	lines := strings.Split(strings.TrimSpace(sink.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 request lines, got %d: %q", len(lines), sink.String())
+	}
+
+	type reqInfo struct {
+		id string
+	}
+	reqs := make(map[string]reqInfo)
+	for _, line := range lines {
+		var req map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			t.Fatalf("unmarshal request: %v", err)
+		}
+		var method string
+		if err := json.Unmarshal(req["method"], &method); err != nil {
+			t.Fatalf("unmarshal method: %v", err)
+		}
+		reqs[method] = reqInfo{id: string(req["id"])}
+	}
+
+	if reqs["tools/list"].id == "" || reqs["tools/call"].id == "" {
+		t.Fatalf("expected request IDs, got %+v", reqs)
+	}
+
+	if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"ok":"call"}}`, reqs["tools/call"].id))) {
+		t.Fatal("expected second response to resolve")
+	}
+	if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"ok":"list"}}`, reqs["tools/list"].id))) {
+		t.Fatal("expected first response to resolve")
+	}
+
+	select {
+	case got := <-responses["tools/call"]:
+		if got.err != nil {
+			t.Fatalf("tools/call returned error: %v", got.err)
+		}
+		want := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"ok":"call"}}`, reqs["tools/call"].id)
+		if string(got.raw) != want {
+			t.Fatalf("unexpected tools/call response: %s", string(got.raw))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tools/call response")
+	}
+
+	select {
+	case got := <-responses["tools/list"]:
+		if got.err != nil {
+			t.Fatalf("tools/list returned error: %v", got.err)
+		}
+		want := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"ok":"list"}}`, reqs["tools/list"].id)
+		if string(got.raw) != want {
+			t.Fatalf("unexpected tools/list response: %s", string(got.raw))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tools/list response")
 	}
 }

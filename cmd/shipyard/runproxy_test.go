@@ -114,6 +114,51 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 	}
 }
 
+func TestRunConfig_MultiServerLogsWarning(t *testing.T) {
+	origRunProxy := runProxyFn
+	t.Cleanup(func() { runProxyFn = origRunProxy })
+
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+
+	logs := &logBuffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+
+	var got struct {
+		name string
+		port int
+	}
+	runProxyFn = func(name string, port int, command string, args []string, env map[string]string, cwd string) {
+		got.name = name
+		got.port = port
+	}
+
+	dir := t.TempDir()
+	path := dir + "/servers.json"
+	data := `{
+		"servers": {
+			"alpha": {"command":"echo"},
+			"beta": {"command":"printf"}
+		},
+		"web": {"port": 8080}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runConfig(path)
+
+	if got.name != "alpha" {
+		t.Fatalf("expected first server alpha, got %q", got.name)
+	}
+	if got.port != 8080 {
+		t.Fatalf("expected explicit port 8080, got %d", got.port)
+	}
+	if !strings.Contains(logs.String(), "multi-server config not yet supported") {
+		t.Fatalf("expected multi-server warning, got %q", logs.String())
+	}
+}
+
 func TestRunConfig_LoadFailureExits(t *testing.T) {
 	origExit := exitFn
 	defer func() { exitFn = origExit }()
