@@ -447,7 +447,11 @@
 
     // REQUEST panel
     html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter request..."></div>';
+    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter request...">';
+    html += '<div class="mode-toggle mode-toggle-sm">';
+    html += '<button class="is-active" data-mode="text">Text</button>';
+    html += '<button data-mode="jq">JQ</button>';
+    html += '</div></div>';
     html += '<div class="code-block">';
     html += '<div class="code-header" data-req-header>' +
       '<span>REQUEST</span>' +
@@ -459,7 +463,11 @@
 
     // RESPONSE panel
     html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter response..."></div>';
+    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter response...">';
+    html += '<div class="mode-toggle mode-toggle-sm">';
+    html += '<button class="is-active" data-mode="text">Text</button>';
+    html += '<button data-mode="jq">JQ</button>';
+    html += '</div></div>';
     html += '<div class="code-block">';
     if (resEntry && resEntry.status === 'error') {
       html += '<div class="code-header" data-res-header>' +
