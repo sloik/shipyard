@@ -2,7 +2,7 @@
 id: SPEC-002
 priority: 2
 type: main
-status: draft
+status: done
 after: [SPEC-001]
 created: 2026-04-04
 ---
