@@ -861,8 +861,8 @@ body {
 }
 
 .table-header > * {
-  padding: 8px 12px;
-  font-size: var(--font-size-sm);
+  padding: 8px 16px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -870,6 +870,15 @@ body {
   user-select: none;
   cursor: pointer;
 }
+
+/* Column widths — match design spec */
+[data-col="time"]    { width: 90px;  flex-shrink: 0; }
+[data-col="dir"]     { width: 55px;  flex-shrink: 0; }
+[data-col="server"]  { width: 110px; flex-shrink: 0; }
+[data-col="method"]  { flex: 1; min-width: 0; }
+[data-col="status"]  { width: 90px;  flex-shrink: 0; }
+[data-col="latency"] { width: 70px;  flex-shrink: 0; text-align: right; }
+[data-col="chevron"] { width: 14px;  flex-shrink: 0; }
 
 .table-row {
   display: flex;
@@ -880,7 +889,7 @@ body {
 }
 
 .table-row > * {
-  padding: 6px 12px;
+  padding: 8px 16px;
   font-size: var(--font-size-md);
 }
 

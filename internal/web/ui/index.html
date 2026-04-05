@@ -330,14 +330,14 @@
   }
 
   function dirBadge(direction) {
-    if (direction.indexOf('client') === 0 || direction.indexOf('client') !== -1 && direction.indexOf('\u2192') !== -1) {
+    if (direction.indexOf('client') === 0) {
       return '<span class="dir dir-req">REQ \u2192</span>';
     }
     return '<span class="dir dir-res">\u2190 RES</span>';
   }
 
   function isRequest(direction) {
-    return direction.indexOf('client') !== -1 && direction.indexOf('\u2192') !== -1;
+    return direction.indexOf('client') === 0;
   }
 
   function statusBadge(status) {

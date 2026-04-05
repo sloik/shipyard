@@ -449,7 +449,7 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 		status = "error"
 	}
 	if !isResponse && method != "" {
-		status = "request"
+		status = "pending"
 	}
 
 	entry := &capture.TrafficEntry{
