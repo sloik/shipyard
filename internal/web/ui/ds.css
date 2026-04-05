@@ -1081,6 +1081,14 @@ body {
   color: var(--text-on-emphasis);
 }
 
+/* Small variant for per-panel filter bars (BUG-008) */
+.mode-toggle-sm {
+  border-radius: var(--radius-s);
+}
+.mode-toggle-sm button {
+  padding: 2px 6px;
+}
+
 /* ==========================================================================
    19. Forms — Schema-Driven (7)
    ========================================================================== */
