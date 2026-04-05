@@ -741,6 +741,47 @@ func TestQuery_ScanFailure(t *testing.T) {
 	}
 }
 
+// --- SPEC-003 AC-3: History persists across restarts ---
+
+func TestStore_PersistsAcrossRestarts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	// First "session" — create store and insert data
+	s1, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore (session 1): %v", err)
+	}
+	s1.Insert(&TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  DirectionClientToServer,
+		ServerName: "srv",
+		Method:     "tools/call",
+		Payload:    `{"persistent":true}`,
+		Status:     "pending",
+	})
+	s1.Close()
+
+	// Second "session" — re-open the same DB
+	s2, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore (session 2): %v", err)
+	}
+	t.Cleanup(func() { s2.Close() })
+
+	page, err := s2.QueryFiltered(QueryFilter{Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("QueryFiltered: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 persisted entry after restart, got %d", page.TotalCount)
+	}
+	if !strings.Contains(page.Items[0].Payload, "persistent") {
+		t.Fatalf("expected payload to contain 'persistent', got %s", page.Items[0].Payload)
+	}
+}
+
 // --- QueryFiltered tests (SPEC-003 AC-4: search, direction, time range) ---
 
 func TestQueryFiltered_SearchByPayload(t *testing.T) {
