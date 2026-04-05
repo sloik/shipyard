@@ -139,7 +139,7 @@
     </div>
 
     <!-- Tool Detail (hidden by default) -->
-    <div id="tool-detail" style="display:none; padding:24px; max-width:720px;">
+    <div id="tool-detail" style="display:none; padding:24px; flex-direction:column;">
 
       <!-- Tool Header -->
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
@@ -168,7 +168,7 @@
       <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
 
       <!-- Response Section -->
-      <div id="tool-response-section" style="display:none;">
+      <div id="tool-response-section" style="display:none; flex:1; min-height:0;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
           <span style="font-size:var(--font-size-lg); font-weight:600; color:var(--text-primary);">Response</span>
           <span id="tool-response-status" class="badge"></span>
@@ -1075,7 +1075,7 @@
 
     // Show detail view
     toolsEmpty.style.display = 'none';
-    toolDetail.style.display = '';
+    toolDetail.style.display = 'flex';
 
     toolDetailName.textContent = tool.name;
     toolDetailServer.textContent = serverName;
