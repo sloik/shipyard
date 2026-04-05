@@ -2,7 +2,7 @@
 id: BUG-007
 priority: 2
 type: bug
-status: open
+status: done
 after: [SPEC-002]
 created: 2026-04-05
 ---
