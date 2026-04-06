@@ -60,13 +60,14 @@ The dashboard opens automatically in a native window. Add `--headless` to skip t
 
 Download `shipyard-macos.zip` from [Releases](https://github.com/sloik/shipyard/releases). Unzip and move `Shipyard.app` to your Applications folder.
 
-**First launch on macOS:** Apple will show *"Shipyard.app cannot be opened because it is from an unidentified developer."* This is expected -- the app is not yet code-signed with an Apple Developer ID. To open it:
+**First launch on macOS:** Apple will block the app because it is not code-signed with an Apple Developer ID. To allow it:
 
-1. **Right-click** (or Control-click) on `Shipyard.app` and select **Open**
-2. Click **Open** in the dialog that appears
-3. macOS remembers your choice -- subsequent launches work normally
+1. Try to open `Shipyard.app` -- macOS will block it
+2. Open **System Settings → Privacy & Security**
+3. Scroll down to the **Security** section -- you'll see a message about Shipyard being blocked
+4. Click **Open Anyway** and confirm
 
-Alternatively, remove the quarantine attribute from the terminal:
+macOS remembers your choice -- subsequent launches work normally. Alternatively, remove the quarantine attribute from the terminal:
 ```bash
 xattr -d com.apple.quarantine /Applications/Shipyard.app
 ```
