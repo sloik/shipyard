@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
@@ -63,24 +64,16 @@ func TestRunProxy_StoreInitFailureExits(t *testing.T) {
 }
 
 func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
-	origRunProxy := runProxyFn
-	t.Cleanup(func() { runProxyFn = origRunProxy })
+	origRunMulti := runMultiServerFn
+	t.Cleanup(func() { runMultiServerFn = origRunMulti })
 
 	var got struct {
-		name    string
-		port    int
-		command string
-		args    []string
-		env     map[string]string
-		cwd     string
+		cfg  *Config
+		port int
 	}
-	runProxyFn = func(name string, port int, command string, args []string, env map[string]string, cwd string) {
-		got.name = name
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+		got.cfg = cfg
 		got.port = port
-		got.command = command
-		got.args = append([]string(nil), args...)
-		got.env = env
-		got.cwd = cwd
 	}
 
 	dir := t.TempDir()
@@ -95,41 +88,42 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path)
+	runConfig(path, 60*time.Second)
 
-	if got.name != "alpha" {
-		t.Fatalf("expected first server alpha, got %q", got.name)
+	if got.cfg == nil {
+		t.Fatal("expected runMultiServer to be called")
 	}
 	if got.port != 9417 {
 		t.Fatalf("expected default port 9417, got %d", got.port)
 	}
-	if got.command != "echo" || len(got.args) != 1 || got.args[0] != "one" {
-		t.Fatalf("unexpected forwarded command/args: %q %v", got.command, got.args)
+	if len(got.cfg.ServerOrder) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(got.cfg.ServerOrder))
 	}
-	if got.cwd != "/tmp/alpha" {
-		t.Fatalf("expected cwd /tmp/alpha, got %q", got.cwd)
+	if got.cfg.ServerOrder[0] != "alpha" {
+		t.Fatalf("expected first server alpha, got %q", got.cfg.ServerOrder[0])
 	}
-	if got.env["A"] != "1" {
-		t.Fatalf("expected env to be forwarded, got %v", got.env)
+	srv := got.cfg.Servers["alpha"]
+	if srv.Command != "echo" || len(srv.Args) != 1 || srv.Args[0] != "one" {
+		t.Fatalf("unexpected alpha command/args: %q %v", srv.Command, srv.Args)
+	}
+	if srv.Cwd != "/tmp/alpha" {
+		t.Fatalf("expected cwd /tmp/alpha, got %q", srv.Cwd)
+	}
+	if srv.Env["A"] != "1" {
+		t.Fatalf("expected env to be forwarded, got %v", srv.Env)
 	}
 }
 
-func TestRunConfig_MultiServerLogsWarning(t *testing.T) {
-	origRunProxy := runProxyFn
-	t.Cleanup(func() { runProxyFn = origRunProxy })
-
-	origDefault := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(origDefault) })
-
-	logs := &logBuffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+func TestRunConfig_MultiServerAllStarted(t *testing.T) {
+	origRunMulti := runMultiServerFn
+	t.Cleanup(func() { runMultiServerFn = origRunMulti })
 
 	var got struct {
-		name string
+		cfg  *Config
 		port int
 	}
-	runProxyFn = func(name string, port int, command string, args []string, env map[string]string, cwd string) {
-		got.name = name
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+		got.cfg = cfg
 		got.port = port
 	}
 
@@ -146,16 +140,50 @@ func TestRunConfig_MultiServerLogsWarning(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path)
+	runConfig(path, 60*time.Second)
 
-	if got.name != "alpha" {
-		t.Fatalf("expected first server alpha, got %q", got.name)
+	if got.cfg == nil {
+		t.Fatal("expected runMultiServer to be called")
 	}
 	if got.port != 8080 {
 		t.Fatalf("expected explicit port 8080, got %d", got.port)
 	}
-	if !strings.Contains(logs.String(), "multi-server config not yet supported") {
-		t.Fatalf("expected multi-server warning, got %q", logs.String())
+	// Both servers should be present — no longer drops second server
+	if len(got.cfg.ServerOrder) != 2 {
+		t.Fatalf("expected 2 servers in config, got %d", len(got.cfg.ServerOrder))
+	}
+}
+
+func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
+	origRunMulti := runMultiServerFn
+	origExit := exitFn
+	t.Cleanup(func() {
+		runMultiServerFn = origRunMulti
+		exitFn = origExit
+	})
+
+	var exitCode int
+	exitFn = func(c int) { exitCode = c }
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+		t.Fatal("should not reach runMultiServer when a server has no command")
+	}
+
+	dir := t.TempDir()
+	path := dir + "/servers.json"
+	data := `{
+		"servers": {
+			"alpha": {"command":"echo"},
+			"beta": {}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runConfig(path, 60*time.Second)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
 	}
 }
 
@@ -166,7 +194,7 @@ func TestRunConfig_LoadFailureExits(t *testing.T) {
 	var code int
 	exitFn = func(c int) { code = c }
 
-	runConfig("/definitely/missing/config.json")
+	runConfig("/definitely/missing/config.json", 60*time.Second)
 
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)

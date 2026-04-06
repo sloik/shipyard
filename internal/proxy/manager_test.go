@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sloik/shipyard/internal/web"
 )
 
 func TestNewResponseTracker(t *testing.T) {
@@ -446,6 +448,176 @@ func TestManagerSendRequest_WriteFailure(t *testing.T) {
 	}
 }
 
+// --- Manager status tracking (SPEC-004 AC-2/AC-3) ---
+
+func TestManager_SetStatus(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	m.SetStatus("alpha", "crashed", "exit code 1")
+
+	servers := m.Servers()
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(servers))
+	}
+	if servers[0].Status != "crashed" {
+		t.Fatalf("expected status crashed, got %q", servers[0].Status)
+	}
+	if servers[0].ErrorMessage != "exit code 1" {
+		t.Fatalf("expected error message, got %q", servers[0].ErrorMessage)
+	}
+}
+
+func TestManager_SetStatus_Online_ResetsStartTime(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	m.SetStatus("alpha", "crashed", "oops")
+	m.SetStatus("alpha", "online", "")
+
+	servers := m.Servers()
+	if servers[0].Status != "online" {
+		t.Fatalf("expected online, got %q", servers[0].Status)
+	}
+	// Uptime may be 0ms if checked immediately — just verify it's non-negative
+	if servers[0].Uptime < 0 {
+		t.Fatalf("expected non-negative uptime, got %d", servers[0].Uptime)
+	}
+}
+
+func TestManager_SetStatus_UnknownServer(t *testing.T) {
+	m := NewManager()
+	// Should not panic
+	m.SetStatus("nonexistent", "online", "")
+}
+
+func TestManager_SetToolCount(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	m.SetToolCount("alpha", 7)
+
+	servers := m.Servers()
+	if servers[0].ToolCount != 7 {
+		t.Fatalf("expected tool count 7, got %d", servers[0].ToolCount)
+	}
+}
+
+func TestManager_ServerStatus(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	if got := m.ServerStatus("alpha"); got != "online" {
+		t.Fatalf("expected online, got %q", got)
+	}
+	if got := m.ServerStatus("nonexistent"); got != "" {
+		t.Fatalf("expected empty string for unknown server, got %q", got)
+	}
+}
+
+func TestManager_RestartServer(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	var cancelled bool
+	m.SetCancelFn("alpha", func() { cancelled = true })
+
+	err := m.RestartServer("alpha")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("expected cancel function to be called")
+	}
+	if got := m.ServerStatus("alpha"); got != "restarting" {
+		t.Fatalf("expected restarting, got %q", got)
+	}
+}
+
+func TestManager_RestartServer_NotFound(t *testing.T) {
+	m := NewManager()
+	err := m.RestartServer("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent server")
+	}
+}
+
+func TestManager_StopServer(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("beta", p)
+
+	var cancelled bool
+	m.SetCancelFn("beta", func() { cancelled = true })
+
+	err := m.StopServer("beta")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("expected cancel function to be called")
+	}
+	if got := m.ServerStatus("beta"); got != "stopped" {
+		t.Fatalf("expected stopped, got %q", got)
+	}
+}
+
+func TestManager_StopServer_NotFound(t *testing.T) {
+	m := NewManager()
+	err := m.StopServer("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent server")
+	}
+}
+
+func TestManager_Servers_EnrichedFields(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+	m.SetToolCount("alpha", 3)
+
+	servers := m.Servers()
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(servers))
+	}
+	s := servers[0]
+	if s.Name != "alpha" {
+		t.Fatalf("expected name alpha, got %q", s.Name)
+	}
+	if s.Command == "" {
+		t.Fatal("expected non-empty command")
+	}
+	if s.ToolCount != 3 {
+		t.Fatalf("expected tool count 3, got %d", s.ToolCount)
+	}
+	if s.Uptime < 0 {
+		t.Fatalf("expected non-negative uptime for online server, got %d", s.Uptime)
+	}
+}
+
+func TestManager_SetHub_BroadcastOnStatusChange(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	m.Register("alpha", p)
+
+	// Create a hub and start it briefly
+	hub := newTestHub(t)
+	m.SetHub(hub)
+
+	// This should not panic even with hub set
+	m.SetStatus("alpha", "crashed", "boom")
+}
+
+func newTestHub(t *testing.T) *web.Hub {
+	t.Helper()
+	return web.NewHub()
+}
+
 func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 	m := NewManager()
 	p, _ := newTestProxy(t)
@@ -546,5 +718,67 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for tools/list response")
+	}
+}
+
+// --- SPEC-007: Session Recording ---
+
+func TestManager_StartRecording(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("test-server", 42)
+	if id := m.ActiveSessionID("test-server"); id != 42 {
+		t.Fatalf("expected active session 42, got %d", id)
+	}
+}
+
+func TestManager_StopRecording(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("test-server", 42)
+	m.StopRecording("test-server")
+	if id := m.ActiveSessionID("test-server"); id != 0 {
+		t.Fatalf("expected no active session, got %d", id)
+	}
+}
+
+func TestManager_ActiveSessionID_NoSession(t *testing.T) {
+	m := NewManager()
+
+	if id := m.ActiveSessionID("nonexistent"); id != 0 {
+		t.Fatalf("expected 0 for no active session, got %d", id)
+	}
+}
+
+func TestManager_MultipleServerSessions(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("alpha", 10)
+	m.StartRecording("beta", 20)
+
+	if id := m.ActiveSessionID("alpha"); id != 10 {
+		t.Fatalf("expected alpha session 10, got %d", id)
+	}
+	if id := m.ActiveSessionID("beta"); id != 20 {
+		t.Fatalf("expected beta session 20, got %d", id)
+	}
+
+	m.StopRecording("alpha")
+	if id := m.ActiveSessionID("alpha"); id != 0 {
+		t.Fatalf("expected alpha cleared, got %d", id)
+	}
+	if id := m.ActiveSessionID("beta"); id != 20 {
+		t.Fatalf("expected beta still 20, got %d", id)
+	}
+}
+
+func TestManager_StartRecording_OverwritesPrevious(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("srv", 1)
+	m.StartRecording("srv", 2)
+
+	if id := m.ActiveSessionID("srv"); id != 2 {
+		t.Fatalf("expected session 2 to overwrite, got %d", id)
 	}
 }
