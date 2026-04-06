@@ -21,7 +21,7 @@
     <a class="tab tab-default" href="#/servers" data-route="servers">Servers</a>
   </nav>
   <span id="ws-indicator" class="ws-indicator ws-disconnected">Disconnected</span>
-  <span id="server-count" class="badge badge-neutral">0 servers</span>
+  <a href="#/servers" id="server-count" class="badge badge-neutral" style="text-decoration:none; cursor:pointer;">0 servers</a>
 </header>
 
 <!-- ================================================================
@@ -50,20 +50,20 @@
   <div id="timeline-empty" class="empty-state">
     <div class="empty-icon">&#128229;</div>
     <div class="empty-title">No traffic yet</div>
-    <div class="empty-desc">Waiting for MCP messages. Configure a client to connect through Shipyard.</div>
+    <div class="empty-desc">Waiting for MCP messages. <a href="#/servers" style="color:var(--accent-primary, #58a6ff);">Set up servers</a> to start capturing traffic.</div>
     <div id="onboard-cards">
       <div class="onboard-step">
         <div class="step-number">1</div>
         <div class="step-content">
-          <strong>Point your MCP client at Shipyard</strong><br>
-          Configure your client (Claude Desktop, VS Code, etc.) to route through the Shipyard proxy.
+          <strong>Add MCP servers</strong><br>
+          <a href="#/servers" style="color:var(--accent-primary, #58a6ff);">Auto-import</a> from Claude Desktop / Claude Code, or provide a config file.
         </div>
       </div>
       <div class="onboard-step">
         <div class="step-number">2</div>
         <div class="step-content">
-          <strong>Make an MCP call</strong><br>
-          Once a tool call flows through, traffic will appear here in real time.
+          <strong>Traffic appears here</strong><br>
+          Every JSON-RPC message between your client and servers shows up in real time.
         </div>
       </div>
     </div>
@@ -485,12 +485,16 @@
     <button class="btn btn-default btn-sm" id="servers-auto-import-btn">Auto-Import</button>
   </div>
 
-  <!-- Empty State -->
+  <!-- Empty State (matches design: UX-002 → "Desktop — First Run (0 servers)") -->
   <div id="servers-empty" class="empty-state">
     <div class="empty-icon">&#128421;</div>
     <div class="empty-title">No servers configured</div>
-    <div class="empty-desc">Add servers via config file or auto-import from Claude Desktop / Claude Code.</div>
-    <button class="btn btn-primary" id="servers-empty-import-btn">Auto-Import</button>
+    <div class="empty-desc">Add your first MCP server or auto-import from Claude Desktop, Claude Code, or Cursor configurations.</div>
+    <div style="display:flex; gap:12px; margin-top:4px;">
+      <button class="btn btn-default btn-sm" id="servers-empty-import-btn">&#8681; Auto-Import</button>
+      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" onclick="alert('Use a config file:\n\nshipyard --config servers.json\n\nSee README for format.')">&#43; Add Server</button>
+    </div>
+    <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">Or run: <code style="background:var(--bg-tertiary, #161b22); padding:2px 6px; border-radius:4px;">shipyard --config servers.json</code></div>
   </div>
 
   <!-- Server Card Grid -->
@@ -3252,8 +3256,24 @@
   // Initial view state: hide content, show empty
   timelineContent.style.display = 'none';
 
-  // Initialize routing
-  navigate(getRoute());
+  // Initialize routing — default to Servers view when 0 servers (first-run UX)
+  (function initRoute() {
+    var route = getRoute();
+    if (!location.hash || location.hash === '#/' || location.hash === '#/timeline') {
+      fetch('/api/servers')
+        .then(function(r) { return r.json(); })
+        .then(function(servers) {
+          if (!servers || servers.length === 0) {
+            navigate('servers');
+          } else {
+            navigate(route);
+          }
+        })
+        .catch(function() { navigate(route); });
+    } else {
+      navigate(route);
+    }
+  })();
 
   // Load initial data
   loadPage();
