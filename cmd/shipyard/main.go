@@ -72,6 +72,7 @@ var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, comman
 }
 var runProxyFn = runProxy
 var runMultiServerFn = runMultiServer
+var runNoServersFn = runNoServers
 
 type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
@@ -152,9 +153,14 @@ func main() {
 
 	args := global.Args()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
-		fmt.Fprintln(os.Stderr, "   or: shipyard --config <servers.json>")
-		exitFn(1)
+		if *headless {
+			fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
+			fmt.Fprintln(os.Stderr, "   or: shipyard --config <servers.json>")
+			exitFn(1)
+			return
+		}
+		// Desktop mode with no servers — open empty dashboard
+		runNoServersFn(9417, *headless)
 		return
 	}
 
@@ -420,5 +426,49 @@ func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name st
 			slog.Warn("server crashed", "server", name, "error", err)
 			return
 		}
+	}
+}
+
+// runNoServers starts the HTTP server and desktop window with no child proxies.
+// This is the default when double-clicking the .app with no config file.
+func runNoServers(port int, headless bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal, shutting down", "signal", sig)
+		cancel()
+	}()
+
+	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
+	if err != nil {
+		slog.Error("failed to initialize capture store", "error", err)
+		exitFn(1)
+		return
+	}
+	defer store.Close()
+
+	hub := webNewHub()
+	go hub.Run(ctx)
+
+	mgr := proxyNewManager()
+	mgr.SetHub(hub)
+
+	srv := web.NewServer(port, store, hub)
+	srv.SetProxyManager(mgr)
+	go func() {
+		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
+		if err := startWebServer(ctx, srv); err != nil {
+			slog.Error("web server error", "error", err)
+		}
+	}()
+
+	if !headless {
+		runDesktopFn(port, cancel)
+	} else {
+		<-ctx.Done()
 	}
 }

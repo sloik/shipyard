@@ -57,8 +57,42 @@ func runShipyardMainInDir(t *testing.T, dir string, args ...string) (int, string
 	return exitErr.ExitCode(), output.String()
 }
 
-func TestMain_NoArgs(t *testing.T) {
-	code, output := runShipyardMain(t)
+func TestMain_NoArgs_Desktop(t *testing.T) {
+	// No args in desktop mode → calls runNoServersFn (not exit 1)
+	orig := runNoServersFn
+	var calledPort int
+	var calledHeadless bool
+	runNoServersFn = func(port int, headless bool) {
+		calledPort = port
+		calledHeadless = headless
+	}
+	t.Cleanup(func() { runNoServersFn = orig })
+
+	origExit := exitFn
+	exitCalled := false
+	exitFn = func(code int) { exitCalled = true }
+	t.Cleanup(func() { exitFn = origExit })
+
+	origArgs := os.Args
+	os.Args = []string{"shipyard"}
+	t.Cleanup(func() { os.Args = origArgs })
+
+	main()
+
+	if exitCalled {
+		t.Fatal("expected no exit call in desktop mode with no args")
+	}
+	if calledPort != 9417 {
+		t.Fatalf("expected port 9417, got %d", calledPort)
+	}
+	if calledHeadless {
+		t.Fatal("expected headless=false")
+	}
+}
+
+func TestMain_NoArgs_Headless(t *testing.T) {
+	// No args in headless mode → prints usage and exits with code 1
+	code, output := runShipyardMain(t, "--headless")
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)
 	}
