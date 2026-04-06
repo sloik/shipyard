@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -73,6 +75,36 @@ var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, comman
 var runProxyFn = runProxy
 var runMultiServerFn = runMultiServer
 var runNoServersFn = runNoServers
+
+// dataDir returns a writable directory for Shipyard's database and logs.
+// On macOS .app launch, cwd is "/" (read-only), so we use a platform-appropriate
+// data directory. Falls back to cwd if home directory is unavailable.
+var dataDirFn = dataDir
+
+func dataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	var dir string
+	switch runtime.GOOS {
+	case "darwin":
+		dir = filepath.Join(home, "Library", "Application Support", "Shipyard")
+	case "windows":
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			dir = filepath.Join(appData, "Shipyard")
+		} else {
+			dir = filepath.Join(home, "Shipyard")
+		}
+	default:
+		dir = filepath.Join(home, ".shipyard")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("failed to create data directory, using cwd", "dir", dir, "error", err)
+		return "."
+	}
+	return dir
+}
 
 type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
@@ -237,7 +269,8 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	}()
 
 	// Initialize capture store
-	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
+	dir := dataDirFn()
+	store, err := captureNewStore(filepath.Join(dir, "shipyard.db"), filepath.Join(dir, "shipyard.jsonl"))
 	if err != nil {
 		slog.Error("failed to initialize capture store", "error", err)
 		exitFn(1)
@@ -311,7 +344,8 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	}()
 
 	// Initialize capture store
-	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
+	dir := dataDirFn()
+	store, err := captureNewStore(filepath.Join(dir, "shipyard.db"), filepath.Join(dir, "shipyard.jsonl"))
 	if err != nil {
 		slog.Error("failed to initialize capture store", "error", err)
 		exitFn(1)
@@ -443,7 +477,8 @@ func runNoServers(port int, headless bool) {
 		cancel()
 	}()
 
-	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
+	dir := dataDirFn()
+	store, err := captureNewStore(filepath.Join(dir, "shipyard.db"), filepath.Join(dir, "shipyard.jsonl"))
 	if err != nil {
 		slog.Error("failed to initialize capture store", "error", err)
 		exitFn(1)
