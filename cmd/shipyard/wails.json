@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "shipyard",
+  "outputfilename": "shipyard",
+  "frontend:dir": "../../internal/web/ui",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Shipyard",
+    "email": ""
+  }
+}

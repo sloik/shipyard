@@ -56,7 +56,7 @@ func TestRunProxy_StoreInitFailureExits(t *testing.T) {
 		exitFn = origExit
 	})
 
-	runProxy("alpha", 0, "ignored", nil, nil, "")
+	runProxy("alpha", 0, "ignored", nil, nil, "", true)
 
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)
@@ -71,7 +71,7 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 		cfg  *Config
 		port int
 	}
-	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration, headless bool) {
 		got.cfg = cfg
 		got.port = port
 	}
@@ -88,7 +88,7 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path, 60*time.Second)
+	runConfig(path, 60*time.Second, true)
 
 	if got.cfg == nil {
 		t.Fatal("expected runMultiServer to be called")
@@ -122,7 +122,7 @@ func TestRunConfig_MultiServerAllStarted(t *testing.T) {
 		cfg  *Config
 		port int
 	}
-	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration, headless bool) {
 		got.cfg = cfg
 		got.port = port
 	}
@@ -140,7 +140,7 @@ func TestRunConfig_MultiServerAllStarted(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path, 60*time.Second)
+	runConfig(path, 60*time.Second, true)
 
 	if got.cfg == nil {
 		t.Fatal("expected runMultiServer to be called")
@@ -164,7 +164,7 @@ func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
 
 	var exitCode int
 	exitFn = func(c int) { exitCode = c }
-	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration, headless bool) {
 		t.Fatal("should not reach runMultiServer when a server has no command")
 	}
 
@@ -180,7 +180,7 @@ func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path, 60*time.Second)
+	runConfig(path, 60*time.Second, true)
 
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
@@ -194,7 +194,7 @@ func TestRunConfig_LoadFailureExits(t *testing.T) {
 	var code int
 	exitFn = func(c int) { code = c }
 
-	runConfig("/definitely/missing/config.json", 60*time.Second)
+	runConfig("/definitely/missing/config.json", 60*time.Second, true)
 
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)
@@ -238,7 +238,7 @@ func TestRunProxy_LogsWebServerAndProxyErrors(t *testing.T) {
 		return errors.New("proxy exploded")
 	}
 
-	runProxy("alpha", 0, "ignored", nil, nil, "")
+	runProxy("alpha", 0, "ignored", nil, nil, "", true)
 
 	out := logs.String()
 	if !strings.Contains(out, "web server error") {
@@ -269,14 +269,14 @@ func TestRunWrap_UsesSeparatorBranch(t *testing.T) {
 		command string
 		args    []string
 	}
-	runProxyFn = func(name string, port int, command string, args []string, env map[string]string, cwd string) {
+	runProxyFn = func(name string, port int, command string, args []string, env map[string]string, cwd string, headless bool) {
 		got.name = name
 		got.port = port
 		got.command = command
 		got.args = append([]string(nil), args...)
 	}
 
-	runWrap([]string{"--name", "sep", "--port", "1234", "--", "echo", "hello"})
+	runWrap([]string{"--name", "sep", "--port", "1234", "--", "echo", "hello"}, true)
 
 	if got.name != "sep" || got.port != 1234 || got.command != "echo" {
 		t.Fatalf("unexpected forwarded values: %+v", got)

@@ -121,7 +121,7 @@ func TestMain_ConfigMissingCommand(t *testing.T) {
 
 func TestRunWrap_ParsesFlagsAndSeparator(t *testing.T) {
 	dir := t.TempDir()
-	code, output := runShipyardMainInDir(t, dir, "wrap", "--name", "alpha", "--port", "0", "--", "sh", "-c", "exit 0")
+	code, output := runShipyardMainInDir(t, dir, "--headless", "wrap", "--name", "alpha", "--port", "0", "--", "sh", "-c", "exit 0")
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d; output=%q", code, output)
 	}
@@ -132,7 +132,7 @@ func TestRunWrap_ParsesFlagsAndSeparator(t *testing.T) {
 
 func TestRunWrap_ParsesCommandWithoutSeparator(t *testing.T) {
 	dir := t.TempDir()
-	code, output := runShipyardMainInDir(t, dir, "wrap", "--name", "beta", "--port", "0", "sh", "-c", "exit 0")
+	code, output := runShipyardMainInDir(t, dir, "--headless", "wrap", "--name", "beta", "--port", "0", "sh", "-c", "exit 0")
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d; output=%q", code, output)
 	}

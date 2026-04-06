@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "shipyard-ws-spike",
+  "outputfilename": "shipyard-ws-spike",
+  "frontend:dir": "frontend",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Shipyard Spike",
+    "email": ""
+  }
+}

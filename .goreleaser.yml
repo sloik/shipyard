@@ -1,6 +1,9 @@
 version: 2
 project_name: shipyard
 
+# NOTE: This builds the headless/CLI binary (CGO_ENABLED=0).
+# Desktop .app/.exe builds require CGO and use `wails build` separately.
+# See: make wails-build
 builds:
   - main: ./cmd/shipyard
     binary: shipyard

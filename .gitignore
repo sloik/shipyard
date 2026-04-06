@@ -10,6 +10,10 @@ credentials.json
 *.exe
 dist/
 
+# Wails build output
+cmd/shipyard/build/
+internal/web/ui/wailsjs/
+
 # Nightshift (only specs and templates are public)
 .nightshift/**
 !.nightshift/config.yaml

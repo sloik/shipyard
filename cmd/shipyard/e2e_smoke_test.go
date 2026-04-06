@@ -86,7 +86,7 @@ func waitForHTTP(t *testing.T, url string, check func(*http.Response, []byte) bo
 func startShipyardProcess(t *testing.T, binary, workDir, configPath string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
 
-	cmd := exec.Command(binary, "--config", configPath)
+	cmd := exec.Command(binary, "--headless", "--config", configPath)
 	cmd.Dir = workDir
 
 	var output bytes.Buffer

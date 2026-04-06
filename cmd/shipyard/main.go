@@ -131,6 +131,7 @@ func main() {
 	configPath := global.String("config", "", "path to JSON config file")
 	schemaPoll := global.Duration("schema-poll", 60*time.Second, "schema change polling interval")
 	showVersion := global.Bool("version", false, "print version and exit")
+	headless := global.Bool("headless", false, "run without desktop window (CLI/server mode)")
 
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
@@ -145,7 +146,7 @@ func main() {
 	}
 
 	if *configPath != "" {
-		runConfig(*configPath, *schemaPoll)
+		runConfig(*configPath, *schemaPoll, *headless)
 		return
 	}
 
@@ -159,15 +160,15 @@ func main() {
 
 	switch args[0] {
 	case "wrap":
-		runWrap(args[1:])
-		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-			exitFn(1)
-			return
-		}
+		runWrap(args[1:], *headless)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+		exitFn(1)
+		return
+	}
 }
 
-func runConfig(configPath string, schemaPoll time.Duration) {
+func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", configPath, "error", err)
@@ -196,7 +197,7 @@ func runConfig(configPath string, schemaPoll time.Duration) {
 		}
 	}
 
-	runMultiServerFn(cfg, port, schemaPoll)
+	runMultiServerFn(cfg, port, schemaPoll, headless)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -216,7 +217,7 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func runProxy(name string, port int, command string, args []string, env map[string]string, cwd string) {
+func runProxy(name string, port int, command string, args []string, env map[string]string, cwd string, headless bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -254,13 +255,24 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 		}
 	}()
 
-	// Start proxy with manager
-	if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
-		slog.Error("proxy error", "error", err)
+	if !headless {
+		// Desktop mode: start proxy in background, open Wails window
+		go func() {
+			if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
+				slog.Error("proxy error", "error", err)
+			}
+		}()
+		// runDesktop blocks until the window closes, then triggers cancel()
+		runDesktopFn(port, cancel)
+	} else {
+		// Headless mode: start proxy (blocks until child exits or context cancelled)
+		if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
+			slog.Error("proxy error", "error", err)
+		}
 	}
 }
 
-func runWrap(args []string) {
+func runWrap(args []string, headless bool) {
 	fs := flag.NewFlagSet("wrap", flag.ExitOnError)
 	name := fs.String("name", "child", "server name for display")
 	port := fs.Int("port", 9417, "web dashboard port")
@@ -276,10 +288,10 @@ func runWrap(args []string) {
 		return
 	}
 
-	runProxyFn(*name, *port, childCmd[0], childCmd[1:], nil, "")
+	runProxyFn(*name, *port, childCmd[0], childCmd[1:], nil, "", headless)
 }
 
-func runMultiServer(cfg *Config, port int, schemaPoll time.Duration) {
+func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -345,7 +357,16 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration) {
 		}()
 	}
 
-	wg.Wait()
+	if !headless {
+		// Desktop mode: open Wails window (blocks until closed)
+		// When the window closes, cancel() triggers shutdown of all servers
+		runDesktopFn(port, cancel)
+		// After window closes, wait for servers to finish
+		wg.Wait()
+	} else {
+		// Headless mode: block until all servers exit
+		wg.Wait()
+	}
 }
 
 // runServerWithRestart runs a single server proxy with restart support.
