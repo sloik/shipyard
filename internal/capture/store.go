@@ -13,6 +13,8 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
+const currentSchemaVersion = 1
+
 var openSQLiteDB = func(path string) (*sql.DB, error) {
 	return sql.Open("sqlite3", path)
 }
@@ -23,6 +25,135 @@ var openJSONLFile = func(path string) (*os.File, error) {
 
 var queryTrafficRows = func(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
 	return db.Query(query, args...)
+}
+
+// columnExists checks whether a column exists on the given table using PRAGMA table_info.
+func (s *Store) columnExists(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false, fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// migrate runs sequential schema migrations based on PRAGMA user_version.
+// For fresh databases (no tables yet), migration is a no-op — CREATE TABLE
+// IF NOT EXISTS in NewStore handles initial schema creation.
+func (s *Store) migrate() error {
+	var version int
+	err := s.db.QueryRow("PRAGMA user_version").Scan(&version)
+	if err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+
+	// On a fresh DB, traffic table won't exist yet. Skip migration —
+	// the CREATE TABLE IF NOT EXISTS block in NewStore will create everything.
+	trafficExists, err := s.tableExists("traffic")
+	if err != nil {
+		return err
+	}
+	if !trafficExists {
+		return nil
+	}
+
+	if version < 1 {
+		if err := s.migrateToV1(); err != nil {
+			return fmt.Errorf("migrate to v1: %w", err)
+		}
+	}
+
+	_, err = s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion))
+	return err
+}
+
+// tableExists checks whether a table exists in the database.
+func (s *Store) tableExists(table string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check table %s: %w", table, err)
+	}
+	return count > 0, nil
+}
+
+// migrateToV1 upgrades a v0 database to v1 by adding session_id column
+// and creating sessions, schema_snapshots, and schema_changes tables.
+func (s *Store) migrateToV1() error {
+	// Add session_id column to traffic if it doesn't exist
+	exists, err := s.columnExists("traffic", "session_id")
+	if err != nil {
+		return fmt.Errorf("check session_id column: %w", err)
+	}
+	if !exists {
+		_, err = s.db.Exec("ALTER TABLE traffic ADD COLUMN session_id INTEGER")
+		if err != nil {
+			return fmt.Errorf("add session_id column: %w", err)
+		}
+	}
+
+	// Create new tables
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			name          TEXT NOT NULL DEFAULT '',
+			server        TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL DEFAULT 'recording',
+			started_at    TEXT NOT NULL,
+			stopped_at    TEXT,
+			duration_ms   INTEGER,
+			request_count INTEGER NOT NULL DEFAULT 0,
+			size_bytes    INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+		CREATE INDEX IF NOT EXISTS idx_sessions_server ON sessions(server);
+
+		CREATE TABLE IF NOT EXISTS schema_snapshots (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			server_name TEXT NOT NULL,
+			snapshot    TEXT NOT NULL,
+			captured_at TEXT NOT NULL,
+			UNIQUE(server_name, captured_at)
+		);
+
+		CREATE TABLE IF NOT EXISTS schema_changes (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			server_name     TEXT NOT NULL,
+			detected_at     TEXT NOT NULL,
+			tools_added     INTEGER NOT NULL DEFAULT 0,
+			tools_removed   INTEGER NOT NULL DEFAULT 0,
+			tools_modified  INTEGER NOT NULL DEFAULT 0,
+			before_snapshot INTEGER REFERENCES schema_snapshots(id),
+			after_snapshot  INTEGER REFERENCES schema_snapshots(id),
+			acknowledged    INTEGER NOT NULL DEFAULT 0,
+			diff_json       TEXT NOT NULL DEFAULT '{}'
+		);
+		CREATE INDEX IF NOT EXISTS idx_schema_changes_server ON schema_changes(server_name);
+		CREATE INDEX IF NOT EXISTS idx_schema_changes_ack ON schema_changes(acknowledged);
+
+		CREATE INDEX IF NOT EXISTS idx_traffic_session ON traffic(session_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("create v1 tables: %w", err)
+	}
+
+	return nil
 }
 
 // Direction constants
@@ -87,7 +218,15 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// Create schema
+	// Run migrations for existing databases
+	// We need a temporary Store to call migrate() on
+	tempStore := &Store{db: db}
+	if err := tempStore.migrate(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	// Create schema (safety net for fresh databases)
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS traffic (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +288,9 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+
+	// Ensure user_version is set for fresh databases
+	_, _ = db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion))
 
 	// Enable WAL mode for better concurrent read/write
 	_, _ = db.Exec("PRAGMA journal_mode=WAL")

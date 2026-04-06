@@ -1671,3 +1671,179 @@ func TestUnacknowledgedCount(t *testing.T) {
 		t.Fatalf("expected 1 after acknowledging one, got %d", count)
 	}
 }
+
+// --- Schema Migration Tests ---
+
+func TestMigration_FreshDB(t *testing.T) {
+	s := newTestStore(t)
+
+	var version int
+	err := s.db.QueryRow("PRAGMA user_version").Scan(&version)
+	if err != nil {
+		t.Fatalf("PRAGMA user_version: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("expected user_version %d, got %d", currentSchemaVersion, version)
+	}
+}
+
+func TestMigration_V0ToV1(t *testing.T) {
+	// Create a v0 database: only the traffic table without session_id
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "v0.db")
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Create v0 schema (traffic table without session_id column)
+	_, err = db.Exec(`
+		CREATE TABLE traffic (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts          TEXT NOT NULL,
+			direction   TEXT NOT NULL,
+			server_name TEXT NOT NULL,
+			method      TEXT NOT NULL DEFAULT '',
+			message_id  TEXT NOT NULL DEFAULT '',
+			payload     TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'ok',
+			latency_ms  INTEGER,
+			matched_id  INTEGER
+		);
+		CREATE INDEX IF NOT EXISTS idx_traffic_ts ON traffic(ts);
+		CREATE INDEX IF NOT EXISTS idx_traffic_method ON traffic(method);
+		CREATE INDEX IF NOT EXISTS idx_traffic_server ON traffic(server_name);
+		CREATE INDEX IF NOT EXISTS idx_traffic_message_id ON traffic(message_id);
+	`)
+	if err != nil {
+		t.Fatalf("create v0 schema: %v", err)
+	}
+
+	// Insert a row to verify data survives migration
+	_, err = db.Exec(
+		`INSERT INTO traffic (ts, direction, server_name, method, payload, status) VALUES (?, ?, ?, ?, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), DirectionClientToServer, "test-srv", "tools/list", `{}`, "pending",
+	)
+	if err != nil {
+		t.Fatalf("insert v0 row: %v", err)
+	}
+
+	// Verify user_version is 0
+	var v0Version int
+	db.QueryRow("PRAGMA user_version").Scan(&v0Version)
+	if v0Version != 0 {
+		t.Fatalf("expected v0 user_version 0, got %d", v0Version)
+	}
+
+	db.Close()
+
+	// Now open with NewStore — should trigger migration
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+	s, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore on v0 db: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// Verify user_version is now 1
+	var version int
+	s.db.QueryRow("PRAGMA user_version").Scan(&version)
+	if version != 1 {
+		t.Fatalf("expected user_version 1 after migration, got %d", version)
+	}
+
+	// Verify session_id column exists on traffic
+	exists, err := s.columnExists("traffic", "session_id")
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected session_id column on traffic table after migration")
+	}
+
+	// Verify sessions table exists
+	var sessCount int
+	err = s.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessCount)
+	if err != nil {
+		t.Fatalf("sessions table should exist: %v", err)
+	}
+
+	// Verify schema_snapshots table exists
+	var snapCount int
+	err = s.db.QueryRow("SELECT COUNT(*) FROM schema_snapshots").Scan(&snapCount)
+	if err != nil {
+		t.Fatalf("schema_snapshots table should exist: %v", err)
+	}
+
+	// Verify schema_changes table exists
+	var changeCount int
+	err = s.db.QueryRow("SELECT COUNT(*) FROM schema_changes").Scan(&changeCount)
+	if err != nil {
+		t.Fatalf("schema_changes table should exist: %v", err)
+	}
+
+	// Verify pre-existing data survived
+	var trafficCount int
+	s.db.QueryRow("SELECT COUNT(*) FROM traffic").Scan(&trafficCount)
+	if trafficCount != 1 {
+		t.Fatalf("expected 1 pre-existing traffic row, got %d", trafficCount)
+	}
+}
+
+func TestMigration_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "idem.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	// Create store (first run)
+	s1, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore first run: %v", err)
+	}
+	s1.Close()
+
+	// Open again (second run) — should not error
+	s2, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore second run: %v", err)
+	}
+	t.Cleanup(func() { s2.Close() })
+
+	var version int
+	s2.db.QueryRow("PRAGMA user_version").Scan(&version)
+	if version != currentSchemaVersion {
+		t.Fatalf("expected user_version %d after second run, got %d", currentSchemaVersion, version)
+	}
+}
+
+func TestColumnExists(t *testing.T) {
+	s := newTestStore(t)
+
+	// Test existing column
+	exists, err := s.columnExists("traffic", "direction")
+	if err != nil {
+		t.Fatalf("columnExists (existing): %v", err)
+	}
+	if !exists {
+		t.Fatal("expected 'direction' column to exist on traffic table")
+	}
+
+	// Test non-existing column
+	exists, err = s.columnExists("traffic", "nonexistent_column")
+	if err != nil {
+		t.Fatalf("columnExists (non-existing): %v", err)
+	}
+	if exists {
+		t.Fatal("expected 'nonexistent_column' to NOT exist on traffic table")
+	}
+
+	// Test session_id column (should exist after full init)
+	exists, err = s.columnExists("traffic", "session_id")
+	if err != nil {
+		t.Fatalf("columnExists (session_id): %v", err)
+	}
+	if !exists {
+		t.Fatal("expected 'session_id' column to exist on traffic table")
+	}
+}
