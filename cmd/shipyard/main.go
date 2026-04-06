@@ -19,6 +19,11 @@ import (
 	"github.com/sloik/shipyard/internal/web"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+)
+
 var parseServerOrder = func(raw json.RawMessage, appendName func(string), consumeValue func(*json.Decoder, string) error) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -125,11 +130,17 @@ func main() {
 	global.SetOutput(io.Discard)
 	configPath := global.String("config", "", "path to JSON config file")
 	schemaPoll := global.Duration("schema-poll", 60*time.Second, "schema change polling interval")
+	showVersion := global.Bool("version", false, "print version and exit")
 
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
 		fmt.Fprintln(os.Stderr, "   or: shipyard --config <servers.json>")
 		exitFn(1)
+		return
+	}
+
+	if *showVersion {
+		fmt.Fprintf(os.Stdout, "shipyard v%s (%s)\n", version, commit)
 		return
 	}
 
