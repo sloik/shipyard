@@ -33,6 +33,15 @@
 </div>
 
 <!-- ================================================================
+     Schema Change Alert Banner (global, SPEC-009)
+     ================================================================ -->
+<div id="schema-alert-banner" style="display:none; background:var(--bg-warning, #4a3600); border-bottom:1px solid var(--border-default); padding:8px 16px; align-items:center; gap:8px;">
+  <span style="font-size:16px;">&#9888;</span>
+  <span id="schema-alert-text" style="color:var(--text-primary); font-size:var(--font-size-sm);">Schema changes detected</span>
+  <a href="#/servers/schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
+</div>
+
+<!-- ================================================================
      View: Timeline (#/timeline)
      ================================================================ -->
 <main id="view-timeline">
@@ -202,6 +211,16 @@
      ================================================================ -->
 <main id="view-history">
 
+  <!-- Sub-Nav: Requests | Sessions -->
+  <div class="app-bar" id="history-sub-nav" style="border-bottom:1px solid var(--border-default); padding:0 16px;">
+    <a class="tab tab-active" href="#" data-sub="requests" id="sub-nav-requests">Requests</a>
+    <a class="tab tab-default" href="#" data-sub="sessions" id="sub-nav-sessions">Sessions</a>
+    <a class="tab tab-default" href="#" data-sub="performance" id="sub-nav-performance">Performance</a>
+  </div>
+
+  <!-- Sub-view: Requests (existing history) -->
+  <div id="history-requests-view">
+
   <!-- Empty State -->
   <div id="history-empty" class="empty-state">
     <div class="empty-icon">&#128337;</div>
@@ -310,6 +329,148 @@
     </div>
   </div>
 
+  </div><!-- /history-requests-view -->
+
+  <!-- Sub-view: Sessions (SPEC-007) -->
+  <div id="history-sessions-view" style="display:none;">
+
+    <!-- Sessions Empty State -->
+    <div id="sessions-empty" class="empty-state">
+      <div class="empty-icon">&#128308;</div>
+      <div class="empty-title">No sessions recorded</div>
+      <div class="empty-desc">Record a session to capture a sequence of MCP requests for replay and export.</div>
+      <button class="btn btn-primary" id="sessions-empty-record-btn">Record Session</button>
+    </div>
+
+    <!-- Sessions Content -->
+    <div id="sessions-content" style="display:none;">
+
+      <!-- Action Bar -->
+      <div class="app-bar" style="gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm" id="session-record-btn" style="display:inline-flex; align-items:center; gap:4px;">
+          <span id="session-record-icon">&#128308;</span> <span id="session-record-label">Record</span>
+        </button>
+        <div class="input-group" id="session-name-group">
+          <input type="text" id="session-name-input" class="input" placeholder="Session name..." style="width:180px;">
+        </div>
+        <div class="input-group">
+          <select id="session-server-filter" class="input" style="min-width:120px;">
+            <option value="">All servers</option>
+          </select>
+        </div>
+        <span id="sessions-count" class="badge badge-neutral"></span>
+      </div>
+
+      <!-- Sessions Table Header -->
+      <div class="table-header">
+        <span data-col="status" style="width:80px;">Status</span>
+        <span data-col="name" style="flex:1;">Name</span>
+        <span data-col="server" style="width:110px;">Server</span>
+        <span data-col="requests" style="width:80px;">Requests</span>
+        <span data-col="duration" style="width:90px;">Duration</span>
+        <span data-col="started" style="width:110px;">Started</span>
+        <span data-col="size" style="width:80px;">Size</span>
+        <span data-col="actions" style="width:180px;">Actions</span>
+      </div>
+
+      <!-- Sessions Table Body -->
+      <div id="sessions-body"></div>
+
+      <!-- Sessions Pagination -->
+      <div id="sessions-pagination" class="pagination">
+        <span id="sessions-page-info" class="badge badge-neutral"></span>
+      </div>
+
+    </div><!-- /sessions-content -->
+
+  </div><!-- /history-sessions-view -->
+
+  <!-- Sub-view: Performance (SPEC-008) -->
+  <div id="history-performance-view" style="display:none;">
+
+    <!-- Action Bar -->
+    <div class="app-bar" id="perf-action-bar" style="padding:8px 16px; gap:8px;">
+      <div class="input-group">
+        <label class="input-label">Time Range</label>
+        <select id="perf-range" class="input" style="min-width:90px;">
+          <option value="1h">1 hour</option>
+          <option value="24h" selected>24 hours</option>
+          <option value="7d">7 days</option>
+          <option value="30d">30 days</option>
+        </select>
+      </div>
+      <div class="input-group">
+        <label class="input-label">Server</label>
+        <select id="perf-server" class="input" style="min-width:110px;">
+          <option value="">All servers</option>
+        </select>
+      </div>
+      <div style="flex:1;"></div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div id="perf-stats" style="display:none; padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px;">
+      <div class="detail-panel" style="padding:12px;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted);">Total Calls</div>
+        <div style="display:flex; align-items:baseline; gap:8px;">
+          <span id="perf-total-calls" style="font-size:var(--font-size-2xl); font-weight:700; color:var(--text-primary);">0</span>
+          <span id="perf-total-calls-delta" style="font-size:var(--font-size-sm);"></span>
+        </div>
+      </div>
+      <div class="detail-panel" style="padding:12px;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted);">Avg Latency</div>
+        <div style="display:flex; align-items:baseline; gap:8px;">
+          <span id="perf-avg-latency" style="font-size:var(--font-size-2xl); font-weight:700; color:var(--text-primary);">0ms</span>
+          <span id="perf-avg-latency-delta" style="font-size:var(--font-size-sm);"></span>
+        </div>
+      </div>
+      <div class="detail-panel" style="padding:12px;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted);">P95 Latency</div>
+        <div style="display:flex; align-items:baseline; gap:8px;">
+          <span id="perf-p95-latency" style="font-size:var(--font-size-2xl); font-weight:700; color:var(--text-primary);">0ms</span>
+        </div>
+      </div>
+      <div class="detail-panel" style="padding:12px;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted);">Error Rate</div>
+        <div style="display:flex; align-items:baseline; gap:8px;">
+          <span id="perf-error-rate" style="font-size:var(--font-size-2xl); font-weight:700; color:var(--text-primary);">0%</span>
+          <span id="perf-error-rate-delta" style="font-size:var(--font-size-sm);"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Color Legend -->
+    <div id="perf-legend" style="display:none; padding:0 16px 8px 16px; font-size:var(--font-size-sm); color:var(--text-muted); display:flex; gap:16px; align-items:center;">
+      <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--success-fg); margin-right:4px;"></span>&lt; 100ms</span>
+      <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--warning-fg); margin-right:4px;"></span>100 &ndash; 500ms</span>
+      <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--danger-fg); margin-right:4px;"></span>&gt; 500ms</span>
+    </div>
+
+    <!-- Latency Table -->
+    <div id="perf-table" style="display:none;">
+      <div class="table-header" id="perf-table-header">
+        <span data-col="tool" style="flex:1;" data-sort="tool">Tool</span>
+        <span data-col="server" style="width:110px;" data-sort="server">Server</span>
+        <span data-col="calls" style="width:70px;" data-sort="calls">Calls</span>
+        <span data-col="min" style="width:70px;" data-sort="min">Min</span>
+        <span data-col="avg" style="width:70px;" data-sort="avg">Avg</span>
+        <span data-col="p50" style="width:70px;" data-sort="p50">P50</span>
+        <span data-col="p95" style="width:70px; color:var(--accent-fg);" data-sort="p95">P95 &#8595;</span>
+        <span data-col="max" style="width:70px;" data-sort="max">Max</span>
+        <span data-col="errpct" style="width:70px;" data-sort="error_rate">Err%</span>
+      </div>
+      <div id="perf-table-body"></div>
+    </div>
+
+    <!-- Empty State -->
+    <div id="perf-empty" class="empty-state">
+      <div class="empty-icon">&#128202;</div>
+      <div class="empty-title">No traffic data yet</div>
+      <div class="empty-desc">Latency profiling will appear here once MCP traffic flows through Shipyard.</div>
+    </div>
+
+  </div><!-- /history-performance-view -->
+
 </main>
 
 <!-- ================================================================
@@ -334,6 +495,38 @@
 
   <!-- Server Card Grid -->
   <div id="servers-grid" style="display:none; padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:16px;"></div>
+
+  <!-- Schema Sub-View (SPEC-009) -->
+  <div id="servers-schema-view" style="display:none; height:calc(100vh - 96px);">
+
+    <!-- Sub-nav -->
+    <div class="app-bar" style="padding:4px 16px; gap:8px; border-bottom:1px solid var(--border-muted);">
+      <a href="#/servers" class="btn btn-ghost btn-sm" id="schema-back-btn">Overview</a>
+      <span class="btn btn-default btn-sm" style="font-weight:600; pointer-events:none;">Schema</span>
+    </div>
+
+    <div style="display:flex; height:calc(100% - 40px);">
+
+      <!-- Change History Sidebar -->
+      <div id="schema-sidebar" style="width:320px; min-width:320px; border-right:1px solid var(--border-default); background:var(--bg-surface); overflow-y:auto; display:flex; flex-direction:column;">
+        <div style="padding:12px 16px; font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-muted);">Change History</div>
+        <div id="schema-change-list" style="flex:1; overflow-y:auto;"></div>
+      </div>
+
+      <!-- Detail Panel -->
+      <div id="schema-detail" style="flex:1; overflow-y:auto; padding:24px;">
+        <!-- Empty State -->
+        <div id="schema-empty" class="empty-state" style="height:100%;">
+          <div class="empty-icon">&#128737;</div>
+          <div class="empty-title">No schema changes detected</div>
+          <div class="empty-desc">All schemas stable</div>
+        </div>
+        <!-- Change Detail -->
+        <div id="schema-change-detail" style="display:none;"></div>
+      </div>
+
+    </div>
+  </div>
 
   <!-- Auto-Import Modal -->
   <div id="auto-import-modal" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
@@ -407,28 +600,47 @@
      ====================================================================== */
   function getRoute() {
     var hash = location.hash.replace(/^#\/?/, '') || 'timeline';
+    // Handle sub-routes: history/performance, history/sessions
+    if (hash.indexOf('history/') === 0 || hash === 'history') {
+      return hash;
+    }
     if (!views[hash]) hash = 'timeline';
     return hash;
   }
 
   function navigate(route) {
+    // Handle sub-routes within history
+    var baseRoute = route;
+    var historySub = null;
+    if (route.indexOf('history') === 0) {
+      baseRoute = 'history';
+      if (route === 'history/performance') historySub = 'performance';
+      else if (route === 'history/sessions') historySub = 'sessions';
+      else historySub = 'requests';
+    }
+
     // Hide all views
     Object.keys(views).forEach(function(key) {
       views[key].style.display = 'none';
     });
-    views[route].style.display = route === 'tools' ? 'flex' : '';
+    views[baseRoute].style.display = baseRoute === 'tools' ? 'flex' : '';
 
     // Update tabs
     var tabs = tabNav.querySelectorAll('.tab');
     for (var i = 0; i < tabs.length; i++) {
       var t = tabs[i];
-      if (t.getAttribute('data-route') === route) {
+      if (t.getAttribute('data-route') === baseRoute) {
         t.classList.remove('tab-default');
         t.classList.add('tab-active');
       } else {
         t.classList.remove('tab-active');
         t.classList.add('tab-default');
       }
+    }
+
+    // Switch history sub-view if applicable
+    if (historySub && typeof switchHistorySub === 'function') {
+      switchHistorySub(historySub);
     }
   }
 
@@ -2290,6 +2502,505 @@
   if (autoImportCancelBtn) autoImportCancelBtn.addEventListener('click', closeAutoImport);
 
   /* ======================================================================
+     Sessions View — State & Logic (SPEC-007)
+     ====================================================================== */
+  var sessionsEmpty      = document.getElementById('sessions-empty');
+  var sessionsContent    = document.getElementById('sessions-content');
+  var sessionsBody       = document.getElementById('sessions-body');
+  var sessionsCountEl    = document.getElementById('sessions-count');
+  var sessionRecordBtn   = document.getElementById('session-record-btn');
+  var sessionRecordIcon  = document.getElementById('session-record-icon');
+  var sessionRecordLabel = document.getElementById('session-record-label');
+  var sessionNameInput   = document.getElementById('session-name-input');
+  var sessionServerFilter = document.getElementById('session-server-filter');
+  var sessionsPageInfo   = document.getElementById('sessions-page-info');
+  var sessionsEmptyRecordBtn = document.getElementById('sessions-empty-record-btn');
+
+  var historyRequestsView = document.getElementById('history-requests-view');
+  var historySessionsView = document.getElementById('history-sessions-view');
+  var historyPerformanceView = document.getElementById('history-performance-view');
+  var subNavRequests      = document.getElementById('sub-nav-requests');
+  var subNavSessions      = document.getElementById('sub-nav-sessions');
+  var subNavPerformance   = document.getElementById('sub-nav-performance');
+
+  // Performance DOM refs
+  var perfRange          = document.getElementById('perf-range');
+  var perfServer         = document.getElementById('perf-server');
+  var perfStats          = document.getElementById('perf-stats');
+  var perfLegend         = document.getElementById('perf-legend');
+  var perfTable          = document.getElementById('perf-table');
+  var perfTableHeader    = document.getElementById('perf-table-header');
+  var perfTableBody      = document.getElementById('perf-table-body');
+  var perfEmpty          = document.getElementById('perf-empty');
+  var perfTotalCalls     = document.getElementById('perf-total-calls');
+  var perfTotalCallsDelta = document.getElementById('perf-total-calls-delta');
+  var perfAvgLatency     = document.getElementById('perf-avg-latency');
+  var perfAvgLatencyDelta = document.getElementById('perf-avg-latency-delta');
+  var perfP95Latency     = document.getElementById('perf-p95-latency');
+  var perfErrorRate      = document.getElementById('perf-error-rate');
+  var perfErrorRateDelta = document.getElementById('perf-error-rate-delta');
+
+  var perfSort  = 'p95';
+  var perfOrder = 'desc';
+  var perfLoaded = false;
+
+  var activeRecordingId  = null;
+  var activeRecordingServer = null;
+  var sessionsLoaded     = false;
+
+  function switchHistorySub(sub) {
+    var allSubs = [
+      { el: historyRequestsView, nav: subNavRequests, key: 'requests' },
+      { el: historySessionsView, nav: subNavSessions, key: 'sessions' },
+      { el: historyPerformanceView, nav: subNavPerformance, key: 'performance' }
+    ];
+    for (var i = 0; i < allSubs.length; i++) {
+      if (allSubs[i].key === sub) {
+        allSubs[i].el.style.display = '';
+        allSubs[i].nav.className = 'tab tab-active';
+      } else {
+        allSubs[i].el.style.display = 'none';
+        allSubs[i].nav.className = 'tab tab-default';
+      }
+    }
+    if (sub === 'requests' && !historyLoaded) historyLoadPage();
+    if (sub === 'sessions') loadSessions();
+    if (sub === 'performance') loadPerformance();
+  }
+
+  // Sub-nav switching
+  document.getElementById('history-sub-nav').addEventListener('click', function(e) {
+    var link = e.target.closest('[data-sub]');
+    if (!link) return;
+    e.preventDefault();
+    switchHistorySub(link.getAttribute('data-sub'));
+  });
+
+  function loadSessions() {
+    var params = new URLSearchParams();
+    var sv = sessionServerFilter.value;
+    if (sv) params.set('server', sv);
+
+    fetch('/api/sessions?' + params)
+      .then(function(resp) { return resp.json(); })
+      .then(function(sessions) {
+        sessionsLoaded = true;
+        sessions = sessions || [];
+
+        if (sessions.length === 0 && !activeRecordingId) {
+          sessionsEmpty.style.display = '';
+          sessionsContent.style.display = 'none';
+          return;
+        }
+
+        sessionsEmpty.style.display = 'none';
+        sessionsContent.style.display = '';
+        sessionsCountEl.textContent = sessions.length + ' session' + (sessions.length !== 1 ? 's' : '');
+        sessionsPageInfo.textContent = sessions.length + ' total';
+
+        // Populate server filter from sessions
+        var srvSet = {};
+        sessions.forEach(function(s) { if (s.server) srvSet[s.server] = true; });
+        var opts = '<option value="">All servers</option>';
+        Object.keys(srvSet).sort().forEach(function(name) {
+          opts += '<option value="' + escapeHtml(name) + '"' + (sv === name ? ' selected' : '') + '>' + escapeHtml(name) + '</option>';
+        });
+        sessionServerFilter.innerHTML = opts;
+
+        // Render rows
+        var html = '';
+        sessions.forEach(function(s) {
+          html += renderSessionRow(s);
+        });
+        sessionsBody.innerHTML = html;
+      })
+      .catch(function(err) {
+        DS.toast('Failed to load sessions: ' + err.message, 'error');
+      });
+  }
+
+  function renderSessionRow(s) {
+    var statusClass = s.status === 'recording' ? 'badge-error' : (s.status === 'complete' ? 'badge-success' : 'badge-neutral');
+    var statusText = s.status === 'recording' ? '&#128308; Recording' : (s.status === 'complete' ? 'Complete' : s.status);
+    var duration = s.duration_ms ? formatDuration(s.duration_ms) : (s.status === 'recording' ? 'In progress' : '-');
+    var size = s.size_bytes ? formatBytes(s.size_bytes) : '-';
+    var started = s.started_at ? relativeTime(new Date(s.started_at).getTime()) : '-';
+    var name = s.name || '(unnamed)';
+
+    var actions = '';
+    if (s.status === 'recording') {
+      actions = '<button class="btn btn-danger btn-sm session-stop-btn" data-id="' + s.id + '">Stop</button>';
+    } else {
+      actions = '<button class="btn btn-default btn-sm session-export-btn" data-id="' + s.id + '">Export</button> '
+        + '<button class="btn btn-default btn-sm session-replay-btn" data-id="' + s.id + '">Replay</button> '
+        + '<button class="btn btn-ghost btn-sm session-delete-btn" data-id="' + s.id + '">Delete</button>';
+    }
+
+    return '<div class="table-row" data-session-id="' + s.id + '">'
+      + '<span data-col="status" style="width:80px;"><span class="badge ' + statusClass + '">' + statusText + '</span></span>'
+      + '<span data-col="name" style="flex:1; font-weight:500;">' + escapeHtml(name) + '</span>'
+      + '<span data-col="server" style="width:110px;">' + escapeHtml(s.server) + '</span>'
+      + '<span data-col="requests" style="width:80px;">' + s.request_count + '</span>'
+      + '<span data-col="duration" style="width:90px;">' + duration + '</span>'
+      + '<span data-col="started" style="width:110px;">' + started + '</span>'
+      + '<span data-col="size" style="width:80px;">' + size + '</span>'
+      + '<span data-col="actions" style="width:180px;">' + actions + '</span>'
+      + '</div>';
+  }
+
+  function formatDuration(ms) {
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    return (ms / 60000).toFixed(1) + 'm';
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + 'B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+  }
+
+  // Record/Stop toggle
+  function toggleRecording() {
+    if (activeRecordingId) {
+      // Stop recording
+      fetch('/api/sessions/' + activeRecordingId + '/stop', { method: 'POST' })
+        .then(function(resp) {
+          if (!resp.ok) return resp.text().then(function(t) { throw new Error(t); });
+          return resp.json();
+        })
+        .then(function() {
+          activeRecordingId = null;
+          activeRecordingServer = null;
+          sessionRecordIcon.innerHTML = '&#128308;';
+          sessionRecordLabel.textContent = 'Record';
+          sessionRecordBtn.className = 'btn btn-primary btn-sm';
+          sessionNameInput.disabled = false;
+          sessionServerFilter.disabled = false;
+          loadSessions();
+        })
+        .catch(function(err) {
+          DS.toast('Failed to stop recording: ' + err.message, 'error');
+        });
+    } else {
+      // Need to pick a server
+      var serverName = sessionServerFilter.value;
+      if (!serverName) {
+        // Auto-pick from available servers
+        fetch('/api/servers')
+          .then(function(resp) { return resp.json(); })
+          .then(function(servers) {
+            if (!servers || servers.length === 0) {
+              DS.toast('No servers available for recording', 'error');
+              return;
+            }
+            if (servers.length === 1) {
+              startRecording(servers[0].name);
+            } else {
+              // Build server list for modal
+              var body = '<p>Select a server to record:</p>';
+              servers.forEach(function(srv) {
+                body += '<button class="btn btn-default" style="margin:4px;" data-server="' + escapeHtml(srv.name) + '">' + escapeHtml(srv.name) + '</button>';
+              });
+              DS.modal('Select Server', body, [
+                { label: 'Cancel', value: 'cancel', className: 'btn-default' }
+              ]).then(function(val) {
+                if (val && val !== 'cancel') startRecording(val);
+              });
+              // Wire up the server buttons inside the modal
+              setTimeout(function() {
+                var btns = document.querySelectorAll('.modal [data-server]');
+                btns.forEach(function(btn) {
+                  btn.addEventListener('click', function() {
+                    var backdrop = btn.closest('.modal-backdrop');
+                    if (backdrop) backdrop.remove();
+                    startRecording(btn.getAttribute('data-server'));
+                  });
+                });
+              }, 50);
+            }
+          });
+        return;
+      }
+      startRecording(serverName);
+    }
+  }
+
+  function startRecording(serverName) {
+    var name = sessionNameInput.value.trim() || 'session-' + new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    fetch('/api/sessions/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, server: serverName })
+    })
+      .then(function(resp) {
+        if (!resp.ok) return resp.text().then(function(t) { throw new Error(t); });
+        return resp.json();
+      })
+      .then(function(sess) {
+        activeRecordingId = sess.id;
+        activeRecordingServer = sess.server;
+        sessionRecordIcon.innerHTML = '&#9632;';
+        sessionRecordLabel.textContent = 'Stop';
+        sessionRecordBtn.className = 'btn btn-danger btn-sm';
+        sessionNameInput.disabled = true;
+        sessionServerFilter.disabled = true;
+        DS.toast('Recording started for ' + serverName, 'success');
+        loadSessions();
+      })
+      .catch(function(err) {
+        DS.toast('Failed to start recording: ' + err.message, 'error');
+      });
+  }
+
+  if (sessionRecordBtn) sessionRecordBtn.addEventListener('click', toggleRecording);
+  if (sessionsEmptyRecordBtn) sessionsEmptyRecordBtn.addEventListener('click', toggleRecording);
+
+  // Server filter change
+  if (sessionServerFilter) sessionServerFilter.addEventListener('change', function() { loadSessions(); });
+
+  // Session action buttons (delegated)
+  if (sessionsBody) sessionsBody.addEventListener('click', function(e) {
+    var stopBtn = e.target.closest('.session-stop-btn');
+    if (stopBtn) {
+      var sid = parseInt(stopBtn.dataset.id, 10);
+      fetch('/api/sessions/' + sid + '/stop', { method: 'POST' })
+        .then(function(resp) { return resp.json(); })
+        .then(function() {
+          if (activeRecordingId === sid) {
+            activeRecordingId = null;
+            activeRecordingServer = null;
+            sessionRecordIcon.innerHTML = '&#128308;';
+            sessionRecordLabel.textContent = 'Record';
+            sessionRecordBtn.className = 'btn btn-primary btn-sm';
+            sessionNameInput.disabled = false;
+            sessionServerFilter.disabled = false;
+          }
+          loadSessions();
+        });
+      return;
+    }
+
+    var exportBtn = e.target.closest('.session-export-btn');
+    if (exportBtn) {
+      var eid = exportBtn.dataset.id;
+      window.open('/api/sessions/' + eid + '/export', '_blank');
+      return;
+    }
+
+    var replayBtn = e.target.closest('.session-replay-btn');
+    if (replayBtn) {
+      var rid = parseInt(replayBtn.dataset.id, 10);
+      DS.modal('Replay Session', 'Re-execute all requests in this session?', [
+        { label: 'Cancel', value: 'cancel', className: 'btn-default' },
+        { label: 'Replay', value: 'replay', className: 'btn-primary' }
+      ]).then(function(val) {
+        if (val !== 'replay') return;
+        replayBtn.disabled = true;
+        replayBtn.textContent = 'Replaying...';
+        fetch('/api/sessions/' + rid + '/replay', { method: 'POST' })
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            var count = data.results ? data.results.length : 0;
+            DS.toast('Replay complete: ' + count + ' request' + (count !== 1 ? 's' : '') + ' executed', 'success');
+          })
+          .catch(function(err) {
+            DS.toast('Replay failed: ' + err.message, 'error');
+          })
+          .then(function() {
+            replayBtn.disabled = false;
+            replayBtn.textContent = 'Replay';
+            loadSessions();
+          });
+      });
+      return;
+    }
+
+    var deleteBtn = e.target.closest('.session-delete-btn');
+    if (deleteBtn) {
+      var did = parseInt(deleteBtn.dataset.id, 10);
+      DS.modal('Delete Session', 'Delete this session? Traffic entries will be unlinked but not deleted.', [
+        { label: 'Cancel', value: 'cancel', className: 'btn-default' },
+        { label: 'Delete', value: 'delete', className: 'btn-danger' }
+      ]).then(function(val) {
+        if (val !== 'delete') return;
+        fetch('/api/sessions/' + did, { method: 'DELETE' })
+          .then(function() { loadSessions(); })
+          .catch(function(err) { DS.toast('Delete failed: ' + err.message, 'error'); });
+      });
+      return;
+    }
+  });
+
+  /* ======================================================================
+     Performance View — State & Logic (SPEC-008)
+     ====================================================================== */
+  function latencyColor(ms) {
+    if (ms < 100) return 'var(--success-fg)';
+    if (ms < 500) return 'var(--warning-fg)';
+    return 'var(--danger-fg)';
+  }
+
+  function formatMs(ms) {
+    if (ms < 1000) return ms.toFixed(0) + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function deltaHtml(current, prev, unit, lowerIsBetter) {
+    if (prev === null || prev === undefined) return '';
+    var diff = current - prev;
+    if (diff === 0) return '';
+    var isUp = diff > 0;
+    var arrow = isUp ? '\u2191' : '\u2193';
+    var color;
+    if (lowerIsBetter) {
+      color = isUp ? 'var(--danger-fg)' : 'var(--success-fg)';
+    } else {
+      color = isUp ? 'var(--success-fg)' : 'var(--danger-fg)';
+    }
+    var val = Math.abs(diff);
+    var text = unit === 'ms' ? formatMs(val) : (unit === '%' ? val.toFixed(1) + '%' : val.toString());
+    return '<span style="color:' + color + ';">' + arrow + ' ' + text + '</span>';
+  }
+
+  function loadPerformance() {
+    var rangeVal = perfRange.value;
+    var serverVal = perfServer.value;
+
+    // Populate server filter from known servers
+    var opts = perfServer.querySelectorAll('option');
+    var existingServers = {};
+    for (var i = 1; i < opts.length; i++) existingServers[opts[i].value] = true;
+    Object.keys(knownServers).forEach(function(s) {
+      if (!existingServers[s]) {
+        var opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        perfServer.appendChild(opt);
+      }
+    });
+
+    var summaryParams = new URLSearchParams();
+    summaryParams.set('range', rangeVal);
+    if (serverVal) summaryParams.set('server', serverVal);
+
+    var toolsParams = new URLSearchParams();
+    toolsParams.set('range', rangeVal);
+    if (serverVal) toolsParams.set('server', serverVal);
+    toolsParams.set('sort', perfSort);
+    toolsParams.set('order', perfOrder);
+
+    // Fetch summary and tools in parallel
+    var summaryPromise = fetch('/api/profiling/summary?' + summaryParams).then(function(r) { return r.json(); });
+    var toolsPromise = fetch('/api/profiling/tools?' + toolsParams).then(function(r) { return r.json(); });
+
+    Promise.all([summaryPromise, toolsPromise]).then(function(results) {
+      var summary = results[0];
+      var tools = results[1] || [];
+      perfLoaded = true;
+
+      if (summary.total_calls === 0 && tools.length === 0) {
+        perfEmpty.style.display = '';
+        perfStats.style.display = 'none';
+        perfLegend.style.display = 'none';
+        perfTable.style.display = 'none';
+        return;
+      }
+
+      perfEmpty.style.display = 'none';
+      perfStats.style.display = '';
+      perfLegend.style.display = '';
+      perfTable.style.display = '';
+
+      // Update stats cards
+      perfTotalCalls.textContent = summary.total_calls;
+      perfTotalCallsDelta.innerHTML = deltaHtml(
+        summary.total_calls, summary.prev_total_calls, '', false);
+
+      perfAvgLatency.textContent = formatMs(summary.avg_latency_ms);
+      perfAvgLatency.style.color = latencyColor(summary.avg_latency_ms);
+      perfAvgLatencyDelta.innerHTML = deltaHtml(
+        summary.avg_latency_ms, summary.prev_avg_latency_ms, 'ms', true);
+
+      perfP95Latency.textContent = formatMs(summary.p95_latency_ms);
+      perfP95Latency.style.color = latencyColor(summary.p95_latency_ms);
+
+      perfErrorRate.textContent = summary.error_rate.toFixed(1) + '%';
+      if (summary.error_rate > 0) {
+        perfErrorRate.style.color = 'var(--danger-fg)';
+      } else {
+        perfErrorRate.style.color = 'var(--success-fg)';
+      }
+      perfErrorRateDelta.innerHTML = deltaHtml(
+        summary.error_rate, summary.prev_error_rate, '%', true);
+
+      // Render tools table
+      renderPerfTable(tools);
+    }).catch(function(err) {
+      DS.toast('Failed to load performance data: ' + err.message, 'error');
+    });
+  }
+
+  function renderPerfTable(tools) {
+    if (!tools || tools.length === 0) {
+      perfTableBody.innerHTML = '';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < tools.length; i++) {
+      var t = tools[i];
+      html += '<div class="table-row" style="display:flex; align-items:center; padding:6px 16px; border-bottom:1px solid var(--border-muted);">';
+      html += '<span style="flex:1; font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-primary);">' + escapeHtml(t.tool) + '</span>';
+      html += '<span style="width:110px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(t.server) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + t.calls + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.min_ms) + ';">' + formatMs(t.min_ms) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.avg_ms) + ';">' + formatMs(t.avg_ms) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.p50_ms) + ';">' + formatMs(t.p50_ms) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); font-weight:600; color:' + latencyColor(t.p95_ms) + ';">' + formatMs(t.p95_ms) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.max_ms) + ';">' + formatMs(t.max_ms) + '</span>';
+      html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + (t.error_rate > 0 ? 'var(--danger-fg)' : 'var(--text-muted)') + ';">' + t.error_rate.toFixed(1) + '%</span>';
+      html += '</div>';
+    }
+    perfTableBody.innerHTML = html;
+  }
+
+  // Sort column click handler
+  perfTableHeader.addEventListener('click', function(e) {
+    var col = e.target.closest('[data-sort]');
+    if (!col) return;
+    var sortKey = col.getAttribute('data-sort');
+    if (sortKey === 'tool' || sortKey === 'server') return; // not sortable by text
+
+    if (perfSort === sortKey) {
+      perfOrder = perfOrder === 'desc' ? 'asc' : 'desc';
+    } else {
+      perfSort = sortKey;
+      perfOrder = 'desc';
+    }
+
+    // Update header styling
+    var headers = perfTableHeader.querySelectorAll('[data-sort]');
+    for (var i = 0; i < headers.length; i++) {
+      var h = headers[i];
+      var sk = h.getAttribute('data-sort');
+      if (sk === perfSort) {
+        h.style.color = 'var(--accent-fg)';
+        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim() + ' ' + (perfOrder === 'desc' ? '\u2193' : '\u2191');
+      } else {
+        h.style.color = '';
+        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim();
+      }
+    }
+
+    loadPerformance();
+  });
+
+  // Filter change handlers
+  perfRange.addEventListener('change', function() { loadPerformance(); });
+  perfServer.addEventListener('change', function() { loadPerformance(); });
+
+  /* ======================================================================
      WebSocket — Handle server_status events (SPEC-004 AC-3)
      ====================================================================== */
   var origWsOnMessage;
@@ -2318,9 +3029,218 @@
                 });
               return;
             }
+            if (data.type === 'session_update') {
+              // Refresh sessions view if currently visible
+              if (historySessionsView && historySessionsView.style.display !== 'none') {
+                loadSessions();
+              }
+              return;
+            }
           } catch(e) { /* not JSON or not server_status */ }
           // Fall through to original handler
           if (origOnMessage) origOnMessage(event);
+        };
+      }
+    };
+  })();
+
+  /* ======================================================================
+     Schema Change Detection (SPEC-009)
+     ====================================================================== */
+  var schemaAlertBanner = document.getElementById('schema-alert-banner');
+  var schemaAlertText   = document.getElementById('schema-alert-text');
+  var schemaSchemaView  = document.getElementById('servers-schema-view');
+  var schemaChangeList  = document.getElementById('schema-change-list');
+  var schemaDetail      = document.getElementById('schema-change-detail');
+  var schemaEmpty       = document.getElementById('schema-empty');
+  var selectedSchemaChangeId = null;
+
+  function checkSchemaAlertBanner() {
+    fetch('/api/schema/unacknowledged-count')
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        if (data && data.count > 0) {
+          schemaAlertText.textContent = data.count + ' unacknowledged schema change' + (data.count !== 1 ? 's' : '') + ' detected';
+          schemaAlertBanner.style.display = 'flex';
+        } else {
+          schemaAlertBanner.style.display = 'none';
+        }
+      })
+      .catch(function() {});
+  }
+
+  function loadSchemaChanges() {
+    fetch('/api/schema/changes')
+      .then(function(resp) { return resp.json(); })
+      .then(function(changes) {
+        renderSchemaChangeList(changes);
+        if (changes.length === 0) {
+          schemaEmpty.style.display = '';
+          schemaDetail.style.display = 'none';
+        } else if (!selectedSchemaChangeId) {
+          schemaEmpty.style.display = 'none';
+          loadSchemaChangeDetail(changes[0].id);
+        }
+      })
+      .catch(function(err) { console.error('Failed to load schema changes:', err); });
+  }
+
+  function renderSchemaChangeList(changes) {
+    if (!changes || changes.length === 0) {
+      schemaChangeList.innerHTML = '<div style="padding:16px; text-align:center; color:var(--text-muted);">No changes</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < changes.length; i++) {
+      var c = changes[i];
+      var isSelected = c.id === selectedSchemaChangeId;
+      var borderStyle = isSelected ? 'border-left:3px solid var(--accent-primary, #58a6ff);' : 'border-left:3px solid transparent;';
+      var bgStyle = isSelected ? 'background:var(--bg-elevated, #1c2333);' : '';
+      var badges = '';
+      if (c.tools_added > 0) badges += '<span class="badge badge-success" style="font-size:11px;">+' + c.tools_added + '</span> ';
+      if (c.tools_removed > 0) badges += '<span class="badge badge-error" style="font-size:11px;">-' + c.tools_removed + '</span> ';
+      if (c.tools_modified > 0) badges += '<span class="badge badge-info" style="font-size:11px;">~' + c.tools_modified + '</span> ';
+      var ackDot = c.acknowledged ? '' : '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent-warning, #d29922); margin-right:4px;"></span>';
+      var ts = c.detected_at ? relativeTime(new Date(c.detected_at).getTime()) : '';
+      html += '<div class="table-row" style="cursor:pointer; padding:10px 12px; ' + borderStyle + bgStyle + ' border-bottom:1px solid var(--border-muted);" data-schema-change-id="' + c.id + '">';
+      html += '<div style="display:flex; align-items:center; gap:6px;">' + ackDot + '<strong style="color:var(--text-primary);">' + escapeHtml(c.server_name) + '</strong></div>';
+      html += '<div style="display:flex; align-items:center; gap:4px; margin-top:4px;">' + badges + '<span style="font-size:var(--font-size-xs); color:var(--text-muted); margin-left:auto;">' + ts + '</span></div>';
+      html += '</div>';
+    }
+    schemaChangeList.innerHTML = html;
+    var rows = schemaChangeList.querySelectorAll('[data-schema-change-id]');
+    for (var j = 0; j < rows.length; j++) {
+      rows[j].addEventListener('click', function() {
+        loadSchemaChangeDetail(parseInt(this.getAttribute('data-schema-change-id')));
+      });
+    }
+  }
+
+  function loadSchemaChangeDetail(id) {
+    selectedSchemaChangeId = id;
+    fetch('/api/schema/changes/' + id)
+      .then(function(resp) { return resp.json(); })
+      .then(function(detail) {
+        renderSchemaChangeDetail(detail);
+        fetch('/api/schema/changes').then(function(r) { return r.json(); }).then(renderSchemaChangeList);
+      })
+      .catch(function(err) { console.error('Schema detail error:', err); });
+  }
+
+  function safeJsonPretty(raw) {
+    try { return escapeHtml(JSON.stringify(JSON.parse(raw), null, 2)); } catch(e) { return escapeHtml(String(raw || '{}')); }
+  }
+
+  function renderSchemaChangeDetail(detail) {
+    schemaEmpty.style.display = 'none';
+    schemaDetail.style.display = '';
+    var ts = detail.detected_at ? new Date(detail.detected_at).toLocaleString() : '';
+    var ackBtn = detail.acknowledged
+      ? '<span class="badge badge-success">Acknowledged</span>'
+      : '<button class="btn btn-primary btn-sm" id="schema-ack-btn" data-id="' + detail.id + '">Acknowledge</button>';
+    var html = '<div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">';
+    html += '<strong style="font-size:var(--font-size-lg); color:var(--text-primary);">' + escapeHtml(detail.server_name) + '</strong>';
+    html += '<span style="font-size:var(--font-size-sm); color:var(--text-muted);">' + ts + '</span><div style="flex:1;"></div>' + ackBtn + '</div>';
+    var diff = detail.diff || {};
+    if (diff.added && diff.added.length > 0) {
+      html += '<div style="margin-bottom:16px;"><div style="font-weight:600; color:var(--text-primary); margin-bottom:8px;">Added Tools (' + diff.added.length + ')</div>';
+      for (var a = 0; a < diff.added.length; a++) {
+        var at = diff.added[a];
+        html += '<div style="background:rgba(63,185,80,0.1); border:1px solid rgba(63,185,80,0.3); border-radius:var(--radius-m); padding:12px; margin-bottom:8px;">';
+        html += '<div style="font-weight:600; color:#3fb950;">' + escapeHtml(at.name) + '</div>';
+        if (at.description) html += '<div style="font-size:var(--font-size-sm); color:var(--text-secondary); margin-top:4px;">' + escapeHtml(at.description) + '</div>';
+        if (at.inputSchema) html += '<pre style="font-size:var(--font-size-xs); color:#3fb950; margin-top:8px; overflow-x:auto;">' + safeJsonPretty(at.inputSchema) + '</pre>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    if (diff.removed && diff.removed.length > 0) {
+      html += '<div style="margin-bottom:16px;"><div style="font-weight:600; color:var(--text-primary); margin-bottom:8px;">Removed Tools (' + diff.removed.length + ')</div>';
+      for (var r = 0; r < diff.removed.length; r++) {
+        var rt = diff.removed[r];
+        html += '<div style="background:rgba(248,81,73,0.1); border:1px solid rgba(248,81,73,0.3); border-radius:var(--radius-m); padding:12px; margin-bottom:8px;">';
+        html += '<div style="font-weight:600; color:#f85149; text-decoration:line-through;">' + escapeHtml(rt.name) + '</div>';
+        if (rt.description) html += '<div style="font-size:var(--font-size-sm); color:var(--text-secondary); margin-top:4px; text-decoration:line-through;">' + escapeHtml(rt.description) + '</div>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    if (diff.modified && diff.modified.length > 0) {
+      html += '<div style="margin-bottom:16px;"><div style="font-weight:600; color:var(--text-primary); margin-bottom:8px;">Modified Tools (' + diff.modified.length + ')</div>';
+      for (var m = 0; m < diff.modified.length; m++) {
+        var mt = diff.modified[m];
+        html += '<div style="background:rgba(210,153,34,0.1); border:1px solid rgba(210,153,34,0.3); border-radius:var(--radius-m); padding:12px; margin-bottom:8px;">';
+        html += '<div style="font-weight:600; color:#d29922;">' + escapeHtml(mt.name) + '</div>';
+        html += '<div style="display:flex; gap:12px; margin-top:8px;">';
+        html += '<div style="flex:1;"><div style="font-size:var(--font-size-xs); color:var(--text-muted); margin-bottom:4px;">Before</div>';
+        html += '<pre style="font-size:var(--font-size-xs); color:#f85149; overflow-x:auto;">' + escapeHtml(JSON.stringify(mt.before || {}, null, 2)) + '</pre></div>';
+        html += '<div style="flex:1;"><div style="font-size:var(--font-size-xs); color:var(--text-muted); margin-bottom:4px;">After</div>';
+        html += '<pre style="font-size:var(--font-size-xs); color:#3fb950; overflow-x:auto;">' + escapeHtml(JSON.stringify(mt.after || {}, null, 2)) + '</pre></div>';
+        html += '</div></div>';
+      }
+      html += '</div>';
+    }
+    schemaDetail.innerHTML = html;
+    var ackBtnEl = document.getElementById('schema-ack-btn');
+    if (ackBtnEl) {
+      ackBtnEl.addEventListener('click', function() {
+        var cid = parseInt(this.getAttribute('data-id'));
+        fetch('/api/schema/changes/' + cid + '/ack', { method: 'POST' }).then(function() {
+          loadSchemaChangeDetail(cid);
+          checkSchemaAlertBanner();
+        });
+      });
+    }
+  }
+
+  function showSchemaView() {
+    var se = document.getElementById('servers-empty');
+    var sg = document.getElementById('servers-grid');
+    var sa = document.getElementById('servers-action-bar');
+    if (se) se.style.display = 'none';
+    if (sg) sg.style.display = 'none';
+    if (sa) sa.style.display = 'none';
+    if (schemaSchemaView) schemaSchemaView.style.display = '';
+    selectedSchemaChangeId = null;
+    loadSchemaChanges();
+  }
+
+  function hideSchemaView() {
+    if (schemaSchemaView) schemaSchemaView.style.display = 'none';
+    var sa = document.getElementById('servers-action-bar');
+    if (sa) sa.style.display = '';
+  }
+
+  var origGetRoute = getRoute;
+  getRoute = function() {
+    var hash = location.hash.replace(/^#\/?/, '') || 'timeline';
+    if (hash === 'servers/schema') return 'servers';
+    return origGetRoute();
+  };
+
+  var origNavigate = navigate;
+  navigate = function(route) {
+    origNavigate(route);
+    var hash = location.hash.replace(/^#\/?/, '');
+    if (hash === 'servers/schema') { showSchemaView(); } else { hideSchemaView(); }
+  };
+
+  (function patchWsForSchemaChange() {
+    var origCWS = connectWS;
+    connectWS = function() {
+      origCWS();
+      if (ws) {
+        var origMsg = ws.onmessage;
+        ws.onmessage = function(event) {
+          try {
+            var data = JSON.parse(event.data);
+            if (data.type === 'schema_change') {
+              checkSchemaAlertBanner();
+              if (location.hash.replace(/^#\/?/, '') === 'servers/schema') loadSchemaChanges();
+              return;
+            }
+          } catch(e) {}
+          if (origMsg) origMsg(event);
         };
       }
     };
@@ -2337,6 +3257,9 @@
 
   // Load initial data
   loadPage();
+
+  // Check schema alert banner on load
+  checkSchemaAlertBanner();
 
   // Connect WebSocket
   connectWS();

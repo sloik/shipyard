@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
@@ -123,6 +124,7 @@ func main() {
 	global := flag.NewFlagSet("shipyard", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	configPath := global.String("config", "", "path to JSON config file")
+	schemaPoll := global.Duration("schema-poll", 60*time.Second, "schema change polling interval")
 
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
@@ -132,7 +134,7 @@ func main() {
 	}
 
 	if *configPath != "" {
-		runConfig(*configPath)
+		runConfig(*configPath, *schemaPoll)
 		return
 	}
 
@@ -154,7 +156,7 @@ func main() {
 		}
 }
 
-func runConfig(configPath string) {
+func runConfig(configPath string, schemaPoll time.Duration) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", configPath, "error", err)
@@ -183,7 +185,7 @@ func runConfig(configPath string) {
 		}
 	}
 
-	runMultiServerFn(cfg, port)
+	runMultiServerFn(cfg, port, schemaPoll)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -266,7 +268,7 @@ func runWrap(args []string) {
 	runProxyFn(*name, *port, childCmd[0], childCmd[1:], nil, "")
 }
 
-func runMultiServer(cfg *Config, port int) {
+func runMultiServer(cfg *Config, port int, schemaPoll time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -317,6 +319,21 @@ func runMultiServer(cfg *Config, port int) {
 	}
 
 	slog.Info("all servers started", "count", len(cfg.ServerOrder))
+
+	// Start schema change watcher
+	if schemaPoll > 0 {
+		go func() {
+			// Give servers a moment to initialize before first baseline capture
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+			slog.Info("schema watcher starting", "interval", schemaPoll)
+			mgr.StartSchemaWatcher(ctx, store, schemaPoll)
+		}()
+	}
+
 	wg.Wait()
 }
 

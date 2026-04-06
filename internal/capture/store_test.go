@@ -2,7 +2,9 @@ package capture
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -905,5 +907,767 @@ func TestQueryFiltered_DefaultPagination(t *testing.T) {
 	}
 	if len(page.Items) != 3 {
 		t.Fatalf("expected 3 items, got %d", len(page.Items))
+	}
+}
+
+// --- SPEC-008: Latency Profiling ---
+
+// seedProfilingData inserts response traffic with known latencies for profiling tests.
+func seedProfilingData(t *testing.T, s *Store) {
+	t.Helper()
+	now := time.Now()
+
+	// tools/call on server "alpha" — 3 calls: 50ms, 100ms, 200ms
+	for i, lat := range []int64{50, 100, 200} {
+		reqID := fmt.Sprintf("alpha-call-%d", i)
+		s.Insert(&TrafficEntry{
+			Timestamp: now.Add(-time.Duration(i) * time.Minute), Direction: DirectionClientToServer,
+			ServerName: "alpha", Method: "tools/call", MessageID: reqID,
+			Payload: `{"jsonrpc":"2.0","method":"tools/call","id":"` + reqID + `"}`, Status: "pending",
+		})
+		s.Insert(&TrafficEntry{
+			Timestamp:  now.Add(-time.Duration(i)*time.Minute + time.Duration(lat)*time.Millisecond),
+			Direction:  DirectionServerToClient,
+			ServerName: "alpha", Method: "tools/call", MessageID: reqID,
+			Payload:    `{"jsonrpc":"2.0","id":"` + reqID + `","result":{}}`,
+			Status:     "ok",
+			IsResponse: true,
+		})
+	}
+
+	// tools/list on server "alpha" — 1 call: 10ms
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(-5 * time.Minute), Direction: DirectionClientToServer,
+		ServerName: "alpha", Method: "tools/list", MessageID: "alpha-list-0",
+		Payload: `{"jsonrpc":"2.0","method":"tools/list","id":"alpha-list-0"}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp:  now.Add(-5*time.Minute + 10*time.Millisecond),
+		Direction:  DirectionServerToClient,
+		ServerName: "alpha", Method: "tools/list", MessageID: "alpha-list-0",
+		Payload:    `{"jsonrpc":"2.0","id":"alpha-list-0","result":{}}`,
+		Status:     "ok",
+		IsResponse: true,
+	})
+
+	// tools/call on server "beta" — 2 calls: 500ms (ok), 800ms (error)
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(-10 * time.Minute), Direction: DirectionClientToServer,
+		ServerName: "beta", Method: "tools/call", MessageID: "beta-call-0",
+		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":"beta-call-0"}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp:  now.Add(-10*time.Minute + 500*time.Millisecond),
+		Direction:  DirectionServerToClient,
+		ServerName: "beta", Method: "tools/call", MessageID: "beta-call-0",
+		Payload:    `{"jsonrpc":"2.0","id":"beta-call-0","result":{}}`,
+		Status:     "ok",
+		IsResponse: true,
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp: now.Add(-11 * time.Minute), Direction: DirectionClientToServer,
+		ServerName: "beta", Method: "tools/call", MessageID: "beta-call-1",
+		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":"beta-call-1"}`, Status: "pending",
+	})
+	s.Insert(&TrafficEntry{
+		Timestamp:  now.Add(-11*time.Minute + 800*time.Millisecond),
+		Direction:  DirectionServerToClient,
+		ServerName: "beta", Method: "tools/call", MessageID: "beta-call-1",
+		Payload:    `{"jsonrpc":"2.0","id":"beta-call-1","error":{"code":-1,"message":"fail"}}`,
+		Status:     "error",
+		IsResponse: true,
+	})
+}
+
+func TestProfilingSummary_Basic(t *testing.T) {
+	s := newTestStore(t)
+	seedProfilingData(t, s)
+
+	summary, err := s.ProfilingSummary("1h", "")
+	if err != nil {
+		t.Fatalf("ProfilingSummary: %v", err)
+	}
+	// 6 response entries total (3 alpha-call + 1 alpha-list + 2 beta-call)
+	if summary.TotalCalls != 6 {
+		t.Fatalf("expected 6 total calls, got %d", summary.TotalCalls)
+	}
+	// Avg: (50+100+200+10+500+800)/6 = 276.67
+	if summary.AvgLatencyMs < 276 || summary.AvgLatencyMs > 277 {
+		t.Fatalf("expected avg ~276.67ms, got %.2f", summary.AvgLatencyMs)
+	}
+	// P95 should be 800 (highest or near-highest value)
+	if summary.P95LatencyMs < 500 {
+		t.Fatalf("expected P95 >= 500ms, got %.2f", summary.P95LatencyMs)
+	}
+	// Error rate: 1 error out of 6 = 16.67%
+	if summary.ErrorRate < 16 || summary.ErrorRate > 17 {
+		t.Fatalf("expected error rate ~16.67%%, got %.2f", summary.ErrorRate)
+	}
+}
+
+func TestProfilingSummary_ServerFilter(t *testing.T) {
+	s := newTestStore(t)
+	seedProfilingData(t, s)
+
+	summary, err := s.ProfilingSummary("1h", "alpha")
+	if err != nil {
+		t.Fatalf("ProfilingSummary: %v", err)
+	}
+	if summary.TotalCalls != 4 {
+		t.Fatalf("expected 4 alpha calls, got %d", summary.TotalCalls)
+	}
+	if summary.ErrorRate != 0 {
+		t.Fatalf("expected 0%% error rate for alpha, got %.2f", summary.ErrorRate)
+	}
+}
+
+func TestProfilingSummary_InvalidRange(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.ProfilingSummary("invalid", "")
+	if err == nil {
+		t.Fatal("expected error for invalid range")
+	}
+}
+
+func TestProfilingSummary_NoData(t *testing.T) {
+	s := newTestStore(t)
+
+	summary, err := s.ProfilingSummary("1h", "")
+	if err != nil {
+		t.Fatalf("ProfilingSummary: %v", err)
+	}
+	if summary.TotalCalls != 0 {
+		t.Fatalf("expected 0 calls, got %d", summary.TotalCalls)
+	}
+	if summary.PrevTotalCalls != nil {
+		t.Fatal("expected nil prev_total_calls when no prior data")
+	}
+}
+
+func TestProfilingByTool_Basic(t *testing.T) {
+	s := newTestStore(t)
+	seedProfilingData(t, s)
+
+	tools, err := s.ProfilingByTool("1h", "", "p95", "desc")
+	if err != nil {
+		t.Fatalf("ProfilingByTool: %v", err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tool groups, got %d", len(tools))
+	}
+	// First should be beta/tools/call (highest P95 = 800ms)
+	if tools[0].Server != "beta" || tools[0].Tool != "tools/call" {
+		t.Fatalf("expected beta/tools/call first, got %s/%s", tools[0].Server, tools[0].Tool)
+	}
+	if tools[0].Calls != 2 {
+		t.Fatalf("expected 2 calls for beta/tools/call, got %d", tools[0].Calls)
+	}
+	if tools[0].MinMs != 500 {
+		t.Fatalf("expected min 500ms for beta/tools/call, got %.2f", tools[0].MinMs)
+	}
+	if tools[0].MaxMs != 800 {
+		t.Fatalf("expected max 800ms for beta/tools/call, got %.2f", tools[0].MaxMs)
+	}
+	if tools[0].ErrorRate != 50 {
+		t.Fatalf("expected 50%% error rate, got %.2f", tools[0].ErrorRate)
+	}
+}
+
+func TestProfilingByTool_ServerFilter(t *testing.T) {
+	s := newTestStore(t)
+	seedProfilingData(t, s)
+
+	tools, err := s.ProfilingByTool("1h", "alpha", "avg", "asc")
+	if err != nil {
+		t.Fatalf("ProfilingByTool: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tool groups for alpha, got %d", len(tools))
+	}
+	if tools[0].Tool != "tools/list" {
+		t.Fatalf("expected tools/list first (lowest avg), got %s", tools[0].Tool)
+	}
+}
+
+func TestProfilingByTool_SortCalls(t *testing.T) {
+	s := newTestStore(t)
+	seedProfilingData(t, s)
+
+	tools, err := s.ProfilingByTool("1h", "", "calls", "desc")
+	if err != nil {
+		t.Fatalf("ProfilingByTool: %v", err)
+	}
+	if tools[0].Calls != 3 {
+		t.Fatalf("expected highest calls=3, got %d", tools[0].Calls)
+	}
+	if tools[len(tools)-1].Calls != 1 {
+		t.Fatalf("expected lowest calls=1, got %d", tools[len(tools)-1].Calls)
+	}
+}
+
+func TestProfilingByTool_NoData(t *testing.T) {
+	s := newTestStore(t)
+
+	tools, err := s.ProfilingByTool("24h", "", "p95", "desc")
+	if err != nil {
+		t.Fatalf("ProfilingByTool: %v", err)
+	}
+	if len(tools) != 0 {
+		t.Fatalf("expected 0 tools, got %d", len(tools))
+	}
+}
+
+func TestPercentile_EdgeCases(t *testing.T) {
+	if v := percentile(nil, 0.95); v != 0 {
+		t.Fatalf("expected 0 for nil, got %f", v)
+	}
+	if v := percentile([]float64{42}, 0.50); v != 42 {
+		t.Fatalf("expected 42, got %f", v)
+	}
+	if v := percentile([]float64{42}, 0.95); v != 42 {
+		t.Fatalf("expected 42, got %f", v)
+	}
+	if v := percentile([]float64{10, 20}, 0.50); v != 10 {
+		t.Fatalf("expected 10 for P50 of [10,20], got %f", v)
+	}
+	// With 2 values, P95 index = int(1 * 0.95) = 0, returns first value
+	if v := percentile([]float64{10, 20}, 0.95); v != 10 {
+		t.Fatalf("expected 10 for P95 of [10,20], got %f", v)
+	}
+	// With 3+ values P95 picks a higher index
+	if v := percentile([]float64{10, 20, 30}, 0.95); v != 20 {
+		t.Fatalf("expected 20 for P95 of [10,20,30], got %f", v)
+	}
+}
+
+func TestProfilingByTool_InvalidRange(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.ProfilingByTool("bad", "", "p95", "desc")
+	if err == nil {
+		t.Fatal("expected error for invalid range")
+	}
+}
+
+// --- SPEC-007: Session Recording ---
+
+func TestStartSession(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.StartSession("test-session", "filesystem")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero session ID")
+	}
+
+	sess, err := s.GetSession(id)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.Name != "test-session" {
+		t.Fatalf("expected name 'test-session', got %q", sess.Name)
+	}
+	if sess.Server != "filesystem" {
+		t.Fatalf("expected server 'filesystem', got %q", sess.Server)
+	}
+	if sess.Status != "recording" {
+		t.Fatalf("expected status 'recording', got %q", sess.Status)
+	}
+	if sess.RequestCount != 0 {
+		t.Fatalf("expected request_count 0, got %d", sess.RequestCount)
+	}
+}
+
+func TestStopSession(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.StartSession("stop-test", "srv")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Insert some traffic tagged to this session
+	s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now(), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{"test":"data"}`, Status: "pending",
+	}, id)
+
+	if err := s.StopSession(id); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
+
+	sess, err := s.GetSession(id)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.Status != "complete" {
+		t.Fatalf("expected status 'complete', got %q", sess.Status)
+	}
+	if sess.DurationMs == nil {
+		t.Fatal("expected non-nil duration_ms")
+	}
+	if sess.RequestCount != 1 {
+		t.Fatalf("expected request_count 1, got %d", sess.RequestCount)
+	}
+	if sess.SizeBytes == 0 {
+		t.Fatal("expected non-zero size_bytes")
+	}
+	if sess.StoppedAt == "" {
+		t.Fatal("expected non-empty stopped_at")
+	}
+}
+
+func TestStopSession_AlreadyStopped(t *testing.T) {
+	s := newTestStore(t)
+
+	id, _ := s.StartSession("already-stopped", "srv")
+	s.StopSession(id)
+
+	err := s.StopSession(id)
+	if err == nil {
+		t.Fatal("expected error stopping already-stopped session")
+	}
+	if !strings.Contains(err.Error(), "not recording") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStopSession_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.StopSession(99999)
+	if err == nil {
+		t.Fatal("expected error for non-existent session")
+	}
+}
+
+func TestGetSession_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.GetSession(99999)
+	if err == nil {
+		t.Fatal("expected error for non-existent session")
+	}
+}
+
+func TestListSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	s.StartSession("s1", "alpha")
+	s.StartSession("s2", "beta")
+	s.StartSession("s3", "alpha")
+
+	// List all
+	sessions, err := s.ListSessions("", "")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 3 {
+		t.Fatalf("expected 3 sessions, got %d", len(sessions))
+	}
+
+	// Filter by server
+	sessions, err = s.ListSessions("alpha", "")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 alpha sessions, got %d", len(sessions))
+	}
+
+	// Filter by status
+	sessions, err = s.ListSessions("", "recording")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 3 {
+		t.Fatalf("expected 3 recording sessions, got %d", len(sessions))
+	}
+}
+
+func TestListSessions_Empty(t *testing.T) {
+	s := newTestStore(t)
+
+	sessions, err := s.ListSessions("", "")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if sessions == nil {
+		t.Fatal("expected non-nil empty slice")
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected 0 sessions, got %d", len(sessions))
+	}
+}
+
+func TestDeleteSession(t *testing.T) {
+	s := newTestStore(t)
+
+	id, _ := s.StartSession("delete-me", "srv")
+
+	// Insert traffic tagged to session
+	s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now(), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call", Payload: `{}`, Status: "pending",
+	}, id)
+
+	if err := s.DeleteSession(id); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	// Session should be gone
+	_, err := s.GetSession(id)
+	if err == nil {
+		t.Fatal("expected error after deleting session")
+	}
+
+	// Traffic should still exist but unlinked
+	page, _ := s.Query(1, 50, "", "")
+	if page.TotalCount != 1 {
+		t.Fatalf("expected 1 traffic entry after session delete, got %d", page.TotalCount)
+	}
+}
+
+func TestDeleteSession_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.DeleteSession(99999)
+	if err == nil {
+		t.Fatal("expected error deleting non-existent session")
+	}
+}
+
+func TestExportSession(t *testing.T) {
+	s := newTestStore(t)
+
+	id, _ := s.StartSession("export-test", "srv")
+
+	// Insert a request and response
+	s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now(), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "tools/call",
+		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file"}}`,
+		Status: "pending",
+	}, id)
+	s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now().Add(50 * time.Millisecond), Direction: DirectionServerToClient,
+		ServerName: "srv", Method: "tools/call",
+		Payload: `{"jsonrpc":"2.0","id":1,"result":{"content":"hello"}}`,
+		Status: "ok", IsResponse: true,
+	}, id)
+
+	s.StopSession(id)
+
+	cassette, err := s.ExportSession(id)
+	if err != nil {
+		t.Fatalf("ExportSession: %v", err)
+	}
+	if cassette.Version != 1 {
+		t.Fatalf("expected version 1, got %d", cassette.Version)
+	}
+	if cassette.Name != "export-test" {
+		t.Fatalf("expected name 'export-test', got %q", cassette.Name)
+	}
+	if cassette.Server != "srv" {
+		t.Fatalf("expected server 'srv', got %q", cassette.Server)
+	}
+	if len(cassette.Requests) != 2 {
+		t.Fatalf("expected 2 cassette entries, got %d", len(cassette.Requests))
+	}
+}
+
+func TestExportSession_Empty(t *testing.T) {
+	s := newTestStore(t)
+
+	id, _ := s.StartSession("empty-session", "srv")
+	s.StopSession(id)
+
+	cassette, err := s.ExportSession(id)
+	if err != nil {
+		t.Fatalf("ExportSession: %v", err)
+	}
+	if len(cassette.Requests) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(cassette.Requests))
+	}
+}
+
+func TestExportSession_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.ExportSession(99999)
+	if err == nil {
+		t.Fatal("expected error exporting non-existent session")
+	}
+}
+
+func TestInsertWithSession_TagsTraffic(t *testing.T) {
+	s := newTestStore(t)
+
+	id, _ := s.StartSession("tag-test", "srv")
+
+	// Insert with session
+	rowID, _ := s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now(), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "test", Payload: `{}`, Status: "pending",
+	}, id)
+
+	if rowID == 0 {
+		t.Fatal("expected non-zero row ID")
+	}
+
+	// Verify session request_count was incremented
+	sess, _ := s.GetSession(id)
+	if sess.RequestCount != 1 {
+		t.Fatalf("expected request_count 1, got %d", sess.RequestCount)
+	}
+}
+
+func TestInsertWithSession_ZeroSessionID(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert with session ID 0 should not tag
+	rowID, _ := s.InsertWithSession(&TrafficEntry{
+		Timestamp: time.Now(), Direction: DirectionClientToServer,
+		ServerName: "srv", Method: "test", Payload: `{}`, Status: "pending",
+	}, 0)
+
+	if rowID == 0 {
+		t.Fatal("expected non-zero row ID")
+	}
+}
+
+func TestListSessions_OrderedNewestFirst(t *testing.T) {
+	s := newTestStore(t)
+
+	id1, _ := s.StartSession("first", "srv")
+	id2, _ := s.StartSession("second", "srv")
+	id3, _ := s.StartSession("third", "srv")
+
+	sessions, _ := s.ListSessions("", "")
+	if len(sessions) != 3 {
+		t.Fatalf("expected 3, got %d", len(sessions))
+	}
+	if sessions[0].ID != id3 || sessions[1].ID != id2 || sessions[2].ID != id1 {
+		t.Fatalf("expected newest-first order %d,%d,%d; got %d,%d,%d",
+			id3, id2, id1, sessions[0].ID, sessions[1].ID, sessions[2].ID)
+	}
+}
+
+// --- SPEC-009: Schema Snapshots & Changes ---
+
+func TestSaveSnapshot_And_GetLatest(t *testing.T) {
+	s := newTestStore(t)
+
+	tools := []ToolSchema{
+		{Name: "read_file", Description: "Read", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	id, err := s.SaveSnapshot("alpha", tools)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero snapshot ID")
+	}
+
+	got, gotID, err := s.GetLatestSnapshot("alpha")
+	if err != nil {
+		t.Fatalf("GetLatestSnapshot: %v", err)
+	}
+	if gotID != id {
+		t.Fatalf("expected snapshot ID %d, got %d", id, gotID)
+	}
+	if len(got) != 1 || got[0].Name != "read_file" {
+		t.Fatalf("unexpected snapshot content: %+v", got)
+	}
+}
+
+func TestGetLatestSnapshot_NoSnapshot(t *testing.T) {
+	s := newTestStore(t)
+
+	tools, id, err := s.GetLatestSnapshot("nonexistent")
+	if err != nil {
+		t.Fatalf("GetLatestSnapshot: %v", err)
+	}
+	if tools != nil {
+		t.Fatalf("expected nil tools, got %+v", tools)
+	}
+	if id != 0 {
+		t.Fatalf("expected 0 id, got %d", id)
+	}
+}
+
+func TestGetLatestSnapshot_ReturnsNewest(t *testing.T) {
+	s := newTestStore(t)
+
+	tools1 := []ToolSchema{{Name: "tool_v1"}}
+	s.SaveSnapshot("alpha", tools1)
+
+	tools2 := []ToolSchema{{Name: "tool_v2"}}
+	id2, _ := s.SaveSnapshot("alpha", tools2)
+
+	got, gotID, err := s.GetLatestSnapshot("alpha")
+	if err != nil {
+		t.Fatalf("GetLatestSnapshot: %v", err)
+	}
+	if gotID != id2 {
+		t.Fatalf("expected latest snapshot ID %d, got %d", id2, gotID)
+	}
+	if got[0].Name != "tool_v2" {
+		t.Fatalf("expected tool_v2, got %s", got[0].Name)
+	}
+}
+
+// saveTestSnapshots creates two snapshot IDs for use in schema change tests.
+func saveTestSnapshots(t *testing.T, s *Store, server string) (int64, int64) {
+	t.Helper()
+	id1, err := s.SaveSnapshot(server, []ToolSchema{{Name: "before_tool"}})
+	if err != nil {
+		t.Fatalf("SaveSnapshot before: %v", err)
+	}
+	id2, err := s.SaveSnapshot(server, []ToolSchema{{Name: "after_tool"}})
+	if err != nil {
+		t.Fatalf("SaveSnapshot after: %v", err)
+	}
+	return id1, id2
+}
+
+func TestInsertSchemaChange_And_List(t *testing.T) {
+	s := newTestStore(t)
+	beforeID, afterID := saveTestSnapshots(t, s, "alpha")
+
+	diff := SchemaDiff{
+		Added:   []ToolSchema{{Name: "new_tool"}},
+		Removed: []ToolSchema{{Name: "old_tool"}},
+	}
+
+	id, err := s.InsertSchemaChange("alpha", diff, beforeID, afterID)
+	if err != nil {
+		t.Fatalf("InsertSchemaChange: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero change ID")
+	}
+
+	changes, err := s.ListSchemaChanges("")
+	if err != nil {
+		t.Fatalf("ListSchemaChanges: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+	if changes[0].ToolsAdded != 1 {
+		t.Fatalf("expected tools_added=1, got %d", changes[0].ToolsAdded)
+	}
+	if changes[0].ToolsRemoved != 1 {
+		t.Fatalf("expected tools_removed=1, got %d", changes[0].ToolsRemoved)
+	}
+	if changes[0].Acknowledged {
+		t.Fatal("expected not acknowledged")
+	}
+}
+
+func TestListSchemaChanges_FilterByServer(t *testing.T) {
+	s := newTestStore(t)
+	aB, aA := saveTestSnapshots(t, s, "alpha")
+	bB, bA := saveTestSnapshots(t, s, "beta")
+
+	s.InsertSchemaChange("alpha", SchemaDiff{Added: []ToolSchema{{Name: "a"}}}, aB, aA)
+	s.InsertSchemaChange("beta", SchemaDiff{Added: []ToolSchema{{Name: "b"}}}, bB, bA)
+
+	changes, err := s.ListSchemaChanges("alpha")
+	if err != nil {
+		t.Fatalf("ListSchemaChanges: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change for alpha, got %d", len(changes))
+	}
+	if changes[0].ServerName != "alpha" {
+		t.Fatalf("expected server alpha, got %s", changes[0].ServerName)
+	}
+}
+
+func TestGetSchemaChange(t *testing.T) {
+	s := newTestStore(t)
+	bID, aID := saveTestSnapshots(t, s, "alpha")
+
+	diff := SchemaDiff{
+		Added: []ToolSchema{{Name: "new_tool", Description: "desc"}},
+	}
+	id, _ := s.InsertSchemaChange("alpha", diff, bID, aID)
+
+	detail, err := s.GetSchemaChange(id)
+	if err != nil {
+		t.Fatalf("GetSchemaChange: %v", err)
+	}
+	if detail.ServerName != "alpha" {
+		t.Fatalf("expected server alpha, got %s", detail.ServerName)
+	}
+	if len(detail.DiffJSON.Added) != 1 {
+		t.Fatalf("expected 1 added in diff, got %d", len(detail.DiffJSON.Added))
+	}
+}
+
+func TestGetSchemaChange_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.GetSchemaChange(99999)
+	if err == nil {
+		t.Fatal("expected error for nonexistent change")
+	}
+}
+
+func TestAcknowledgeSchemaChange(t *testing.T) {
+	s := newTestStore(t)
+	bID, aID := saveTestSnapshots(t, s, "alpha")
+
+	id, _ := s.InsertSchemaChange("alpha", SchemaDiff{Added: []ToolSchema{{Name: "x"}}}, bID, aID)
+
+	err := s.AcknowledgeSchemaChange(id)
+	if err != nil {
+		t.Fatalf("AcknowledgeSchemaChange: %v", err)
+	}
+
+	detail, _ := s.GetSchemaChange(id)
+	if !detail.Acknowledged {
+		t.Fatal("expected acknowledged after AcknowledgeSchemaChange")
+	}
+}
+
+func TestAcknowledgeSchemaChange_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.AcknowledgeSchemaChange(99999)
+	if err == nil {
+		t.Fatal("expected error for nonexistent change")
+	}
+}
+
+func TestUnacknowledgedCount(t *testing.T) {
+	s := newTestStore(t)
+
+	count, err := s.UnacknowledgedCount()
+	if err != nil {
+		t.Fatalf("UnacknowledgedCount: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0, got %d", count)
+	}
+
+	aB, aA := saveTestSnapshots(t, s, "alpha")
+	bB, bA := saveTestSnapshots(t, s, "beta")
+
+	s.InsertSchemaChange("alpha", SchemaDiff{Added: []ToolSchema{{Name: "a"}}}, aB, aA)
+	id2, _ := s.InsertSchemaChange("beta", SchemaDiff{Added: []ToolSchema{{Name: "b"}}}, bB, bA)
+
+	count, _ = s.UnacknowledgedCount()
+	if count != 2 {
+		t.Fatalf("expected 2, got %d", count)
+	}
+
+	s.AcknowledgeSchemaChange(id2)
+	count, _ = s.UnacknowledgedCount()
+	if count != 1 {
+		t.Fatalf("expected 1 after acknowledging one, got %d", count)
 	}
 }

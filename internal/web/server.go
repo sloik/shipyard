@@ -38,6 +38,9 @@ type ProxyManager interface {
 	SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (json.RawMessage, error)
 	RestartServer(name string) error
 	StopServer(name string) error
+	StartRecording(server string, sessionID int64)
+	StopRecording(server string)
+	ActiveSessionID(server string) int64
 }
 
 // ServerInfo describes a running server for the API.
@@ -91,6 +94,20 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/tools/conflicts", s.handleToolConflicts)
 	mux.HandleFunc("POST /api/tools/call", s.handleToolCall)
 	mux.HandleFunc("POST /api/replay", s.handleReplay)
+	mux.HandleFunc("POST /api/sessions/start", s.handleSessionStart)
+	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
+	mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionDetail)
+	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleSessionExport)
+	mux.HandleFunc("POST /api/sessions/{id}/stop", s.handleSessionStop)
+	mux.HandleFunc("POST /api/sessions/{id}/replay", s.handleSessionReplay)
+	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleSessionDelete)
+	mux.HandleFunc("GET /api/schema/changes", s.handleSchemaChanges)
+	mux.HandleFunc("GET /api/schema/changes/{id}", s.handleSchemaChangeDetail)
+	mux.HandleFunc("POST /api/schema/changes/{id}/ack", s.handleSchemaAcknowledge)
+	mux.HandleFunc("GET /api/schema/current/{server}", s.handleSchemaCurrentTools)
+	mux.HandleFunc("GET /api/schema/unacknowledged-count", s.handleSchemaUnackCount)
+	mux.HandleFunc("GET /api/profiling/summary", s.handleProfilingSummary)
+	mux.HandleFunc("GET /api/profiling/tools", s.handleProfilingTools)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 
 	srv := &http.Server{
@@ -534,6 +551,198 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// --- Session Recording Handlers (SPEC-007) ---
+
+func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Name   string `json:"name"`
+		Server string `json:"server"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	id, err := s.store.StartSession(req.Name, req.Server)
+	if err != nil {
+		slog.Error("start session", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Tell the manager to tag traffic for this server
+	if s.proxies != nil {
+		s.proxies.StartRecording(req.Server, id)
+	}
+
+	sess, err := s.store.GetSession(id)
+	if err != nil {
+		slog.Error("get session after start", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sess)
+}
+
+func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	// Get session to find server name before stopping
+	sess, err := s.store.GetSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.store.StopSession(id); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	// Stop recording in manager
+	if s.proxies != nil {
+		s.proxies.StopRecording(sess.Server)
+	}
+
+	sess, _ = s.store.GetSession(id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sess)
+}
+
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	server := r.URL.Query().Get("server")
+	status := r.URL.Query().Get("status")
+
+	sessions, err := s.store.ListSessions(server, status)
+	if err != nil {
+		slog.Error("list sessions", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
+}
+
+func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	sess, err := s.store.GetSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sess)
+}
+
+func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	cassette, err := s.store.ExportSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="session-%d.json"`, id))
+	json.NewEncoder(w).Encode(cassette)
+}
+
+func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	cassette, err := s.store.ExportSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	var results []map[string]interface{}
+	for _, entry := range cassette.Requests {
+		if entry.Params == nil {
+			continue // skip responses
+		}
+		params := entry.Params
+		start := time.Now()
+		result, sendErr := s.proxies.SendRequest(r.Context(), cassette.Server, entry.Method, params)
+		elapsed := time.Since(start)
+
+		res := map[string]interface{}{
+			"method":     entry.Method,
+			"latency_ms": elapsed.Milliseconds(),
+		}
+		if sendErr != nil {
+			res["error"] = sendErr.Error()
+		} else {
+			res["result"] = json.RawMessage(result)
+		}
+		results = append(results, res)
+	}
+
+	if results == nil {
+		results = []map[string]interface{}{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"session_id": id,
+		"results":    results,
+	})
+}
+
+func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.DeleteSession(id); err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := acceptWebSocket(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -579,4 +788,136 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+// --- Latency Profiling Handlers ---
+
+func (s *Server) handleProfilingSummary(w http.ResponseWriter, r *http.Request) {
+	rangeStr := r.URL.Query().Get("range")
+	if rangeStr == "" {
+		rangeStr = "24h"
+	}
+	server := r.URL.Query().Get("server")
+
+	result, err := s.store.ProfilingSummary(rangeStr, server)
+	if err != nil {
+		slog.Error("profiling summary", "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleProfilingTools(w http.ResponseWriter, r *http.Request) {
+	rangeStr := r.URL.Query().Get("range")
+	if rangeStr == "" {
+		rangeStr = "24h"
+	}
+	server := r.URL.Query().Get("server")
+	sortBy := r.URL.Query().Get("sort")
+	if sortBy == "" {
+		sortBy = "p95"
+	}
+	order := r.URL.Query().Get("order")
+	if order == "" {
+		order = "desc"
+	}
+
+	result, err := s.store.ProfilingByTool(rangeStr, server, sortBy, order)
+	if err != nil {
+		slog.Error("profiling tools", "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if result == nil {
+		result = []capture.ToolProfile{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// --- Schema Change Detection Handlers ---
+
+func (s *Server) handleSchemaChanges(w http.ResponseWriter, r *http.Request) {
+	server := r.URL.Query().Get("server")
+	changes, err := s.store.ListSchemaChanges(server)
+	if err != nil {
+		slog.Error("list schema changes", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(changes)
+}
+
+func (s *Server) handleSchemaChangeDetail(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	detail, err := s.store.GetSchemaChange(id)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(detail)
+}
+
+func (s *Server) handleSchemaAcknowledge(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.AcknowledgeSchemaChange(id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "acknowledged"})
+}
+
+func (s *Server) handleSchemaCurrentTools(w http.ResponseWriter, r *http.Request) {
+	server := r.PathValue("server")
+	if server == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+
+	tools, _, err := s.store.GetLatestSnapshot(server)
+	if err != nil {
+		slog.Error("get latest snapshot", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if tools == nil {
+		tools = []capture.ToolSchema{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tools)
+}
+
+func (s *Server) handleSchemaUnackCount(w http.ResponseWriter, r *http.Request) {
+	count, err := s.store.UnacknowledgedCount()
+	if err != nil {
+		slog.Error("unacknowledged count", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
@@ -70,7 +71,7 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 		cfg  *Config
 		port int
 	}
-	runMultiServerFn = func(cfg *Config, port int) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
 		got.cfg = cfg
 		got.port = port
 	}
@@ -87,7 +88,7 @@ func TestRunConfig_DefaultPortAndMultiServerForwarding(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path)
+	runConfig(path, 60*time.Second)
 
 	if got.cfg == nil {
 		t.Fatal("expected runMultiServer to be called")
@@ -121,7 +122,7 @@ func TestRunConfig_MultiServerAllStarted(t *testing.T) {
 		cfg  *Config
 		port int
 	}
-	runMultiServerFn = func(cfg *Config, port int) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
 		got.cfg = cfg
 		got.port = port
 	}
@@ -139,7 +140,7 @@ func TestRunConfig_MultiServerAllStarted(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path)
+	runConfig(path, 60*time.Second)
 
 	if got.cfg == nil {
 		t.Fatal("expected runMultiServer to be called")
@@ -163,7 +164,7 @@ func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
 
 	var exitCode int
 	exitFn = func(c int) { exitCode = c }
-	runMultiServerFn = func(cfg *Config, port int) {
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration) {
 		t.Fatal("should not reach runMultiServer when a server has no command")
 	}
 
@@ -179,7 +180,7 @@ func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runConfig(path)
+	runConfig(path, 60*time.Second)
 
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
@@ -193,7 +194,7 @@ func TestRunConfig_LoadFailureExits(t *testing.T) {
 	var code int
 	exitFn = func(c int) { code = c }
 
-	runConfig("/definitely/missing/config.json")
+	runConfig("/definitely/missing/config.json", 60*time.Second)
 
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)

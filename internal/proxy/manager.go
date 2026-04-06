@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,9 +17,10 @@ import (
 // Manager holds all running proxies, keyed by server name.
 // It enables the web server to send JSON-RPC requests to child servers.
 type Manager struct {
-	mu      sync.RWMutex
-	proxies map[string]*managedProxy
-	hub     *web.Hub // for broadcasting status changes
+	mu             sync.RWMutex
+	proxies        map[string]*managedProxy
+	hub            *web.Hub // for broadcasting status changes
+	activeSessions map[string]int64 // server name → session ID
 }
 
 type managedProxy struct {
@@ -75,7 +77,8 @@ func (rt *responseTracker) cancel(id string) {
 // NewManager creates a new proxy manager.
 func NewManager() *Manager {
 	return &Manager{
-		proxies: make(map[string]*managedProxy),
+		proxies:        make(map[string]*managedProxy),
+		activeSessions: make(map[string]int64),
 	}
 }
 
@@ -238,6 +241,27 @@ func (m *Manager) ServerStatus(name string) string {
 	return ""
 }
 
+// StartRecording begins recording traffic for a server.
+func (m *Manager) StartRecording(server string, sessionID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeSessions[server] = sessionID
+}
+
+// StopRecording stops recording traffic for a server.
+func (m *Manager) StopRecording(server string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.activeSessions, server)
+}
+
+// ActiveSessionID returns the active session ID for a server, or 0 if not recording.
+func (m *Manager) ActiveSessionID(server string) int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.activeSessions[server]
+}
+
 var requestIDCounter int64
 var requestTimeout = 30 * time.Second
 var marshalRequest = json.Marshal
@@ -331,4 +355,153 @@ func (mp *managedProxy) HandleChildOutput(line []byte) bool {
 	}
 
 	return mp.responses.resolve(idStr, line)
+}
+
+// StartSchemaWatcher polls all online servers for tools/list and detects schema changes.
+// It captures a baseline on startup, then polls at the given interval.
+// It blocks until ctx is cancelled.
+func (m *Manager) StartSchemaWatcher(ctx context.Context, store *capture.Store, interval time.Duration) {
+	// Initial baseline capture
+	m.captureAllSchemas(ctx, store)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkSchemaChanges(ctx, store)
+		}
+	}
+}
+
+// captureAllSchemas captures a baseline snapshot for each online server.
+func (m *Manager) captureAllSchemas(ctx context.Context, store *capture.Store) {
+	m.mu.RLock()
+	var names []string
+	for name, mp := range m.proxies {
+		if mp.status == "online" {
+			names = append(names, name)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, name := range names {
+		tools, err := m.fetchToolsList(ctx, name)
+		if err != nil {
+			slog.Warn("schema baseline: failed to fetch tools/list", "server", name, "error", err)
+			continue
+		}
+		if _, err := store.SaveSnapshot(name, tools); err != nil {
+			slog.Warn("schema baseline: failed to save snapshot", "server", name, "error", err)
+		} else {
+			slog.Info("schema baseline captured", "server", name, "tools", len(tools))
+		}
+	}
+}
+
+// checkSchemaChanges polls all online servers and compares to last snapshot.
+func (m *Manager) checkSchemaChanges(ctx context.Context, store *capture.Store) {
+	m.mu.RLock()
+	var names []string
+	for name, mp := range m.proxies {
+		if mp.status == "online" {
+			names = append(names, name)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, name := range names {
+		tools, err := m.fetchToolsList(ctx, name)
+		if err != nil {
+			slog.Debug("schema poll: failed to fetch tools/list", "server", name, "error", err)
+			continue
+		}
+
+		// Get last snapshot
+		lastTools, lastID, err := store.GetLatestSnapshot(name)
+		if err != nil {
+			slog.Warn("schema poll: failed to get snapshot", "server", name, "error", err)
+			continue
+		}
+
+		// If no previous snapshot, this is a baseline
+		if lastTools == nil {
+			if _, err := store.SaveSnapshot(name, tools); err != nil {
+				slog.Warn("schema poll: failed to save baseline", "server", name, "error", err)
+			}
+			continue
+		}
+
+		// Compare
+		diff := capture.DiffSchemas(lastTools, tools)
+		if diff.IsEmpty() {
+			continue
+		}
+
+		// Save new snapshot
+		newID, err := store.SaveSnapshot(name, tools)
+		if err != nil {
+			slog.Warn("schema poll: failed to save new snapshot", "server", name, "error", err)
+			continue
+		}
+
+		// Insert change record
+		changeID, err := store.InsertSchemaChange(name, diff, lastID, newID)
+		if err != nil {
+			slog.Warn("schema poll: failed to insert change", "server", name, "error", err)
+			continue
+		}
+
+		slog.Info("schema change detected",
+			"server", name,
+			"added", len(diff.Added),
+			"removed", len(diff.Removed),
+			"modified", len(diff.Modified),
+			"change_id", changeID,
+		)
+
+		// Broadcast WS event
+		m.mu.RLock()
+		hub := m.hub
+		m.mu.RUnlock()
+
+		if hub != nil {
+			evt := map[string]interface{}{
+				"type":      "schema_change",
+				"server":    name,
+				"added":     len(diff.Added),
+				"removed":   len(diff.Removed),
+				"modified":  len(diff.Modified),
+				"change_id": changeID,
+			}
+			data, _ := json.Marshal(evt)
+			hub.Broadcast(data)
+		}
+	}
+}
+
+// fetchToolsList calls tools/list on a server with a 5s timeout and parses the response.
+func (m *Manager) fetchToolsList(ctx context.Context, serverName string) ([]capture.ToolSchema, error) {
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	raw, err := m.SendRequest(callCtx, serverName, "tools/list", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON-RPC response envelope
+	var rpcResp struct {
+		Result struct {
+			Tools []capture.ToolSchema `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
+		return nil, fmt.Errorf("parse tools/list response: %w", err)
+	}
+
+	return rpcResp.Result.Tools, nil
 }

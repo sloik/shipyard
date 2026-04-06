@@ -720,3 +720,65 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 		t.Fatal("timed out waiting for tools/list response")
 	}
 }
+
+// --- SPEC-007: Session Recording ---
+
+func TestManager_StartRecording(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("test-server", 42)
+	if id := m.ActiveSessionID("test-server"); id != 42 {
+		t.Fatalf("expected active session 42, got %d", id)
+	}
+}
+
+func TestManager_StopRecording(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("test-server", 42)
+	m.StopRecording("test-server")
+	if id := m.ActiveSessionID("test-server"); id != 0 {
+		t.Fatalf("expected no active session, got %d", id)
+	}
+}
+
+func TestManager_ActiveSessionID_NoSession(t *testing.T) {
+	m := NewManager()
+
+	if id := m.ActiveSessionID("nonexistent"); id != 0 {
+		t.Fatalf("expected 0 for no active session, got %d", id)
+	}
+}
+
+func TestManager_MultipleServerSessions(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("alpha", 10)
+	m.StartRecording("beta", 20)
+
+	if id := m.ActiveSessionID("alpha"); id != 10 {
+		t.Fatalf("expected alpha session 10, got %d", id)
+	}
+	if id := m.ActiveSessionID("beta"); id != 20 {
+		t.Fatalf("expected beta session 20, got %d", id)
+	}
+
+	m.StopRecording("alpha")
+	if id := m.ActiveSessionID("alpha"); id != 0 {
+		t.Fatalf("expected alpha cleared, got %d", id)
+	}
+	if id := m.ActiveSessionID("beta"); id != 20 {
+		t.Fatalf("expected beta still 20, got %d", id)
+	}
+}
+
+func TestManager_StartRecording_OverwritesPrevious(t *testing.T) {
+	m := NewManager()
+
+	m.StartRecording("srv", 1)
+	m.StartRecording("srv", 2)
+
+	if id := m.ActiveSessionID("srv"); id != 2 {
+		t.Fatalf("expected session 2 to overwrite, got %d", id)
+	}
+}
