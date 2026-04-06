@@ -52,13 +52,28 @@ shipyard wrap --name filesystem -- npx -y @modelcontextprotocol/server-filesyste
 shipyard --config servers.json
 ```
 
-Then open [http://localhost:9417](http://localhost:9417) in your browser.
+The dashboard opens automatically in a native window. Add `--headless` to skip the window and open [http://localhost:9417](http://localhost:9417) in your browser instead.
 
 ## Installation
 
-### GitHub Releases
+### Desktop App (macOS)
 
-Download the binary for your platform from [Releases](https://github.com/sloik/shipyard/releases), extract, and add to your `PATH`.
+Download `shipyard-macos.zip` from [Releases](https://github.com/sloik/shipyard/releases). Unzip and move `Shipyard.app` to your Applications folder.
+
+**First launch on macOS:** Apple will show *"Shipyard.app cannot be opened because it is from an unidentified developer."* This is expected -- the app is not yet code-signed with an Apple Developer ID. To open it:
+
+1. **Right-click** (or Control-click) on `Shipyard.app` and select **Open**
+2. Click **Open** in the dialog that appears
+3. macOS remembers your choice -- subsequent launches work normally
+
+Alternatively, remove the quarantine attribute from the terminal:
+```bash
+xattr -d com.apple.quarantine /Applications/Shipyard.app
+```
+
+### CLI Binaries
+
+Download the binary for your platform from [Releases](https://github.com/sloik/shipyard/releases), extract, and add to your `PATH`. Use `--headless` flag to run without a desktop window.
 
 Available binaries: macOS (arm64, amd64), Linux (arm64, amd64), Windows (amd64, arm64).
 
