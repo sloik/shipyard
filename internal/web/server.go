@@ -36,12 +36,19 @@ var acceptWebSocket = func(w http.ResponseWriter, r *http.Request, opts *websock
 type ProxyManager interface {
 	Servers() []ServerInfo
 	SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (json.RawMessage, error)
+	RestartServer(name string) error
+	StopServer(name string) error
 }
 
 // ServerInfo describes a running server for the API.
 type ServerInfo struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Command      string `json:"command,omitempty"`
+	ToolCount    int    `json:"tool_count"`
+	Uptime       int64  `json:"uptime_ms"`
+	RestartCount int    `json:"restart_count"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // Server is the HTTP + WebSocket server for the web dashboard.
@@ -77,7 +84,11 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/traffic", s.handleTraffic)
 	mux.HandleFunc("GET /api/traffic/{id}", s.handleTrafficDetail)
 	mux.HandleFunc("GET /api/servers", s.handleServers)
+	mux.HandleFunc("POST /api/servers/{name}/restart", s.handleServerRestart)
+	mux.HandleFunc("POST /api/servers/{name}/stop", s.handleServerStop)
+	mux.HandleFunc("GET /api/auto-import", s.handleAutoImportScan)
 	mux.HandleFunc("GET /api/tools", s.handleTools)
+	mux.HandleFunc("GET /api/tools/conflicts", s.handleToolConflicts)
 	mux.HandleFunc("POST /api/tools/call", s.handleToolCall)
 	mux.HandleFunc("POST /api/replay", s.handleReplay)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
@@ -265,6 +276,146 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	servers := s.proxies.Servers()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(servers)
+}
+
+func (s *Server) handleServerRestart(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.proxies.RestartServer(name); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "restarting"})
+}
+
+func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.proxies.StopServer(name); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+}
+
+// DiscoveredServer describes a server found via auto-import scanning.
+type DiscoveredServer struct {
+	Name    string `json:"name"`
+	Command string `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Source  string `json:"source"`
+	Status  string `json:"status"` // "new", "duplicate", "already_imported"
+}
+
+// autoImportScanner can be overridden in tests.
+var autoImportScanner = scanForServers
+
+func (s *Server) handleAutoImportScan(w http.ResponseWriter, r *http.Request) {
+	var existing map[string]bool
+	if s.proxies != nil {
+		servers := s.proxies.Servers()
+		existing = make(map[string]bool, len(servers))
+		for _, srv := range servers {
+			existing[srv.Name] = true
+		}
+	} else {
+		existing = map[string]bool{}
+	}
+
+	discovered := autoImportScanner(existing)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(discovered)
+}
+
+func (s *Server) handleToolConflicts(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
+
+	servers := s.proxies.Servers()
+	if len(servers) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
+
+	// Collect tools from each server by sending tools/list
+	type toolEntry struct {
+		Name   string `json:"name"`
+		Server string `json:"server"`
+	}
+
+	toolMap := make(map[string][]string) // toolName -> []serverName
+	for _, srv := range servers {
+		if srv.Status != "online" {
+			continue
+		}
+		result, err := s.proxies.SendRequest(r.Context(), srv.Name, "tools/list", json.RawMessage("{}"))
+		if err != nil {
+			continue
+		}
+		var rpcResp struct {
+			Result struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(result, &rpcResp); err != nil {
+			continue
+		}
+		for _, t := range rpcResp.Result.Tools {
+			toolMap[t.Name] = append(toolMap[t.Name], srv.Name)
+		}
+	}
+
+	// Filter to only duplicates
+	type conflict struct {
+		ToolName string   `json:"tool_name"`
+		Servers  []string `json:"servers"`
+	}
+	var conflicts []conflict
+	for name, servers := range toolMap {
+		if len(servers) > 1 {
+			conflicts = append(conflicts, conflict{ToolName: name, Servers: servers})
+		}
+	}
+
+	if conflicts == nil {
+		conflicts = []conflict{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(conflicts)
 }
 
 func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/sloik/shipyard/internal/capture"
@@ -64,6 +65,7 @@ var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, comman
 	return p.Run(ctx)
 }
 var runProxyFn = runProxy
+var runMultiServerFn = runMultiServer
 
 type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
@@ -166,24 +168,22 @@ func runConfig(configPath string) {
 		return
 	}
 
-	serverName := cfg.ServerOrder[0]
-	server := cfg.Servers[serverName]
-	if len(cfg.ServerOrder) > 1 {
-		slog.Warn("multi-server config not yet supported; using first server only", "server", serverName, "configured_servers", len(cfg.ServerOrder))
-	}
-
 	port := cfg.Web.Port
 	if port == 0 {
 		port = 9417
 	}
 
-	if server.Command == "" {
-		slog.Error("config server is missing command", "server", serverName, "path", configPath)
-		exitFn(1)
-		return
+	// Validate all servers have commands
+	for _, name := range cfg.ServerOrder {
+		srv := cfg.Servers[name]
+		if srv.Command == "" {
+			slog.Error("config server is missing command", "server", name, "path", configPath)
+			exitFn(1)
+			return
+		}
 	}
 
-	runProxyFn(serverName, port, server.Command, server.Args, server.Env, server.Cwd)
+	runMultiServerFn(cfg, port)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -264,4 +264,112 @@ func runWrap(args []string) {
 	}
 
 	runProxyFn(*name, *port, childCmd[0], childCmd[1:], nil, "")
+}
+
+func runMultiServer(cfg *Config, port int) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal, shutting down", "signal", sig)
+		cancel()
+	}()
+
+	// Initialize capture store
+	store, err := captureNewStore("shipyard.db", "shipyard.jsonl")
+	if err != nil {
+		slog.Error("failed to initialize capture store", "error", err)
+		exitFn(1)
+		return
+	}
+	defer store.Close()
+
+	// Start web dashboard
+	hub := webNewHub()
+	go hub.Run(ctx)
+
+	// Create proxy manager
+	mgr := proxyNewManager()
+	mgr.SetHub(hub)
+
+	srv := web.NewServer(port, store, hub)
+	srv.SetProxyManager(mgr)
+	go func() {
+		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
+		if err := startWebServer(ctx, srv); err != nil {
+			slog.Error("web server error", "error", err)
+		}
+	}()
+
+	// Start all servers concurrently
+	var wg sync.WaitGroup
+	for _, name := range cfg.ServerOrder {
+		server := cfg.Servers[name]
+		wg.Add(1)
+		go func(name string, server ServerConfig) {
+			defer wg.Done()
+			runServerWithRestart(ctx, mgr, name, server, store, hub)
+		}(name, server)
+	}
+
+	slog.Info("all servers started", "count", len(cfg.ServerOrder))
+	wg.Wait()
+}
+
+// runServerWithRestart runs a single server proxy with restart support.
+// It respects manager status to decide whether to restart after exit.
+func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name string, server ServerConfig, store *capture.Store, hub *web.Hub) {
+	for {
+		if parentCtx.Err() != nil {
+			return
+		}
+
+		// Check if the server is stopped (user requested stop)
+		status := mgr.ServerStatus(name)
+		if status == "stopped" {
+			return
+		}
+
+		// Create a per-proxy cancelable context
+		proxyCtx, proxyCancel := context.WithCancel(parentCtx)
+
+		p := proxy.NewProxy(name, server.Command, server.Args, server.Env, server.Cwd, store, hub)
+		mp := mgr.Register(name, p)
+		p.SetManaged(mp)
+		mgr.SetCancelFn(name, proxyCancel)
+		mgr.SetStatus(name, "online", "")
+
+		err := p.Run(proxyCtx)
+		proxyCancel()
+
+		if parentCtx.Err() != nil {
+			// Parent context cancelled — shutting down entirely
+			return
+		}
+
+		// Check the current status set by the manager
+		status = mgr.ServerStatus(name)
+		switch status {
+		case "stopped":
+			// User requested stop — don't restart
+			return
+		case "restarting":
+			// User requested restart — loop and start again
+			slog.Info("restarting server per user request", "server", name)
+			continue
+		default:
+			// Unexpected exit — mark as crashed
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+			mgr.SetStatus(name, "crashed", errMsg)
+			slog.Warn("server crashed", "server", name, "error", err)
+			return
+		}
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,12 +18,20 @@ import (
 type Manager struct {
 	mu      sync.RWMutex
 	proxies map[string]*managedProxy
+	hub     *web.Hub // for broadcasting status changes
 }
 
 type managedProxy struct {
-	proxy       *Proxy
-	inputWriter *childInputWriter
-	responses   *responseTracker
+	proxy        *Proxy
+	inputWriter  *childInputWriter
+	responses    *responseTracker
+	status       string    // "online", "crashed", "stopped", "restarting"
+	command      string    // the command string for display
+	startedAt    time.Time // when the proxy was last started
+	restartCount int       // how many times it has been restarted
+	toolCount    int       // cached tool count
+	errorMessage string    // last error message if crashed
+	cancelFn     context.CancelFunc // cancel function for stopping the proxy
 }
 
 // responseTracker correlates JSON-RPC request IDs to response channels.
@@ -70,14 +79,29 @@ func NewManager() *Manager {
 	}
 }
 
+// SetHub sets the WebSocket hub for broadcasting status updates.
+func (m *Manager) SetHub(hub *web.Hub) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hub = hub
+}
+
 // Register adds a proxy to the manager. Must be called before the proxy's Run.
 func (m *Manager) Register(name string, p *Proxy) *managedProxy {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	cmd := p.command
+	if len(p.args) > 0 {
+		cmd += " " + strings.Join(p.args, " ")
+	}
+
 	mp := &managedProxy{
 		proxy:     p,
 		responses: newResponseTracker(),
+		status:    "online",
+		command:   cmd,
+		startedAt: time.Now(),
 	}
 	m.proxies[name] = mp
 	return mp
@@ -89,13 +113,129 @@ func (m *Manager) Servers() []web.ServerInfo {
 	defer m.mu.RUnlock()
 
 	result := make([]web.ServerInfo, 0, len(m.proxies))
-	for name := range m.proxies {
+	for name, mp := range m.proxies {
+		uptime := int64(0)
+		if mp.status == "online" && !mp.startedAt.IsZero() {
+			uptime = time.Since(mp.startedAt).Milliseconds()
+		}
 		result = append(result, web.ServerInfo{
-			Name:   name,
-			Status: "online", // TODO: track actual status per proxy lifecycle
+			Name:         name,
+			Status:       mp.status,
+			Command:      mp.command,
+			ToolCount:    mp.toolCount,
+			Uptime:       uptime,
+			RestartCount: mp.restartCount,
+			ErrorMessage: mp.errorMessage,
 		})
 	}
 	return result
+}
+
+// SetStatus updates the status of a managed proxy and broadcasts via WebSocket.
+func (m *Manager) SetStatus(name, status, errorMsg string) {
+	m.mu.Lock()
+	mp, ok := m.proxies[name]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	mp.status = status
+	mp.errorMessage = errorMsg
+	if status == "online" {
+		mp.startedAt = time.Now()
+	}
+	hub := m.hub
+	m.mu.Unlock()
+
+	// Broadcast status change
+	if hub != nil {
+		evt := map[string]interface{}{
+			"type":   "server_status",
+			"server": name,
+			"status": status,
+		}
+		if errorMsg != "" {
+			evt["error"] = errorMsg
+		}
+		data, _ := json.Marshal(evt)
+		hub.Broadcast(data)
+	}
+}
+
+// SetToolCount updates the cached tool count for a server.
+func (m *Manager) SetToolCount(name string, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mp, ok := m.proxies[name]; ok {
+		mp.toolCount = count
+	}
+}
+
+// SetCancelFn stores the context cancel function for a server's proxy goroutine.
+func (m *Manager) SetCancelFn(name string, cancel context.CancelFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mp, ok := m.proxies[name]; ok {
+		mp.cancelFn = cancel
+	}
+}
+
+// RestartServer stops and restarts a specific server.
+func (m *Manager) RestartServer(name string) error {
+	m.mu.Lock()
+	mp, ok := m.proxies[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("server %q not found", name)
+	}
+	cancel := mp.cancelFn
+	mp.status = "restarting"
+	mp.restartCount++
+	mp.errorMessage = ""
+	m.mu.Unlock()
+
+	// Broadcast restarting status
+	m.SetStatus(name, "restarting", "")
+
+	// Cancel the running proxy — the run loop in main.go will detect this
+	// and restart the proxy.
+	if cancel != nil {
+		cancel()
+	}
+
+	return nil
+}
+
+// StopServer stops a specific server.
+func (m *Manager) StopServer(name string) error {
+	m.mu.Lock()
+	mp, ok := m.proxies[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("server %q not found", name)
+	}
+	cancel := mp.cancelFn
+	mp.status = "stopped"
+	mp.errorMessage = ""
+	m.mu.Unlock()
+
+	m.SetStatus(name, "stopped", "")
+
+	if cancel != nil {
+		cancel()
+	}
+
+	return nil
+}
+
+// ServerStatus returns the status of a specific server.
+func (m *Manager) ServerStatus(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if mp, ok := m.proxies[name]; ok {
+		return mp.status
+	}
+	return ""
 }
 
 var requestIDCounter int64

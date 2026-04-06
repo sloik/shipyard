@@ -16,8 +16,10 @@ import (
 
 // mockProxyManager implements ProxyManager for testing.
 type mockProxyManager struct {
-	servers  []ServerInfo
-	sendFunc func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error)
+	servers     []ServerInfo
+	sendFunc    func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error)
+	restartFunc func(name string) error
+	stopFunc    func(name string) error
 }
 
 func (m *mockProxyManager) Servers() []ServerInfo {
@@ -29,6 +31,20 @@ func (m *mockProxyManager) SendRequest(ctx context.Context, server, method strin
 		return m.sendFunc(ctx, server, method, params)
 	}
 	return nil, fmt.Errorf("sendFunc not configured")
+}
+
+func (m *mockProxyManager) RestartServer(name string) error {
+	if m.restartFunc != nil {
+		return m.restartFunc(name)
+	}
+	return fmt.Errorf("server %q not found", name)
+}
+
+func (m *mockProxyManager) StopServer(name string) error {
+	if m.stopFunc != nil {
+		return m.stopFunc(name)
+	}
+	return fmt.Errorf("server %q not found", name)
 }
 
 // newTestServer creates a Server with a real Store for testing HTTP handlers.
@@ -831,5 +847,327 @@ func TestHandleTrafficDetail_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// --- POST /api/servers/{name}/restart (SPEC-004 AC-4) ---
+
+func TestHandleServerRestart_Success(t *testing.T) {
+	srv := newTestServer(t)
+	var restarted string
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "alpha", Status: "online"}},
+		restartFunc: func(name string) error {
+			restarted = name
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/alpha/restart", nil)
+	req.SetPathValue("name", "alpha")
+	w := httptest.NewRecorder()
+	srv.handleServerRestart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if restarted != "alpha" {
+		t.Fatalf("expected restart of alpha, got %q", restarted)
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["status"] != "restarting" {
+		t.Fatalf("expected status restarting, got %q", result["status"])
+	}
+}
+
+func TestHandleServerRestart_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		restartFunc: func(name string) error {
+			return fmt.Errorf("server %q not found", name)
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/nonexistent/restart", nil)
+	req.SetPathValue("name", "nonexistent")
+	w := httptest.NewRecorder()
+	srv.handleServerRestart(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleServerRestart_NoProxyManager(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/alpha/restart", nil)
+	req.SetPathValue("name", "alpha")
+	w := httptest.NewRecorder()
+	srv.handleServerRestart(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+}
+
+// --- POST /api/servers/{name}/stop (SPEC-004 AC-4) ---
+
+func TestHandleServerStop_Success(t *testing.T) {
+	srv := newTestServer(t)
+	var stopped string
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "beta", Status: "online"}},
+		stopFunc: func(name string) error {
+			stopped = name
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/beta/stop", nil)
+	req.SetPathValue("name", "beta")
+	w := httptest.NewRecorder()
+	srv.handleServerStop(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if stopped != "beta" {
+		t.Fatalf("expected stop of beta, got %q", stopped)
+	}
+}
+
+func TestHandleServerStop_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		stopFunc: func(name string) error {
+			return fmt.Errorf("server %q not found", name)
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/nonexistent/stop", nil)
+	req.SetPathValue("name", "nonexistent")
+	w := httptest.NewRecorder()
+	srv.handleServerStop(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// --- GET /api/servers with enriched info (SPEC-004 AC-2) ---
+
+func TestHandleServers_EnrichedInfo(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "alpha", Status: "online", Command: "node server.js", ToolCount: 5, Uptime: 60000, RestartCount: 1},
+			{Name: "beta", Status: "crashed", Command: "python mcp.py", ErrorMessage: "exit code 1"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []ServerInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(result))
+	}
+
+	// Check enriched fields
+	for _, s := range result {
+		if s.Name == "alpha" {
+			if s.Command != "node server.js" {
+				t.Fatalf("expected command 'node server.js', got %q", s.Command)
+			}
+			if s.ToolCount != 5 {
+				t.Fatalf("expected tool_count 5, got %d", s.ToolCount)
+			}
+			if s.RestartCount != 1 {
+				t.Fatalf("expected restart_count 1, got %d", s.RestartCount)
+			}
+		}
+		if s.Name == "beta" {
+			if s.Status != "crashed" {
+				t.Fatalf("expected status crashed, got %q", s.Status)
+			}
+			if s.ErrorMessage != "exit code 1" {
+				t.Fatalf("expected error message, got %q", s.ErrorMessage)
+			}
+		}
+	}
+}
+
+// --- GET /api/auto-import (SPEC-004 AC-5) ---
+
+func TestHandleAutoImportScan(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "existing-server", Status: "online"}},
+	})
+
+	orig := autoImportScanner
+	t.Cleanup(func() { autoImportScanner = orig })
+
+	autoImportScanner = func(existing map[string]bool) []DiscoveredServer {
+		if !existing["existing-server"] {
+			t.Fatal("expected existing-server in existing map")
+		}
+		return []DiscoveredServer{
+			{Name: "new-server", Command: "node mcp.js", Source: "claude-code", Status: "new"},
+			{Name: "existing-server", Command: "python srv.py", Source: "claude-desktop", Status: "already_imported"},
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auto-import", nil)
+	w := httptest.NewRecorder()
+	srv.handleAutoImportScan(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []DiscoveredServer
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 discovered servers, got %d", len(result))
+	}
+	if result[0].Status != "new" {
+		t.Fatalf("expected first server status 'new', got %q", result[0].Status)
+	}
+	if result[1].Status != "already_imported" {
+		t.Fatalf("expected second server status 'already_imported', got %q", result[1].Status)
+	}
+}
+
+func TestHandleAutoImportScan_NoProxyManager(t *testing.T) {
+	srv := newTestServer(t)
+	// proxies is nil
+
+	orig := autoImportScanner
+	t.Cleanup(func() { autoImportScanner = orig })
+
+	autoImportScanner = func(existing map[string]bool) []DiscoveredServer {
+		if len(existing) != 0 {
+			t.Fatalf("expected empty existing map when no proxy manager, got %v", existing)
+		}
+		return []DiscoveredServer{
+			{Name: "new-server", Command: "node mcp.js", Source: "claude-code", Status: "new"},
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auto-import", nil)
+	w := httptest.NewRecorder()
+	srv.handleAutoImportScan(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+// --- GET /api/tools/conflicts (SPEC-004 AC-6) ---
+
+func TestHandleToolConflicts_NoConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "alpha", Status: "online"},
+			{Name: "beta", Status: "online"},
+		},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			if server == "alpha" {
+				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"}]}}`), nil
+			}
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"write_file"}]}}`), nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/conflicts", nil)
+	w := httptest.NewRecorder()
+	srv.handleToolConflicts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 conflicts, got %d", len(result))
+	}
+}
+
+func TestHandleToolConflicts_WithConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "alpha", Status: "online"},
+			{Name: "beta", Status: "online"},
+		},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			// Both servers have "read_file" tool
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"},{"name":"write_file"}]}}`), nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/conflicts", nil)
+	w := httptest.NewRecorder()
+	srv.handleToolConflicts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []struct {
+		ToolName string   `json:"tool_name"`
+		Servers  []string `json:"servers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Both read_file and write_file should be conflicts
+	if len(result) != 2 {
+		t.Fatalf("expected 2 conflicts, got %d: %s", len(result), w.Body.String())
+	}
+	for _, c := range result {
+		if len(c.Servers) != 2 {
+			t.Fatalf("expected 2 servers for conflict %q, got %d", c.ToolName, len(c.Servers))
+		}
+	}
+}
+
+func TestHandleToolConflicts_NoProxyManager(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/conflicts", nil)
+	w := httptest.NewRecorder()
+	srv.handleToolConflicts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected empty array, got %d", len(result))
 	}
 }
