@@ -153,6 +153,39 @@ func TestRunConfig_MultiServerAllStarted(t *testing.T) {
 	}
 }
 
+func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
+	origRunMulti := runMultiServerFn
+	origExit := exitFn
+	t.Cleanup(func() {
+		runMultiServerFn = origRunMulti
+		exitFn = origExit
+	})
+
+	var exitCode int
+	exitFn = func(c int) { exitCode = c }
+	runMultiServerFn = func(cfg *Config, port int) {
+		t.Fatal("should not reach runMultiServer when a server has no command")
+	}
+
+	dir := t.TempDir()
+	path := dir + "/servers.json"
+	data := `{
+		"servers": {
+			"alpha": {"command":"echo"},
+			"beta": {}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runConfig(path)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+}
+
 func TestRunConfig_LoadFailureExits(t *testing.T) {
 	origExit := exitFn
 	defer func() { exitFn = origExit }()

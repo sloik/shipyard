@@ -313,13 +313,44 @@
 </main>
 
 <!-- ================================================================
-     View: Servers (#/servers) — Placeholder
+     View: Servers (#/servers)
      ================================================================ -->
 <main id="view-servers">
-  <div class="empty-state">
+
+  <!-- Action Bar -->
+  <div id="servers-action-bar" class="app-bar" style="padding:8px 16px;">
+    <span id="servers-summary" style="font-size:var(--font-size-sm); color:var(--text-secondary);"></span>
+    <div style="flex:1;"></div>
+    <button class="btn btn-default btn-sm" id="servers-auto-import-btn">Auto-Import</button>
+  </div>
+
+  <!-- Empty State -->
+  <div id="servers-empty" class="empty-state">
     <div class="empty-icon">&#128421;</div>
-    <div class="empty-title">Server Management</div>
-    <div class="empty-desc">Coming in Phase 3 — monitor and control MCP servers</div>
+    <div class="empty-title">No servers configured</div>
+    <div class="empty-desc">Add servers via config file or auto-import from Claude Desktop / Claude Code.</div>
+    <button class="btn btn-primary" id="servers-empty-import-btn">Auto-Import</button>
+  </div>
+
+  <!-- Server Card Grid -->
+  <div id="servers-grid" style="display:none; padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:16px;"></div>
+
+  <!-- Auto-Import Modal -->
+  <div id="auto-import-modal" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
+    <div style="background:var(--bg-surface); border:1px solid var(--border-default); border-radius:var(--radius-l); width:560px; max-height:80vh; display:flex; flex-direction:column;">
+      <div style="padding:16px; border-bottom:1px solid var(--border-muted); display:flex; align-items:center;">
+        <strong style="color:var(--text-primary);">Auto-Import MCP Servers</strong>
+        <div style="flex:1;"></div>
+        <button class="btn btn-ghost btn-sm" id="auto-import-close">&#10005;</button>
+      </div>
+      <div id="auto-import-body" style="padding:16px; overflow-y:auto; flex:1;">
+        <div style="text-align:center; color:var(--text-muted); padding:24px;">Scanning...</div>
+      </div>
+      <div id="auto-import-footer" style="padding:12px 16px; border-top:1px solid var(--border-muted); display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn btn-default btn-sm" id="auto-import-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="auto-import-confirm" disabled>Import 0 Servers</button>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -1041,6 +1072,7 @@
   var allTools         = {}; // { serverName: [{ name, description, inputSchema }] }
   var selectedTool     = null; // { server, name, description, inputSchema }
   var toolsLoaded      = false;
+  var toolConflicts    = {}; // { toolName: [serverName, ...] }
 
   /* ======================================================================
      Tool Browser — Load Tools
@@ -1075,7 +1107,21 @@
               pending--;
               if (pending <= 0) {
                 toolsLoaded = true;
-                renderToolSidebar();
+                // Fetch tool conflicts
+                fetch('/api/tools/conflicts')
+                  .then(function(resp) { return resp.json(); })
+                  .then(function(conflicts) {
+                    toolConflicts = {};
+                    if (conflicts && conflicts.length > 0) {
+                      for (var c = 0; c < conflicts.length; c++) {
+                        toolConflicts[conflicts[c].tool_name] = conflicts[c].servers;
+                      }
+                    }
+                    renderToolSidebar();
+                  })
+                  .catch(function() {
+                    renderToolSidebar();
+                  });
               }
             });
         });
@@ -1092,6 +1138,15 @@
   function renderToolSidebar() {
     var searchVal = toolSearch ? toolSearch.value.trim().toLowerCase() : '';
     var html = '';
+
+    // Show conflict warning banner
+    var conflictCount = Object.keys(toolConflicts).length;
+    if (conflictCount > 0) {
+      html += '<div style="padding:6px 8px; margin:0 4px 4px 4px; background:var(--warning-subtle); border-radius:var(--radius-s); font-size:var(--font-size-xs); color:var(--warning-fg); display:flex; align-items:center; gap:4px;">';
+      html += '<span>&#9888;</span> ' + conflictCount + ' tool name conflict' + (conflictCount !== 1 ? 's' : '') + ' detected';
+      html += '</div>';
+    }
+
     var serverNames = Object.keys(allTools);
 
     for (var s = 0; s < serverNames.length; s++) {
@@ -1141,10 +1196,22 @@
       for (var t = 0; t < filteredTools.length; t++) {
         var tool = filteredTools[t];
         var isActive = selectedTool && selectedTool.server === srvName && selectedTool.name === tool.name;
+        var isConflict = toolConflicts[tool.name] && toolConflicts[tool.name].length > 1;
         var itemClass = 'tool-item' + (isActive ? ' is-active' : '');
-        html += '<div class="' + itemClass + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '">';
-        html += '<span style="color:var(--text-muted);">&#128295;</span>';
+        var itemStyle = isConflict ? 'background:var(--warning-subtle);' : '';
+        html += '<div class="' + itemClass + '" style="' + itemStyle + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '">';
+        if (isConflict) {
+          html += '<span style="color:var(--warning-fg);">&#9888;</span>';
+        } else {
+          html += '<span style="color:var(--text-muted);">&#128295;</span>';
+        }
         html += '<span style="font-family:var(--font-mono); font-size:var(--font-size-sm);">' + escapeHtml(tool.name) + '</span>';
+        if (isConflict) {
+          var otherServers = toolConflicts[tool.name].filter(function(n) { return n !== srvName; });
+          if (otherServers.length > 0) {
+            html += '<span style="font-size:var(--font-size-xs); color:var(--warning-fg); margin-left:auto;">also in: ' + escapeHtml(otherServers.join(', ')) + '</span>';
+          }
+        }
         html += '</div>';
       }
 
@@ -1497,6 +1564,9 @@
     }
     if (route === 'history' && !historyLoaded) {
       historyLoadPage();
+    }
+    if (route === 'servers') {
+      loadServers();
     }
   };
 
@@ -2022,6 +2092,239 @@
     historyDiff.style.display = 'none';
     historyContent.style.display = '';
   });
+
+  /* ======================================================================
+     Servers View (SPEC-004)
+     ====================================================================== */
+  var serversEmpty      = document.getElementById('servers-empty');
+  var serversGrid       = document.getElementById('servers-grid');
+  var serversSummary    = document.getElementById('servers-summary');
+  var serversActionBar  = document.getElementById('servers-action-bar');
+  var autoImportModal   = document.getElementById('auto-import-modal');
+  var autoImportBody    = document.getElementById('auto-import-body');
+  var autoImportConfirm = document.getElementById('auto-import-confirm');
+
+  function loadServers() {
+    fetch('/api/servers')
+      .then(function(resp) { return resp.json(); })
+      .then(function(servers) {
+        if (!servers || servers.length === 0) {
+          serversEmpty.style.display = '';
+          serversGrid.style.display = 'none';
+          serversActionBar.style.display = 'none';
+          return;
+        }
+
+        serversEmpty.style.display = 'none';
+        serversGrid.style.display = '';
+        serversActionBar.style.display = '';
+
+        // Build summary
+        var online = 0, crashed = 0, totalTools = 0, conflicts = 0;
+        for (var i = 0; i < servers.length; i++) {
+          if (servers[i].status === 'online') online++;
+          if (servers[i].status === 'crashed') crashed++;
+          totalTools += servers[i].tool_count || 0;
+        }
+        var summary = online + ' online';
+        if (crashed > 0) summary += ', ' + crashed + ' crashed';
+        summary += ', ' + totalTools + ' tools';
+        serversSummary.textContent = summary;
+
+        renderServerCards(servers);
+      })
+      .catch(function(err) {
+        console.error('Failed to load servers:', err);
+      });
+  }
+
+  function renderServerCards(servers) {
+    var html = '';
+    for (var i = 0; i < servers.length; i++) {
+      var s = servers[i];
+      var cardClass = 'server-card';
+      if (s.status === 'crashed') cardClass += ' is-crashed';
+
+      var statusDot = '';
+      if (s.status === 'online') statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
+      else if (s.status === 'crashed') statusDot = '<span class="badge-dot" style="background:var(--danger-fg);"></span>';
+      else if (s.status === 'restarting') statusDot = '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
+      else statusDot = '<span class="badge-dot" style="background:var(--text-muted);"></span>';
+
+      var uptimeStr = '';
+      if (s.status === 'online' && s.uptime_ms > 0) {
+        var secs = Math.floor(s.uptime_ms / 1000);
+        if (secs < 60) uptimeStr = secs + 's';
+        else if (secs < 3600) uptimeStr = Math.floor(secs / 60) + 'm';
+        else if (secs < 86400) uptimeStr = Math.floor(secs / 3600) + 'h';
+        else uptimeStr = Math.floor(secs / 86400) + 'd';
+      }
+
+      html += '<div class="' + cardClass + '" data-server="' + escapeHtml(s.name) + '">';
+
+      // Header: status dot + name + tool count pill
+      html += '<div style="display:flex; align-items:center; gap:8px;">';
+      html += statusDot;
+      html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
+      if (s.tool_count > 0) {
+        html += '<span class="pill">' + s.tool_count + ' tools</span>';
+      }
+      html += '</div>';
+
+      // Command line
+      if (s.command) {
+        html += '<div style="font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-secondary); background:var(--bg-inset); padding:6px 8px; border-radius:var(--radius-s); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">';
+        html += escapeHtml(s.command);
+        html += '</div>';
+      }
+
+      // Error banner for crashed
+      if (s.status === 'crashed' && s.error_message) {
+        html += '<div class="server-crash-msg" style="padding:6px 8px; background:var(--danger-subtle); border-radius:var(--radius-s);">';
+        html += escapeHtml(s.error_message);
+        html += '</div>';
+      }
+
+      // Stats row
+      html += '<div class="server-stats">';
+      if (uptimeStr) html += '<span>Uptime: ' + uptimeStr + '</span>';
+      if (s.restart_count > 0) html += '<span>Restarts: ' + s.restart_count + '</span>';
+      html += '</div>';
+
+      // Actions
+      html += '<div class="server-actions">';
+      if (s.status === 'online') {
+        html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')">Stop</button>';
+        html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
+      } else if (s.status === 'crashed' || s.status === 'stopped') {
+        html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
+      } else if (s.status === 'restarting') {
+        html += '<span class="badge badge-warning">Restarting...</span>';
+      }
+      html += '</div>';
+
+      html += '</div>';
+    }
+    serversGrid.innerHTML = html;
+  }
+
+  // Global handlers for server actions (called from onclick in rendered HTML)
+  window.__shipyard_restartServer = function(name) {
+    fetch('/api/servers/' + encodeURIComponent(name) + '/restart', { method: 'POST' })
+      .then(function(resp) { return resp.json(); })
+      .then(function() { loadServers(); })
+      .catch(function(err) { console.error('Restart failed:', err); });
+  };
+
+  window.__shipyard_stopServer = function(name) {
+    fetch('/api/servers/' + encodeURIComponent(name) + '/stop', { method: 'POST' })
+      .then(function(resp) { return resp.json(); })
+      .then(function() { loadServers(); })
+      .catch(function(err) { console.error('Stop failed:', err); });
+  };
+
+  // Auto-Import
+  function openAutoImport() {
+    autoImportModal.style.display = 'flex';
+    autoImportBody.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:24px;">Scanning...</div>';
+    autoImportConfirm.disabled = true;
+    autoImportConfirm.textContent = 'Import 0 Servers';
+
+    fetch('/api/auto-import')
+      .then(function(resp) { return resp.json(); })
+      .then(function(discovered) {
+        if (!discovered || discovered.length === 0) {
+          autoImportBody.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:24px;">No MCP servers found in known config files.</div>';
+          return;
+        }
+
+        var html = '';
+        for (var i = 0; i < discovered.length; i++) {
+          var d = discovered[i];
+          var disabled = d.status === 'already_imported' ? ' disabled' : '';
+          var checked = d.status === 'new' ? ' checked' : '';
+          var badgeClass = d.status === 'new' ? 'badge-success' : (d.status === 'duplicate' ? 'badge-warning' : 'badge-neutral');
+          var badgeLabel = d.status === 'new' ? 'New' : (d.status === 'duplicate' ? 'Duplicate' : 'Already imported');
+
+          html += '<label style="display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid var(--border-muted);"' + disabled + '>';
+          html += '<input type="checkbox" data-name="' + escapeHtml(d.name) + '"' + checked + disabled + '>';
+          html += '<div style="flex:1;">';
+          html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(d.name) + '</div>';
+          html += '<div style="font-size:var(--font-size-sm); color:var(--text-secondary); font-family:var(--font-mono);">' + escapeHtml(d.command + (d.args ? ' ' + d.args.join(' ') : '')) + '</div>';
+          html += '</div>';
+          html += '<span class="badge ' + badgeClass + '" style="font-size:var(--font-size-xs);">' + badgeLabel + '</span>';
+          html += '<span style="font-size:var(--font-size-xs); color:var(--text-muted);">' + escapeHtml(d.source) + '</span>';
+          html += '</label>';
+        }
+        autoImportBody.innerHTML = html;
+        updateImportCount();
+
+        // Listen for checkbox changes
+        autoImportBody.addEventListener('change', updateImportCount);
+      })
+      .catch(function(err) {
+        autoImportBody.innerHTML = '<div style="text-align:center; color:var(--danger-fg); padding:24px;">Failed to scan: ' + escapeHtml(err.message || 'unknown error') + '</div>';
+      });
+  }
+
+  function updateImportCount() {
+    var checkboxes = autoImportBody.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)');
+    var count = checkboxes.length;
+    autoImportConfirm.textContent = 'Import ' + count + ' Server' + (count !== 1 ? 's' : '');
+    autoImportConfirm.disabled = count === 0;
+  }
+
+  function closeAutoImport() {
+    autoImportModal.style.display = 'none';
+  }
+
+  // Auto-import button handlers
+  var autoImportBtn = document.getElementById('servers-auto-import-btn');
+  var emptyImportBtn = document.getElementById('servers-empty-import-btn');
+  var autoImportCloseBtn = document.getElementById('auto-import-close');
+  var autoImportCancelBtn = document.getElementById('auto-import-cancel');
+
+  if (autoImportBtn) autoImportBtn.addEventListener('click', openAutoImport);
+  if (emptyImportBtn) emptyImportBtn.addEventListener('click', openAutoImport);
+  if (autoImportCloseBtn) autoImportCloseBtn.addEventListener('click', closeAutoImport);
+  if (autoImportCancelBtn) autoImportCancelBtn.addEventListener('click', closeAutoImport);
+
+  /* ======================================================================
+     WebSocket — Handle server_status events (SPEC-004 AC-3)
+     ====================================================================== */
+  var origWsOnMessage;
+  (function patchWsForServerStatus() {
+    var origConnectWS = connectWS;
+    connectWS = function() {
+      origConnectWS();
+      if (ws) {
+        var origOnMessage = ws.onmessage;
+        ws.onmessage = function(event) {
+          // Try to parse as server_status event
+          try {
+            var data = JSON.parse(event.data);
+            if (data.type === 'server_status') {
+              // Refresh servers view if currently visible
+              if (getRoute() === 'servers') {
+                loadServers();
+              }
+              // Update server count in header
+              fetch('/api/servers')
+                .then(function(resp) { return resp.json(); })
+                .then(function(servers) {
+                  if (servers) {
+                    serverCountEl.textContent = servers.length + ' server' + (servers.length !== 1 ? 's' : '');
+                  }
+                });
+              return;
+            }
+          } catch(e) { /* not JSON or not server_status */ }
+          // Fall through to original handler
+          if (origOnMessage) origOnMessage(event);
+        };
+      }
+    };
+  })();
 
   /* ======================================================================
      Init

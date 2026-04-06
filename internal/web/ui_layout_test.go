@@ -224,6 +224,68 @@ func TestSPEC003_HistoryViewElements(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// SPEC-004: Phase 3 Server Management Layout Tests
+// ---------------------------------------------------------------------------
+
+// TestSPEC004_ServersViewElements verifies the Servers view has all required
+// structural elements for server management.
+func TestSPEC004_ServersViewElements(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC-2: Server grid exists
+	if !strings.Contains(content, `id="servers-grid"`) {
+		t.Error("AC-2 FAIL: expected servers-grid element")
+	}
+
+	// AC-2: Server summary in action bar
+	if !strings.Contains(content, `id="servers-summary"`) {
+		t.Error("AC-2 FAIL: expected servers-summary element")
+	}
+
+	// AC-4: Restart functionality
+	if !strings.Contains(content, "__shipyard_restartServer") {
+		t.Error("AC-4 FAIL: expected restartServer function")
+	}
+	if !strings.Contains(content, "/api/servers/") {
+		t.Error("AC-4 FAIL: expected /api/servers/ endpoint calls")
+	}
+
+	// AC-4: Stop functionality
+	if !strings.Contains(content, "__shipyard_stopServer") {
+		t.Error("AC-4 FAIL: expected stopServer function")
+	}
+
+	// AC-5: Auto-import button exists
+	if !strings.Contains(content, `id="servers-auto-import-btn"`) {
+		t.Error("AC-5 FAIL: expected auto-import button")
+	}
+
+	// AC-5: Auto-import modal exists
+	if !strings.Contains(content, `id="auto-import-modal"`) {
+		t.Error("AC-5 FAIL: expected auto-import modal")
+	}
+
+	// AC-5: Auto-import endpoint
+	if !strings.Contains(content, "/api/auto-import") {
+		t.Error("AC-5 FAIL: expected /api/auto-import fetch call")
+	}
+
+	// AC-3: WebSocket server_status handling
+	if !strings.Contains(content, "server_status") {
+		t.Error("AC-3 FAIL: expected server_status WebSocket event handler")
+	}
+
+	// Empty state
+	if !strings.Contains(content, `id="servers-empty"`) {
+		t.Error("expected servers-empty state")
+	}
+}
+
 // TestBUG007_ResponseSectionFillsHeight verifies the response section can
 // grow vertically to fill remaining viewport height (AC-4).
 func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {
