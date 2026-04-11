@@ -3318,6 +3318,10 @@
   (function initRoute() {
     var route = getRoute();
     navigate(route);
+    // Eagerly hydrate server state so the header badge and Servers view
+    // reflect configured servers even when route switching falls back to
+    // hash/CSS behavior in the desktop webview.
+    loadServers();
     if (!location.hash || location.hash === '#/' || location.hash === '#/timeline' || location.hash === '#timeline') {
       fetch('/api/servers')
         .then(function(r) { return r.json(); })

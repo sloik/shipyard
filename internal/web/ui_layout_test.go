@@ -106,6 +106,9 @@ func TestSPECBUG012_InitRouteActivatesDefaultViewImmediately(t *testing.T) {
 	if !strings.Contains(initBody, "navigate(route);") {
 		t.Error("AC-7 FAIL: initRoute should activate the current route immediately before async fetches")
 	}
+	if !strings.Contains(initBody, "loadServers();") {
+		t.Error("SPEC-BUG-014 FAIL: initRoute should eagerly hydrate server state from /api/servers")
+	}
 	if strings.Contains(initBody, ".catch(function() { navigate(route); });") {
 		t.Error("AC-7 FAIL: initRoute should not rely on async fallback navigation to reveal the initial route")
 	}
