@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -198,6 +199,70 @@ func TestRunConfig_LoadFailureExits(t *testing.T) {
 
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d", code)
+	}
+}
+
+func TestRunConfig_AbsoluteHomePath(t *testing.T) {
+	origRunMulti := runMultiServerFn
+	t.Cleanup(func() { runMultiServerFn = origRunMulti })
+
+	var got struct {
+		cfg  *Config
+		port int
+	}
+	runMultiServerFn = func(cfg *Config, port int, schemaPoll time.Duration, headless bool) {
+		got.cfg = cfg
+		got.port = port
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "servers.json")
+	data := `{
+		"servers": {
+			"alpha": {"command":"echo","args":["home-path"]}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runConfig(path, 60*time.Second, true)
+
+	if got.cfg == nil {
+		t.Fatal("expected runMultiServer to be called for absolute home-path config")
+	}
+	if got.port != 9417 {
+		t.Fatalf("expected default port 9417, got %d", got.port)
+	}
+	if len(got.cfg.ServerOrder) != 1 || got.cfg.ServerOrder[0] != "alpha" {
+		t.Fatalf("expected alpha in ServerOrder, got %v", got.cfg.ServerOrder)
+	}
+}
+
+func TestSeedConfiguredServers_RegistersVisibleServers(t *testing.T) {
+	store := newEphemeralStore(t)
+	hub := web.NewHub()
+	mgr := proxy.NewManager()
+
+	cfg := &Config{
+		Servers: map[string]ServerConfig{
+			"alpha": {Command: "echo", Args: []string{"one"}},
+			"beta":  {Command: "printf", Args: []string{"two"}},
+		},
+		ServerOrder: []string{"alpha", "beta"},
+	}
+
+	seedConfiguredServers(cfg, mgr, store, hub)
+
+	servers := mgr.Servers()
+	if len(servers) != 2 {
+		t.Fatalf("expected 2 seeded servers, got %d", len(servers))
+	}
+	for _, srv := range servers {
+		if srv.Status != "starting" {
+			t.Fatalf("expected seeded server %q to be starting, got %q", srv.Name, srv.Status)
+		}
 	}
 }
 

@@ -255,6 +255,15 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func seedConfiguredServers(cfg *Config, mgr *proxy.Manager, store *capture.Store, hub *web.Hub) {
+	for _, name := range cfg.ServerOrder {
+		server := cfg.Servers[name]
+		p := proxy.NewProxy(name, server.Command, server.Args, server.Env, server.Cwd, store, hub)
+		mgr.Register(name, p)
+		mgr.SetStatus(name, "starting", "")
+	}
+}
+
 func runProxy(name string, port int, command string, args []string, env map[string]string, cwd string, headless bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -360,6 +369,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	// Create proxy manager
 	mgr := proxyNewManager()
 	mgr.SetHub(hub)
+	seedConfiguredServers(cfg, mgr, store, hub)
 
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)

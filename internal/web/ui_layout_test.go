@@ -518,6 +518,42 @@ func TestSPEC004_ServersViewElements(t *testing.T) {
 	}
 }
 
+// TestSPECBUG014_LoadServersRefreshesBadge verifies the Servers view refresh
+// path updates the header badge from the API response and preserves the
+// configured-server vs empty-state branch behavior.
+func TestSPECBUG014_LoadServersRefreshesBadge(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+
+	requiredSnippets := []string{
+		"serverCountEl.textContent = serverCount + ' server'",
+		"serversSummary.textContent = '0 online, 0 tools'",
+		"serversEmpty.style.display = ''",
+		"serversGrid.style.display = 'none'",
+		"serversActionBar.style.display = 'none'",
+		"serversEmpty.style.display = 'none'",
+		"serversGrid.style.display = ''",
+		"serversActionBar.style.display = ''",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(loadBody, needle) {
+			t.Errorf("expected %q in loadServers()", needle)
+		}
+	}
+}
+
 // TestBUG007_ResponseSectionFillsHeight verifies the response section can
 // grow vertically to fill remaining viewport height (AC-4).
 func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {

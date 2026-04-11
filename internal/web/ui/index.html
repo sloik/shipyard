@@ -2338,7 +2338,11 @@
     fetch('/api/servers')
       .then(function(resp) { return resp.json(); })
       .then(function(servers) {
+        var serverCount = servers ? servers.length : 0;
+        serverCountEl.textContent = serverCount + ' server' + (serverCount !== 1 ? 's' : '');
+
         if (!servers || servers.length === 0) {
+          serversSummary.textContent = '0 online, 0 tools';
           serversEmpty.style.display = '';
           serversGrid.style.display = 'none';
           serversActionBar.style.display = 'none';
