@@ -629,6 +629,36 @@ func TestNewStore_SchemaFailure(t *testing.T) {
 	}
 }
 
+func TestNewStore_MigrateFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	orig := openSQLiteDB
+	openSQLiteDB = func(path string) (*sql.DB, error) {
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.Close(); err != nil {
+			return nil, err
+		}
+		return db, nil
+	}
+	t.Cleanup(func() { openSQLiteDB = orig })
+
+	_, err := NewStore(dbPath, jsonlPath)
+	if err == nil {
+		t.Fatal("expected migrate error")
+	}
+	if !strings.Contains(err.Error(), "migrate:") {
+		t.Fatalf("expected migrate wrapper, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "database is closed") {
+		t.Fatalf("expected closed database error, got %v", err)
+	}
+}
+
 func TestInsert_ReturnsZeroOnExecFailure(t *testing.T) {
 	s := newTestStore(t)
 
