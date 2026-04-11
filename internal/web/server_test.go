@@ -156,6 +156,26 @@ func TestHandleServers_Empty(t *testing.T) {
 	}
 }
 
+func TestNoCache_SetsResponseHeaders(t *testing.T) {
+	h := noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
+		t.Fatalf("expected Cache-Control no-store, got %q", got)
+	}
+	if got := w.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("expected Pragma no-cache, got %q", got)
+	}
+	if got := w.Header().Get("Expires"); got != "0" {
+		t.Fatalf("expected Expires 0, got %q", got)
+	}
+}
+
 // --- GET /api/tools ---
 
 func TestHandleTools_MissingServerParam(t *testing.T) {

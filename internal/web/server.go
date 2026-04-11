@@ -81,7 +81,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("embed ui: %w", err)
 	}
-	mux.Handle("GET /", http.FileServer(http.FS(uiContent)))
+	mux.Handle("GET /", noCache(http.FileServer(http.FS(uiContent))))
 
 	// API endpoints
 	mux.HandleFunc("GET /api/traffic", s.handleTraffic)
@@ -129,6 +129,15 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {

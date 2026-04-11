@@ -121,6 +121,20 @@ func TestRedirector_ContentType(t *testing.T) {
 	}
 }
 
+func TestRedirector_AllowsCacheBustedTargetURL(t *testing.T) {
+	target := "http://localhost:9417/?_shipyard=12345"
+	handler := newRedirector(target)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, fmt.Sprintf("window.location.replace(%q)", target)) {
+		t.Fatalf("expected cache-busted redirect to %s, got:\n%s", target, body)
+	}
+}
+
 func TestRedirector_ValidHTML(t *testing.T) {
 	handler := newRedirector("http://localhost:9417")
 

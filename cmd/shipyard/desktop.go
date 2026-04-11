@@ -40,7 +40,7 @@ func runDesktop(port int, cancel context.CancelFunc) {
 		return
 	}
 
-	url := fmt.Sprintf("http://localhost:%d", port)
+	url := fmt.Sprintf("http://localhost:%d/?_shipyard=%d", port, time.Now().UnixNano())
 	slog.Info("opening desktop window", "url", url)
 
 	err := wails.Run(&options.App{
