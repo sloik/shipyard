@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: [SPEC-017, SPEC-BUG-010]
 prior_attempts: []
 violates: "SPEC-017 R1 — desktop app should be usable on first launch"
