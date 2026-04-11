@@ -605,6 +605,68 @@ func TestRunProxy_StoreInitFailure_HeadlessDoesNotCallDesktop(t *testing.T) {
 	}
 }
 
+func TestRunProxy_DesktopMode_ManagedProxyErrorPath(t *testing.T) {
+	origStore := captureNewStore
+	origHub := webNewHub
+	origMgr := proxyNewManager
+	origStartWeb := startWebServer
+	origRunManaged := runManagedProxy
+	origDesktop := runDesktopFn
+	origDefault := slog.Default()
+
+	t.Cleanup(func() {
+		captureNewStore = origStore
+		webNewHub = origHub
+		proxyNewManager = origMgr
+		startWebServer = origStartWeb
+		runManagedProxy = origRunManaged
+		runDesktopFn = origDesktop
+		slog.SetDefault(origDefault)
+	})
+
+	// Silence expected error-path logs from the background proxy goroutine.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&strings.Builder{}, nil)))
+
+	store := newEphemeralStore(t)
+	captureNewStore = func(dbPath, jsonlPath string) (*capture.Store, error) {
+		return store, nil
+	}
+	webNewHub = func() *web.Hub { return web.NewHub() }
+	proxyNewManager = func() *proxy.Manager { return proxy.NewManager() }
+	startWebServer = func(ctx context.Context, srv *web.Server) error {
+		<-ctx.Done()
+		return nil
+	}
+
+	runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, command string, args []string, env map[string]string, cwd string, store *capture.Store, hub *web.Hub) error {
+		return errors.New("forced managed proxy failure")
+	}
+
+	desktopCalled := make(chan struct{}, 1)
+	runDesktopFn = func(port int, cancel context.CancelFunc) {
+		desktopCalled <- struct{}{}
+		cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		runProxy("test", 0, "ignored", nil, nil, "", false)
+		close(done)
+	}()
+
+	select {
+	case <-desktopCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for desktop runner to be called")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runProxy to return")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent safety: redirector can serve multiple requests
 // ---------------------------------------------------------------------------
