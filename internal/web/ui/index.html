@@ -502,7 +502,7 @@
     <div class="empty-desc">Add your first MCP server or auto-import from Claude Desktop, Claude Code, or Cursor configurations.</div>
     <div style="display:flex; gap:12px; margin-top:4px;">
       <button class="btn btn-default btn-sm" id="servers-empty-import-btn">&#8681; Auto-Import</button>
-      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" onclick="alert('Use a config file:\n\nshipyard --config servers.json\n\nSee README for format.')">&#43; Add Server</button>
+      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" type="button">&#43; Add Server</button>
     </div>
     <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">Or run: <code style="background:var(--bg-tertiary, #161b22); padding:2px 6px; border-radius:4px;">shipyard --config servers.json</code></div>
   </div>
@@ -2438,6 +2438,39 @@
     serversGrid.innerHTML = html;
   }
 
+  function openAddServerModal() {
+    var addServerCommand = 'shipyard --config ~/servers.json';
+    var addServerConfig = '{\n' +
+      '  "servers": {\n' +
+      '    "filesystem": {\n' +
+      '      "command": "npx",\n' +
+      '      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]\n' +
+      '    }\n' +
+      '  },\n' +
+      '  "web": {\n' +
+      '    "port": 9417\n' +
+      '  }\n' +
+      '}';
+
+    var body = ''
+      + '<div style="display:flex; flex-direction:column; gap:12px;">'
+      + '<p style="margin:0; color:var(--text-secondary);">Create or edit <span class="code-inline">~/servers.json</span> with a top-level <span class="code-inline">servers</span> object, then launch Shipyard with that file.</p>'
+      + '<div class="code-block">'
+      + '<div class="code-header"><span>Run Shipyard</span><button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerCommand) + '">Copy</button></div>'
+      + '<div class="code-body">' + escapeHtml(addServerCommand) + '</div>'
+      + '</div>'
+      + '<div class="code-block">'
+      + '<div class="code-header"><span>Example `servers.json`</span><button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerConfig) + '">Copy</button></div>'
+      + '<div class="code-body">' + escapeHtml(addServerConfig) + '</div>'
+      + '</div>'
+      + '<div style="font-size:var(--font-size-sm); color:var(--text-muted);">Replace <span class="code-inline">filesystem</span> with your own server. Add <span class="code-inline">cwd</span> and <span class="code-inline">env</span> fields if the server needs them.</div>'
+      + '</div>';
+
+    DS.modal('Add a server', body, [
+      { label: 'Close', value: 'close', className: 'btn-default' }
+    ]);
+  }
+
   // Global handlers for server actions (called from onclick in rendered HTML)
   window.__shipyard_restartServer = function(name) {
     fetch('/api/servers/' + encodeURIComponent(name) + '/restart', { method: 'POST' })
@@ -2511,11 +2544,16 @@
   // Auto-import button handlers
   var autoImportBtn = document.getElementById('servers-auto-import-btn');
   var emptyImportBtn = document.getElementById('servers-empty-import-btn');
+  var emptyAddBtn = document.getElementById('servers-empty-add-btn');
   var autoImportCloseBtn = document.getElementById('auto-import-close');
   var autoImportCancelBtn = document.getElementById('auto-import-cancel');
 
   if (autoImportBtn) autoImportBtn.addEventListener('click', openAutoImport);
   if (emptyImportBtn) emptyImportBtn.addEventListener('click', openAutoImport);
+  if (emptyAddBtn) {
+    emptyAddBtn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    emptyAddBtn.addEventListener('click', openAddServerModal);
+  }
   if (autoImportCloseBtn) autoImportCloseBtn.addEventListener('click', closeAutoImport);
   if (autoImportCancelBtn) autoImportCancelBtn.addEventListener('click', closeAutoImport);
 

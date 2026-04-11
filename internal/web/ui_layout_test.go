@@ -170,6 +170,73 @@ func TestSPECBUG012_AppShellCSS(t *testing.T) {
 	}
 }
 
+// TestSPECBUG013_AddServerCTAUsesSharedModal verifies the empty-state Add
+// Server button is wired to the shared modal flow and includes concrete setup
+// guidance instead of a fragile inline alert.
+func TestSPECBUG013_AddServerCTAUsesSharedModal(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	btnIdx := strings.Index(content, `id="servers-empty-add-btn"`)
+	if btnIdx == -1 {
+		t.Fatal("expected servers-empty-add-btn in index.html")
+	}
+	btnStart := strings.LastIndex(content[:btnIdx], "<button")
+	btnEnd := strings.Index(content[btnIdx:], ">")
+	if btnStart == -1 || btnEnd == -1 {
+		t.Fatal("could not extract servers-empty-add-btn tag")
+	}
+	btnTag := content[btnStart : btnIdx+btnEnd+1]
+	if strings.Contains(btnTag, "onclick=") {
+		t.Fatalf("AC-1 FAIL: Add Server button should not use inline onclick, tag=%s", btnTag)
+	}
+
+	requiredSnippets := []string{
+		"function openAddServerModal()",
+		"emptyAddBtn.addEventListener('click', openAddServerModal)",
+		"emptyAddBtn.addEventListener('mousedown', function(e) { e.stopPropagation(); })",
+		"DS.modal('Add a server'",
+		"shipyard --config ~/servers.json",
+		`"servers": {`,
+		`@modelcontextprotocol/server-filesystem`,
+		"label: 'Close'",
+		"escapeHtml(addServerCommand)",
+		"escapeHtml(addServerConfig)",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) {
+			t.Errorf("AC-1/AC-2/AC-6 FAIL: expected %q in add-server flow", needle)
+		}
+	}
+}
+
+// TestSPECBUG013_SharedModalIsDismissible verifies the shared modal helper
+// supports Escape key and backdrop dismissal so the add-server flow can be
+// closed without restarting the app.
+func TestSPECBUG013_SharedModalIsDismissible(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	content := string(js)
+
+	requiredSnippets := []string{
+		"DS.modal = function(title, body, actions)",
+		"if (e.key === 'Escape') { close(''); }",
+		"backdrop.addEventListener('click', function(e) {",
+		"if (e.target === backdrop) close('');",
+		"btn.addEventListener('click', function() { close(action.value); });",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) {
+			t.Errorf("AC-3 FAIL: expected %q in shared modal helper", needle)
+		}
+	}
+}
+
 // TestBUG007_ToolDetailNoMaxWidth verifies that #tool-detail does not have a
 // max-width constraint so it fills the full available width (BUG-007).
 func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
