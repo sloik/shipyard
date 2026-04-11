@@ -114,6 +114,27 @@ func TestSPECBUG012_InitRouteActivatesDefaultViewImmediately(t *testing.T) {
 	}
 }
 
+func TestSPECBUG014_ServerStatePollingStartsAtBootstrap(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "function startServerStatePolling()") {
+		t.Fatal("SPEC-BUG-014 FAIL: expected dedicated server-state polling bootstrap helper")
+	}
+	if !strings.Contains(content, "serverStateTimer = setInterval(function() {") {
+		t.Error("SPEC-BUG-014 FAIL: expected interval-based server-state polling")
+	}
+	if !strings.Contains(content, "loadServers();\n    }, 2000);") {
+		t.Error("SPEC-BUG-014 FAIL: expected polling loop to refresh via loadServers()")
+	}
+	if !strings.Contains(content, "startServerStatePolling();") {
+		t.Error("SPEC-BUG-014 FAIL: expected bootstrap to start server-state polling")
+	}
+}
+
 // TestSPECBUG012_TabClicksNavigateImmediately verifies that top tabs are
 // plain hash links and do not depend on a JS click handler.
 func TestSPECBUG012_TabClicksNavigateImmediately(t *testing.T) {

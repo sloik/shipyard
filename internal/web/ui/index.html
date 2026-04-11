@@ -607,6 +607,7 @@
   var wsBackoff     = 1000;
   var wsMaxBackoff  = 30000;
   var wsTimer       = null;
+  var serverStateTimer = null;
   var knownServers  = {};
   var knownMethods  = {};
   var dirFilter     = '';
@@ -2372,6 +2373,13 @@
       });
   }
 
+  function startServerStatePolling() {
+    if (serverStateTimer) return;
+    serverStateTimer = setInterval(function() {
+      loadServers();
+    }, 2000);
+  }
+
   function renderServerCards(servers) {
     var html = '';
     for (var i = 0; i < servers.length; i++) {
@@ -3336,6 +3344,7 @@
 
   // Load initial data
   loadPage();
+  startServerStatePolling();
 
   // Check schema alert banner on load
   checkSchemaAlertBanner();
