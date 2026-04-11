@@ -135,7 +135,7 @@ runtime:
 ## Git Configuration
 
 git:
-  main_branch: "v2/main"
+  main_branch: "main"
   branch_prefix: "nightshift"
   commit_style: "conventional"
   worktrees: "auto"
