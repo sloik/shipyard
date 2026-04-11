@@ -15,48 +15,58 @@
   <span class="empty-icon">&#9875;</span>
   <strong>Shipyard</strong>
   <nav id="tab-nav">
-    <a class="tab tab-active" href="#/timeline" data-route="timeline">Timeline</a>
-    <a class="tab tab-default" href="#/tools" data-route="tools">Tools</a>
-    <a class="tab tab-default" href="#/history" data-route="history">History</a>
-    <a class="tab tab-default" href="#/servers" data-route="servers">Servers</a>
+    <a class="tab tab-active" href="#timeline" data-route="timeline">Timeline</a>
+    <a class="tab tab-default" href="#tools" data-route="tools">Tools</a>
+    <a class="tab tab-default" href="#history" data-route="history">History</a>
+    <a class="tab tab-default" href="#servers" data-route="servers">Servers</a>
   </nav>
   <span id="ws-indicator" class="ws-indicator ws-disconnected">Disconnected</span>
-  <a href="#/servers" id="server-count" class="badge badge-neutral" style="text-decoration:none; cursor:pointer;">0 servers</a>
+  <a href="#servers" id="server-count" class="badge badge-neutral" style="text-decoration:none; cursor:pointer;">0 servers</a>
 </header>
 
-<!-- ================================================================
-     Disconnected Banner
-     ================================================================ -->
-<div id="ws-banner" class="detail-panel">
-  <span class="badge badge-error">Connection lost. Reconnecting...</span>
-  <button class="btn btn-danger btn-sm" id="retry-btn">Retry now</button>
-</div>
+<div id="timeline" class="route-target" aria-hidden="true"></div>
+<div id="tools" class="route-target" aria-hidden="true"></div>
+<div id="history" class="route-target" aria-hidden="true"></div>
+<div id="servers" class="route-target" aria-hidden="true"></div>
 
-<!-- ================================================================
-     Schema Change Alert Banner (global, SPEC-009)
-     ================================================================ -->
-<div id="schema-alert-banner" style="display:none; background:var(--bg-warning, #4a3600); border-bottom:1px solid var(--border-default); padding:8px 16px; align-items:center; gap:8px;">
-  <span style="font-size:16px;">&#9888;</span>
-  <span id="schema-alert-text" style="color:var(--text-primary); font-size:var(--font-size-sm);">Schema changes detected</span>
-  <a href="#/servers/schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
-</div>
+<div id="app-chrome">
+  <div id="global-banners">
+    <!-- ================================================================
+         Disconnected Banner
+         ================================================================ -->
+    <div id="ws-banner" class="detail-panel">
+      <span class="badge badge-error">Connection lost. Reconnecting...</span>
+      <button class="btn btn-danger btn-sm" id="retry-btn">Retry now</button>
+    </div>
+
+    <!-- ================================================================
+         Schema Change Alert Banner (global, SPEC-009)
+         ================================================================ -->
+    <div id="schema-alert-banner" style="display:none; background:var(--bg-warning, #4a3600); border-bottom:1px solid var(--border-default); padding:8px 16px; align-items:center; gap:8px;">
+      <span style="font-size:16px;">&#9888;</span>
+      <span id="schema-alert-text" style="color:var(--text-primary); font-size:var(--font-size-sm);">Schema changes detected</span>
+      <a href="#/servers/schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
+    </div>
+  </div>
+
+  <div id="route-stack">
 
 <!-- ================================================================
      View: Timeline (#/timeline)
      ================================================================ -->
-<main id="view-timeline">
+<main id="view-timeline" class="route-view is-active">
 
   <!-- Empty State -->
-  <div id="timeline-empty" class="empty-state">
+    <div id="timeline-empty" class="empty-state">
     <div class="empty-icon">&#128229;</div>
     <div class="empty-title">No traffic yet</div>
-    <div class="empty-desc">Waiting for MCP messages. <a href="#/servers" style="color:var(--accent-primary, #58a6ff);">Set up servers</a> to start capturing traffic.</div>
+    <div class="empty-desc">Waiting for MCP messages. <a href="#servers" style="color:var(--accent-primary, #58a6ff);">Set up servers</a> to start capturing traffic.</div>
     <div id="onboard-cards">
       <div class="onboard-step">
         <div class="step-number">1</div>
         <div class="step-content">
           <strong>Add MCP servers</strong><br>
-          <a href="#/servers" style="color:var(--accent-primary, #58a6ff);">Auto-import</a> from Claude Desktop / Claude Code, or provide a config file.
+          <a href="#servers" style="color:var(--accent-primary, #58a6ff);">Auto-import</a> from Claude Desktop / Claude Code, or provide a config file.
         </div>
       </div>
       <div class="onboard-step">
@@ -123,7 +133,7 @@
 <!-- ================================================================
      View: Tools (#/tools)
      ================================================================ -->
-<main id="view-tools" style="display:flex; height:calc(100vh - 48px);">
+<main id="view-tools" class="route-view route-view-flex">
 
   <!-- Sidebar -->
   <div id="tools-sidebar" style="width:260px; min-width:260px; border-right:1px solid var(--border-default); display:flex; flex-direction:column; background:var(--bg-surface); overflow:hidden;">
@@ -209,7 +219,7 @@
 <!-- ================================================================
      View: History (#/history)
      ================================================================ -->
-<main id="view-history">
+<main id="view-history" class="route-view">
 
   <!-- Sub-Nav: Requests | Sessions -->
   <div class="app-bar" id="history-sub-nav" style="border-bottom:1px solid var(--border-default); padding:0 16px;">
@@ -476,7 +486,7 @@
 <!-- ================================================================
      View: Servers (#/servers)
      ================================================================ -->
-<main id="view-servers">
+<main id="view-servers" class="route-view">
 
   <!-- Action Bar -->
   <div id="servers-action-bar" class="app-bar" style="padding:8px 16px;">
@@ -551,6 +561,9 @@
   </div>
 </main>
 
+  </div><!-- /route-stack -->
+</div><!-- /app-chrome -->
+
 <script src="/ds.js"></script>
 <script>
 (function() {
@@ -623,11 +636,11 @@
       else historySub = 'requests';
     }
 
-    // Hide all views
+    // Show exactly one top-level view.
     Object.keys(views).forEach(function(key) {
-      views[key].style.display = 'none';
+      views[key].classList.remove('is-active');
     });
-    views[baseRoute].style.display = baseRoute === 'tools' ? 'flex' : '';
+    views[baseRoute].classList.add('is-active');
 
     // Update tabs
     var tabs = tabNav.querySelectorAll('.tab');
@@ -648,14 +661,15 @@
     }
   }
 
-  window.addEventListener('hashchange', function() { navigate(getRoute()); });
-  tabNav.addEventListener('click', function(e) {
-    var tab = e.target.closest('.tab');
-    if (tab) {
-      e.preventDefault();
-      location.hash = tab.getAttribute('href');
+  window.__shipyardNavigateRoute = function(route, href) {
+    navigate(route);
+    if (href && location.hash !== href) {
+      location.hash = href;
     }
-  });
+    return false;
+  };
+
+  window.addEventListener('hashchange', function() { navigate(getRoute()); });
 
   /* ======================================================================
      Helpers
@@ -3256,22 +3270,21 @@
   // Initial view state: hide content, show empty
   timelineContent.style.display = 'none';
 
-  // Initialize routing — default to Servers view when 0 servers (first-run UX)
+  // Initialize routing — activate a route immediately, then apply first-run
+  // server-aware redirect asynchronously. This avoids a header-only black page
+  // if the desktop webview stalls before the /api/servers fetch resolves.
   (function initRoute() {
     var route = getRoute();
-    if (!location.hash || location.hash === '#/' || location.hash === '#/timeline') {
+    navigate(route);
+    if (!location.hash || location.hash === '#/' || location.hash === '#/timeline' || location.hash === '#timeline') {
       fetch('/api/servers')
         .then(function(r) { return r.json(); })
         .then(function(servers) {
           if (!servers || servers.length === 0) {
             navigate('servers');
-          } else {
-            navigate(route);
           }
         })
-        .catch(function() { navigate(route); });
-    } else {
-      navigate(route);
+        .catch(function() {});
     }
   })();
 

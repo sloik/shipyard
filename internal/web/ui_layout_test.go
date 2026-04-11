@@ -5,6 +5,171 @@ import (
 	"testing"
 )
 
+// TestSPECBUG012_RouteViewsUseDedicatedRouteStack verifies that the app shell
+// keeps the app bar outside the route stack and that each top-level view uses
+// the explicit route-view contract required for isolated navigation.
+func TestSPECBUG012_RouteViewsUseDedicatedRouteStack(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	headerIdx := strings.Index(content, "<header class=\"app-bar\">")
+	if headerIdx == -1 {
+		t.Fatal("AC-9 FAIL: expected app bar header to exist")
+	}
+	chromeIdx := strings.Index(content, `id="app-chrome"`)
+	if chromeIdx == -1 {
+		t.Fatal("AC-9 FAIL: expected app-chrome container to exist")
+	}
+	routeStackIdx := strings.Index(content, `id="route-stack"`)
+	if routeStackIdx == -1 {
+		t.Fatal("AC-7 FAIL: expected route-stack container to exist")
+	}
+	if !(headerIdx < chromeIdx && chromeIdx < routeStackIdx) {
+		t.Fatalf("AC-9 FAIL: expected header/app chrome/route stack ordering, got header=%d chrome=%d routeStack=%d", headerIdx, chromeIdx, routeStackIdx)
+	}
+	for _, targetID := range []string{`id="timeline" class="route-target"`, `id="tools" class="route-target"`, `id="history" class="route-target"`, `id="servers" class="route-target"`} {
+		if !strings.Contains(content, targetID) {
+			t.Errorf("AC-7 FAIL: expected route target marker %q", targetID)
+		}
+	}
+
+	expectedViews := []string{
+		`id="view-timeline" class="route-view is-active"`,
+		`id="view-tools" class="route-view route-view-flex"`,
+		`id="view-history" class="route-view"`,
+		`id="view-servers" class="route-view"`,
+	}
+	for _, needle := range expectedViews {
+		if !strings.Contains(content, needle) {
+			t.Errorf("AC-7 FAIL: expected route-view declaration %q", needle)
+		}
+	}
+}
+
+// TestSPECBUG012_NavigateUsesActiveRouteClasses verifies that navigate()
+// activates one top-level route via class toggling instead of treating the
+// page as one long stacked document.
+func TestSPECBUG012_NavigateUsesActiveRouteClasses(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	fnIdx := strings.Index(content, "function navigate(route)")
+	if fnIdx == -1 {
+		t.Fatal("AC-7 FAIL: expected navigate(route) function in index.html")
+	}
+	fnBody := content[fnIdx:]
+	if endIdx := strings.Index(fnBody[1:], "\n  window.addEventListener"); endIdx > 0 {
+		fnBody = fnBody[:endIdx+1]
+	}
+
+	if strings.Contains(fnBody, ".style.display = 'none'") || strings.Contains(fnBody, ".style.display = baseRoute === 'tools' ? 'flex' : ''") {
+		t.Error("AC-7 FAIL: navigate() should not use inline display toggles for top-level route isolation")
+	}
+	if !strings.Contains(fnBody, "classList.remove('is-active')") {
+		t.Error("AC-7 FAIL: navigate() should remove is-active from non-selected views")
+	}
+	if !strings.Contains(fnBody, "classList.add('is-active')") {
+		t.Error("AC-7 FAIL: navigate() should add is-active to the selected view")
+	}
+	if !strings.Contains(fnBody, "tab-active") {
+		t.Error("AC-8 FAIL: navigate() should continue updating active tab state")
+	}
+}
+
+// TestSPECBUG012_InitRouteActivatesDefaultViewImmediately verifies that the
+// page never waits on async startup fetches before showing an initial route.
+func TestSPECBUG012_InitRouteActivatesDefaultViewImmediately(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	initIdx := strings.Index(content, "(function initRoute()")
+	if initIdx == -1 {
+		t.Fatal("expected initRoute bootstrap in index.html")
+	}
+	initBody := content[initIdx:]
+	if endIdx := strings.Index(initBody[1:], "\n\n  // Load initial data"); endIdx > 0 {
+		initBody = initBody[:endIdx+1]
+	}
+
+	if !strings.Contains(content, `id="view-timeline" class="route-view is-active"`) {
+		t.Error("AC-7 FAIL: timeline view should be active by default in the HTML shell")
+	}
+	if !strings.Contains(initBody, "navigate(route);") {
+		t.Error("AC-7 FAIL: initRoute should activate the current route immediately before async fetches")
+	}
+	if strings.Contains(initBody, ".catch(function() { navigate(route); });") {
+		t.Error("AC-7 FAIL: initRoute should not rely on async fallback navigation to reveal the initial route")
+	}
+}
+
+// TestSPECBUG012_TabClicksNavigateImmediately verifies that top tabs are
+// plain hash links and do not depend on a JS click handler.
+func TestSPECBUG012_TabClicksNavigateImmediately(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, href := range []string{`href="#timeline"`, `href="#tools"`, `href="#history"`, `href="#servers"`} {
+		if !strings.Contains(content, href) {
+			t.Errorf("AC-8 FAIL: expected top-nav hash link %q", href)
+		}
+	}
+	if !strings.Contains(content, "window.addEventListener('hashchange'") {
+		t.Error("AC-8 FAIL: expected hashchange routing hook")
+	}
+	if strings.Contains(content, `onclick="return window.__shipyardNavigateRoute(`) {
+		t.Error("AC-8 FAIL: tabs should not require inline onclick handlers to navigate")
+	}
+	if strings.Contains(content, "tabNav.addEventListener('click'") {
+		t.Error("AC-8 FAIL: tabs should not depend on a JS click handler that can block native hash navigation")
+	}
+	if !strings.Contains(content, "window.__shipyardNavigateRoute = function(route, href)") {
+		t.Error("AC-8 FAIL: explicit route helper should exist for desktop/webview tab clicks")
+	}
+	if !strings.Contains(content, "navigate(route);") || !strings.Contains(content, "if (href && location.hash !== href)") {
+		t.Error("AC-8 FAIL: explicit route helper should navigate immediately and keep the hash in sync")
+	}
+}
+
+// TestSPECBUG012_AppShellCSS verifies the app shell owns scrolling at the
+// route-view level so the app bar remains visible during view scrolling.
+func TestSPECBUG012_AppShellCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	requiredRules := []string{
+		"html {\n  font-family: var(--font-sans);",
+		"height: 100%;",
+		"overflow: hidden;",
+		"#app-chrome {",
+		"#route-stack {",
+		".route-view {",
+		".route-view.is-active {",
+		".route-view.route-view-flex.is-active {",
+		"flex-shrink: 0;",
+		"--wails-draggable: no-drag;",
+	}
+	for _, needle := range requiredRules {
+		if !strings.Contains(content, needle) {
+			t.Errorf("AC-9 FAIL: expected CSS to contain %q", needle)
+		}
+	}
+}
+
 // TestBUG007_ToolDetailNoMaxWidth verifies that #tool-detail does not have a
 // max-width constraint so it fills the full available width (BUG-007).
 func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {

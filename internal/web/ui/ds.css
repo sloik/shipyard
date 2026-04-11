@@ -215,6 +215,8 @@ html {
   line-height: 1.5;
   color: var(--text-primary);
   background: var(--bg);
+  height: 100%;
+  overflow: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -225,6 +227,94 @@ body {
   line-height: 1.5;
   color: var(--text-primary);
   background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  overflow: hidden;
+  --wails-draggable: no-drag;
+}
+
+#app-chrome {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#global-banners {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.route-target {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+#route-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.route-view {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.route-view.is-active {
+  display: block;
+}
+
+.route-view.route-view-flex.is-active {
+  display: flex;
+  overflow: hidden;
+}
+
+/* Non-JS fallback routing for Wails/webview edge cases. */
+#timeline:target ~ #app-chrome #view-timeline {
+  display: block !important;
+}
+#timeline:target ~ #app-chrome #view-tools,
+#timeline:target ~ #app-chrome #view-history,
+#timeline:target ~ #app-chrome #view-servers {
+  display: none !important;
+}
+
+#tools:target ~ #app-chrome #view-tools {
+  display: flex !important;
+  overflow: hidden;
+}
+#tools:target ~ #app-chrome #view-timeline,
+#tools:target ~ #app-chrome #view-history,
+#tools:target ~ #app-chrome #view-servers {
+  display: none !important;
+}
+
+#history:target ~ #app-chrome #view-history {
+  display: block !important;
+}
+#history:target ~ #app-chrome #view-timeline,
+#history:target ~ #app-chrome #view-tools,
+#history:target ~ #app-chrome #view-servers {
+  display: none !important;
+}
+
+#servers:target ~ #app-chrome #view-servers {
+  display: block !important;
+}
+#servers:target ~ #app-chrome #view-timeline,
+#servers:target ~ #app-chrome #view-tools,
+#servers:target ~ #app-chrome #view-history {
+  display: none !important;
 }
 
 /* Scrollbar */
@@ -636,6 +726,18 @@ body {
   padding: 0 16px;
   height: 44px;
   gap: 16px;
+  flex-shrink: 0;
+  --wails-draggable: no-drag;
+}
+
+#tab-nav,
+#tab-nav .tab,
+button,
+a,
+input,
+select,
+textarea {
+  --wails-draggable: no-drag;
 }
 
 .tab {
