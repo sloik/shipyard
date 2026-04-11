@@ -124,4 +124,4 @@ Constraints:
 
 - Start with RED tests for the clean-exit, restart, and crash-cutoff paths before adding any seam.
 - If a seam is required, keep it narrow, document why, and prefer dependency injection of timing/process hooks over broader architectural changes.
-- This spec should improve confidence in BUG-002-class behavior even if it does not directly implement a new user-facing feature.
+- This spec should improve confidence in SPEC-BUG-002-class behavior even if it does not directly implement a new user-facing feature.

@@ -78,7 +78,7 @@ and testing.
 
 List any current violations that are known and tracked. Remove entries as bugs are fixed.
 
-- BUG-006: onChange multiple updates per frame (FIXED)
+- SPEC-BUG-006: onChange multiple updates per frame (FIXED)
 
 ## References
 

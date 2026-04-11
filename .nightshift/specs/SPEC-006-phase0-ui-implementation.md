@@ -171,7 +171,7 @@ The main Phase 0 screen. Two states:
 - Server/method filter values extracted from traffic data (no separate endpoint)
 
 ### JSON Syntax Highlighting
-- Reuse existing `highlightJSON()` function from BUG-001
+- Reuse existing `highlightJSON()` function from SPEC-BUG-001
 - Token classes: `.jt-key`, `.jt-string`, `.jt-number`, `.jt-boolean`, `.jt-bracket`
 - Applied when rendering detail panel JSON
 

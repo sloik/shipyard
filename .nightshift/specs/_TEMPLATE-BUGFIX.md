@@ -6,7 +6,7 @@ Copy this template to report and fix a bug. Fill in all sections. Save as `specs
 
 ```markdown
 ---
-id: BUG-001
+id: SPEC-BUG-001
 template_version: 2
 priority: 1          # Bugs default to priority 1 (highest). Deprioritize only if explicitly deferred.
 layer: 2             # Layer of the feature that contains the bug
@@ -14,7 +14,7 @@ type: bugfix
 status: draft        # draft | ready | in_progress | done | blocked
 after: []            # Soft dependencies: list of spec IDs (if any)
 violates: [SPEC-XXX] # REQUIRED: list of spec IDs this bug violates (e.g., [SPEC-012, SPEC-015])
-prior_attempts: []   # Previous attempts to fix this bug (e.g., [BUG-001-sqlite-memory-leak])
+prior_attempts: []   # Previous attempts to fix this bug (e.g., [SPEC-BUG-001-sqlite-memory-leak])
 created: 2026-03-26
 ---
 
@@ -130,7 +130,7 @@ Optional — defaults to standard gap protocol (see Nightshift-Coordinator-And-O
 ### File Naming
 
 - Save as `specs/BUG-NNN-short-title.md`
-- Example: `specs/BUG-001-json-editor-bounces.md`
+- Example: `specs/SPEC-BUG-001-json-editor-bounces.md`
 - Use the bug ID in the filename for easy lookup
 - **Note:** Bug IDs use `BUG-NNN` format, not `SPEC-NNN`, to distinguish them from feature/refactor specs
 
@@ -186,7 +186,7 @@ The selection algorithm in LOOP.md prioritizes bugs first (by type == "bugfix"),
 
 ```markdown
 ---
-id: BUG-002
+id: SPEC-BUG-002
 template_version: 2
 priority: 1
 layer: 2

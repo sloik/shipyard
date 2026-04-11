@@ -1,5 +1,5 @@
 ---
-id: BUG-003
+id: SPEC-BUG-003
 priority: 2
 type: bugfix
 status: draft
@@ -7,7 +7,7 @@ after: [SPEC-001]
 created: 2026-04-04
 ---
 
-# BUG-003: Config File Mode Not Implemented
+# SPEC-BUG-003: Config File Mode Not Implemented
 
 ## Problem
 

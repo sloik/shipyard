@@ -4,7 +4,7 @@ priority: 2
 type: main
 status: in-progress
 supersedes: UX-001
-after: [BUG-001, SPEC-001]
+after: [SPEC-BUG-001, SPEC-001]
 created: 2026-04-04
 ---
 
@@ -69,7 +69,7 @@ Checklist for each spec:
 1. **Read the .pen file** via Pencil MCP tools before writing any HTML/CSS/JS
 2. **Match the design pixel-for-pixel** — colors, spacing, typography, layout
 3. **No external dependencies** — all CSS/JS inline in `internal/web/ui/index.html`
-4. **JSON syntax highlighting** uses the existing `highlightJSON()` from BUG-001
+4. **JSON syntax highlighting** uses the existing `highlightJSON()` from SPEC-BUG-001
 5. **Dark theme** — the design defines the color palette; implementation uses CSS variables
 6. **Light theme** — all variables have dark/light values; implementation uses CSS variables with theme switching
 7. **Responsive** — dashboard should work at 1024px+ width (no mobile needed)

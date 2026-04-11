@@ -1183,7 +1183,7 @@ textarea {
   color: var(--text-on-emphasis);
 }
 
-/* Small variant for per-panel filter bars (BUG-008) */
+/* Small variant for per-panel filter bars (SPEC-BUG-008) */
 .mode-toggle-sm {
   border-radius: var(--radius-s);
 }

@@ -1,5 +1,5 @@
 ---
-id: BUG-007
+id: SPEC-BUG-007
 priority: 2
 type: bug
 status: done
@@ -7,7 +7,7 @@ after: [SPEC-002]
 created: 2026-04-05
 ---
 
-# BUG-007: Tool Detail Panel Does Not Fill Available Width
+# SPEC-BUG-007: Tool Detail Panel Does Not Fill Available Width
 
 ## Screenshots
 

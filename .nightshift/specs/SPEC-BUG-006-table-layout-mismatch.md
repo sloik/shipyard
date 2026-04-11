@@ -1,5 +1,5 @@
 ---
-id: BUG-006
+id: SPEC-BUG-006
 priority: 1
 type: bug
 status: done
@@ -7,7 +7,7 @@ after: [SPEC-006]
 created: 2026-04-05
 ---
 
-# BUG-006: Traffic Table Layout Does Not Match Design
+# SPEC-BUG-006: Traffic Table Layout Does Not Match Design
 
 ## Screenshots
 

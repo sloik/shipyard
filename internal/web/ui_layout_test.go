@@ -238,7 +238,7 @@ func TestSPECBUG013_SharedModalIsDismissible(t *testing.T) {
 }
 
 // TestBUG007_ToolDetailNoMaxWidth verifies that #tool-detail does not have a
-// max-width constraint so it fills the full available width (BUG-007).
+// max-width constraint so it fills the full available width (SPEC-BUG-007).
 func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
@@ -284,11 +284,11 @@ func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BUG-008: Text/JQ Toggle Missing from Per-Panel Filter Bars
+// SPEC-BUG-008: Text/JQ Toggle Missing from Per-Panel Filter Bars
 // ---------------------------------------------------------------------------
 
 // TestBUG008_PanelFiltersHaveModeToggle verifies that both the request and
-// response per-panel filter bars include the Text/JQ mode toggle (BUG-008).
+// response per-panel filter bars include the Text/JQ mode toggle (SPEC-BUG-008).
 func TestBUG008_PanelFiltersHaveModeToggle(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
@@ -357,7 +357,7 @@ func TestBUG008_PanelFiltersHaveModeToggle(t *testing.T) {
 }
 
 // TestBUG008_ModeToggleSmCSS verifies that ds.css contains the .mode-toggle-sm
-// variant class with smaller sizing (BUG-008 AC-4).
+// variant class with smaller sizing (SPEC-BUG-008 AC-4).
 func TestBUG008_ModeToggleSmCSS(t *testing.T) {
 	css, err := uiFS.ReadFile("ui/ds.css")
 	if err != nil {

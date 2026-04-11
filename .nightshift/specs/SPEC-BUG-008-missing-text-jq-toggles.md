@@ -1,5 +1,5 @@
 ---
-id: BUG-008
+id: SPEC-BUG-008
 priority: 2
 type: bug
 status: done
@@ -7,7 +7,7 @@ after: [SPEC-006]
 created: 2026-04-05
 ---
 
-# BUG-008: Text/JQ Toggle Missing from Per-Panel Filter Bars
+# SPEC-BUG-008: Text/JQ Toggle Missing from Per-Panel Filter Bars
 
 ## Screenshot
 

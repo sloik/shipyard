@@ -1,5 +1,5 @@
 ---
-id: BUG-002
+id: SPEC-BUG-002
 priority: 2
 type: bugfix
 status: draft
@@ -7,7 +7,7 @@ after: [SPEC-001]
 created: 2026-04-04
 ---
 
-# BUG-002: Child Process Not Auto-Restarted After Crash
+# SPEC-BUG-002: Child Process Not Auto-Restarted After Crash
 
 ## Problem
 

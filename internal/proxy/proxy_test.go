@@ -122,7 +122,7 @@ func TestCaptureMessage_InvalidJSON(t *testing.T) {
 }
 
 func TestCaptureMessage_StatusNeverRequest(t *testing.T) {
-	// BUG-006 AC-4: status must never be "request" — it should be "pending"
+	// SPEC-BUG-006 AC-4: status must never be "request" - it should be "pending"
 	p, store := newTestProxy(t)
 
 	// Insert various message types and verify none produce "request" status

@@ -1,5 +1,5 @@
 ---
-id: BUG-001
+id: SPEC-BUG-001
 priority: 1
 type: bugfix
 status: draft
@@ -7,7 +7,7 @@ after: [SPEC-001]
 created: 2026-04-04
 ---
 
-# BUG-001: JSON Payload Has No Syntax Highlighting
+# SPEC-BUG-001: JSON Payload Has No Syntax Highlighting
 
 ## Problem
 

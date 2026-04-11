@@ -1,5 +1,5 @@
 ---
-id: BUG-004
+id: SPEC-BUG-004
 priority: 2
 type: bug
 status: done
@@ -7,7 +7,7 @@ after: [SPEC-002]
 created: 2026-04-05
 ---
 
-# BUG-004: JSON Syntax Highlighting — Color Mismatch & Missing Differentiation
+# SPEC-BUG-004: JSON Syntax Highlighting — Color Mismatch & Missing Differentiation
 
 ## Screenshot
 

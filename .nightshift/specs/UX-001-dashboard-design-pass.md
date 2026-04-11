@@ -4,7 +4,7 @@ priority: 3
 type: main
 status: superseded
 superseded_by: UX-002
-after: [BUG-001]
+after: [SPEC-BUG-001]
 created: 2026-04-04
 ---
 

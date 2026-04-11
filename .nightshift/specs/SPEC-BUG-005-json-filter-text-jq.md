@@ -1,5 +1,5 @@
 ---
-id: BUG-005
+id: SPEC-BUG-005
 priority: 3
 type: bug
 status: done
@@ -7,7 +7,7 @@ after: [SPEC-002]
 created: 2026-04-05
 ---
 
-# BUG-005: JSON Filter (Text/JQ Toggle) — Non-Functional in Timeline & Tool Browser
+# SPEC-BUG-005: JSON Filter (Text/JQ Toggle) — Non-Functional in Timeline & Tool Browser
 
 ## Screenshot
 
