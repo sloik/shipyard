@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 0
 type: refactor
-status: ready
+status: done
 after: [SPEC-008-002]
 prior_attempts: []
 parent: SPEC-008
