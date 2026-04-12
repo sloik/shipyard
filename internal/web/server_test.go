@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
+	"github.com/sloik/shipyard/internal/gateway"
 )
 
 // mockProxyManager implements ProxyManager for testing.
@@ -176,6 +177,45 @@ func TestNoCache_SetsResponseHeaders(t *testing.T) {
 	}
 }
 
+func TestWithCORS_SetsResponseHeaders(t *testing.T) {
+	h := withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("expected Access-Control-Allow-Origin *, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, DELETE, OPTIONS" {
+		t.Fatalf("unexpected Access-Control-Allow-Methods %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type" {
+		t.Fatalf("unexpected Access-Control-Allow-Headers %q", got)
+	}
+}
+
+func TestWithCORS_HandlesPreflight(t *testing.T) {
+	called := false
+	h := withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/servers/alpha/restart", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if called {
+		t.Fatal("expected OPTIONS preflight to stop before inner handler")
+	}
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for OPTIONS preflight, got %d", w.Code)
+	}
+}
+
 // --- GET /api/tools ---
 
 func TestHandleTools_MissingServerParam(t *testing.T) {
@@ -188,6 +228,126 @@ func TestHandleTools_MissingServerParam(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleGatewayTools_FiltersDisabledEntries(t *testing.T) {
+	srv := newTestServer(t)
+	policy, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetToolEnabled("alpha", "write_file", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	if err := policy.SetServerEnabled("beta", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "alpha", Status: "online"},
+			{Name: "beta", Status: "online"},
+		},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			if method != "tools/list" {
+				t.Fatalf("expected tools/list, got %s", method)
+			}
+			switch server {
+			case "alpha":
+				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file","description":"read","inputSchema":{"type":"object"}},{"name":"write_file","description":"write","inputSchema":{"type":"object"}}]}}`), nil
+			case "beta":
+				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"chat","description":"chat","inputSchema":{"type":"object"}}]}}`), nil
+			default:
+				t.Fatalf("unexpected server %s", server)
+			}
+			return nil, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/gateway/tools", nil)
+	w := httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Tools) != 1 {
+		t.Fatalf("expected 1 enabled tool, got %d", len(resp.Tools))
+	}
+	if resp.Tools[0].Name != "alpha__read_file" || !resp.Tools[0].Enabled {
+		t.Fatalf("unexpected filtered tool: %+v", resp.Tools[0])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/gateway/tools?include_disabled=1", nil)
+	w = httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 include_disabled, got %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal include_disabled: %v", err)
+	}
+	if len(resp.Tools) != 3 {
+		t.Fatalf("expected 3 tools with disabled included, got %d", len(resp.Tools))
+	}
+	var foundDisabledTool, foundDisabledServer bool
+	for _, item := range resp.Tools {
+		if item.Name == "alpha__write_file" && !item.Enabled && item.ServerEnabled && !item.ToolEnabled {
+			foundDisabledTool = true
+		}
+		if item.Name == "beta__chat" && !item.Enabled && !item.ServerEnabled && item.ToolEnabled {
+			foundDisabledServer = true
+		}
+	}
+	if !foundDisabledTool || !foundDisabledServer {
+		t.Fatalf("expected disabled entries in include_disabled catalog, got %+v", resp.Tools)
+	}
+}
+
+func TestHandleGatewayToggleEndpointsPersistPolicy(t *testing.T) {
+	srv := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/gateway/servers/lmstudio/disable", nil)
+	req.SetPathValue("name", "lmstudio")
+	w := httptest.NewRecorder()
+	srv.handleGatewayServerDisable(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/gateway/tools/lmstudio/lms_chat/disable", nil)
+	req.SetPathValue("server", "lmstudio")
+	req.SetPathValue("tool", "lms_chat")
+	w = httptest.NewRecorder()
+	srv.handleGatewayToolDisable(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 tool disable, got %d", w.Code)
+	}
+
+	reloaded, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("reload policy: %v", err)
+	}
+	if reloaded.ServerEnabled("lmstudio") {
+		t.Fatal("expected lmstudio server policy to persist disabled")
+	}
+	if reloaded.ToolEnabled("lmstudio", "lms_chat") {
+		t.Fatal("expected lms_chat tool policy to persist disabled")
 	}
 }
 
@@ -374,6 +534,64 @@ func TestHandleToolCall_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleToolCall_DisabledServerRejected(t *testing.T) {
+	srv := newTestServer(t)
+	policy, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetServerEnabled("lmstudio", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			t.Fatal("SendRequest should not be called for disabled server")
+			return nil, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/call", strings.NewReader(`{"server":"lmstudio","tool":"lms_status","arguments":{}}`))
+	w := httptest.NewRecorder()
+	srv.handleToolCall(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `server \"lmstudio\" is disabled`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestHandleToolCall_DisabledToolRejected(t *testing.T) {
+	srv := newTestServer(t)
+	policy, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetToolEnabled("lmstudio", "lms_status", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			t.Fatal("SendRequest should not be called for disabled tool")
+			return nil, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/call", strings.NewReader(`{"server":"lmstudio","tool":"lms_status","arguments":{}}`))
+	w := httptest.NewRecorder()
+	srv.handleToolCall(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `tool \"lms_status\" on server \"lmstudio\" is disabled`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 
@@ -1551,7 +1769,7 @@ func TestHandleSessionExport(t *testing.T) {
 		Timestamp: time.Now(), Direction: capture.DirectionClientToServer,
 		ServerName: "srv", Method: "tools/call",
 		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file"}}`,
-		Status: "pending",
+		Status:  "pending",
 	}, id)
 	srv.store.StopSession(id)
 
@@ -1608,7 +1826,7 @@ func TestHandleSessionReplay(t *testing.T) {
 		Timestamp: time.Now(), Direction: capture.DirectionClientToServer,
 		ServerName: "srv", Method: "tools/call",
 		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file"}}`,
-		Status: "pending",
+		Status:  "pending",
 	}, id)
 	srv.store.StopSession(id)
 

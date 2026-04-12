@@ -555,6 +555,20 @@ body {
   display: inline-flex;
 }
 
+.search-bar-strip {
+  border: none;
+  border-bottom: 1px solid var(--border-muted);
+  border-radius: 0;
+  background: var(--bg-surface);
+  padding: 10px 12px;
+}
+
+.search-bar-strip.is-active {
+  border-color: transparent;
+  border-bottom-color: var(--border-default);
+  box-shadow: none;
+}
+
 /* ==========================================================================
    6. Badges (6)
    ========================================================================== */
@@ -1201,6 +1215,36 @@ textarea {
   gap: 4px;
 }
 
+.field-width-400 {
+  width: 400px;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.field-width-240 {
+  width: 240px;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.field-width-200 {
+  width: 200px;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.field-width-160 {
+  width: 160px;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.field-width-auto {
+  width: fit-content;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
 .field label {
   font-size: var(--font-size-sm);
   font-weight: 500;
@@ -1320,6 +1364,13 @@ textarea {
   font-size: var(--font-size-md);
   max-width: 320px;
   margin-bottom: 16px;
+}
+
+.tool-browser-empty-state {
+  padding: 32px;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-l);
+  background: var(--bg-surface);
 }
 
 /* Toast container (fixed position, managed by ds.js) */
@@ -1547,7 +1598,49 @@ textarea {
 }
 
 /* ==========================================================================
-   24. Settings (2)
+   24. Tool Conflict Detail State (SPEC-BUG-023)
+   ========================================================================== */
+
+.tool-conflict-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-l);
+  overflow: hidden;
+}
+
+.tool-conflict-card.is-selected {
+  border-color: var(--warning-fg);
+  box-shadow: 0 0 0 1px var(--warning-fg);
+}
+
+.tool-conflict-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.tool-conflict-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+.tool-conflict-schema {
+  background: var(--bg-inset);
+  border-radius: var(--radius-s);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   25. Settings (2)
    ========================================================================== */
 
 .settings-section {

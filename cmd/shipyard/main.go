@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
+	"github.com/sloik/shipyard/internal/gateway"
 	"github.com/sloik/shipyard/internal/proxy"
 	"github.com/sloik/shipyard/internal/web"
 )
@@ -291,11 +292,19 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	hub := webNewHub()
 	go hub.Run(ctx)
 
+	gatewayStore, err := gateway.NewStore(filepath.Join(dir, "gateway-policy.json"))
+	if err != nil {
+		slog.Error("failed to initialize gateway policy store", "error", err)
+		exitFn(1)
+		return
+	}
+
 	// Create proxy manager
 	mgr := proxyNewManager()
 
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
+	srv.SetGatewayPolicyStore(gatewayStore)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {
@@ -366,6 +375,13 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	hub := webNewHub()
 	go hub.Run(ctx)
 
+	gatewayStore, err := gateway.NewStore(filepath.Join(dir, "gateway-policy.json"))
+	if err != nil {
+		slog.Error("failed to initialize gateway policy store", "error", err)
+		exitFn(1)
+		return
+	}
+
 	// Create proxy manager
 	mgr := proxyNewManager()
 	mgr.SetHub(hub)
@@ -373,6 +389,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
+	srv.SetGatewayPolicyStore(gatewayStore)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {
@@ -499,11 +516,19 @@ func runNoServers(port int, headless bool) {
 	hub := webNewHub()
 	go hub.Run(ctx)
 
+	gatewayStore, err := gateway.NewStore(filepath.Join(dir, "gateway-policy.json"))
+	if err != nil {
+		slog.Error("failed to initialize gateway policy store", "error", err)
+		exitFn(1)
+		return
+	}
+
 	mgr := proxyNewManager()
 	mgr.SetHub(hub)
 
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
+	srv.SetGatewayPolicyStore(gatewayStore)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {

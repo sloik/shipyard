@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,114 +93,86 @@ func TestWaitForServer_PortZero(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// redirector tests
+// desktop bridge tests
 // ---------------------------------------------------------------------------
 
-func TestRedirector_ServesHTMLWithTargetURL(t *testing.T) {
-	target := "http://localhost:9417"
-	handler := newRedirector(target)
+func TestDesktopBridge_ServesConfigEndpoint(t *testing.T) {
+	handler := newDesktopBridge(9417)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/_shipyard/desktop-config", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from config endpoint, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"api_base":"http://127.0.0.1:9417","ws_base":"ws://127.0.0.1:9417"}` {
+		t.Fatalf("unexpected desktop config payload: %s", got)
+	}
+}
+
+func TestDesktopBridge_ProxiesAPIRequestsToLocalhost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"method":%q,"path":%q,"body":%q}`, r.Method, r.URL.Path, string(body))
+	}))
+	defer upstream.Close()
+
+	handler := newDesktopBridge(mustPortFromURL(t, upstream.URL))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/alpha/restart", strings.NewReader(`{"force":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected proxied API request to return 200, got %d", w.Code)
+	}
 	body := w.Body.String()
-	if !strings.Contains(body, fmt.Sprintf("window.location.replace(%q)", target)) {
-		t.Fatalf("expected body to contain redirect to %s, got:\n%s", target, body)
+	for _, needle := range []string{`"method":"POST"`, `"path":"/api/servers/alpha/restart"`, `"{\"force\":true}"`} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("expected proxied body to contain %s, got %s", needle, body)
+		}
 	}
 }
 
-func TestRedirector_ContentType(t *testing.T) {
-	handler := newRedirector("http://localhost:9417")
+func TestDesktopBridge_UnknownPathsReturnNotFound(t *testing.T) {
+	handler := newDesktopBridge(9417)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/not-a-real-asset", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	ct := w.Header().Get("Content-Type")
-	if ct != "text/html; charset=utf-8" {
-		t.Fatalf("expected Content-Type %q, got %q", "text/html; charset=utf-8", ct)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected unknown asset-origin path to return 404, got %d", w.Code)
 	}
 }
 
-func TestRedirector_AllowsCacheBustedTargetURL(t *testing.T) {
-	target := "http://localhost:9417/?_shipyard=12345"
-	handler := newRedirector(target)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	body := w.Body.String()
-	if !strings.Contains(body, fmt.Sprintf("window.location.replace(%q)", target)) {
-		t.Fatalf("expected cache-busted redirect to %s, got:\n%s", target, body)
-	}
-}
-
-func TestRedirector_ValidHTML(t *testing.T) {
-	handler := newRedirector("http://localhost:9417")
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	body := w.Body.String()
-	if !strings.HasPrefix(body, "<!DOCTYPE html>") {
-		t.Fatalf("expected body to start with <!DOCTYPE html>, got:\n%s", body)
-	}
-	if !strings.Contains(body, "</html>") {
-		t.Fatalf("expected body to contain closing </html> tag, got:\n%s", body)
-	}
-}
-
-func TestRedirector_DifferentPorts(t *testing.T) {
+func TestDesktopBridge_DifferentPorts(t *testing.T) {
 	cases := []struct {
 		name string
-		url  string
+		port int
 	}{
-		{"default", "http://localhost:9417"},
-		{"custom", "http://localhost:8080"},
-		{"high-port", "http://localhost:65535"},
+		{"default", 9417},
+		{"custom", 8080},
+		{"high-port", 65535},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := newRedirector(tc.url)
+			handler := newDesktopBridge(tc.port)
 
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/_shipyard/desktop-config", nil)
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 
-			body := w.Body.String()
-			if !strings.Contains(body, fmt.Sprintf("window.location.replace(%q)", tc.url)) {
-				t.Fatalf("expected redirect to %s in body, got:\n%s", tc.url, body)
+			want := fmt.Sprintf(`{"api_base":"http://127.0.0.1:%d","ws_base":"ws://127.0.0.1:%d"}`, tc.port, tc.port)
+			if got := strings.TrimSpace(w.Body.String()); got != want {
+				t.Fatalf("expected config %s, got %s", want, got)
 			}
 		})
-	}
-}
-
-func TestRedirector_SpecialCharactersEscaped(t *testing.T) {
-	// URL with special chars — %q in fmt.Sprintf should escape them in the Go
-	// string, and the HTML should not contain unescaped angle brackets.
-	target := `http://localhost:9417/path?foo=bar&baz=<script>`
-	handler := newRedirector(target)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	body := w.Body.String()
-
-	// The URL should appear in the body (possibly with Go %q escaping of special chars)
-	// but raw unquoted <script> must not appear outside the quoted string
-	if strings.Contains(body, "<script>") && !strings.Contains(body, html.EscapeString("<script>")) {
-		// Check that the angle brackets are inside the quoted string from %q,
-		// which would render them as \u003c / \u003e or keep them inside quotes.
-		// fmt.Sprintf(%q, ...) wraps the whole URL in Go-style double quotes and
-		// escapes control chars. Verify the body contains the %q-escaped form.
-		escaped := fmt.Sprintf("%q", target)
-		if !strings.Contains(body, escaped) {
-			t.Fatalf("expected special characters to be properly quoted in body, got:\n%s", body)
-		}
 	}
 }
 
@@ -682,24 +656,42 @@ func TestRunProxy_DesktopMode_ManagedProxyErrorPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Concurrent safety: redirector can serve multiple requests
+// Concurrent safety: desktop bridge can serve multiple requests
 // ---------------------------------------------------------------------------
 
-func TestRedirector_ConcurrentRequests(t *testing.T) {
-	handler := newRedirector("http://localhost:9417")
+func TestDesktopBridge_ConcurrentRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	handler := newDesktopBridge(mustPortFromURL(t, upstream.URL))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
-			if w.Code != http.StatusOK {
-				t.Errorf("expected 200, got %d", w.Code)
+			if w.Code != http.StatusNoContent {
+				t.Errorf("expected 204, got %d", w.Code)
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+func mustPortFromURL(t *testing.T, rawURL string) int {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse upstream port from %q: %v", rawURL, err)
+	}
+	return port
 }

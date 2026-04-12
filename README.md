@@ -54,6 +54,37 @@ shipyard --config servers.json
 
 The dashboard opens automatically in a native window. Add `--headless` to skip the window and open [http://localhost:9417](http://localhost:9417) in your browser instead.
 
+### Expose Shipyard as one MCP server to external clients
+
+If you want Claude CLI or Codex to connect to one Shipyard entry instead of
+registering every child MCP separately, run the stdio bridge:
+
+```bash
+go run ./cmd/shipyard-mcp --api-base http://127.0.0.1:9417
+```
+
+This bridge:
+
+- speaks MCP over stdio
+- discovers Shipyard-managed tools through the local HTTP API
+- exposes namespaced tools like `lmstudio__chat`
+- lets multiple external clients connect through separate bridge processes while
+  sharing one running Shipyard backend
+
+Example registration shape:
+
+```json
+{
+  "mcpServers": {
+    "shipyard": {
+      "type": "stdio",
+      "command": "go",
+      "args": ["run", "./cmd/shipyard-mcp", "--api-base", "http://127.0.0.1:9417"]
+    }
+  }
+}
+```
+
 ## Installation
 
 ### Desktop App (macOS)

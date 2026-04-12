@@ -59,9 +59,9 @@ func TestSPECBUG012_NavigateUsesActiveRouteClasses(t *testing.T) {
 	}
 	content := string(html)
 
-	fnIdx := strings.Index(content, "function navigate(route)")
+	fnIdx := strings.Index(content, "function navigateRoute(route)")
 	if fnIdx == -1 {
-		t.Fatal("AC-7 FAIL: expected navigate(route) function in index.html")
+		t.Fatal("AC-7 FAIL: expected navigateRoute(route) function in index.html")
 	}
 	fnBody := content[fnIdx:]
 	if endIdx := strings.Index(fnBody[1:], "\n  window.addEventListener"); endIdx > 0 {
@@ -103,13 +103,13 @@ func TestSPECBUG012_InitRouteActivatesDefaultViewImmediately(t *testing.T) {
 	if !strings.Contains(content, `id="view-timeline" class="route-view is-active"`) {
 		t.Error("AC-7 FAIL: timeline view should be active by default in the HTML shell")
 	}
-	if !strings.Contains(initBody, "navigate(route);") {
+	if !strings.Contains(initBody, "navigateRoute(route);") {
 		t.Error("AC-7 FAIL: initRoute should activate the current route immediately before async fetches")
 	}
 	if !strings.Contains(initBody, "loadServers();") {
 		t.Error("SPEC-BUG-014 FAIL: initRoute should eagerly hydrate server state from /api/servers")
 	}
-	if strings.Contains(initBody, ".catch(function() { navigate(route); });") {
+	if strings.Contains(initBody, ".catch(function() { navigateRoute(route); });") {
 		t.Error("AC-7 FAIL: initRoute should not rely on async fallback navigation to reveal the initial route")
 	}
 }
@@ -132,6 +132,66 @@ func TestSPECBUG014_ServerStatePollingStartsAtBootstrap(t *testing.T) {
 	}
 	if !strings.Contains(content, "startServerStatePolling();") {
 		t.Error("SPEC-BUG-014 FAIL: expected bootstrap to start server-state polling")
+	}
+}
+
+func TestSPECBUG016_DesktopBridgeConfigBootstrap(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredSnippets := []string{
+		"var nativeFetch   = window.fetch.bind(window);",
+		"var desktopBridgeConfig = null;",
+		"var desktopBridgeConfigPromise = null;",
+		"function usesDesktopAssetOrigin()",
+		"return location.protocol !== 'http:' && location.protocol !== 'https:';",
+		"function loadDesktopBridgeConfig()",
+		"nativeFetch('/_shipyard/desktop-config')",
+		"desktopBridgeConfig = config || {};",
+		"function resolveAPIURL(path)",
+		"return path;",
+		"function appFetch(input, init)",
+		"return nativeFetch(resolveAPIURL(input), init);",
+		"window.fetch = appFetch;",
+		"loadDesktopBridgeConfig().then(function() {",
+		"connectWS();",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-016 FAIL: expected %q in desktop bridge bootstrap", needle)
+		}
+	}
+}
+
+func TestSPECBUG016_ConnectWSUsesResolvedDesktopURL(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	connectIdx := strings.Index(content, "function connectWS()")
+	if connectIdx == -1 {
+		t.Fatal("expected connectWS() function in index.html")
+	}
+	connectBody := content[connectIdx:]
+	if endIdx := strings.Index(connectBody[1:], "\n\n  retryBtn.addEventListener"); endIdx > 0 {
+		connectBody = connectBody[:endIdx+1]
+	}
+
+	requiredSnippets := []string{
+		"function resolveWebSocketURL(path)",
+		"desktopBridgeConfig.ws_base",
+		"return desktopBridgeConfig.ws_base.replace(/\\/$/, '') + path;",
+		"ws = new WebSocket(resolveWebSocketURL('/ws'));",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) && !strings.Contains(connectBody, needle) {
+			t.Errorf("SPEC-BUG-016 FAIL: expected %q in desktop websocket transport path", needle)
+		}
 	}
 }
 
@@ -161,7 +221,7 @@ func TestSPECBUG012_TabClicksNavigateImmediately(t *testing.T) {
 	if !strings.Contains(content, "window.__shipyardNavigateRoute = function(route, href)") {
 		t.Error("AC-8 FAIL: explicit route helper should exist for desktop/webview tab clicks")
 	}
-	if !strings.Contains(content, "navigate(route);") || !strings.Contains(content, "if (href && location.hash !== href)") {
+	if !strings.Contains(content, "navigateRoute(route);") || !strings.Contains(content, "if (href && location.hash !== href)") {
 		t.Error("AC-8 FAIL: explicit route helper should navigate immediately and keep the hash in sync")
 	}
 }
@@ -295,6 +355,9 @@ func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
 	if !strings.Contains(content, `id="tool-params-form"`) {
 		t.Error("AC-2: expected tool-params-form element to exist")
 	}
+	if !strings.Contains(content, "field-width-400") {
+		t.Error("AC-2: expected schema-driven fields to include the Phase 1 width classes")
+	}
 
 	// AC-3/AC-4: response section should exist and be ready to fill space
 	if !strings.Contains(content, `id="tool-response-section"`) {
@@ -304,6 +367,102 @@ func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
 	// AC-5: tool-detail must have padding:24px
 	if !strings.Contains(tag, "padding:24px") {
 		t.Errorf("AC-5 FAIL: #tool-detail should have padding:24px, tag: %s", tag)
+	}
+}
+
+func TestSPECBUG017_ToolBrowserEmptyStateMatchesPhase1CardTreatment(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	idx := strings.Index(content, `id="tools-empty"`)
+	if idx == -1 {
+		t.Fatal("expected tools-empty in index.html")
+	}
+	tagStart := strings.LastIndex(content[:idx], "<")
+	tagEnd := strings.Index(content[idx:], ">")
+	if tagStart == -1 || tagEnd == -1 {
+		t.Fatal("could not extract tools-empty tag")
+	}
+	tag := content[tagStart : idx+tagEnd+1]
+
+	for _, needle := range []string{"class=\"empty-state tool-browser-empty-state\"", "height:100%"} {
+		if !strings.Contains(tag, needle) {
+			t.Errorf("SPEC-BUG-017 FAIL: expected %q in tools-empty tag: %s", needle, tag)
+		}
+	}
+	if !strings.Contains(content, "fill in parameters, and execute it.") {
+		t.Error("SPEC-BUG-017 FAIL: tools empty-state copy should mention per-tool parameter controls")
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for _, needle := range []string{
+		".tool-browser-empty-state {",
+		"padding: 32px;",
+		"border: 1px solid var(--border-muted);",
+		"border-radius: var(--radius-l);",
+		"background: var(--bg-surface);",
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Errorf("SPEC-BUG-017 FAIL: expected %q in tool-browser empty-state CSS", needle)
+		}
+	}
+}
+
+func TestSPECBUG025_ToolBrowserSchemaFieldsUsePhase1WidthClasses(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderIdx := strings.Index(content, "function renderToolForm(schema)")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-BUG-025 FAIL: expected renderToolForm(schema) in index.html")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  /* ======================================================================\n     Tool Browser — Collect Form Arguments"); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+
+	for _, needle := range []string{
+		"var fieldCount = keys.length;",
+		"renderField(key, prop, isRequired, fieldCount === 1);",
+		"function getFieldWidthClass(prop, forceWide)",
+		"if (forceWide) return 'field-width-400';",
+		"return 'field-width-240';",
+		"field-width-auto",
+		"field-width-160",
+		"field-width-200",
+	} {
+		if !strings.Contains(renderBody, needle) && !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-025 FAIL: expected %q in schema field width contract", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for _, needle := range []string{
+		".field-width-400 {",
+		"width: 400px;",
+		".field-width-240 {",
+		".field-width-200 {",
+		".field-width-160 {",
+		".field-width-auto {",
+		"width: fit-content;",
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Errorf("SPEC-BUG-025 FAIL: expected %q in field width CSS", needle)
+		}
 	}
 }
 
@@ -578,6 +737,91 @@ func TestSPECBUG014_LoadServersRefreshesBadge(t *testing.T) {
 	}
 }
 
+// TestSPECBUG014_NavigateRefreshesServersView verifies that entering the
+// Servers route re-syncs from /api/servers instead of relying on stale state
+// from the traffic filter bootstrap.
+func TestSPECBUG014_NavigateRefreshesServersView(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	navigateIdx := strings.Index(content, "function navigateRoute(route)")
+	if navigateIdx == -1 {
+		t.Fatal("expected navigateRoute(route) function in index.html")
+	}
+	navigateBody := content[navigateIdx:]
+	if endIdx := strings.Index(navigateBody[1:], "\n\n  window.__shipyardNavigateRoute"); endIdx > 0 {
+		navigateBody = navigateBody[:endIdx+1]
+	}
+
+	requiredSnippets := []string{
+		"if (baseRoute === 'servers') {",
+		"loadServers();",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(navigateBody, needle) {
+			t.Errorf("expected %q in navigateRoute(route)", needle)
+		}
+	}
+}
+
+// TestSPECBUG014_TrackFiltersDoesNotOwnServerCountBadge verifies traffic
+// filter bootstrapping no longer overwrites the global configured-server badge.
+func TestSPECBUG014_TrackFiltersDoesNotOwnServerCountBadge(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	trackIdx := strings.Index(content, "function trackFilters(items)")
+	if trackIdx == -1 {
+		t.Fatal("expected trackFilters(items) function in index.html")
+	}
+	trackBody := content[trackIdx:]
+	if endIdx := strings.Index(trackBody[1:], "\n  function rebuildDropdown"); endIdx > 0 {
+		trackBody = trackBody[:endIdx+1]
+	}
+
+	if strings.Contains(trackBody, "serverCountEl.textContent") {
+		t.Fatal("SPEC-BUG-014 FAIL: trackFilters should not mutate the server-count badge")
+	}
+}
+
+// TestSPECBUG015_ServersTabSameRouteClickRefreshesLiveState verifies that a
+// same-route Servers tab activation still re-syncs the view from /api/servers
+// in the Wails webview, where hashchange is not guaranteed for same-hash
+// clicks.
+func TestSPECBUG015_ServersTabSameRouteClickRefreshesLiveState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	listenerIdx := strings.Index(content, "tabNav.addEventListener('pointerup'")
+	if listenerIdx == -1 {
+		t.Fatal("expected pointerup listener on tabNav in index.html")
+	}
+	listenerBody := content[listenerIdx:]
+	if endIdx := strings.Index(listenerBody[1:], "\n\n  /* ======================================================================"); endIdx > 0 {
+		listenerBody = listenerBody[:endIdx+1]
+	}
+
+	requiredSnippets := []string{
+		"data-route') !== 'servers'",
+		"if (getRoute() === 'servers') {",
+		"loadServers();",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(listenerBody, needle) {
+			t.Errorf("expected %q in same-route servers refresh handler", needle)
+		}
+	}
+}
+
 // TestBUG007_ResponseSectionFillsHeight verifies the response section can
 // grow vertically to fill remaining viewport height (AC-4).
 func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {
@@ -619,5 +863,244 @@ func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {
 
 	if !strings.Contains(respTag, "flex:1") {
 		t.Errorf("AC-4 FAIL: #tool-response-section should have flex:1 to fill remaining height, tag: %s", respTag)
+	}
+}
+
+// TestSPECBUG021_ToolBrowserResponsePanelUsesFillHeightLayout verifies that
+// the Tool Browser response panel fills remaining pane height and keeps
+// scrolling local to the response JSON viewer.
+func TestSPECBUG021_ToolBrowserResponsePanelUsesFillHeightLayout(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	checkTag := func(id string) string {
+		idx := strings.Index(content, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("expected to find %s in index.html", id)
+		}
+		tagStart := strings.LastIndex(content[:idx], "<")
+		tagEnd := strings.Index(content[idx:], ">")
+		if tagStart == -1 || tagEnd == -1 {
+			t.Fatalf("could not extract %s tag", id)
+		}
+		return content[tagStart : idx+tagEnd+1]
+	}
+
+	detailTag := checkTag("tool-detail")
+	for _, needle := range []string{"height:100%", "min-height:0", "flex-direction:column"} {
+		if !strings.Contains(detailTag, needle) {
+			t.Errorf("SPEC-BUG-021 FAIL: expected %q in #tool-detail tag: %s", needle, detailTag)
+		}
+	}
+
+	responseSectionTag := checkTag("tool-response-section")
+	for _, needle := range []string{"display:flex", "flex-direction:column", "flex:1", "min-height:0"} {
+		if !strings.Contains(responseSectionTag, needle) {
+			t.Errorf("SPEC-BUG-021 FAIL: expected %q in #tool-response-section tag: %s", needle, responseSectionTag)
+		}
+	}
+
+	responseBodyTag := checkTag("tool-response-body")
+	for _, needle := range []string{"display:flex", "flex-direction:column", "flex:1", "min-height:0"} {
+		if !strings.Contains(responseBodyTag, needle) {
+			t.Errorf("SPEC-BUG-021 FAIL: expected %q in #tool-response-body tag: %s", needle, responseBodyTag)
+		}
+	}
+
+	responseJsonTag := checkTag("tool-response-json")
+	for _, needle := range []string{"flex:1", "min-height:0", "max-height:none", "overflow:auto"} {
+		if !strings.Contains(responseJsonTag, needle) {
+			t.Errorf("SPEC-BUG-021 FAIL: expected %q in #tool-response-json tag: %s", needle, responseJsonTag)
+		}
+	}
+	if strings.Contains(responseJsonTag, "max-height:400px") {
+		t.Errorf("SPEC-BUG-021 FAIL: #tool-response-json should not keep the 400px cap, tag: %s", responseJsonTag)
+	}
+}
+
+func TestSPECBUG022_ToolBrowserShowsIdleResponseStateOnSelection(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column;"`,
+		`id="tool-response-status" class="badge" style="display:none;"`,
+		`id="tool-response-latency" class="pill" style="display:none;"`,
+		`id="tool-response-idle"`,
+		`Execute the selected tool to see response output here.`,
+		"function showToolResponseIdle()",
+		"function showToolResponseLoading()",
+		"showToolResponseIdle();",
+		"showToolResponseLoading();",
+		"toolResponseSection.style.display = 'flex';",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-022 FAIL: expected %q in Tool Browser idle response contract", needle)
+		}
+	}
+
+	selectIdx := strings.Index(content, "function selectTool(serverName, toolName)")
+	if selectIdx == -1 {
+		t.Fatal("SPEC-BUG-022 FAIL: expected selectTool() function")
+	}
+	selectBody := content[selectIdx:]
+	if endIdx := strings.Index(selectBody[1:], "\n\n  /* ======================================================================\n     Tool Browser — Render Schema Form"); endIdx > 0 {
+		selectBody = selectBody[:endIdx+1]
+	}
+	if strings.Contains(selectBody, "toolResponseSection.style.display = 'none';") {
+		t.Error("SPEC-BUG-022 FAIL: selectTool() should not hide the response section")
+	}
+	if !strings.Contains(selectBody, "showToolResponseIdle();") {
+		t.Error("SPEC-BUG-022 FAIL: selectTool() should reset the response area into the idle state")
+	}
+
+	execIdx := strings.Index(content, "function executeTool()")
+	if execIdx == -1 {
+		t.Fatal("SPEC-BUG-022 FAIL: expected executeTool() function")
+	}
+	execBody := content[execIdx:]
+	if endIdx := strings.Index(execBody[1:], "\n\n  function toolResponseBody"); endIdx > 0 {
+		execBody = execBody[:endIdx+1]
+	}
+	if strings.Contains(execBody, "toolResponseSection.style.display = 'none';") {
+		t.Error("SPEC-BUG-022 FAIL: executeTool() should not hide the response section during loading")
+	}
+	if !strings.Contains(execBody, "showToolResponseLoading();") {
+		t.Error("SPEC-BUG-022 FAIL: executeTool() should render loading inside the existing response region")
+	}
+}
+
+func TestSPECBUG023_ToolBrowserRendersConflictDetailState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		`id="tool-conflict-section"`,
+		`id="tool-conflict-title"`,
+		`id="tool-conflict-message"`,
+		`id="tool-conflict-cards"`,
+		`Conflicting Implementations`,
+		`Tool name conflict:`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-023 FAIL: expected %q in conflicted-tool detail markup", needle)
+		}
+	}
+
+	selectIdx := strings.Index(content, "function selectTool(serverName, toolName)")
+	if selectIdx == -1 {
+		t.Fatal("SPEC-BUG-023 FAIL: expected selectTool() function")
+	}
+	selectBody := content[selectIdx:]
+	if endIdx := strings.Index(selectBody[1:], "\n\n  /* ======================================================================\n     Tool Browser — Render Schema Form"); endIdx > 0 {
+		selectBody = selectBody[:endIdx+1]
+	}
+
+	requiredSnippets := []string{
+		"renderToolConflictState(tool);",
+		"toolDetailServer.className = 'badge ' + (toolConflicts[tool.name] && toolConflicts[tool.name].length > 1 ? 'badge-warning' : 'badge-neutral');",
+		"toolConflictSection.style.display = 'none';",
+		"toolConflictCards.innerHTML = html;",
+		"toolConflictMessage.textContent = 'This tool name exists in multiple servers. Clients may receive unpredictable results depending on which server responds first.';",
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) && !strings.Contains(selectBody, needle) {
+			t.Errorf("SPEC-BUG-023 FAIL: expected %q in conflicted-tool render path", needle)
+		}
+	}
+}
+
+func TestSPECBUG023_ToolBrowserKeepsStandardDetailLayoutForNormalTools(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		`id="tool-detail-server" class="badge badge-neutral"`,
+		`id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);"`,
+		`id="tool-params-section" style="margin-bottom:16px;"`,
+		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column;"`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-023 FAIL: expected standard tool detail layout snippet %q", needle)
+		}
+	}
+
+	conflictIdx := strings.Index(content, `id="tool-conflict-section"`)
+	paramsIdx := strings.Index(content, `id="tool-params-section"`)
+	responseIdx := strings.Index(content, `id="tool-response-section"`)
+	if conflictIdx == -1 || paramsIdx == -1 || responseIdx == -1 {
+		t.Fatal("SPEC-BUG-023 FAIL: expected tool conflict, params, and response sections")
+	}
+	if !(conflictIdx < paramsIdx && paramsIdx < responseIdx) {
+		t.Fatalf("SPEC-BUG-023 FAIL: expected conflict section before params and response sections, got conflict=%d params=%d response=%d", conflictIdx, paramsIdx, responseIdx)
+	}
+}
+
+func TestSPECBUG024_ToolBrowserSidebarSearchUsesPhase1StripChrome(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	sidebarIdx := strings.Index(content, `id="tools-sidebar"`)
+	if sidebarIdx == -1 {
+		t.Fatal("SPEC-BUG-024 FAIL: expected tools-sidebar container in index.html")
+	}
+	searchIdx := strings.Index(content, `id="tool-search-bar"`)
+	if searchIdx == -1 {
+		t.Fatal("SPEC-BUG-024 FAIL: expected tool-search-bar in index.html")
+	}
+	sidebarSlice := content[sidebarIdx:searchIdx]
+	if strings.Contains(sidebarSlice, "padding:8px") {
+		t.Error("SPEC-BUG-024 FAIL: expected no padded wrapper between the sidebar chrome and the search strip")
+	}
+
+	searchTagStart := strings.LastIndex(content[:searchIdx], "<")
+	searchTagEnd := strings.Index(content[searchIdx:], ">")
+	if searchTagStart == -1 || searchTagEnd == -1 {
+		t.Fatal("SPEC-BUG-024 FAIL: could not extract tool-search-bar tag")
+	}
+	searchTag := content[searchTagStart : searchIdx+searchTagEnd+1]
+	for _, needle := range []string{
+		`class="search-bar search-bar-strip"`,
+		`id="tool-search"`,
+		`class="search-clear"`,
+		`search-icon`,
+	} {
+		if !strings.Contains(searchTag, needle) && !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-024 FAIL: expected %q in sidebar search contract", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for _, needle := range []string{
+		".search-bar-strip {",
+		"border-bottom: 1px solid var(--border-muted);",
+		"border-radius: 0;",
+		"padding: 10px 12px;",
+		"background: var(--bg-surface);",
+		".search-bar-strip.is-active {",
+		"box-shadow: none;",
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Errorf("SPEC-BUG-024 FAIL: expected %q in sidebar search strip CSS", needle)
+		}
 	}
 }

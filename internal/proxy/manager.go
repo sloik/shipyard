@@ -19,7 +19,7 @@ import (
 type Manager struct {
 	mu             sync.RWMutex
 	proxies        map[string]*managedProxy
-	hub            *web.Hub // for broadcasting status changes
+	hub            *web.Hub         // for broadcasting status changes
 	activeSessions map[string]int64 // server name → session ID
 }
 
@@ -27,13 +27,17 @@ type managedProxy struct {
 	proxy        *Proxy
 	inputWriter  *childInputWriter
 	responses    *responseTracker
-	status       string    // "online", "crashed", "stopped", "restarting"
-	command      string    // the command string for display
-	startedAt    time.Time // when the proxy was last started
-	restartCount int       // how many times it has been restarted
-	toolCount    int       // cached tool count
-	errorMessage string    // last error message if crashed
+	status       string             // "online", "crashed", "stopped", "restarting"
+	command      string             // the command string for display
+	startedAt    time.Time          // when the proxy was last started
+	restartCount int                // how many times it has been restarted
+	toolCount    int                // cached tool count
+	errorMessage string             // last error message if crashed
 	cancelFn     context.CancelFunc // cancel function for stopping the proxy
+	initMu       sync.Mutex
+	initReady    bool
+	initRunning  bool
+	initWait     chan struct{}
 }
 
 // responseTracker correlates JSON-RPC request IDs to response channels.
@@ -266,6 +270,8 @@ var requestIDCounter int64
 var requestTimeout = 30 * time.Second
 var marshalRequest = json.Marshal
 
+const managedChildProtocolVersion = "2025-03-26"
+
 // SendRequest sends a JSON-RPC request to a child server and waits for the response.
 func (m *Manager) SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (json.RawMessage, error) {
 	m.mu.RLock()
@@ -274,6 +280,20 @@ func (m *Manager) SendRequest(ctx context.Context, serverName, method string, pa
 
 	if !ok {
 		return nil, fmt.Errorf("server %q not found", serverName)
+	}
+
+	if method != "initialize" && method != "notifications/initialized" {
+		if err := m.ensureInitialized(ctx, serverName, mp); err != nil {
+			return nil, err
+		}
+	}
+
+	return m.sendRequestRaw(ctx, serverName, mp, method, params)
+}
+
+func (m *Manager) sendRequestRaw(ctx context.Context, serverName string, mp *managedProxy, method string, params json.RawMessage) (json.RawMessage, error) {
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
 	}
 
 	// Generate a unique request ID
@@ -314,12 +334,131 @@ func (m *Manager) SendRequest(ctx context.Context, serverName, method string, pa
 
 	select {
 	case raw := <-ch:
+		if method == "tools/list" {
+			m.updateToolCountFromResponse(serverName, raw)
+		}
 		return raw, nil
 	case <-timer.C:
 		return nil, fmt.Errorf("timeout waiting for response from %q after %s", serverName, timeout)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (m *Manager) ensureInitialized(ctx context.Context, serverName string, mp *managedProxy) error {
+	for {
+		mp.initMu.Lock()
+		if mp.initReady {
+			mp.initMu.Unlock()
+			return nil
+		}
+		if mp.initRunning {
+			wait := mp.initWait
+			mp.initMu.Unlock()
+
+			select {
+			case <-wait:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		wait := make(chan struct{})
+		mp.initRunning = true
+		mp.initWait = wait
+		mp.initMu.Unlock()
+
+		err := m.initializeChildSession(ctx, serverName, mp)
+
+		mp.initMu.Lock()
+		if err == nil {
+			mp.initReady = true
+		}
+		mp.initRunning = false
+		close(wait)
+		mp.initWait = nil
+		mp.initMu.Unlock()
+
+		return err
+	}
+}
+
+func (m *Manager) initializeChildSession(ctx context.Context, serverName string, mp *managedProxy) error {
+	initParams := map[string]interface{}{
+		"protocolVersion": managedChildProtocolVersion,
+		"capabilities":    map[string]interface{}{},
+		"clientInfo": map[string]interface{}{
+			"name":    "shipyard",
+			"version": "dev",
+		},
+	}
+	paramsBytes, err := marshalRequest(initParams)
+	if err != nil {
+		return fmt.Errorf("marshal initialize params: %w", err)
+	}
+
+	raw, err := m.sendRequestRaw(ctx, serverName, mp, "initialize", json.RawMessage(paramsBytes))
+	if err != nil {
+		return fmt.Errorf("initialize %q: %w", serverName, err)
+	}
+
+	var rpcResp struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
+		return fmt.Errorf("parse initialize response from %q: %w", serverName, err)
+	}
+	if rpcResp.Error != nil {
+		return fmt.Errorf("initialize %q returned error: %s", serverName, string(rpcResp.Error))
+	}
+
+	if err := m.sendNotificationRaw(ctx, serverName, mp, "notifications/initialized", json.RawMessage("{}")); err != nil {
+		return fmt.Errorf("notifications/initialized %q: %w", serverName, err)
+	}
+
+	return nil
+}
+
+func (m *Manager) sendNotificationRaw(ctx context.Context, serverName string, mp *managedProxy, method string, params json.RawMessage) error {
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
+	}
+
+	req := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}
+	reqBytes, err := marshalRequest(req)
+	if err != nil {
+		return fmt.Errorf("marshal notification: %w", err)
+	}
+	if mp.inputWriter == nil {
+		return fmt.Errorf("server %q has no input writer attached", serverName)
+	}
+	if err := mp.inputWriter.writeLine(ctx, reqBytes); err != nil {
+		return fmt.Errorf("write to child: %w", err)
+	}
+
+	go mp.proxy.captureMessage(reqBytes, capture.DirectionClientToServer, time.Now())
+	return nil
+}
+
+func (m *Manager) updateToolCountFromResponse(serverName string, raw json.RawMessage) {
+	var rpcResp struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
+		return
+	}
+
+	m.SetToolCount(serverName, len(rpcResp.Result.Tools))
 }
 
 // SetInputWriter sets the child input writer for a managed proxy.

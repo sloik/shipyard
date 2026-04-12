@@ -335,6 +335,7 @@ func TestManagerSendRequest(t *testing.T) {
 		sink := &trackedWriteCloser{}
 		cw.attach(sink)
 		mp.SetInputWriter(cw)
+		mp.initReady = true
 
 		type result struct {
 			raw json.RawMessage

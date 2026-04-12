@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sloik/shipyard/internal/capture"
+	"github.com/sloik/shipyard/internal/gateway"
 )
 
 //go:embed ui
@@ -30,6 +31,15 @@ var subUIFS = fs.Sub
 
 var acceptWebSocket = func(w http.ResponseWriter, r *http.Request, opts *websocket.AcceptOptions) (wsConn, error) {
 	return websocket.Accept(w, r, opts)
+}
+
+// UIAssets returns the embedded dashboard UI files rooted at the ui/ folder.
+func UIAssets() (fs.FS, error) {
+	uiContent, err := subUIFS(uiFS, "ui")
+	if err != nil {
+		return nil, fmt.Errorf("embed ui: %w", err)
+	}
+	return uiContent, nil
 }
 
 // ProxyManager defines the interface the web server uses to interact with proxies.
@@ -54,12 +64,24 @@ type ServerInfo struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
+type toolsEnvelope struct {
+	Tools []shipyardTool `json:"tools"`
+}
+
+type shipyardTool struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"inputSchema,omitempty"`
+	InputSchema2 json.RawMessage `json:"input_schema,omitempty"`
+}
+
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
 	port    int
 	store   *capture.Store
 	hub     *Hub
 	proxies ProxyManager
+	gateway *gateway.Store
 }
 
 // NewServer creates a new web server.
@@ -72,16 +94,20 @@ func (s *Server) SetProxyManager(pm ProxyManager) {
 	s.proxies = pm
 }
 
+func (s *Server) SetGatewayPolicyStore(gs *gateway.Store) {
+	s.gateway = gs
+}
+
 // Start runs the HTTP server. It blocks until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
 	// Serve embedded UI
-	uiContent, err := subUIFS(uiFS, "ui")
+	uiAssets, err := UIAssets()
 	if err != nil {
-		return fmt.Errorf("embed ui: %w", err)
+		return err
 	}
-	mux.Handle("GET /", noCache(http.FileServer(http.FS(uiContent))))
+	mux.Handle("GET /", noCache(http.FileServer(http.FS(uiAssets))))
 
 	// API endpoints
 	mux.HandleFunc("GET /api/traffic", s.handleTraffic)
@@ -93,6 +119,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/tools", s.handleTools)
 	mux.HandleFunc("GET /api/tools/conflicts", s.handleToolConflicts)
 	mux.HandleFunc("POST /api/tools/call", s.handleToolCall)
+	mux.HandleFunc("GET /api/gateway/tools", s.handleGatewayTools)
+	mux.HandleFunc("GET /api/gateway/policy", s.handleGatewayPolicy)
+	mux.HandleFunc("POST /api/gateway/servers/{name}/enable", s.handleGatewayServerEnable)
+	mux.HandleFunc("POST /api/gateway/servers/{name}/disable", s.handleGatewayServerDisable)
+	mux.HandleFunc("POST /api/gateway/tools/{server}/{tool}/enable", s.handleGatewayToolEnable)
+	mux.HandleFunc("POST /api/gateway/tools/{server}/{tool}/disable", s.handleGatewayToolDisable)
 	mux.HandleFunc("POST /api/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/sessions/start", s.handleSessionStart)
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
@@ -112,7 +144,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: mux,
+		Handler: withCORS(mux),
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
@@ -136,6 +168,21 @@ func noCache(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -352,16 +399,27 @@ func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
 
 // DiscoveredServer describes a server found via auto-import scanning.
 type DiscoveredServer struct {
-	Name    string `json:"name"`
-	Command string `json:"command"`
-	Args    []string `json:"args,omitempty"`
+	Name    string            `json:"name"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
-	Source  string `json:"source"`
-	Status  string `json:"status"` // "new", "duplicate", "already_imported"
+	Source  string            `json:"source"`
+	Status  string            `json:"status"` // "new", "duplicate", "already_imported"
 }
 
 // autoImportScanner can be overridden in tests.
 var autoImportScanner = scanForServers
+
+type gatewayToolInfo struct {
+	Name          string          `json:"name"`
+	Server        string          `json:"server"`
+	Tool          string          `json:"tool"`
+	Description   string          `json:"description,omitempty"`
+	InputSchema   json.RawMessage `json:"inputSchema,omitempty"`
+	ServerEnabled bool            `json:"server_enabled"`
+	ToolEnabled   bool            `json:"tool_enabled"`
+	Enabled       bool            `json:"enabled"`
+}
 
 func (s *Server) handleAutoImportScan(w http.ResponseWriter, r *http.Request) {
 	var existing map[string]bool
@@ -456,8 +514,7 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send tools/list to the child server
-	result, err := s.proxies.SendRequest(r.Context(), serverName, "tools/list", json.RawMessage("{}"))
+	result, err := s.fetchToolsResult(r.Context(), serverName)
 	if err != nil {
 		slog.Error("tools/list failed", "server", serverName, "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -512,6 +569,26 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server and tool fields required", http.StatusBadRequest)
 		return
 	}
+	if s.gateway != nil {
+		if !s.gateway.ServerEnabled(req.Server) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":      fmt.Sprintf("server %q is disabled by Shipyard gateway policy", req.Server),
+				"latency_ms": int64(0),
+			})
+			return
+		}
+		if !s.gateway.ToolEnabled(req.Server, req.Tool) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":      fmt.Sprintf("tool %q on server %q is disabled by Shipyard gateway policy", req.Tool, req.Server),
+				"latency_ms": int64(0),
+			})
+			return
+		}
+	}
 
 	// Build tools/call params
 	params := map[string]interface{}{
@@ -558,6 +635,155 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleGatewayTools(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	includeDisabled := r.URL.Query().Get("include_disabled") == "1"
+	tools, err := s.gatewayCatalog(r.Context(), includeDisabled)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
+}
+
+func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
+	if s.gateway == nil {
+		http.Error(w, "no gateway policy store configured", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.gateway.Snapshot())
+}
+
+func (s *Server) handleGatewayServerEnable(w http.ResponseWriter, r *http.Request) {
+	s.handleGatewayServerToggle(w, r, true)
+}
+
+func (s *Server) handleGatewayServerDisable(w http.ResponseWriter, r *http.Request) {
+	s.handleGatewayServerToggle(w, r, false)
+}
+
+func (s *Server) handleGatewayToolEnable(w http.ResponseWriter, r *http.Request) {
+	s.handleGatewayToolToggle(w, r, true)
+}
+
+func (s *Server) handleGatewayToolDisable(w http.ResponseWriter, r *http.Request) {
+	s.handleGatewayToolToggle(w, r, false)
+}
+
+func (s *Server) handleGatewayServerToggle(w http.ResponseWriter, r *http.Request, enabled bool) {
+	if s.gateway == nil {
+		http.Error(w, "no gateway policy store configured", http.StatusServiceUnavailable)
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+	if err := s.gateway.SetServerEnabled(name, enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"server": name, "enabled": enabled})
+}
+
+func (s *Server) handleGatewayToolToggle(w http.ResponseWriter, r *http.Request, enabled bool) {
+	if s.gateway == nil {
+		http.Error(w, "no gateway policy store configured", http.StatusServiceUnavailable)
+		return
+	}
+	serverName := r.PathValue("server")
+	toolName := r.PathValue("tool")
+	if serverName == "" || toolName == "" {
+		http.Error(w, "server and tool required", http.StatusBadRequest)
+		return
+	}
+	if err := s.gateway.SetToolEnabled(serverName, toolName, enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"server":  serverName,
+		"tool":    toolName,
+		"enabled": enabled,
+	})
+}
+
+func (s *Server) gatewayCatalog(ctx context.Context, includeDisabled bool) ([]gatewayToolInfo, error) {
+	servers := s.proxies.Servers()
+	result := make([]gatewayToolInfo, 0)
+	for _, srv := range servers {
+		if srv.Status != "online" {
+			continue
+		}
+		tools, err := s.fetchRawTools(ctx, srv.Name)
+		if err != nil {
+			continue
+		}
+		for _, tool := range tools {
+			serverEnabled := true
+			toolEnabled := true
+			effectiveEnabled := true
+			if s.gateway != nil {
+				serverEnabled = s.gateway.ServerEnabled(srv.Name)
+				toolEnabled = s.gateway.ToolEnabled(srv.Name, tool.Name)
+				effectiveEnabled = serverEnabled && toolEnabled
+			}
+			if !includeDisabled && !effectiveEnabled {
+				continue
+			}
+			result = append(result, gatewayToolInfo{
+				Name:          srv.Name + "__" + tool.Name,
+				Server:        srv.Name,
+				Tool:          tool.Name,
+				Description:   tool.Description,
+				InputSchema:   tool.InputSchema,
+				ServerEnabled: serverEnabled,
+				ToolEnabled:   toolEnabled,
+				Enabled:       effectiveEnabled,
+			})
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) fetchToolsResult(ctx context.Context, serverName string) (json.RawMessage, error) {
+	return s.proxies.SendRequest(ctx, serverName, "tools/list", json.RawMessage("{}"))
+}
+
+func (s *Server) fetchRawTools(ctx context.Context, serverName string) ([]shipyardTool, error) {
+	result, err := s.fetchToolsResult(ctx, serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	var rpcResp struct {
+		Result toolsEnvelope   `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(result, &rpcResp); err != nil {
+		return nil, fmt.Errorf("invalid response from server")
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("server returned error: %s", string(rpcResp.Error))
+	}
+	for i := range rpcResp.Result.Tools {
+		if len(rpcResp.Result.Tools[i].InputSchema) == 0 && len(rpcResp.Result.Tools[i].InputSchema2) > 0 {
+			rpcResp.Result.Tools[i].InputSchema = rpcResp.Result.Tools[i].InputSchema2
+		}
+	}
+	return rpcResp.Result.Tools, nil
 }
 
 // --- Session Recording Handlers (SPEC-007) ---

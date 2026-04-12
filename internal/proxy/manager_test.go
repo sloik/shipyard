@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,38 @@ import (
 
 	"github.com/sloik/shipyard/internal/web"
 )
+
+type lineObserverWriteCloser struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	lines chan string
+}
+
+func newLineObserverWriteCloser() *lineObserverWriteCloser {
+	return &lineObserverWriteCloser{lines: make(chan string, 16)}
+}
+
+func (w *lineObserverWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	n, err := w.buf.Write(p)
+	for {
+		data := w.buf.Bytes()
+		idx := bytes.IndexByte(data, '\n')
+		if idx == -1 {
+			break
+		}
+		line := string(data[:idx])
+		rest := append([]byte(nil), data[idx+1:]...)
+		w.buf.Reset()
+		w.buf.Write(rest)
+		w.lines <- line
+	}
+	return n, err
+}
+
+func (w *lineObserverWriteCloser) Close() error { return nil }
 
 func TestNewResponseTracker(t *testing.T) {
 	rt := newResponseTracker()
@@ -343,6 +376,7 @@ func TestManagerSendRequest_ContextCanceled(t *testing.T) {
 	cw := newChildInputWriter()
 	cw.attach(&trackedWriteCloser{})
 	mp.SetInputWriter(cw)
+	mp.initReady = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -365,6 +399,7 @@ func TestManagerSendRequest_ContextCanceledWhileWaiting(t *testing.T) {
 	cw := newChildInputWriter()
 	cw.attach(&trackedWriteCloser{})
 	mp.SetInputWriter(cw)
+	mp.initReady = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -400,6 +435,7 @@ func TestManagerSendRequest_Timeout(t *testing.T) {
 	cw := newChildInputWriter()
 	cw.attach(&trackedWriteCloser{})
 	mp.SetInputWriter(cw)
+	mp.initReady = true
 
 	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
 	if err == nil {
@@ -419,7 +455,8 @@ func TestManagerSendRequest_MarshalFailure(t *testing.T) {
 
 	m := NewManager()
 	p, _ := newTestProxy(t)
-	m.Register("alpha", p)
+	mp := m.Register("alpha", p)
+	mp.initReady = true
 
 	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
 	if err == nil {
@@ -438,6 +475,7 @@ func TestManagerSendRequest_WriteFailure(t *testing.T) {
 	cw := newChildInputWriter()
 	cw.close()
 	mp.SetInputWriter(cw)
+	mp.initReady = true
 
 	_, err := m.SendRequest(context.Background(), "alpha", "tools/list", nil)
 	if err == nil {
@@ -627,6 +665,7 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 	sink := &trackedWriteCloser{}
 	cw.attach(sink)
 	mp.SetInputWriter(cw)
+	mp.initReady = true
 
 	type result struct {
 		raw json.RawMessage
@@ -719,6 +758,84 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for tools/list response")
 	}
+}
+
+func TestManagerSendRequest_BootstrapsManagedChildBeforeToolsList(t *testing.T) {
+	m := NewManager()
+	p, store := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	sink := newLineObserverWriteCloser()
+	cw.attach(sink)
+	mp.SetInputWriter(cw)
+
+	resultCh := make(chan struct {
+		raw json.RawMessage
+		err error
+	}, 1)
+	go func() {
+		raw, err := m.SendRequest(context.Background(), "alpha", "tools/list", json.RawMessage(`{}`))
+		resultCh <- struct {
+			raw json.RawMessage
+			err error
+		}{raw: raw, err: err}
+	}()
+
+	for handled := 0; handled < 3; handled++ {
+		select {
+		case line := <-sink.lines:
+			var req map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(line), &req); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+
+			var method string
+			if err := json.Unmarshal(req["method"], &method); err != nil {
+				t.Fatalf("unmarshal method: %v", err)
+			}
+
+			switch handled {
+			case 0:
+				if method != "initialize" {
+					t.Fatalf("expected first request initialize, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s"}}`, req["id"], managedChildProtocolVersion))) {
+					t.Fatal("expected initialize response to resolve")
+				}
+			case 1:
+				if method != "notifications/initialized" {
+					t.Fatalf("expected second message notifications/initialized, got %q", method)
+				}
+			case 2:
+				if method != "tools/list" {
+					t.Fatalf("expected third request tools/list, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"lms_status"},{"name":"lms_chat"}]}}`, req["id"]))) {
+					t.Fatal("expected tools/list response to resolve")
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for bootstrap writes")
+		}
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("SendRequest returned error: %v", got.err)
+		}
+		if !strings.Contains(string(got.raw), `"tools":[{"name":"lms_status"},{"name":"lms_chat"}]`) {
+			t.Fatalf("unexpected tools/list payload: %s", string(got.raw))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tools/list result")
+	}
+
+	if servers := m.Servers(); len(servers) != 1 || servers[0].ToolCount != 2 {
+		t.Fatalf("expected cached tool count 2 after bootstrap, got %+v", servers)
+	}
+	waitForStoreCount(t, store, 3)
 }
 
 // --- SPEC-007: Session Recording ---

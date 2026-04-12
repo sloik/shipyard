@@ -137,12 +137,10 @@
 
   <!-- Sidebar -->
   <div id="tools-sidebar" style="width:260px; min-width:260px; border-right:1px solid var(--border-default); display:flex; flex-direction:column; background:var(--bg-surface); overflow:hidden;">
-    <div style="padding:8px;">
-      <div class="search-bar" id="tool-search-bar">
-        <span class="search-icon">&#128269;</span>
-        <input type="text" id="tool-search" placeholder="Search tools...">
-        <button class="search-clear">&#10005;</button>
-      </div>
+    <div class="search-bar search-bar-strip" id="tool-search-bar">
+      <span class="search-icon">&#128269;</span>
+      <input type="text" id="tool-search" placeholder="Search tools...">
+      <button class="search-clear">&#10005;</button>
     </div>
     <div id="tool-groups" style="flex:1; overflow-y:auto; padding:0 4px 8px 4px;"></div>
   </div>
@@ -151,14 +149,14 @@
   <div id="tools-main" style="flex:1; overflow-y:auto; padding:0;">
 
     <!-- Empty State (no tool selected) -->
-    <div id="tools-empty" class="empty-state" style="height:100%;">
+    <div id="tools-empty" class="empty-state tool-browser-empty-state" style="height:100%;">
       <div class="empty-icon">&#128295;</div>
       <div class="empty-title">No tool selected</div>
-      <div class="empty-desc">Select a tool from the sidebar to view its schema and execute it.</div>
+      <div class="empty-desc">Select a tool from the sidebar to view its schema, fill in parameters, and execute it.</div>
     </div>
 
     <!-- Tool Detail (hidden by default) -->
-    <div id="tool-detail" style="display:none; padding:24px; flex-direction:column;">
+    <div id="tool-detail" style="display:none; height:100%; min-height:0; padding:24px; flex-direction:column;">
 
       <!-- Tool Header -->
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
@@ -167,6 +165,20 @@
         <span id="tool-detail-server" class="badge badge-neutral"></span>
       </div>
       <div id="tool-detail-desc" style="font-size:var(--font-size-md); color:var(--text-secondary); margin-bottom:16px;"></div>
+
+      <div id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);">
+        <div style="display:flex; align-items:flex-start; gap:10px;">
+          <span style="font-size:18px; line-height:1; color:var(--warning-fg);">&#9888;</span>
+          <div style="flex:1; min-width:0;">
+            <div id="tool-conflict-title" style="font-size:var(--font-size-md); font-weight:600; color:var(--text-primary); margin-bottom:2px;"></div>
+            <div id="tool-conflict-message" style="font-size:var(--font-size-sm); color:var(--text-secondary);"></div>
+          </div>
+        </div>
+        <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-muted);">
+          <div id="tool-conflict-cards-title" style="font-size:var(--font-size-lg); font-weight:600; color:var(--text-primary); margin-bottom:12px;">Conflicting Implementations</div>
+          <div id="tool-conflict-cards" style="display:flex; flex-direction:column; gap:12px;"></div>
+        </div>
+      </div>
 
       <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
 
@@ -187,11 +199,11 @@
       <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
 
       <!-- Response Section -->
-      <div id="tool-response-section" style="display:none; flex:1; min-height:0;">
+      <div id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
           <span style="font-size:var(--font-size-lg); font-weight:600; color:var(--text-primary);">Response</span>
-          <span id="tool-response-status" class="badge"></span>
-          <span id="tool-response-latency" class="pill"></span>
+          <span id="tool-response-status" class="badge" style="display:none;"></span>
+          <span id="tool-response-latency" class="pill" style="display:none;"></span>
           <div style="flex:1;"></div>
           <button class="btn btn-copy btn-sm" id="tool-response-copy">Copy</button>
           <button class="btn btn-default btn-sm" id="tool-response-retry">Retry</button>
@@ -203,14 +215,13 @@
             <button data-mode="jq">JQ</button>
           </div>
         </div>
-        <div id="tool-response-body" class="code-block" style="border:1px solid var(--border-default); border-radius:var(--radius-m);">
-          <div class="json-viewer code-body" id="tool-response-json" style="max-height:400px; overflow:auto;"></div>
+        <div id="tool-response-body" class="code-block" style="border:1px solid var(--border-default); border-radius:var(--radius-m); flex:1; min-height:0; display:flex; flex-direction:column;">
+          <div class="json-viewer code-body" id="tool-response-json" style="flex:1; min-height:0; max-height:none; overflow:auto;">
+            <div id="tool-response-idle" style="height:100%; min-height:120px; display:flex; align-items:center; justify-content:center; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center; padding:24px;">
+              Execute the selected tool to see response output here.
+            </div>
+          </div>
         </div>
-      </div>
-
-      <!-- Loading State (hidden by default) -->
-      <div id="tool-response-loading" style="display:none; padding:24px; text-align:center;">
-        <span class="spinner">Executing...</span>
       </div>
     </div>
   </div>
@@ -603,6 +614,7 @@
   var pageSize      = 25;
   var totalCount    = 0;
   var expandedRowId = null;
+  var nativeFetch   = window.fetch.bind(window);
   var ws            = null;
   var wsBackoff     = 1000;
   var wsMaxBackoff  = 30000;
@@ -612,6 +624,8 @@
   var knownMethods  = {};
   var dirFilter     = '';
   var filterTimer   = null;
+  var desktopBridgeConfig = null;
+  var desktopBridgeConfigPromise = null;
 
   /* ======================================================================
      Routing
@@ -626,7 +640,7 @@
     return hash;
   }
 
-  function navigate(route) {
+  function navigateRoute(route) {
     // Handle sub-routes within history
     var baseRoute = route;
     var historySub = null;
@@ -642,6 +656,9 @@
       views[key].classList.remove('is-active');
     });
     views[baseRoute].classList.add('is-active');
+    if (baseRoute === 'servers') {
+      loadServers();
+    }
 
     // Update tabs
     var tabs = tabNav.querySelectorAll('.tab');
@@ -663,14 +680,25 @@
   }
 
   window.__shipyardNavigateRoute = function(route, href) {
-    navigate(route);
+    navigateRoute(route);
     if (href && location.hash !== href) {
       location.hash = href;
     }
     return false;
   };
 
-  window.addEventListener('hashchange', function() { navigate(getRoute()); });
+  window.addEventListener('hashchange', function() { navigateRoute(getRoute()); });
+
+  // Wails/webview nuance: clicking the already-active Servers tab may not
+  // produce a new hashchange, so same-route activation still needs to re-sync
+  // from the live /api/servers response.
+  tabNav.addEventListener('pointerup', function(e) {
+    var tab = e.target.closest('.tab');
+    if (!tab || tab.getAttribute('data-route') !== 'servers') return;
+    if (getRoute() === 'servers') {
+      loadServers();
+    }
+  });
 
   /* ======================================================================
      Helpers
@@ -693,6 +721,60 @@
   function absoluteTime(tsMs) {
     var d = new Date(tsMs);
     return d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+  }
+
+  function usesDesktopAssetOrigin() {
+    return location.protocol !== 'http:' && location.protocol !== 'https:';
+  }
+
+  function loadDesktopBridgeConfig() {
+    if (!usesDesktopAssetOrigin()) {
+      return Promise.resolve({});
+    }
+    if (desktopBridgeConfig) {
+      return Promise.resolve(desktopBridgeConfig);
+    }
+    if (desktopBridgeConfigPromise) {
+      return desktopBridgeConfigPromise;
+    }
+    desktopBridgeConfigPromise = nativeFetch('/_shipyard/desktop-config')
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('desktop bridge config ' + resp.status);
+        return resp.json();
+      })
+      .then(function(config) {
+        desktopBridgeConfig = config || {};
+        return desktopBridgeConfig;
+      })
+      .catch(function(err) {
+        console.error('Failed to load desktop bridge config:', err);
+        desktopBridgeConfig = {};
+        return desktopBridgeConfig;
+      });
+    return desktopBridgeConfigPromise;
+  }
+
+  function resolveAPIURL(path) {
+    return path;
+  }
+
+  function appFetch(input, init) {
+    if (!usesDesktopAssetOrigin() || typeof input !== 'string' || input.charAt(0) !== '/' || input.indexOf('/_shipyard/desktop-config') === 0) {
+      return nativeFetch(input, init);
+    }
+    return loadDesktopBridgeConfig().then(function() {
+      return nativeFetch(resolveAPIURL(input), init);
+    });
+  }
+
+  window.fetch = appFetch;
+
+  function resolveWebSocketURL(path) {
+    if (desktopBridgeConfig && desktopBridgeConfig.ws_base) {
+      return desktopBridgeConfig.ws_base.replace(/\/$/, '') + path;
+    }
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return proto + '//' + location.host + path;
   }
 
   function dirBadge(direction) {
@@ -1041,9 +1123,6 @@
     }
     if (serversChanged) rebuildDropdown(filterServer, knownServers, 'All servers');
     if (methodsChanged) rebuildDropdown(filterMethod, knownMethods, 'All methods');
-
-    var serverNames = Object.keys(knownServers);
-    serverCountEl.textContent = serverNames.length + ' server' + (serverNames.length !== 1 ? 's' : '');
   }
 
   function rebuildDropdown(select, map, allLabel) {
@@ -1218,8 +1297,7 @@
   }
 
   function connectWS() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws = new WebSocket(resolveWebSocketURL('/ws'));
 
     ws.onopen = function() {
       setWsState('live');
@@ -1289,11 +1367,14 @@
   var toolDetailName   = document.getElementById('tool-detail-name');
   var toolDetailServer = document.getElementById('tool-detail-server');
   var toolDetailDesc   = document.getElementById('tool-detail-desc');
+  var toolConflictSection = document.getElementById('tool-conflict-section');
+  var toolConflictTitle = document.getElementById('tool-conflict-title');
+  var toolConflictMessage = document.getElementById('tool-conflict-message');
+  var toolConflictCards = document.getElementById('tool-conflict-cards');
   var toolParamsForm   = document.getElementById('tool-params-form');
   var toolParamsSection = document.getElementById('tool-params-section');
   var toolExecuteBtn   = document.getElementById('tool-execute-btn');
   var toolResponseSection = document.getElementById('tool-response-section');
-  var toolResponseLoading = document.getElementById('tool-response-loading');
   var toolResponseStatus  = document.getElementById('tool-response-status');
   var toolResponseLatency = document.getElementById('tool-response-latency');
   var toolResponseJson    = document.getElementById('tool-response-json');
@@ -1304,6 +1385,118 @@
   var selectedTool     = null; // { server, name, description, inputSchema }
   var toolsLoaded      = false;
   var toolConflicts    = {}; // { toolName: [serverName, ...] }
+
+  function resetToolResponseMeta() {
+    toolResponseStatus.style.display = 'none';
+    toolResponseStatus.className = 'badge';
+    toolResponseStatus.textContent = '';
+    toolResponseLatency.style.display = 'none';
+    toolResponseLatency.className = 'pill';
+    toolResponseLatency.textContent = '';
+    toolResponseCopy.disabled = true;
+    toolResponseRetry.disabled = false;
+    toolResponseCopy.removeAttribute('data-copy');
+    var bodyBlock = document.getElementById('tool-response-body');
+    if (bodyBlock) bodyBlock.style.borderColor = '';
+  }
+
+  function showToolResponseIdle() {
+    resetToolResponseMeta();
+    toolResponseJson.innerHTML = ''
+      + '<div id="tool-response-idle" style="height:100%; min-height:120px; display:flex; align-items:center; justify-content:center; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center; padding:24px;">'
+      + 'Execute the selected tool to see response output here.'
+      + '</div>';
+    var toolFilter = document.getElementById('tool-response-filter');
+    if (toolFilter) toolFilter.value = '';
+  }
+
+  function showToolResponseLoading() {
+    resetToolResponseMeta();
+    toolResponseJson.innerHTML = ''
+      + '<div id="tool-response-loading" style="height:100%; min-height:120px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:var(--text-muted); text-align:center; padding:24px;">'
+      + '<span class="spinner">Executing...</span>'
+      + '<span>Waiting for server response</span>'
+      + '</div>';
+  }
+
+  function getToolDefinition(serverName, toolName) {
+    var srvData = allTools[serverName];
+    if (!srvData || !srvData.tools) return null;
+    for (var i = 0; i < srvData.tools.length; i++) {
+      if (srvData.tools[i].name === toolName) {
+        return srvData.tools[i];
+      }
+    }
+    return null;
+  }
+
+  function describeToolSchema(schema) {
+    if (!schema || !schema.properties) return 'params: {}';
+
+    var required = schema.required || [];
+    var keys = Object.keys(schema.properties);
+    if (keys.length === 0) return 'params: {}';
+
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var prop = schema.properties[key] || {};
+      var type = prop.type || 'string';
+      if (Array.isArray(type)) type = type.join('|');
+      parts.push(key + (required.indexOf(key) === -1 ? '?: ' : ': ') + type);
+    }
+
+    return 'params: { ' + parts.join(', ') + ' }';
+  }
+
+  function renderToolConflictState(tool) {
+    var conflicts = toolConflicts[tool.name] || [];
+    if (!toolConflictSection || !toolConflictTitle || !toolConflictMessage || !toolConflictCards) return;
+
+    if (!conflicts || conflicts.length <= 1) {
+      toolConflictSection.style.display = 'none';
+      toolConflictTitle.textContent = '';
+      toolConflictMessage.textContent = '';
+      toolConflictCards.innerHTML = '';
+      return;
+    }
+
+    toolConflictSection.style.display = '';
+    toolConflictTitle.textContent = 'Tool name conflict: ' + tool.name;
+    toolConflictMessage.textContent = 'This tool name exists in multiple servers. Clients may receive unpredictable results depending on which server responds first.';
+
+    var html = '';
+    for (var i = 0; i < conflicts.length; i++) {
+      var serverName = conflicts[i];
+      var srvData = allTools[serverName] || {};
+      var conflictTool = getToolDefinition(serverName, tool.name) || tool;
+      var isSelected = selectedTool && selectedTool.server === serverName;
+      var cardClass = 'tool-conflict-card' + (isSelected ? ' is-selected' : '');
+      var statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
+      if (srvData.status === 'offline') {
+        statusDot = '<span class="badge-dot" style="background:var(--danger-fg);"></span>';
+      } else if (srvData.status === 'restarting') {
+        statusDot = '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
+      }
+
+      html += '<div class="' + cardClass + '">';
+      html += '<div class="tool-conflict-card-header">';
+      html += '<span style="display:flex; align-items:center; gap:8px; min-width:0;">' + statusDot + '<span class="tool-conflict-server">' + escapeHtml(serverName) + '</span></span>';
+      if (isSelected) {
+        html += '<span class="badge badge-info">Selected</span>';
+      } else {
+        html += '<span class="badge badge-neutral">Alternative</span>';
+      }
+      html += '</div>';
+      html += '<div class="tool-conflict-card-body">';
+      html += '<div style="font-size:var(--font-size-md); color:var(--text-secondary);">' + escapeHtml(conflictTool.description || 'No description available.') + '</div>';
+      html += '<div class="tool-conflict-schema">' + escapeHtml(describeToolSchema(conflictTool.inputSchema || null)) + '</div>';
+      html += '</div>';
+      html += '</div>';
+    }
+
+    toolConflictCards.innerHTML = html;
+  }
 
   /* ======================================================================
      Tool Browser — Load Tools
@@ -1489,14 +1682,15 @@
 
     toolDetailName.textContent = tool.name;
     toolDetailServer.textContent = serverName;
+    toolDetailServer.className = 'badge ' + (toolConflicts[tool.name] && toolConflicts[tool.name].length > 1 ? 'badge-warning' : 'badge-neutral');
     toolDetailDesc.textContent = tool.description || 'No description available.';
+    renderToolConflictState(tool);
 
     // Render form
     renderToolForm(tool.inputSchema);
 
-    // Hide response section
-    toolResponseSection.style.display = 'none';
-    toolResponseLoading.style.display = 'none';
+    toolResponseSection.style.display = 'flex';
+    showToolResponseIdle();
   }
 
   /* ======================================================================
@@ -1513,28 +1707,39 @@
     var required = schema.required || [];
     var props = schema.properties;
     var keys = Object.keys(props);
+    var fieldCount = keys.length;
     var html = '';
 
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       var prop = props[key];
       var isRequired = required.indexOf(key) !== -1;
-      html += renderField(key, prop, isRequired);
+      html += renderField(key, prop, isRequired, fieldCount === 1);
     }
 
     toolParamsForm.innerHTML = html;
   }
 
-  function renderField(name, prop, isRequired) {
+  function getFieldWidthClass(prop, forceWide) {
+    if (forceWide) return 'field-width-400';
+    if (prop && prop.type === 'boolean') return 'field-width-auto';
+    if (prop && (prop.type === 'number' || prop.type === 'integer')) return 'field-width-160';
+    if (prop && prop.enum && prop.enum.length > 0) return 'field-width-200';
+    if (prop && prop.type === 'array') return 'field-width-240';
+    return 'field-width-240';
+  }
+
+  function renderField(name, prop, isRequired, forceWide) {
     var type = prop.type || 'string';
     var desc = prop.description || '';
     var reqMark = isRequired ? '<span class="field-required">*</span>' : '';
+    var widthClass = getFieldWidthClass(prop, forceWide);
 
     // Type badge
     var typeBadge = '<span class="badge badge-neutral" style="font-size:var(--font-size-xs); margin-left:4px;">' + escapeHtml(type) + '</span>';
 
     if (type === 'boolean') {
-      return '<div class="field field-boolean">' +
+      return '<div class="field field-boolean ' + widthClass + '">' +
         '<div class="switch" data-field="' + escapeHtml(name) + '"></div>' +
         '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
         (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
@@ -1542,7 +1747,7 @@
     }
 
     if (type === 'number' || type === 'integer') {
-      return '<div class="field field-number">' +
+      return '<div class="field field-number ' + widthClass + '">' +
         '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
         '<input class="input" type="number" data-field="' + escapeHtml(name) + '" placeholder="' + escapeHtml(desc || name) + '"' + (prop.default !== undefined ? ' value="' + escapeHtml(String(prop.default)) + '"' : '') + '>' +
         (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
@@ -1557,7 +1762,7 @@
         var sel = prop.default === val ? ' selected' : '';
         options += '<option value="' + escapeHtml(String(val)) + '"' + sel + '>' + escapeHtml(String(val)) + '</option>';
       }
-      return '<div class="field field-enum">' +
+      return '<div class="field field-enum ' + widthClass + '">' +
         '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
         '<select class="input" data-field="' + escapeHtml(name) + '">' + options + '</select>' +
         (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
@@ -1565,7 +1770,7 @@
     }
 
     if (type === 'array') {
-      return '<div class="field field-array" data-field="' + escapeHtml(name) + '">' +
+      return '<div class="field field-array ' + widthClass + '" data-field="' + escapeHtml(name) + '">' +
         '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
         (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
         '<div class="field-array-items"></div>' +
@@ -1574,7 +1779,7 @@
     }
 
     // Default: text/string
-    return '<div class="field field-text">' +
+    return '<div class="field field-text ' + widthClass + '">' +
       '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
       '<input class="input" type="text" data-field="' + escapeHtml(name) + '" placeholder="' + escapeHtml(desc || name) + '"' + (prop.default !== undefined ? ' value="' + escapeHtml(String(prop.default)) + '"' : '') + '>' +
       (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
@@ -1636,11 +1841,11 @@
 
     var args = collectArguments();
 
-    // Show loading state
+    // Show loading state within the existing response region
     toolExecuteBtn.disabled = true;
     toolExecuteBtn.innerHTML = '<span class="spinner">Executing...</span>';
-    toolResponseSection.style.display = 'none';
-    toolResponseLoading.style.display = '';
+    toolResponseSection.style.display = 'flex';
+    showToolResponseLoading();
 
     var body = JSON.stringify({
       server: selectedTool.server,
@@ -1655,8 +1860,7 @@
     })
       .then(function(resp) { return resp.json(); })
       .then(function(data) {
-        toolResponseLoading.style.display = 'none';
-        toolResponseSection.style.display = '';
+        toolResponseSection.style.display = 'flex';
 
         var isError = !!data.error;
         var latencyMs = data.latency_ms;
@@ -1691,12 +1895,13 @@
         }
       })
       .catch(function(err) {
-        toolResponseLoading.style.display = 'none';
-        toolResponseSection.style.display = '';
+        toolResponseSection.style.display = 'flex';
         toolResponseStatus.className = 'badge badge-error';
         toolResponseStatus.innerHTML = '<span class="badge-dot"></span>Error';
+        toolResponseStatus.style.display = '';
         toolResponseLatency.style.display = 'none';
-        toolResponseJson.textContent = 'Network error: ' + err.message;
+        toolResponseCopy.disabled = true;
+        toolResponseJson.innerHTML = '<div style="padding:12px; color:var(--danger-fg);">Network error: ' + escapeHtml(err.message) + '</div>';
       })
       .then(function() {
         // Reset button
@@ -1709,6 +1914,7 @@
     var str = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     toolResponseJson.innerHTML = highlightJSON(str);
     toolResponseCopy.setAttribute('data-copy', typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+    toolResponseCopy.disabled = false;
 
     // Wire tool response filter
     var toolFilter = document.getElementById('tool-response-filter');
@@ -1787,9 +1993,9 @@
   /* ======================================================================
      Tool Browser — Load on Tab Switch
      ====================================================================== */
-  var origNavigate = navigate;
-  navigate = function(route) {
-    origNavigate(route);
+  var origToolNavigateRoute = navigateRoute;
+  navigateRoute = function(route) {
+    origToolNavigateRoute(route);
     if (route === 'tools' && !toolsLoaded) {
       loadTools();
     }
@@ -3286,9 +3492,9 @@
     return origGetRoute();
   };
 
-  var origNavigate = navigate;
-  navigate = function(route) {
-    origNavigate(route);
+  var origSchemaNavigateRoute = navigateRoute;
+  navigateRoute = function(route) {
+    origSchemaNavigateRoute(route);
     var hash = location.hash.replace(/^#\/?/, '');
     if (hash === 'servers/schema') { showSchemaView(); } else { hideSchemaView(); }
   };
@@ -3325,17 +3531,17 @@
   // if the desktop webview stalls before the /api/servers fetch resolves.
   (function initRoute() {
     var route = getRoute();
-    navigate(route);
+    navigateRoute(route);
     // Eagerly hydrate server state so the header badge and Servers view
     // reflect configured servers even when route switching falls back to
     // hash/CSS behavior in the desktop webview.
     loadServers();
     if (!location.hash || location.hash === '#/' || location.hash === '#/timeline' || location.hash === '#timeline') {
-      fetch('/api/servers')
+      appFetch('/api/servers')
         .then(function(r) { return r.json(); })
         .then(function(servers) {
           if (!servers || servers.length === 0) {
-            navigate('servers');
+            navigateRoute('servers');
           }
         })
         .catch(function() {});
@@ -3349,8 +3555,10 @@
   // Check schema alert banner on load
   checkSchemaAlertBanner();
 
-  // Connect WebSocket
-  connectWS();
+  // Connect WebSocket after desktop mode learns the real localhost bridge URL.
+  loadDesktopBridgeConfig().then(function() {
+    connectWS();
+  });
 
   // Periodically refresh relative timestamps (every 30s)
   setInterval(function() {

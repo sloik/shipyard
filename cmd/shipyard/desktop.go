@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 	"time"
 
+	"github.com/sloik/shipyard/internal/web"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -18,13 +23,15 @@ type desktopApp struct {
 	cancelFunc context.CancelFunc
 }
 
-// runDesktop starts the Wails native window pointing at the localhost HTTP server.
-// It blocks until the window is closed. When the window closes, it calls cancelFunc
-// to trigger graceful shutdown of the HTTP server and proxies.
+// runDesktop starts the Wails native window using the bundled Wails frontend.
+// It blocks until the window is closed. When the window closes, it calls
+// cancelFunc to trigger graceful shutdown of the HTTP server and proxies.
 //
-// Architecture: The Wails AssetServer handler serves a tiny redirector page that
-// navigates the webview to http://localhost:{port}. Once there, all relative URLs
-// (fetch, WebSocket) resolve against localhost — zero frontend changes needed.
+// Architecture: In production, Wails serves the bundled frontend from its asset
+// origin. The custom AssetServer handler is therefore a desktop bridge for
+// backend traffic only: it proxies /api/* requests to the localhost HTTP server
+// and exposes a tiny config endpoint that tells the frontend which explicit
+// localhost WebSocket URL to use.
 var runDesktopFn = runDesktop
 
 func runDesktop(port int, cancel context.CancelFunc) {
@@ -40,17 +47,24 @@ func runDesktop(port int, cancel context.CancelFunc) {
 		return
 	}
 
-	url := fmt.Sprintf("http://localhost:%d/?_shipyard=%d", port, time.Now().UnixNano())
-	slog.Info("opening desktop window", "url", url)
+	slog.Info("opening desktop window", "bridge_port", port)
 
-	err := wails.Run(&options.App{
+	uiAssets, err := web.UIAssets()
+	if err != nil {
+		slog.Error("failed to load embedded desktop UI", "error", err)
+		cancel()
+		return
+	}
+
+	err = wails.Run(&options.App{
 		Title:     "Shipyard",
 		Width:     1280,
 		Height:    800,
 		MinWidth:  900,
 		MinHeight: 600,
 		AssetServer: &assetserver.Options{
-			Handler: newRedirector(url),
+			Assets:  uiAssets,
+			Handler: newDesktopBridge(port),
 		},
 		BackgroundColour: &options.RGBA{R: 26, G: 26, B: 46, A: 255},
 		OnBeforeClose:    app.beforeClose,
@@ -96,24 +110,47 @@ func waitForServer(port int, timeout time.Duration) bool {
 	return false
 }
 
-// redirector serves a tiny HTML page that navigates the webview to the
-// localhost HTTP server. This is the Wails AssetServer handler for Option B
-// (window loads from localhost). After the redirect, the webview's origin is
-// http://localhost:{port} and all relative fetch/WebSocket URLs resolve correctly.
-type redirector struct {
-	page []byte
+type desktopBridge struct {
+	config []byte
+	proxy  *httputil.ReverseProxy
 }
 
-func newRedirector(targetURL string) *redirector {
-	html := fmt.Sprintf(`<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>body{background:#1a1a2e;margin:0}</style>
-<script>window.location.replace(%q);</script>
-</head><body></body></html>`, targetURL)
-	return &redirector{page: []byte(html)}
+func newDesktopBridge(port int) http.Handler {
+	target, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	if err != nil {
+		panic(fmt.Sprintf("invalid desktop bridge target: %v", err))
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+		slog.Error("desktop bridge proxy error", "path", r.URL.Path, "error", proxyErr)
+		http.Error(w, "desktop bridge proxy error", http.StatusBadGateway)
+	}
+
+	config, err := json.Marshal(map[string]string{
+		"api_base": fmt.Sprintf("http://127.0.0.1:%d", port),
+		"ws_base": fmt.Sprintf("ws://127.0.0.1:%d", port),
+	})
+	if err != nil {
+		panic(fmt.Sprintf("marshal desktop bridge config: %v", err))
+	}
+
+	return &desktopBridge{
+		config: config,
+		proxy:  proxy,
+	}
 }
 
-func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(h.page)
+func (h *desktopBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("desktop bridge request", "method", r.Method, "path", r.URL.Path)
+
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/_shipyard/desktop-config":
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(h.config)
+	case strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws":
+		h.proxy.ServeHTTP(w, r)
+	default:
+		http.NotFound(w, r)
+	}
 }
