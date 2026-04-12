@@ -466,6 +466,100 @@ func TestSPECBUG025_ToolBrowserSchemaFieldsUsePhase1WidthClasses(t *testing.T) {
 	}
 }
 
+func TestSPECBUG028_ToolBrowserLongSchemaFormsUseDedicatedScrollOwner(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	checkTag := func(id string) string {
+		idx := strings.Index(content, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("expected to find %s in index.html", id)
+		}
+		tagStart := strings.LastIndex(content[:idx], "<")
+		tagEnd := strings.Index(content[idx:], ">")
+		if tagStart == -1 || tagEnd == -1 {
+			t.Fatalf("could not extract %s tag", id)
+		}
+		return content[tagStart : idx+tagEnd+1]
+	}
+
+	mainTag := checkTag("tools-main")
+	for _, needle := range []string{
+		"display:flex",
+		"flex-direction:column",
+		"min-height:0",
+		"overflow:hidden",
+	} {
+		if !strings.Contains(mainTag, needle) {
+			t.Errorf("SPEC-BUG-028 FAIL: expected %q in #tools-main tag: %s", needle, mainTag)
+		}
+	}
+
+	detailTag := checkTag("tool-detail")
+	for _, needle := range []string{
+		"height:100%",
+		"min-height:0",
+		"flex-direction:column",
+		"overflow:hidden",
+	} {
+		if !strings.Contains(detailTag, needle) {
+			t.Errorf("SPEC-BUG-028 FAIL: expected %q in #tool-detail tag: %s", needle, detailTag)
+		}
+	}
+
+	scrollTag := checkTag("tool-detail-scroll")
+	for _, needle := range []string{
+		"display:flex",
+		"flex:0 1 auto",
+		"min-height:0",
+		"flex-direction:column",
+		"overflow-y:auto",
+	} {
+		if !strings.Contains(scrollTag, needle) {
+			t.Errorf("SPEC-BUG-028 FAIL: expected %q in #tool-detail-scroll tag: %s", needle, scrollTag)
+		}
+	}
+
+	responseTag := checkTag("tool-response-section")
+	for _, needle := range []string{"display:flex", "flex:1", "min-height:0", "flex-direction:column"} {
+		if !strings.Contains(responseTag, needle) {
+			t.Errorf("SPEC-BUG-028 FAIL: expected %q in #tool-response-section tag: %s", needle, responseTag)
+		}
+	}
+
+	scrollIdx := strings.Index(content, `id="tool-detail-scroll"`)
+	paramsIdx := strings.Index(content, `id="tool-params-section"`)
+	execIdx := strings.Index(content, `id="tool-execute-btn"`)
+	responseIdx := strings.Index(content, `id="tool-response-section"`)
+	if scrollIdx == -1 || paramsIdx == -1 || execIdx == -1 || responseIdx == -1 {
+		t.Fatal("SPEC-BUG-028 FAIL: expected scroll, params, execute, and response sections")
+	}
+	if !(scrollIdx < paramsIdx && paramsIdx < execIdx && execIdx < responseIdx) {
+		t.Fatalf("SPEC-BUG-028 FAIL: expected params and execute controls to stay inside the scroll owner before response section, got scroll=%d params=%d execute=%d response=%d", scrollIdx, paramsIdx, execIdx, responseIdx)
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for _, needle := range []string{
+		"#tools-main {",
+		"overflow: hidden;",
+		"#tool-detail-scroll {",
+		"overflow-y: auto;",
+		"flex: 0 1 auto;",
+		"min-height: 0;",
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Errorf("SPEC-BUG-028 FAIL: expected %q in scroll ownership CSS", needle)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SPEC-BUG-008: Text/JQ Toggle Missing from Per-Panel Filter Bars
 // ---------------------------------------------------------------------------

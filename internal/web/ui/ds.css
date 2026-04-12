@@ -263,6 +263,21 @@ body {
   overflow: hidden;
 }
 
+#tools-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#tool-detail-scroll {
+  display: flex;
+  flex: 0 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
 .route-view {
   display: none;
   flex: 1;
