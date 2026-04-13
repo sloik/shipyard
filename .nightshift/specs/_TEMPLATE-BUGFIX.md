@@ -6,7 +6,7 @@ Copy this template to report and fix a bug. Fill in all sections. Save as `specs
 
 ```markdown
 ---
-id: SPEC-BUG-001
+id: BUG-001
 template_version: 2
 priority: 1          # Bugs default to priority 1 (highest). Deprioritize only if explicitly deferred.
 layer: 2             # Layer of the feature that contains the bug
@@ -14,7 +14,7 @@ type: bugfix
 status: draft        # draft | ready | in_progress | done | blocked
 after: []            # Soft dependencies: list of spec IDs (if any)
 violates: [SPEC-XXX] # REQUIRED: list of spec IDs this bug violates (e.g., [SPEC-012, SPEC-015])
-prior_attempts: []   # Previous attempts to fix this bug (e.g., [SPEC-BUG-001-sqlite-memory-leak])
+prior_attempts: []   # Previous attempts to fix this bug (e.g., [BUG-001-sqlite-memory-leak])
 created: 2026-03-26
 ---
 
@@ -50,12 +50,9 @@ Example:
 
 ## Root Cause
 
-(Optional, filled by the agent after investigation.)
-
-What in the code is causing the bug? This section may be empty when first written; the agent fills it in during work.
-
-Example:
-> The error message container uses dynamic height based on content. When the message appears, the parent frame doesn't have reserved space for it, causing the editor to reflow. The fix: always reserve fixed space for the error area, even when empty.
+**Leave blank.** The implementation agent investigates and fills this in during the
+Nightshift run. Do NOT include root cause hypotheses, fix suggestions, or solution
+strategies in the bug spec — that is the agent's job, not the spec author's.
 
 ## Requirements
 
@@ -97,14 +94,15 @@ What this bug fix does NOT cover.
 - Syntax highlighting in the editor (separate spec)
 - Validation performance optimization (future spec)
 
-## Research Hints
+## Code Pointers
 
-Pointers for the implementation agent. Optional but improves first-pass success rate.
+File paths and line numbers where the bug manifests. **No fix suggestions** — just
+point the agent to the right files. The agent reads the code and investigates.
 
-- Files to study: [paths to buggy code, related test files, the violated spec]
-- Patterns to look for: [what causes the bug — layout, state, timing, etc.]
-- Cortex tags: [relevant tags for querying project history]
-- DevKB: [which DevKB files are relevant]
+- Bug area: `path/to/file.ext` (lines N–M)
+- Related code: `path/to/other.ext`
+- Test file: `path/to/test_file.ext`
+- Violated spec: `specs/SPEC-XXX-name.md`
 
 ## Gap Protocol
 
@@ -113,14 +111,6 @@ Optional — defaults to standard gap protocol (see Nightshift-Coordinator-And-O
 - Research-acceptable gaps: [e.g., "understanding layout behavior", "existing CSS patterns"]
 - Stop-immediately gaps: [e.g., "root cause unclear after investigation", "fix requires API change"]
 - Max research subagents before stopping: 3 (default)
-
-## Notes for the Agent
-
-(Optional section for clarifications, known gotchas, etc.)
-
-- This bug was reported by a user on 2026-03-25 — see the issue ticket for context
-- The error container is a child of the frame; check z-index and overflow behavior
-- Existing tests in `src/__tests__/JsonEditor.test.tsx` need to be updated to cover layout stability
 ```
 
 ---
@@ -130,7 +120,7 @@ Optional — defaults to standard gap protocol (see Nightshift-Coordinator-And-O
 ### File Naming
 
 - Save as `specs/BUG-NNN-short-title.md`
-- Example: `specs/SPEC-BUG-001-json-editor-bounces.md`
+- Example: `specs/BUG-001-json-editor-bounces.md`
 - Use the bug ID in the filename for easy lookup
 - **Note:** Bug IDs use `BUG-NNN` format, not `SPEC-NNN`, to distinguish them from feature/refactor specs
 
@@ -186,7 +176,7 @@ The selection algorithm in LOOP.md prioritizes bugs first (by type == "bugfix"),
 
 ```markdown
 ---
-id: SPEC-BUG-002
+id: BUG-002
 template_version: 2
 priority: 1
 layer: 2
@@ -218,7 +208,7 @@ In the Tool Execution Sheet's JSON tab (SPEC-010/012), the text editor area resi
 
 ## Root Cause
 
-(To be filled by agent.)
+(Agent fills in during run.)
 
 ## Requirements
 
@@ -247,11 +237,11 @@ In the Tool Execution Sheet's JSON tab (SPEC-010/012), the text editor area resi
 - Error styling/colors (design task)
 - Syntax highlighting (separate feature)
 
-## Notes
+## Code Pointers
 
-- Reported by user @ 2026-03-25 in Slack #bugs
-- The error container should use fixed height + absolute positioning to avoid layout flow
-- Check for overflow hidden/visible on parent containers
+- Bug area: `src/components/sheets/ToolSheet/JsonEditor.tsx` (lines 40–75)
+- Related code: `src/components/ErrorDisplay.tsx`
+- Test file: `src/__tests__/JsonEditor.test.tsx`
 ```
 
 ---
