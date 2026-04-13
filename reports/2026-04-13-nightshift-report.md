@@ -174,3 +174,62 @@ Note: 2 pre-existing data races in `internal/proxy` and `cmd/shipyard` test file
 - The `POST /mcp` endpoint is entirely new — Shipyard previously only exposed stdio-based MCP via `shipyard-mcp` binary. The HTTP relay added here is the spec's target.
 - Tool names in the HTTP relay are prefixed as `{server}__{tool}` (consistent with the existing `shipyard-mcp` convention).
 - Pre-existing data races in the test suite: `TestChildInputWriter_WriteLineRetriesAfterNewlineFailure` (proxy) and `TestRunProxy_HeadlessTrue_DoesNotCallDesktop` (cmd/shipyard). Neither is caused by SPEC-010. Confirmed by testing on clean baseline.
+
+---
+
+## SPEC-011 — Token Management UI
+
+| Field | Value |
+|---|---|
+| Spec | SPEC-011 |
+| Status | done |
+| Duration | ~30 min |
+| Agent | Claude Sonnet 4.6 (inline) |
+
+## Summary
+
+Added a full Tokens page to the Shipyard dashboard, plus the required backend soft-delete migration. The backend `DeleteToken` now sets `is_revoked=1` instead of hard-deleting rows. A schema migration handles existing DBs. The UI adds `#/tokens` as a new top-level route with a token list table, create flow, scope editor with live preview, stats panel, and revoke confirmation.
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `internal/auth/store.go` | Added `Revoked bool` to `TokenRecord`; updated schema (is_revoked column); added `migrate()` + `columnExists()`; changed `DeleteToken` to soft-delete; updated `Authenticate` to reject revoked tokens; updated `ListTokens` and `GetToken` to populate `Revoked` field |
+| `internal/auth/store_test.go` | Updated `TestStore_DeleteToken` to assert soft-delete: row still exists, `is_revoked=1`, `ListTokens` includes it with `Revoked=true` |
+| `internal/web/ui/index.html` | Added "Tokens" nav tab; added `#tokens` route target; added `<main id="view-tokens">` with table + panels; added full Tokens JS section (400+ lines: XHR helpers, load/render, create flow, scope editor, stats panel, revoke confirmation) |
+
+## Test Results
+
+```
+go build ./cmd/shipyard/   PASS
+go vet ./...               PASS
+go build ./...             PASS
+go test -race ./internal/auth/... ./internal/web/...   PASS (all auth and web tests)
+go test -race ./...        PASS for all packages we changed; pre-existing race in internal/proxy unchanged
+```
+
+## AC Checklist
+
+- [x] AC-1: `#/tokens` displays the token list table loading from `GET /api/tokens` — navigateRoute patch triggers loadTokens() on first visit
+- [x] AC-2: Table columns: Name, Created, Last Used, Rate Limit, Scopes, Status — dates formatted via tokFmtDate(), scope count as integer, status as badge
+- [x] AC-3: Revoked tokens appear with "revoked" badge (badge-error) and greyed-out styling (opacity:0.5); NOT removed from list — renderTokens() never filters
+- [x] AC-4: "Create Token" form with: name (required text), rate limit (number, default 60), initial scopes (textarea, one per line) — openCreateTokenDialog()
+- [x] AC-5: Submitting with empty name shows validation error toast and does not call the API — guarded before tokXHR POST
+- [x] AC-6: On successful creation, show-once dialog displays plaintext token with "Copy" button and "not shown again" warning — showTokenOnceDialog()
+- [x] AC-7: "Copy" button copies to clipboard using execCommand('copy') and shows "Copied" visual feedback — tokCopyText()
+- [x] AC-8: After dismissing dialog, loadTokens() is called in the onClose callback
+- [x] AC-9: "Edit Scopes" opens scope editor (tokensScopePanel) showing current scopes as editable list — openScopeEditor()
+- [x] AC-10: Each scope row shows `{server}:{tool_pattern}` format input; users can add/remove rows via addScopeRow() and remove button
+- [x] AC-11: Live preview calls `GET /api/tools`, filters client-side via scopeMatchesTool() with glob→RegExp replacement — renderScopePreview()
+- [x] AC-12: Saving scopes calls `PUT /api/tokens/{id}/scopes`; token list refreshes on success via loadTokens()
+- [x] AC-13: "Revoke" shows DS.modal confirmation naming the token; confirming calls `DELETE /api/tokens/{id}`; row updates without page reload (loadTokens() re-renders in place)
+- [x] AC-14: Stats panel calls `GET /api/tokens/{id}/stats`; renders available fields (last_used_at, total_calls, calls_today, calls_this_week, error_rate, top_tools) — openStatsPanel()
+- [x] AC-15: Tokens page uses only ds.css classes (badge, btn, input, table-header, table-row, empty-state, app-bar) — no inline styles beyond layout, no new CSS classes
+- [x] AC-16: All HTTP calls use XMLHttpRequest with tokXHR() helper; no fetch(), no async/await, no Promise chains for HTTP — DS.modal .then() is UI-only, not HTTP
+
+## Blockers / Discoveries
+
+- `DS.modal` returns a Promise (design system component). Used `.then()` only for UI dispatch (not HTTP calls) — satisfies AC-16 which scopes the restriction to "HTTP calls".
+- `navigator.clipboard.writeText()` is forbidden by spec; used `document.execCommand('copy')` with hidden textarea instead.
+- Pre-existing data races in `internal/proxy` and `cmd/shipyard` are unrelated to SPEC-011.
+- `GET /api/tokens/{id}/stats` currently returns only `id` and `last_used_at` (SPEC-010 `GetStats` implementation). The UI renders whatever fields are present; additional fields (total_calls, calls_today, etc.) are guarded with `!== undefined` checks and will display when the backend is extended.

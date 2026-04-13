@@ -92,7 +92,7 @@ func TestStore_DeleteToken(t *testing.T) {
 		t.Fatalf("GenerateToken: %v", err)
 	}
 
-	// Token authenticates before deletion
+	// Token authenticates before revocation
 	if _, err := s.Authenticate(plaintext); err != nil {
 		t.Fatalf("Authenticate before delete: %v", err)
 	}
@@ -101,10 +101,37 @@ func TestStore_DeleteToken(t *testing.T) {
 		t.Fatalf("DeleteToken: %v", err)
 	}
 
-	// Token must not authenticate after deletion (AC-12)
+	// Token must not authenticate after soft-delete (is_revoked=1)
 	_, err = s.Authenticate(plaintext)
 	if err == nil {
-		t.Fatal("expected auth failure after deletion")
+		t.Fatal("expected auth failure after revocation")
+	}
+
+	// Row must still exist in DB (soft-delete, not hard-delete)
+	var isRevoked int
+	if err := s.db.QueryRow("SELECT is_revoked FROM tokens WHERE id=?", id).Scan(&isRevoked); err != nil {
+		t.Fatalf("expected row to still exist after soft-delete: %v", err)
+	}
+	if isRevoked != 1 {
+		t.Fatalf("expected is_revoked=1, got %d", isRevoked)
+	}
+
+	// ListTokens must still include the revoked token
+	tokens, err := s.ListTokens()
+	if err != nil {
+		t.Fatalf("ListTokens: %v", err)
+	}
+	found := false
+	for _, tok := range tokens {
+		if tok.ID == id {
+			found = true
+			if !tok.Revoked {
+				t.Error("expected Revoked=true in ListTokens result")
+			}
+		}
+	}
+	if !found {
+		t.Error("revoked token not found in ListTokens — expected soft-delete to keep row")
 	}
 }
 

@@ -25,12 +25,13 @@ type Store struct {
 
 // TokenRecord holds token metadata (never the plaintext or hash).
 type TokenRecord struct {
-	ID               int64     `json:"id"`
-	Name             string    `json:"name"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID               int64      `json:"id"`
+	Name             string     `json:"name"`
+	CreatedAt        time.Time  `json:"created_at"`
 	LastUsedAt       *time.Time `json:"last_used_at,omitempty"`
-	RateLimitPerMin  int       `json:"rate_limit_per_minute,omitempty"`
-	Scopes           []string  `json:"scopes"`
+	RateLimitPerMin  int        `json:"rate_limit_per_minute,omitempty"`
+	Scopes           []string   `json:"scopes"`
+	Revoked          bool       `json:"revoked"`
 }
 
 // openAuthDB can be overridden in tests.
@@ -54,7 +55,8 @@ func NewStore(dbPath, bootstrapToken string) (*Store, error) {
 			hash               TEXT NOT NULL UNIQUE,
 			created_at         TEXT NOT NULL,
 			last_used_at       TEXT,
-			rate_limit_per_min INTEGER NOT NULL DEFAULT 0
+			rate_limit_per_min INTEGER NOT NULL DEFAULT 0,
+			is_revoked         INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS token_scopes (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +71,12 @@ func NewStore(dbPath, bootstrapToken string) (*Store, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init auth schema: %w", err)
+	}
+
+	// Migrate existing DBs: add is_revoked if not present.
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate auth schema: %w", err)
 	}
 
 	s := &Store{
@@ -162,16 +170,20 @@ func (s *Store) Authenticate(plaintext string) (*TokenRecord, error) {
 	var rec TokenRecord
 	var createdStr string
 	var lastUsedStr sql.NullString
+	var isRevoked int
 
 	err := s.db.QueryRow(
-		"SELECT id, name, created_at, last_used_at, rate_limit_per_min FROM tokens WHERE hash=?",
+		"SELECT id, name, created_at, last_used_at, rate_limit_per_min, is_revoked FROM tokens WHERE hash=?",
 		hash,
-	).Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin)
+	).Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin, &isRevoked)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("token not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query token: %w", err)
+	}
+	if isRevoked != 0 {
+		return nil, fmt.Errorf("token revoked")
 	}
 
 	if t, err := time.Parse(time.RFC3339Nano, createdStr); err == nil {
@@ -216,13 +228,13 @@ func (s *Store) AuthenticateBootstrap(plaintext string) bool {
 	return plaintext == s.bootstrapToken
 }
 
-// ListTokens returns metadata for all tokens (no hashes or plaintext).
+// ListTokens returns metadata for all tokens, including revoked ones (no hashes or plaintext).
 func (s *Store) ListTokens() ([]TokenRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	rows, err := s.db.Query(
-		"SELECT id, name, created_at, last_used_at, rate_limit_per_min FROM tokens ORDER BY id",
+		"SELECT id, name, created_at, last_used_at, rate_limit_per_min, is_revoked FROM tokens ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list tokens: %w", err)
@@ -234,7 +246,8 @@ func (s *Store) ListTokens() ([]TokenRecord, error) {
 		var rec TokenRecord
 		var createdStr string
 		var lastUsedStr sql.NullString
-		if err := rows.Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin); err != nil {
+		var isRevoked int
+		if err := rows.Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin, &isRevoked); err != nil {
 			return nil, fmt.Errorf("scan token: %w", err)
 		}
 		if t, err := time.Parse(time.RFC3339Nano, createdStr); err == nil {
@@ -245,6 +258,7 @@ func (s *Store) ListTokens() ([]TokenRecord, error) {
 				rec.LastUsedAt = &t
 			}
 		}
+		rec.Revoked = isRevoked != 0
 		results = append(results, rec)
 	}
 
@@ -276,16 +290,18 @@ func (s *Store) GetToken(id int64) (*TokenRecord, error) {
 	var rec TokenRecord
 	var createdStr string
 	var lastUsedStr sql.NullString
+	var isRevoked int
 
 	err := s.db.QueryRow(
-		"SELECT id, name, created_at, last_used_at, rate_limit_per_min FROM tokens WHERE id=?", id,
-	).Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin)
+		"SELECT id, name, created_at, last_used_at, rate_limit_per_min, is_revoked FROM tokens WHERE id=?", id,
+	).Scan(&rec.ID, &rec.Name, &createdStr, &lastUsedStr, &rec.RateLimitPerMin, &isRevoked)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("token not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
+	rec.Revoked = isRevoked != 0
 
 	if t, err := time.Parse(time.RFC3339Nano, createdStr); err == nil {
 		rec.CreatedAt = t
@@ -312,14 +328,14 @@ func (s *Store) GetToken(id int64) (*TokenRecord, error) {
 	return &rec, nil
 }
 
-// DeleteToken revokes a token by ID.
+// DeleteToken soft-deletes a token by setting is_revoked=1.
 func (s *Store) DeleteToken(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	res, err := s.db.Exec("DELETE FROM tokens WHERE id=?", id)
+	res, err := s.db.Exec("UPDATE tokens SET is_revoked=1 WHERE id=?", id)
 	if err != nil {
-		return fmt.Errorf("delete token: %w", err)
+		return fmt.Errorf("revoke token: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -392,6 +408,38 @@ func (s *Store) GetStats(id int64) (*TokenStats, error) {
 	}
 
 	return &stats, nil
+}
+
+// migrate applies incremental schema changes to existing databases.
+func migrate(db *sql.DB) error {
+	if !columnExists(db, "tokens", "is_revoked") {
+		if _, err := db.Exec(`ALTER TABLE tokens ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add is_revoked column: %w", err)
+		}
+	}
+	return nil
+}
+
+// columnExists checks whether a column exists in a SQLite table.
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // hashToken returns the hex-encoded SHA-256 hash of the token plaintext.

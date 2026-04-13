@@ -19,6 +19,7 @@
     <a class="tab tab-default" href="#tools" data-route="tools">Tools</a>
     <a class="tab tab-default" href="#history" data-route="history">History</a>
     <a class="tab tab-default" href="#servers" data-route="servers">Servers</a>
+    <a class="tab tab-default" href="#tokens" data-route="tokens">Tokens</a>
   </nav>
   <span id="ws-indicator" class="ws-indicator ws-disconnected">Disconnected</span>
   <a href="#servers" id="server-count" class="badge badge-neutral" style="text-decoration:none; cursor:pointer;">0 servers</a>
@@ -28,6 +29,7 @@
 <div id="tools" class="route-target" aria-hidden="true"></div>
 <div id="history" class="route-target" aria-hidden="true"></div>
 <div id="servers" class="route-target" aria-hidden="true"></div>
+<div id="tokens" class="route-target" aria-hidden="true"></div>
 
 <div id="app-chrome">
   <div id="global-banners">
@@ -574,6 +576,82 @@
   </div>
 </main>
 
+<!-- ================================================================
+     View: Tokens (#/tokens)
+     ================================================================ -->
+<main id="view-tokens" class="route-view">
+
+  <!-- Action Bar -->
+  <div class="app-bar" style="padding:8px 16px;">
+    <span style="font-size:var(--font-size-sm); color:var(--text-secondary);">Bearer tokens for MCP API access</span>
+    <div style="flex:1;"></div>
+    <button class="btn btn-primary btn-sm" id="tokens-create-btn">&#43; Create Token</button>
+  </div>
+
+  <!-- Auth-not-configured state -->
+  <div id="tokens-auth-disabled" class="empty-state" style="display:none;">
+    <div class="empty-icon">&#128274;</div>
+    <div class="empty-title">Auth not configured</div>
+    <div class="empty-desc">Bearer token authentication is not enabled. Start Shipyard with <code style="background:var(--bg-surface); padding:2px 6px; border-radius:4px;">--auth-token</code> to enable it.</div>
+  </div>
+
+  <!-- Empty state (auth enabled, no tokens) -->
+  <div id="tokens-empty" class="empty-state" style="display:none;">
+    <div class="empty-icon">&#128273;</div>
+    <div class="empty-title">No tokens yet</div>
+    <div class="empty-desc">Create a bearer token to allow API clients to authenticate with Shipyard.</div>
+    <button class="btn btn-primary btn-sm" id="tokens-empty-create-btn">&#43; Create Token</button>
+  </div>
+
+  <!-- Token Table -->
+  <div id="tokens-table-wrap" style="display:none;">
+    <div class="table-header">
+      <div style="flex:2; min-width:0;" data-col-label="Name">NAME</div>
+      <div style="width:130px; flex-shrink:0;" data-col-label="Created">CREATED</div>
+      <div style="width:130px; flex-shrink:0;" data-col-label="Last Used">LAST USED</div>
+      <div style="width:90px; flex-shrink:0;" data-col-label="Rate Limit">RATE LIMIT</div>
+      <div style="width:60px; flex-shrink:0;" data-col-label="Scopes">SCOPES</div>
+      <div style="width:90px; flex-shrink:0;" data-col-label="Status">STATUS</div>
+      <div style="width:180px; flex-shrink:0;" data-col-label="Actions">ACTIONS</div>
+    </div>
+    <div id="tokens-body"></div>
+  </div>
+
+  <!-- Stats Panel (collapsed by default, revealed per-token) -->
+  <div id="tokens-stats-panel" style="display:none; padding:16px; border-top:1px solid var(--border-default); background:var(--bg-surface);">
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+      <strong id="tokens-stats-name" style="color:var(--text-primary); font-size:var(--font-size-md);"></strong>
+      <button class="btn btn-ghost btn-sm" id="tokens-stats-close">&#10005; Close</button>
+    </div>
+    <div id="tokens-stats-body" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px;"></div>
+  </div>
+
+  <!-- Scope Editor Panel (inline, revealed per-token) -->
+  <div id="tokens-scope-panel" style="display:none; padding:16px; border-top:1px solid var(--border-default); background:var(--bg-surface);">
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+      <strong id="tokens-scope-name" style="color:var(--text-primary); font-size:var(--font-size-md);"></strong>
+      <span style="color:var(--text-muted); font-size:var(--font-size-sm);">Scope Editor</span>
+      <div style="flex:1;"></div>
+      <button class="btn btn-primary btn-sm" id="tokens-scope-save">Save</button>
+      <button class="btn btn-ghost btn-sm" id="tokens-scope-close">Cancel</button>
+    </div>
+    <div style="display:flex; gap:16px;">
+      <!-- Scope rows -->
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted); margin-bottom:8px;">Scopes — format: <code style="background:var(--bg-surface); padding:1px 4px; border-radius:3px;">server:tool_pattern</code> (use * as wildcard)</div>
+        <div id="tokens-scope-rows" style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;"></div>
+        <button class="btn btn-default btn-sm" id="tokens-scope-add-row">&#43; Add Scope</button>
+      </div>
+      <!-- Live preview -->
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:var(--font-size-sm); color:var(--text-muted); margin-bottom:8px;">Live preview — matching tools</div>
+        <div id="tokens-scope-preview" style="font-size:var(--font-size-sm); color:var(--text-secondary); border:1px solid var(--border-muted); border-radius:var(--radius-m); padding:8px; min-height:80px; max-height:240px; overflow-y:auto; background:var(--bg-inset);"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
   </div><!-- /route-stack -->
 </div><!-- /app-chrome -->
 
@@ -590,7 +668,8 @@
     timeline: document.getElementById('view-timeline'),
     tools:    document.getElementById('view-tools'),
     history:  document.getElementById('view-history'),
-    servers:  document.getElementById('view-servers')
+    servers:  document.getElementById('view-servers'),
+    tokens:   document.getElementById('view-tokens')
   };
   var timelineEmpty   = document.getElementById('timeline-empty');
   var timelineContent = document.getElementById('timeline-content');
@@ -3573,6 +3652,503 @@
       }
     };
   })();
+
+  /* ======================================================================
+     Tokens View — SPEC-011
+     ====================================================================== */
+
+  var tokensView          = document.getElementById('view-tokens');
+  var tokensBody          = document.getElementById('tokens-body');
+  var tokensTableWrap     = document.getElementById('tokens-table-wrap');
+  var tokensEmptyEl       = document.getElementById('tokens-empty');
+  var tokensAuthDisabled  = document.getElementById('tokens-auth-disabled');
+  var tokensStatsPanel    = document.getElementById('tokens-stats-panel');
+  var tokensStatsName     = document.getElementById('tokens-stats-name');
+  var tokensStatsBody     = document.getElementById('tokens-stats-body');
+  var tokensScopePanel    = document.getElementById('tokens-scope-panel');
+  var tokensScopeName     = document.getElementById('tokens-scope-name');
+  var tokensScopeRows     = document.getElementById('tokens-scope-rows');
+  var tokensScopePreview  = document.getElementById('tokens-scope-preview');
+
+  var tokensLoaded   = false;
+  var activeScopeId  = null;  // token ID currently in scope editor
+  var activeStatsId  = null;  // token ID currently showing stats
+  var allToolsCache  = null;  // cached tools list for scope preview
+
+  /* ------------------------------------------------------------------
+     Helper: XHR wrapper (callbacks, no fetch/Promise)
+     ------------------------------------------------------------------ */
+  function tokXHR(method, url, body, onSuccess, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        var data = null;
+        if (xhr.responseText) {
+          try { data = JSON.parse(xhr.responseText); } catch(e) { data = null; }
+        }
+        onSuccess(data, xhr.status);
+      } else {
+        if (onError) onError(xhr.status, xhr.responseText);
+      }
+    };
+    xhr.onerror = function() {
+      if (onError) onError(0, 'Network error');
+    };
+    xhr.send(body ? JSON.stringify(body) : null);
+  }
+
+  /* ------------------------------------------------------------------
+     Format helpers
+     ------------------------------------------------------------------ */
+  function tokFmtDate(isoStr) {
+    if (!isoStr) return '—';
+    var d = new Date(isoStr);
+    if (isNaN(d.getTime())) return isoStr;
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function tokStatusBadge(revoked) {
+    if (revoked) {
+      return '<span class="badge badge-error"><span class="badge-dot"></span>revoked</span>';
+    }
+    return '<span class="badge badge-success"><span class="badge-dot"></span>active</span>';
+  }
+
+  /* ------------------------------------------------------------------
+     Copy helper (no navigator.clipboard / no Promise)
+     ------------------------------------------------------------------ */
+  function tokCopyText(text, btnEl) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); } catch(e) { /* ignore */ }
+    document.body.removeChild(ta);
+    if (btnEl) {
+      var orig = btnEl.textContent;
+      btnEl.textContent = 'Copied';
+      btnEl.classList.add('btn-copied');
+      btnEl.classList.remove('btn-copy');
+      setTimeout(function() {
+        btnEl.textContent = orig;
+        btnEl.classList.remove('btn-copied');
+        btnEl.classList.add('btn-copy');
+      }, 2000);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+     Load tokens
+     ------------------------------------------------------------------ */
+  function loadTokens() {
+    tokXHR('GET', '/api/tokens', null, function(data, status) {
+      tokensLoaded = true;
+      tokensAuthDisabled.style.display = 'none';
+
+      if (!data || !Array.isArray(data)) {
+        renderTokens([]);
+        return;
+      }
+      renderTokens(data);
+    }, function(status) {
+      if (status === 503) {
+        tokensTableWrap.style.display = 'none';
+        tokensEmptyEl.style.display = 'none';
+        tokensAuthDisabled.style.display = '';
+      } else {
+        DS.toast('Failed to load tokens (' + status + ')', 'error');
+      }
+    });
+  }
+
+  function renderTokens(tokens) {
+    if (!tokens || tokens.length === 0) {
+      tokensTableWrap.style.display = 'none';
+      tokensEmptyEl.style.display = '';
+      return;
+    }
+    tokensEmptyEl.style.display = 'none';
+    tokensTableWrap.style.display = '';
+
+    var html = '';
+    for (var i = 0; i < tokens.length; i++) {
+      var tok = tokens[i];
+      var revokedAttr = tok.revoked ? ' style="opacity:0.5;"' : '';
+      var rateLabel = tok.rate_limit_per_minute > 0 ? tok.rate_limit_per_minute + '/min' : '—';
+      var scopeCount = (tok.scopes && tok.scopes.length) ? tok.scopes.length : 0;
+      html += '<div class="table-row" data-token-id="' + tok.id + '"' + revokedAttr + '>';
+      html += '<div style="flex:2; min-width:0; font-weight:500; color:var(--text-primary);">' + escapeHtml(tok.name) + '</div>';
+      html += '<div style="width:130px; flex-shrink:0; font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(tokFmtDate(tok.created_at)) + '</div>';
+      html += '<div style="width:130px; flex-shrink:0; font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(tokFmtDate(tok.last_used_at)) + '</div>';
+      html += '<div style="width:90px; flex-shrink:0; font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(rateLabel) + '</div>';
+      html += '<div style="width:60px; flex-shrink:0; font-size:var(--font-size-sm); color:var(--text-secondary);">' + scopeCount + '</div>';
+      html += '<div style="width:90px; flex-shrink:0;">' + tokStatusBadge(tok.revoked) + '</div>';
+      html += '<div style="width:180px; flex-shrink:0;" class="row-actions">';
+      html += '<button class="btn btn-ghost btn-sm" data-action="stats" data-token-id="' + tok.id + '" data-token-name="' + escapeHtml(tok.name) + '">Stats</button>';
+      if (!tok.revoked) {
+        html += '<button class="btn btn-ghost btn-sm" data-action="scopes" data-token-id="' + tok.id + '" data-token-name="' + escapeHtml(tok.name) + '" data-token-scopes="' + escapeHtml(JSON.stringify(tok.scopes || [])) + '">Edit Scopes</button>';
+        html += '<button class="btn btn-danger btn-sm" data-action="revoke" data-token-id="' + tok.id + '" data-token-name="' + escapeHtml(tok.name) + '">Revoke</button>';
+      }
+      html += '</div>';
+      html += '</div>';
+    }
+    tokensBody.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------------
+     Tokens table — action delegation
+     ------------------------------------------------------------------ */
+  if (tokensBody) {
+    tokensBody.addEventListener('click', function(e) {
+      var btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      var action  = btn.getAttribute('data-action');
+      var tokenId = parseInt(btn.getAttribute('data-token-id'), 10);
+      var tokenName = btn.getAttribute('data-token-name') || '';
+
+      if (action === 'stats') {
+        openStatsPanel(tokenId, tokenName);
+      } else if (action === 'scopes') {
+        var rawScopes = btn.getAttribute('data-token-scopes') || '[]';
+        var scopes;
+        try { scopes = JSON.parse(rawScopes); } catch(e) { scopes = []; }
+        openScopeEditor(tokenId, tokenName, scopes);
+      } else if (action === 'revoke') {
+        DS.modal(
+          'Revoke token',
+          'Revoke token <strong>' + escapeHtml(tokenName) + '</strong>? The token will stop working immediately but remain visible in the list.',
+          [
+            { label: 'Cancel', value: 'cancel', className: 'btn-default' },
+            { label: 'Revoke', value: 'revoke', className: 'btn-danger' }
+          ]
+        ).then(function(val) {
+          if (val !== 'revoke') return;
+          tokXHR('DELETE', '/api/tokens/' + tokenId, null, function() {
+            DS.toast('Token revoked', 'success');
+            loadTokens();
+            if (activeScopeId === tokenId) closeScopePanel();
+            if (activeStatsId === tokenId) closeStatsPanel();
+          }, function(status) {
+            DS.toast('Revoke failed (' + status + ')', 'error');
+          });
+        });
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------
+     Stats panel
+     ------------------------------------------------------------------ */
+  function openStatsPanel(tokenId, tokenName) {
+    activeStatsId = tokenId;
+    tokensStatsName.textContent = tokenName + ' — Stats';
+    tokensStatsBody.innerHTML = '<span style="color:var(--text-muted); font-size:var(--font-size-sm);">Loading...</span>';
+    tokensStatsPanel.style.display = '';
+    tokensScopePanel.style.display = 'none';
+    activeScopeId = null;
+
+    tokXHR('GET', '/api/tokens/' + tokenId + '/stats', null, function(data) {
+      if (!data) { tokensStatsBody.innerHTML = '<span style="color:var(--text-muted);">No data</span>'; return; }
+      var html = '';
+      html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px;">';
+      html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Last Used</div>';
+      html += '<div style="font-size:var(--font-size-md); color:var(--text-primary);">' + escapeHtml(tokFmtDate(data.last_used_at)) + '</div></div>';
+      if (data.total_calls !== undefined) {
+        html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px;">';
+        html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Total Calls</div>';
+        html += '<div style="font-size:var(--font-size-md); color:var(--text-primary);">' + (data.total_calls || 0) + '</div></div>';
+      }
+      if (data.calls_today !== undefined) {
+        html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px;">';
+        html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Calls Today</div>';
+        html += '<div style="font-size:var(--font-size-md); color:var(--text-primary);">' + (data.calls_today || 0) + '</div></div>';
+      }
+      if (data.calls_this_week !== undefined) {
+        html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px;">';
+        html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Calls This Week</div>';
+        html += '<div style="font-size:var(--font-size-md); color:var(--text-primary);">' + (data.calls_this_week || 0) + '</div></div>';
+      }
+      if (data.error_rate !== undefined) {
+        html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px;">';
+        html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Error Rate</div>';
+        html += '<div style="font-size:var(--font-size-md); color:var(--text-primary);">' + (data.error_rate !== undefined ? (data.error_rate * 100).toFixed(1) + '%' : '—') + '</div></div>';
+      }
+      if (data.top_tools && data.top_tools.length > 0) {
+        html += '<div style="background:var(--bg-raised); border-radius:var(--radius-m); padding:12px; grid-column:span 2;">';
+        html += '<div style="font-size:var(--font-size-xs); color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">Top Tools</div>';
+        for (var i = 0; i < Math.min(5, data.top_tools.length); i++) {
+          html += '<div style="font-size:var(--font-size-sm); color:var(--text-secondary); padding:2px 0;">' + escapeHtml(data.top_tools[i]) + '</div>';
+        }
+        html += '</div>';
+      }
+      tokensStatsBody.innerHTML = html || '<span style="color:var(--text-muted);">No stats available</span>';
+    }, function(status) {
+      tokensStatsBody.innerHTML = '<span style="color:var(--danger-fg);">Failed to load stats (' + status + ')</span>';
+    });
+  }
+
+  function closeStatsPanel() {
+    activeStatsId = null;
+    tokensStatsPanel.style.display = 'none';
+  }
+
+  if (document.getElementById('tokens-stats-close')) {
+    document.getElementById('tokens-stats-close').addEventListener('click', closeStatsPanel);
+  }
+
+  /* ------------------------------------------------------------------
+     Scope editor
+     ------------------------------------------------------------------ */
+  function openScopeEditor(tokenId, tokenName, scopes) {
+    activeScopeId = tokenId;
+    tokensScopeName.textContent = tokenName;
+    tokensScopePanel.style.display = '';
+    tokensStatsPanel.style.display = 'none';
+    activeStatsId = null;
+
+    // Populate scope rows
+    tokensScopeRows.innerHTML = '';
+    var scopeList = scopes && scopes.length ? scopes : [];
+    for (var i = 0; i < scopeList.length; i++) {
+      addScopeRow(scopeList[i]);
+    }
+    updateScopePreview();
+  }
+
+  function closeScopePanel() {
+    activeScopeId = null;
+    tokensScopePanel.style.display = 'none';
+  }
+
+  function addScopeRow(value) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:6px;';
+    var inp = document.createElement('input');
+    inp.className = 'input';
+    inp.type = 'text';
+    inp.value = value || '';
+    inp.placeholder = 'server:tool_pattern (e.g. cortex:* or *:*)';
+    inp.style.flex = '1';
+    inp.addEventListener('input', updateScopePreview);
+    var del = document.createElement('button');
+    del.className = 'btn btn-ghost btn-sm';
+    del.style.color = 'var(--danger-fg)';
+    del.textContent = '\u00d7';
+    del.addEventListener('click', function() {
+      tokensScopeRows.removeChild(row);
+      updateScopePreview();
+    });
+    row.appendChild(inp);
+    row.appendChild(del);
+    tokensScopeRows.appendChild(row);
+  }
+
+  function getScopeValues() {
+    var inputs = tokensScopeRows.querySelectorAll('input');
+    var scopes = [];
+    for (var i = 0; i < inputs.length; i++) {
+      var v = inputs[i].value.trim();
+      if (v) scopes.push(v);
+    }
+    return scopes;
+  }
+
+  function scopeMatchesTool(scopes, serverName, toolName) {
+    if (!scopes || scopes.length === 0) return true; // no scopes = unrestricted
+    for (var i = 0; i < scopes.length; i++) {
+      var parts = scopes[i].split(':');
+      if (parts.length < 2) continue;
+      var serverPat = parts[0];
+      var toolPat   = parts.slice(1).join(':');
+      var serverRe  = new RegExp('^' + serverPat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+      var toolRe    = new RegExp('^' + toolPat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+      if (serverRe.test(serverName) && toolRe.test(toolName)) return true;
+    }
+    return false;
+  }
+
+  function updateScopePreview() {
+    var scopes = getScopeValues();
+    if (!allToolsCache) {
+      // Lazy-load tools
+      tokXHR('GET', '/api/tools', null, function(data) {
+        allToolsCache = data || [];
+        renderScopePreview(scopes);
+      }, function() {
+        tokensScopePreview.innerHTML = '<span style="color:var(--text-muted);">Could not load tools list</span>';
+      });
+    } else {
+      renderScopePreview(scopes);
+    }
+  }
+
+  function renderScopePreview(scopes) {
+    if (!allToolsCache || allToolsCache.length === 0) {
+      tokensScopePreview.innerHTML = '<span style="color:var(--text-muted);">No tools registered</span>';
+      return;
+    }
+    var matched = [];
+    for (var i = 0; i < allToolsCache.length; i++) {
+      var tool = allToolsCache[i];
+      var server = tool.server || '';
+      var name   = tool.name || '';
+      if (scopeMatchesTool(scopes, server, name)) {
+        matched.push(escapeHtml(server + ':' + name));
+      }
+    }
+    if (matched.length === 0) {
+      tokensScopePreview.innerHTML = '<span style="color:var(--text-muted);">No matching tools</span>';
+    } else {
+      tokensScopePreview.innerHTML = matched.map(function(t) {
+        return '<div style="padding:2px 0; color:var(--success-fg);">' + t + '</div>';
+      }).join('');
+    }
+  }
+
+  if (document.getElementById('tokens-scope-add-row')) {
+    document.getElementById('tokens-scope-add-row').addEventListener('click', function() {
+      addScopeRow('');
+      updateScopePreview();
+    });
+  }
+
+  if (document.getElementById('tokens-scope-save')) {
+    document.getElementById('tokens-scope-save').addEventListener('click', function() {
+      if (activeScopeId === null) return;
+      var scopes = getScopeValues();
+      tokXHR('PUT', '/api/tokens/' + activeScopeId + '/scopes', { scopes: scopes }, function() {
+        DS.toast('Scopes updated', 'success');
+        closeScopePanel();
+        loadTokens();
+      }, function(status) {
+        DS.toast('Failed to update scopes (' + status + ')', 'error');
+      });
+    });
+  }
+
+  if (document.getElementById('tokens-scope-close')) {
+    document.getElementById('tokens-scope-close').addEventListener('click', closeScopePanel);
+  }
+
+  /* ------------------------------------------------------------------
+     Create Token flow
+     ------------------------------------------------------------------ */
+  function openCreateTokenDialog() {
+    var body = '<div style="display:flex; flex-direction:column; gap:12px;">'
+      + '<div class="input-group">'
+      +   '<label class="input-label" for="tok-create-name">Name <span style="color:var(--danger-fg)">*</span></label>'
+      +   '<input class="input" type="text" id="tok-create-name" placeholder="e.g. CI runner" style="width:100%;">'
+      +   '<div id="tok-create-name-err" style="display:none; color:var(--danger-fg); font-size:var(--font-size-sm); margin-top:4px;">Name is required</div>'
+      + '</div>'
+      + '<div class="input-group">'
+      +   '<label class="input-label" for="tok-create-rate">Rate limit (requests / minute)</label>'
+      +   '<input class="input" type="number" id="tok-create-rate" value="60" min="0" style="width:100%;">'
+      + '</div>'
+      + '<div class="input-group">'
+      +   '<label class="input-label" for="tok-create-scopes">Initial scopes (one per line)</label>'
+      +   '<textarea class="input" id="tok-create-scopes" rows="4" placeholder="server:tool_pattern&#10;*:*" style="width:100%; resize:vertical; font-family:var(--font-mono); font-size:var(--font-size-sm);"></textarea>'
+      + '</div>'
+      + '</div>';
+
+    DS.modal('Create Token', body, [
+      { label: 'Cancel', value: 'cancel', className: 'btn-default' },
+      { label: 'Create', value: 'create', className: 'btn-primary' }
+    ]).then(function(val) {
+      if (val !== 'create') return;
+      var nameEl  = document.getElementById('tok-create-name');
+      var rateEl  = document.getElementById('tok-create-rate');
+      var scopeEl = document.getElementById('tok-create-scopes');
+      var errEl   = document.getElementById('tok-create-name-err');
+      var name    = nameEl ? nameEl.value.trim() : '';
+      if (!name) {
+        if (errEl) errEl.style.display = '';
+        // Re-open the dialog since user needs to fix it
+        DS.toast('Name is required', 'error');
+        return;
+      }
+      var rateLimit = rateEl ? (parseInt(rateEl.value, 10) || 60) : 60;
+      var scopeLines = scopeEl ? scopeEl.value.split('\n') : [];
+      var scopes = [];
+      for (var i = 0; i < scopeLines.length; i++) {
+        var s = scopeLines[i].trim();
+        if (s) scopes.push(s);
+      }
+
+      tokXHR('POST', '/api/tokens', { name: name, rate_limit_per_minute: rateLimit, scopes: scopes }, function(data) {
+        if (!data || !data.token) {
+          DS.toast('Token created (no plaintext returned)', 'info');
+          loadTokens();
+          return;
+        }
+        showTokenOnceDialog(data.token, data.name || name, function() {
+          loadTokens();
+        });
+      }, function(status) {
+        DS.toast('Failed to create token (' + status + ')', 'error');
+      });
+    });
+  }
+
+  function showTokenOnceDialog(plaintext, tokenName, onClose) {
+    var escapedToken = escapeHtml(plaintext);
+    var body = '<div style="display:flex; flex-direction:column; gap:12px;">'
+      + '<div style="background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m); padding:10px; font-size:var(--font-size-sm); color:var(--warning-fg);">'
+      +   '&#9888; This token will not be shown again. Copy it now.'
+      + '</div>'
+      + '<div style="font-size:var(--font-size-sm); color:var(--text-muted);">Token: <strong style="color:var(--text-primary);">' + escapeHtml(tokenName) + '</strong></div>'
+      + '<div style="display:flex; align-items:center; gap:8px;">'
+      +   '<code id="tok-plaintext-display" style="flex:1; background:var(--bg-inset); border:1px solid var(--border-default); border-radius:var(--radius-m); padding:8px 12px; font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--accent-fg); word-break:break-all;">' + escapedToken + '</code>'
+      +   '<button class="btn btn-copy btn-sm" id="tok-copy-btn">Copy</button>'
+      + '</div>'
+      + '</div>';
+
+    DS.modal('Token Created', body, [
+      { label: 'Done (token will not be shown again)', value: 'done', className: 'btn-primary' }
+    ]).then(function() {
+      // Clear the plaintext variable — do not persist beyond this dialog
+      plaintext = null;
+      if (onClose) onClose();
+    });
+
+    // Wire up copy button (DS.modal renders into DOM, so we can grab it after next tick)
+    setTimeout(function() {
+      var copyBtn = document.getElementById('tok-copy-btn');
+      if (copyBtn) {
+        copyBtn.addEventListener('click', function() {
+          var dispEl = document.getElementById('tok-plaintext-display');
+          var text = dispEl ? dispEl.textContent : '';
+          tokCopyText(text, copyBtn);
+        });
+      }
+    }, 50);
+  }
+
+  /* ------------------------------------------------------------------
+     Button wiring
+     ------------------------------------------------------------------ */
+  if (document.getElementById('tokens-create-btn')) {
+    document.getElementById('tokens-create-btn').addEventListener('click', openCreateTokenDialog);
+  }
+  if (document.getElementById('tokens-empty-create-btn')) {
+    document.getElementById('tokens-empty-create-btn').addEventListener('click', openCreateTokenDialog);
+  }
+
+  /* ------------------------------------------------------------------
+     Route integration — load tokens when tab becomes active
+     ------------------------------------------------------------------ */
+  var origTokensNavigateRoute = navigateRoute;
+  navigateRoute = function(route) {
+    origTokensNavigateRoute(route);
+    if (route === 'tokens' && !tokensLoaded) {
+      loadTokens();
+    }
+  };
 
   /* ======================================================================
      Init
