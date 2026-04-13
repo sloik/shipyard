@@ -2,7 +2,7 @@
 id: SPEC-008
 priority: 8
 type: feature
-status: draft
+status: done
 after: [SPEC-004]
 created: 2026-04-06
 ---
@@ -105,16 +105,16 @@ function latencyColor(ms) {
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `GET /api/profiling/summary` returns aggregate stats for the specified time range
-- [ ] AC-2: Summary includes deltas from the previous equivalent period
-- [ ] AC-3: `GET /api/profiling/tools` returns per-tool stats with min/avg/P50/P95/max
-- [ ] AC-4: Tool stats are sortable by any numeric column
-- [ ] AC-5: Server filter limits stats to traffic from a specific server
-- [ ] AC-6: Latency values in the UI use semantic colors (green/yellow/red)
-- [ ] AC-7: Stats cards show trend arrows (up/down) alongside deltas
-- [ ] AC-8: Color legend is visible below stats cards
-- [ ] AC-9: Empty state shown when no traffic exists in the selected range
-- [ ] AC-10: All tests pass (`go test ./...`)
+- [x] AC-1: `GET /api/profiling/summary` returns aggregate stats for the specified time range
+- [x] AC-2: Summary includes deltas from the previous equivalent period
+- [x] AC-3: `GET /api/profiling/tools` returns per-tool stats with min/avg/P50/P95/max
+- [x] AC-4: Tool stats are sortable by any numeric column
+- [x] AC-5: Server filter limits stats to traffic from a specific server
+- [x] AC-6: Latency values in the UI use semantic colors (green/yellow/red)
+- [x] AC-7: Stats cards show trend arrows (up/down) alongside deltas
+- [x] AC-8: Color legend is visible below stats cards
+- [x] AC-9: Empty state shown when no traffic exists in the selected range
+- [x] AC-10: All tests pass (`go test ./...`)
 
 ## Out of Scope
 

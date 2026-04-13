@@ -2,7 +2,7 @@
 id: SPEC-009
 priority: 9
 type: feature
-status: draft
+status: done
 after: [SPEC-004]
 created: 2026-04-06
 ---
@@ -174,18 +174,18 @@ GET    /api/schema/unacknowledged-count  → handleSchemaUnackCount
 
 ## Acceptance Criteria
 
-- [ ] AC-1: On startup, Shipyard captures a baseline schema snapshot for each server
-- [ ] AC-2: Polling runs every 60s (configurable via `--schema-poll` flag)
-- [ ] AC-3: Schema changes are detected by comparing `tools/list` responses
-- [ ] AC-4: `schema_changes` table stores the diff with added/removed/modified counts
-- [ ] AC-5: WebSocket broadcasts `schema_change` events when changes are detected
-- [ ] AC-6: Alert banner appears on any tab when unacknowledged changes exist
-- [ ] AC-7: `GET /api/schema/changes` returns change history, filterable by server
-- [ ] AC-8: `GET /api/schema/changes/{id}` returns full diff detail with tool schemas
-- [ ] AC-9: `POST /api/schema/changes/{id}/ack` marks a change as acknowledged
-- [ ] AC-10: UI shows change history sidebar with schema diff detail panel
-- [ ] AC-11: Acknowledging all changes dismisses the global alert banner
-- [ ] AC-12: All tests pass (`go test ./...`)
+- [x] AC-1: On startup, Shipyard captures a baseline schema snapshot for each server
+- [x] AC-2: Polling runs every 60s (configurable via `--schema-poll` flag)
+- [x] AC-3: Schema changes are detected by comparing `tools/list` responses
+- [x] AC-4: `schema_changes` table stores the diff with added/removed/modified counts
+- [x] AC-5: WebSocket broadcasts `schema_change` events when changes are detected
+- [x] AC-6: Alert banner appears on any tab when unacknowledged changes exist
+- [x] AC-7: `GET /api/schema/changes` returns change history, filterable by server
+- [x] AC-8: `GET /api/schema/changes/{id}` returns full diff detail with tool schemas
+- [x] AC-9: `POST /api/schema/changes/{id}/ack` marks a change as acknowledged
+- [x] AC-10: UI shows change history sidebar with schema diff detail panel
+- [x] AC-11: Acknowledging all changes dismisses the global alert banner
+- [x] AC-12: All tests pass (`go test ./...`)
 
 ## Out of Scope
 

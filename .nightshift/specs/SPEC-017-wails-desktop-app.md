@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: feature
-status: draft
+status: done
 after: []
 prior_attempts: []
 created: 2026-04-06
@@ -20,27 +20,27 @@ The current architecture is already 90% there: single Go binary, embedded web UI
 
 ## Requirements
 
-- [ ] R1: Shipyard launches as a native desktop app (double-click `.app` on macOS, `.exe` on Windows)
-- [ ] R2: The dashboard UI appears in a native window, not a browser tab
-- [ ] R3: All existing functionality works identically (timeline, tools, history, servers, sessions, schema detection, profiling)
-- [ ] R4: Real-time updates (WebSocket) work inside the native window
-- [ ] R5: CLI/headless mode preserved via `--headless` flag (no window, HTTP server only — for CI, servers, scripting)
-- [ ] R6: The proxy HTTP API remains accessible on `localhost:<port>` for external MCP clients
-- [ ] R7: Build produces platform-native artifacts (`.app` bundle on macOS, `.exe` on Windows, ELF on Linux)
-- [ ] R8: Binary size stays under 25 MB (currently ~12 MB)
+- [x] R1: Shipyard launches as a native desktop app (double-click `.app` on macOS, `.exe` on Windows)
+- [x] R2: The dashboard UI appears in a native window, not a browser tab
+- [x] R3: All existing functionality works identically (timeline, tools, history, servers, sessions, schema detection, profiling)
+- [x] R4: Real-time updates (WebSocket) work inside the native window
+- [x] R5: CLI/headless mode preserved via `--headless` flag (no window, HTTP server only — for CI, servers, scripting)
+- [x] R6: The proxy HTTP API remains accessible on `localhost:<port>` for external MCP clients
+- [x] R7: Build produces platform-native artifacts (`.app` bundle on macOS, `.exe` on Windows, ELF on Linux)
+- [x] R8: Binary size stays under 25 MB (currently ~12 MB)
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Running `shipyard --config servers.json` opens a native window with the dashboard loaded — no browser needed
-- [ ] AC 2: Running `shipyard --headless --config servers.json` starts the proxy + HTTP server with no window (current behavior preserved)
-- [ ] AC 3: Traffic timeline updates in real-time inside the native window (WebSocket or equivalent)
-- [ ] AC 4: Tool invocation from the native window works (call tool → see response)
-- [ ] AC 5: An external MCP client can connect to `localhost:9417` while the desktop app is running (proxy function unchanged)
-- [ ] AC 6: `wails build` (or equivalent) produces a macOS `.app` bundle that launches on double-click
-- [ ] AC 7: All existing tests pass (216+ tests, no regressions)
-- [ ] AC 8: Binary size is under 25 MB on macOS arm64
-- [ ] AC 9: Window title shows "Shipyard" and version; window is resizable with a minimum size of 900x600
-- [ ] AC 10: App quits cleanly — child MCP processes are terminated, SQLite DB flushed, no orphan processes
+- [x] AC 1: Running `shipyard --config servers.json` opens a native window with the dashboard loaded — no browser needed
+- [x] AC 2: Running `shipyard --headless --config servers.json` starts the proxy + HTTP server with no window (current behavior preserved)
+- [x] AC 3: Traffic timeline updates in real-time inside the native window (WebSocket or equivalent)
+- [x] AC 4: Tool invocation from the native window works (call tool → see response)
+- [x] AC 5: An external MCP client can connect to `localhost:9417` while the desktop app is running (proxy function unchanged)
+- [x] AC 6: `wails build` (or equivalent) produces a macOS `.app` bundle that launches on double-click
+- [x] AC 7: All existing tests pass (216+ tests, no regressions)
+- [x] AC 8: Binary size is under 25 MB on macOS arm64
+- [x] AC 9: Window title shows "Shipyard" and version; window is resizable with a minimum size of 900x600
+- [x] AC 10: App quits cleanly — child MCP processes are terminated, SQLite DB flushed, no orphan processes
 
 ## Context
 
