@@ -524,7 +524,7 @@ func TestSPECBUG028_ToolBrowserLongSchemaFormsUseDedicatedScrollOwner(t *testing
 	}
 
 	responseTag := checkTag("tool-response-section")
-	for _, needle := range []string{"display:flex", "flex:0 0 auto", "min-height:200px", "flex-direction:column"} {
+	for _, needle := range []string{"display:flex", "flex:0 0 300px", "flex-direction:column"} {
 		if !strings.Contains(responseTag, needle) {
 			t.Errorf("SPEC-BUG-028 FAIL: expected %q in #tool-response-section tag: %s", needle, responseTag)
 		}
@@ -1010,8 +1010,8 @@ func TestBUG007_ResponseSectionFillsHeight(t *testing.T) {
 	respTagEnd := strings.Index(content[respIdx:], ">")
 	respTag := content[respTagStart : respIdx+respTagEnd+1]
 
-	if !strings.Contains(respTag, "flex:0 0 auto") {
-		t.Errorf("AC-4 FAIL: #tool-response-section should have flex:0 0 auto (always visible, never collapses), tag: %s", respTag)
+	if !strings.Contains(respTag, "flex:0 0 300px") {
+		t.Errorf("AC-4 FAIL: #tool-response-section should have flex:0 0 300px (fixed default height so JSON scrolls), tag: %s", respTag)
 	}
 }
 
@@ -1046,7 +1046,7 @@ func TestSPECBUG021_ToolBrowserResponsePanelUsesFillHeightLayout(t *testing.T) {
 	}
 
 	responseSectionTag := checkTag("tool-response-section")
-	for _, needle := range []string{"display:flex", "flex-direction:column", "flex:0 0 auto", "min-height:200px"} {
+	for _, needle := range []string{"display:flex", "flex-direction:column", "flex:0 0 300px"} {
 		if !strings.Contains(responseSectionTag, needle) {
 			t.Errorf("SPEC-BUG-021 FAIL: expected %q in #tool-response-section tag: %s", needle, responseSectionTag)
 		}
@@ -1078,7 +1078,7 @@ func TestSPECBUG022_ToolBrowserShowsIdleResponseStateOnSelection(t *testing.T) {
 	content := string(html)
 
 	for _, needle := range []string{
-		`id="tool-response-section" style="display:flex; flex:0 0 auto; min-height:200px; flex-direction:column; padding:0 24px 24px 24px;"`,
+		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; padding:0 24px 24px 24px;"`,
 		`id="tool-response-status" class="badge" style="display:none;"`,
 		`id="tool-response-latency" class="pill" style="display:none;"`,
 		`id="tool-response-idle"`,
@@ -1179,7 +1179,7 @@ func TestSPECBUG023_ToolBrowserKeepsStandardDetailLayoutForNormalTools(t *testin
 		`id="tool-detail-server" class="badge badge-neutral"`,
 		`id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);"`,
 		`id="tool-params-section" style="margin-bottom:16px;"`,
-		`id="tool-response-section" style="display:flex; flex:0 0 auto; min-height:200px; flex-direction:column; padding:0 24px 24px 24px;"`,
+		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; padding:0 24px 24px 24px;"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-023 FAIL: expected standard tool detail layout snippet %q", needle)
