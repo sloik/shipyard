@@ -932,7 +932,10 @@
           cls = 'jt-string';       // string value (or key: string)
         }
       }
-      result += '<div class="json-line ' + cls + '">' + escapeHtml(line) + '</div>';
+      result += '<div class="json-line ' + cls + '">'
+              + '<span class="ln">' + (i + 1) + '</span>'
+              + '<span class="lc">' + escapeHtml(line) + '</span>'
+              + '</div>';
     }
     return result;
   }
