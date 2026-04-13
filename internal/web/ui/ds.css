@@ -1607,6 +1607,10 @@ textarea {
   border-color: var(--danger-fg);
 }
 
+.server-card.is-restarting {
+  border-color: var(--warning-fg);
+}
+
 .server-card.is-crashed .server-crash-msg {
   font-size: var(--font-size-sm);
   color: var(--danger-fg);

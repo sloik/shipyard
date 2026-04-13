@@ -1230,3 +1230,64 @@ func TestSPECBUG026_OfflineBannerGatedByCount(t *testing.T) {
 		t.Error("SPEC-BUG-026 FAIL: expected conditional gate 'offlineCount > 0 || restartingCount > 0' proving banner is shown/hidden by count")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-027: Servers view restarting card does not match approved state
+// ---------------------------------------------------------------------------
+
+// TestSPECBUG027_RestartingCardHasIsRestartingClass verifies that renderServerCards()
+// assigns the is-restarting CSS class to a restarting server card (AC3).
+func TestSPECBUG027_RestartingCardHasIsRestartingClass(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "is-restarting") {
+		t.Error("SPEC-BUG-027 FAIL: expected 'is-restarting' class assignment in renderServerCards JS source (AC3)")
+	}
+
+	// Also verify the CSS class exists in ds.css
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	if !strings.Contains(string(css), ".server-card.is-restarting") {
+		t.Error("SPEC-BUG-027 FAIL: expected '.server-card.is-restarting' rule in ds.css (AC3)")
+	}
+}
+
+// TestSPECBUG027_RestartingCardHasPill verifies that renderServerCards() builds
+// the dedicated restarting pill header (not just a footer badge) when the server
+// status is restarting (AC1).
+func TestSPECBUG027_RestartingCardHasPill(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// The restarting pill uses border-radius:100px — the old badge did not
+	if !strings.Contains(content, "border-radius:100px") {
+		t.Error("SPEC-BUG-027 FAIL: expected pill element with 'border-radius:100px' in renderServerCards JS source (AC1)")
+	}
+	// The pill text must be present as inline markup, not just the old badge
+	if !strings.Contains(content, "warning-subtle") {
+		t.Error("SPEC-BUG-027 FAIL: expected warning-subtle background on restarting pill in renderServerCards JS source (AC1)")
+	}
+}
+
+// TestSPECBUG027_RestartingCardHasCenteredBody verifies that renderServerCards()
+// renders the centered waiting body for a restarting server (AC2).
+func TestSPECBUG027_RestartingCardHasCenteredBody(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "Waiting for process to start...") {
+		t.Error("SPEC-BUG-027 FAIL: expected 'Waiting for process to start...' text in renderServerCards JS source (AC2)")
+	}
+}

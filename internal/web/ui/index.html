@@ -2614,6 +2614,7 @@
       var s = servers[i];
       var cardClass = 'server-card';
       if (s.status === 'crashed') cardClass += ' is-crashed';
+      else if (s.status === 'restarting') cardClass += ' is-restarting';
 
       var statusDot = '';
       if (s.status === 'online') statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
@@ -2632,46 +2633,69 @@
 
       html += '<div class="' + cardClass + '" data-server="' + escapeHtml(s.name) + '">';
 
-      // Header: status dot + name + tool count pill
-      html += '<div style="display:flex; align-items:center; gap:8px;">';
-      html += statusDot;
-      html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
-      if (s.tool_count > 0) {
-        html += '<span class="pill">' + s.tool_count + ' tools</span>';
-      }
-      html += '</div>';
+      if (s.status === 'restarting') {
+        // SPEC-BUG-027: dedicated restarting-state card (qFcnB)
+        // Header: warning dot + server name (left) | Restarting pill (right)
+        html += '<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border-muted);">';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        html += '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
+        html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
+        html += '</div>';
+        // 72XWK restarting pill
+        html += '<div style="display:flex; align-items:center; gap:4px; padding:2px 8px; background:var(--warning-subtle); border-radius:100px;">';
+        html += '<span style="display:inline-block; width:10px; height:10px; border:1.5px solid transparent; border-top-color:var(--warning-fg); border-radius:50%; animation:spin 0.8s linear infinite;"></span>';
+        html += '<span style="font-size:var(--font-size-xs); font-weight:600; color:var(--warning-fg);">Restarting...</span>';
+        html += '</div>';
+        html += '</div>';
+        // xdMRZ centered waiting body
+        html += '<div style="display:flex; align-items:center; justify-content:center; gap:8px; padding:16px;">';
+        html += '<span class="spinner">';
+        html += 'Waiting for process to start...';
+        html += '</span>';
+        if (s.restart_count > 0) {
+          html += '<span style="font-size:var(--font-size-xs); color:var(--text-muted);">(' + s.restart_count + ' restart' + (s.restart_count !== 1 ? 's' : '') + ')</span>';
+        }
+        html += '</div>';
+      } else {
+        // Header: status dot + name + tool count pill
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        html += statusDot;
+        html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
+        if (s.tool_count > 0) {
+          html += '<span class="pill">' + s.tool_count + ' tools</span>';
+        }
+        html += '</div>';
 
-      // Command line
-      if (s.command) {
-        html += '<div style="font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-secondary); background:var(--bg-inset); padding:6px 8px; border-radius:var(--radius-s); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">';
-        html += escapeHtml(s.command);
+        // Command line
+        if (s.command) {
+          html += '<div style="font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-secondary); background:var(--bg-inset); padding:6px 8px; border-radius:var(--radius-s); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">';
+          html += escapeHtml(s.command);
+          html += '</div>';
+        }
+
+        // Error banner for crashed
+        if (s.status === 'crashed' && s.error_message) {
+          html += '<div class="server-crash-msg" style="padding:6px 8px; background:var(--danger-subtle); border-radius:var(--radius-s);">';
+          html += escapeHtml(s.error_message);
+          html += '</div>';
+        }
+
+        // Stats row
+        html += '<div class="server-stats">';
+        if (uptimeStr) html += '<span>Uptime: ' + uptimeStr + '</span>';
+        if (s.restart_count > 0) html += '<span>Restarts: ' + s.restart_count + '</span>';
+        html += '</div>';
+
+        // Actions
+        html += '<div class="server-actions">';
+        if (s.status === 'online') {
+          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')">Stop</button>';
+          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
+        } else if (s.status === 'crashed' || s.status === 'stopped') {
+          html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
+        }
         html += '</div>';
       }
-
-      // Error banner for crashed
-      if (s.status === 'crashed' && s.error_message) {
-        html += '<div class="server-crash-msg" style="padding:6px 8px; background:var(--danger-subtle); border-radius:var(--radius-s);">';
-        html += escapeHtml(s.error_message);
-        html += '</div>';
-      }
-
-      // Stats row
-      html += '<div class="server-stats">';
-      if (uptimeStr) html += '<span>Uptime: ' + uptimeStr + '</span>';
-      if (s.restart_count > 0) html += '<span>Restarts: ' + s.restart_count + '</span>';
-      html += '</div>';
-
-      // Actions
-      html += '<div class="server-actions">';
-      if (s.status === 'online') {
-        html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')">Stop</button>';
-        html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
-      } else if (s.status === 'crashed' || s.status === 'stopped') {
-        html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">Restart</button>';
-      } else if (s.status === 'restarting') {
-        html += '<span class="badge badge-warning">Restarting...</span>';
-      }
-      html += '</div>';
 
       html += '</div>';
     }
