@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-BUG-031]
 created: 2026-04-13
 ---
@@ -53,40 +53,40 @@ On window resize: re-clamp stored height to new container bounds.
 
 ## Requirements
 
-- [ ] R1: A `.resize-handle` element appears between the form section and the
+- [x] R1: A `.resize-handle` element appears between the form section and the
   response section in the Tool Browser.
-- [ ] R2: Dragging the handle vertically adjusts the height of the response
+- [x] R2: Dragging the handle vertically adjusts the height of the response
   section in real time.
-- [ ] R3: The response section height is clamped to `[150px, container - 150px]`
+- [x] R3: The response section height is clamped to `[150px, container - 150px]`
   so neither section disappears entirely.
-- [ ] R4: The split persists across page reloads via `localStorage`.
-- [ ] R5: On window resize, the stored height is re-clamped to new bounds.
-- [ ] R6: The handle uses the existing `.resize-handle` class from `ds.css` —
+- [x] R4: The split persists across page reloads via `localStorage`.
+- [x] R5: On window resize, the stored height is re-clamped to new bounds.
+- [x] R6: The handle uses the existing `.resize-handle` class from `ds.css` —
   no new CSS needed.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A `.resize-handle` element exists between `#tool-detail-scroll` and
+- [x] AC 1: A `.resize-handle` element exists between `#tool-detail-scroll` and
   `#tool-response-section` in `index.html`.
-- [ ] AC 2: Dragging the handle down shrinks the response section; dragging up
+- [x] AC 2: Dragging the handle down shrinks the response section; dragging up
   grows it.
-- [ ] AC 3: Response section height is never less than 150px or more than
+- [x] AC 3: Response section height is never less than 150px or more than
   (container height − 150px).
-- [ ] AC 4: After dragging and reloading, the response section opens at the
+- [x] AC 4: After dragging and reloading, the response section opens at the
   saved height.
-- [ ] AC 5: The localStorage key is `shipyard_tool_response_height`.
-- [ ] AC 6: On `window.addEventListener('resize', ...)`, the stored height is
+- [x] AC 5: The localStorage key is `shipyard_tool_response_height`.
+- [x] AC 6: On `window.addEventListener('resize', ...)`, the stored height is
   re-clamped.
-- [ ] AC 7: The handle is visible and has `cursor:row-resize` (from
+- [x] AC 7: The handle is visible and has `cursor:row-resize` (from
   `.resize-handle` in ds.css — no new CSS required).
-- [ ] AC 8: No inline style is added to the handle element itself — styling
+- [x] AC 8: No inline style is added to the handle element itself — styling
   comes entirely from the `.resize-handle` class.
-- [ ] AC 9: Layout tests assert the presence and position of the handle element
+- [x] AC 9: Layout tests assert the presence and position of the handle element
   (between scroll section and response section in DOM order).
-- [ ] AC 10: `.shipyard-dev/verify-spec-032.sh` exits 0.
-- [ ] AC 11: `go test ./...` passes.
-- [ ] AC 12: `go vet ./...` passes.
-- [ ] AC 13: `go build ./...` passes.
+- [x] AC 10: `.shipyard-dev/verify-spec-032.sh` exits 0.
+- [x] AC 11: `go test ./...` passes.
+- [x] AC 12: `go vet ./...` passes.
+- [x] AC 13: `go build ./...` passes.
 
 ## Verification Script
 
