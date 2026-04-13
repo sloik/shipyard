@@ -347,3 +347,70 @@ func TestLoadConfig_ReadErrorForDirectory(t *testing.T) {
 		t.Fatalf("expected read config file error, got %q", got)
 	}
 }
+
+// AC-20: Config supports bootstrap_token via env var expansion.
+func TestConfigUnmarshal_AuthBlock_EnvVarExpansion(t *testing.T) {
+	t.Setenv("MCP_RELAY_BOOTSTRAP_TOKEN", "secret-from-env")
+
+	data := `{
+		"servers": {"s": {"command": "echo"}},
+		"auth": {
+			"enabled": true,
+			"bootstrap_token": "${MCP_RELAY_BOOTSTRAP_TOKEN}"
+		}
+	}`
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !cfg.Auth.Enabled {
+		t.Error("expected auth.enabled to be true")
+	}
+	if cfg.Auth.BootstrapToken != "secret-from-env" {
+		t.Errorf("expected bootstrap token 'secret-from-env', got %q", cfg.Auth.BootstrapToken)
+	}
+}
+
+func TestConfigUnmarshal_AuthBlock_Disabled(t *testing.T) {
+	data := `{
+		"servers": {"s": {"command": "echo"}},
+		"auth": {"enabled": false}
+	}`
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.Auth.Enabled {
+		t.Error("expected auth.enabled to be false")
+	}
+}
+
+func TestExpandEnvVars(t *testing.T) {
+	t.Setenv("TEST_VAR_A", "hello")
+	t.Setenv("TEST_VAR_B", "world")
+
+	got := expandEnvVars("${TEST_VAR_A}-${TEST_VAR_B}")
+	want := "hello-world"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExpandEnvVars_MissingVar(t *testing.T) {
+	// A missing env var expands to "" (standard shell behaviour)
+	got := expandEnvVars("prefix-${DEFINITELY_UNSET_VAR_XYZ}")
+	if got != "prefix-" {
+		t.Errorf("got %q, want %q", got, "prefix-")
+	}
+}
+
+func TestExpandEnvVars_NoExpansion(t *testing.T) {
+	got := expandEnvVars("no-vars-here")
+	if got != "no-vars-here" {
+		t.Errorf("got %q, want %q", got, "no-vars-here")
+	}
+}

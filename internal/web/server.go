@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
 )
@@ -51,6 +53,7 @@ type ProxyManager interface {
 	StartRecording(server string, sessionID int64)
 	StopRecording(server string)
 	ActiveSessionID(server string) int64
+	ServersForAuth() []string
 }
 
 // ServerInfo describes a running server for the API.
@@ -77,11 +80,14 @@ type shipyardTool struct {
 
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
-	port    int
-	store   *capture.Store
-	hub     *Hub
-	proxies ProxyManager
-	gateway *gateway.Store
+	port       int
+	store      *capture.Store
+	hub        *Hub
+	proxies    ProxyManager
+	gateway    *gateway.Store
+	authStore  *auth.Store
+	authLimiter *auth.RateLimiter
+	authEnabled bool
 }
 
 // NewServer creates a new web server.
@@ -96,6 +102,13 @@ func (s *Server) SetProxyManager(pm ProxyManager) {
 
 func (s *Server) SetGatewayPolicyStore(gs *gateway.Store) {
 	s.gateway = gs
+}
+
+// SetAuthStore enables bearer token authentication with the given store.
+func (s *Server) SetAuthStore(as *auth.Store, limiter *auth.RateLimiter, enabled bool) {
+	s.authStore = as
+	s.authLimiter = limiter
+	s.authEnabled = enabled
 }
 
 // Start runs the HTTP server. It blocks until the context is cancelled.
@@ -141,6 +154,24 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/profiling/summary", s.handleProfilingSummary)
 	mux.HandleFunc("GET /api/profiling/tools", s.handleProfilingTools)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
+
+	// Token admin API (auth required via bootstrap or admin token)
+	mux.HandleFunc("POST /api/tokens", s.handleTokenCreate)
+	mux.HandleFunc("GET /api/tokens", s.handleTokenList)
+	mux.HandleFunc("DELETE /api/tokens/{id}", s.handleTokenDelete)
+	mux.HandleFunc("PUT /api/tokens/{id}/scopes", s.handleTokenUpdateScopes)
+	mux.HandleFunc("GET /api/tokens/{id}/stats", s.handleTokenStats)
+
+	// MCP proxy endpoint — auth-gated when auth.enabled: true
+	if s.authEnabled && s.authStore != nil {
+		mcpH := auth.NewMCPHandler(s.authStore, s.authLimiter, s.proxies)
+		mux.Handle("POST /mcp", mcpH)
+		mux.Handle("POST /mcp/{token}", mcpH)
+	} else {
+		// Auth disabled: passthrough MCP proxy (no auth check)
+		mux.HandleFunc("POST /mcp", s.handleMCPPassthrough)
+		mux.Handle("POST /mcp/{token}", http.HandlerFunc(s.handleMCPPassthrough))
+	}
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
@@ -1155,4 +1186,285 @@ func (s *Server) handleSchemaUnackCount(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
+
+// --- Token Admin API ---
+
+// requireAdminAuth checks that the request carries a valid bootstrap token or admin token.
+// Returns false and writes an error response if auth fails.
+func (s *Server) requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.authStore == nil {
+		// Auth not configured — allow
+		return true
+	}
+	v := r.Header.Get("Authorization")
+	if !strings.HasPrefix(v, "Bearer ") {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	tok := strings.TrimPrefix(v, "Bearer ")
+
+	// Check bootstrap token first
+	if s.authStore.AuthenticateBootstrap(tok) {
+		return true
+	}
+	// Then check admin token (any valid stored token can manage tokens)
+	_, err := s.authStore.Authenticate(tok)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if s.authStore == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Name           string   `json:"name"`
+		Scopes         []string `json:"scopes"`
+		RateLimitPerMin int     `json:"rate_limit_per_minute"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		http.Error(w, "name required", http.StatusBadRequest)
+		return
+	}
+	if req.Scopes == nil {
+		req.Scopes = []string{}
+	}
+
+	plaintext, id, err := s.authStore.GenerateToken(req.Name, req.RateLimitPerMin, req.Scopes)
+	if err != nil {
+		slog.Error("generate token", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":    id,
+		"token": plaintext, // shown exactly once
+		"name":  req.Name,
+	})
+}
+
+func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if s.authStore == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	tokens, err := s.authStore.ListTokens()
+	if err != nil {
+		slog.Error("list tokens", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if tokens == nil {
+		tokens = []auth.TokenRecord{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tokens)
+}
+
+func (s *Server) handleTokenDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if s.authStore == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.authStore.DeleteToken(id); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "token not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("delete token", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleTokenUpdateScopes(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if s.authStore == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Scopes == nil {
+		req.Scopes = []string{}
+	}
+
+	if err := s.authStore.UpdateScopes(id, req.Scopes); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "token not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("update scopes", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
+func (s *Server) handleTokenStats(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if s.authStore == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	stats, err := s.authStore.GetStats(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "token not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("get token stats", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// handleMCPPassthrough forwards MCP JSON-RPC to the appropriate child server without auth.
+// Used when auth.enabled is false. Expects tool names in "server__tool" format for tools/call.
+func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
+	if s.proxies == nil {
+		writeJSONRPCError(w, nil, -32603, "no proxy manager configured")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSONRPCError(w, nil, -32700, "failed to read request body")
+		return
+	}
+
+	var rpcReq struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(body, &rpcReq); err != nil {
+		writeJSONRPCError(w, nil, -32700, "parse error")
+		return
+	}
+
+	// For passthrough we forward to the server named in params, or "default".
+	serverName := extractPassthroughServer(rpcReq.Params)
+	if serverName == "" {
+		// Try to find any online server
+		names := s.proxies.ServersForAuth()
+		if len(names) == 0 {
+			writeJSONRPCError(w, rpcReq.ID, -32603, "no servers available")
+			return
+		}
+		serverName = names[0]
+	}
+
+	result, err := s.proxies.SendRequest(r.Context(), serverName, rpcReq.Method, rpcReq.Params)
+	if err != nil {
+		writeJSONRPCError(w, rpcReq.ID, -32603, fmt.Sprintf("upstream error: %v", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
+}
+
+func extractPassthroughServer(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		Server string `json:"server"`
+	}
+	_ = json.Unmarshal(params, &p)
+	return p.Server
+}
+
+func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+		},
+	}
+	if id != nil {
+		resp["id"] = json.RawMessage(id)
+	} else {
+		resp["id"] = nil
+	}
+	json.NewEncoder(w).Encode(resp)
 }

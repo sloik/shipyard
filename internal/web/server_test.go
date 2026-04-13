@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
 )
@@ -67,6 +68,14 @@ func (m *mockProxyManager) ActiveSessionID(server string) int64 {
 		return m.activeSessions[server]
 	}
 	return 0
+}
+
+func (m *mockProxyManager) ServersForAuth() []string {
+	names := make([]string, 0, len(m.servers))
+	for _, s := range m.servers {
+		names = append(names, s.Name)
+	}
+	return names
 }
 
 // newTestServer creates a Server with a real Store for testing HTTP handlers.
@@ -2138,5 +2147,223 @@ func TestHandleSchemaUnackCount_WithChanges(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &result)
 	if result["count"] != 1 {
 		t.Fatalf("expected count 1, got %d", result["count"])
+	}
+}
+
+// --- Token Admin API ---
+
+func newTestServerWithAuth(t *testing.T) (*Server, *auth.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := capture.NewStore(
+		filepath.Join(dir, "test.db"),
+		filepath.Join(dir, "test.jsonl"),
+	)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authStore, err := auth.NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewAuthStore: %v", err)
+	}
+	t.Cleanup(func() { authStore.Close() })
+
+	hub := NewHub()
+	srv := NewServer(9999, store, hub)
+	srv.SetAuthStore(authStore, auth.NewRateLimiter(), true)
+	return srv, authStore
+}
+
+// AC-9: POST /api/tokens with bootstrap token creates new token and returns plaintext once.
+func TestHandleTokenCreate_WithBootstrapToken(t *testing.T) {
+	srv, _ := newTestServerWithAuth(t)
+
+	body := `{"name":"admin-token","scopes":["*:*"],"rate_limit_per_minute":0}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tokens", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bootstrap")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleTokenCreate(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&result)
+	if _, hasToken := result["token"]; !hasToken {
+		t.Error("expected token in response (AC-9)")
+	}
+	if _, hasID := result["id"]; !hasID {
+		t.Error("expected id in response")
+	}
+	tok, _ := result["token"].(string)
+	if !strings.HasPrefix(tok, "rl_") {
+		t.Errorf("expected rl_ prefix, got %q", tok)
+	}
+}
+
+// AC-11: GET /api/tokens returns metadata but never token value.
+func TestHandleTokenList_NoPlaintertext(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	// Create a token first
+	plaintext, _, err := authStore.GenerateToken("test", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var tokens []map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&tokens)
+	if len(tokens) == 0 {
+		t.Fatal("expected at least one token")
+	}
+
+	// Verify no plaintext
+	for _, tok := range tokens {
+		if _, hasToken := tok["token"]; hasToken {
+			t.Error("token value must not be in list response (AC-11)")
+		}
+		if _, hasHash := tok["hash"]; hasHash {
+			t.Error("hash must not be in list response (AC-16)")
+		}
+		if _, hasName := tok["name"]; !hasName {
+			t.Error("name should be in list response")
+		}
+	}
+}
+
+// AC-12: DELETE /api/tokens/{id} revokes token.
+func TestHandleTokenDelete_RevokesToken(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	plaintext, id, err := authStore.GenerateToken("to-delete", 0, nil)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/tokens/%d", id), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", id))
+	req.Header.Set("Authorization", "Bearer "+plaintext) // use own token to delete itself
+	w := httptest.NewRecorder()
+	srv.handleTokenDelete(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+
+	// Token must no longer authenticate
+	_, err = authStore.Authenticate(plaintext)
+	if err == nil {
+		t.Fatal("deleted token should no longer authenticate (AC-12)")
+	}
+}
+
+// AC-18: PUT /api/tokens/{id}/scopes updates scopes.
+func TestHandleTokenUpdateScopes(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	plaintext, id, err := authStore.GenerateToken("scoped", 0, []string{"old:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	body := `{"scopes":["new:read","new:write"]}`
+	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/tokens/%d/scopes", id), strings.NewReader(body))
+	req.SetPathValue("id", fmt.Sprintf("%d", id))
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleTokenUpdateScopes(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify scopes were updated (AC-18)
+	rec, err := authStore.Authenticate(plaintext)
+	if err != nil {
+		t.Fatalf("Authenticate after scope update: %v", err)
+	}
+	if len(rec.Scopes) != 2 {
+		t.Fatalf("expected 2 scopes, got %v", rec.Scopes)
+	}
+}
+
+// AC-19: GET /api/tokens/{id}/stats returns call count and last-used timestamp.
+func TestHandleTokenStats(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	// Create an admin token first, then use it to call stats
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+
+	_, id, err := authStore.GenerateToken("stats-tok", 0, nil)
+	if err != nil {
+		t.Fatalf("GenerateToken stats-tok: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tokens/%d/stats", id), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", id))
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var stats map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&stats)
+	if _, hasID := stats["id"]; !hasID {
+		t.Error("stats should contain id (AC-19)")
+	}
+}
+
+// AC-15: Dashboard endpoints work without bearer token even when auth.enabled.
+func TestHandleServers_NoAuthRequired(t *testing.T) {
+	srv, _ := newTestServerWithAuth(t)
+	// No auth header — should still work
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 without auth on /api/servers, got %d", w.Code)
+	}
+}
+
+// AC-2: With auth.enabled=false, POST /mcp succeeds.
+func TestHandleMCPPassthrough_NoAuth(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetAuthStore(nil, nil, false)
+
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "test", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`), nil
+		},
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"server":"test"}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }

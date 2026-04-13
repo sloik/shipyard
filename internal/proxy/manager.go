@@ -235,6 +235,17 @@ func (m *Manager) StopServer(name string) error {
 	return nil
 }
 
+// ServersForAuth returns the names of all registered servers (used by auth middleware).
+func (m *Manager) ServersForAuth() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.proxies))
+	for name := range m.proxies {
+		names = append(names, name)
+	}
+	return names
+}
+
 // ServerStatus returns the status of a specific server.
 func (m *Manager) ServerStatus(name string) string {
 	m.mu.RLock()

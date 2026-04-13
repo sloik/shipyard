@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
 	"github.com/sloik/shipyard/internal/proxy"
@@ -111,6 +113,7 @@ type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
 	ServerOrder []string                `json:"-"`
 	Web         WebConfig               `json:"web"`
+	Auth        AuthConfig              `json:"auth"`
 }
 
 type ServerConfig struct {
@@ -124,16 +127,38 @@ type WebConfig struct {
 	Port int `json:"port"`
 }
 
+// AuthConfig holds the optional auth block from servers.json.
+type AuthConfig struct {
+	Enabled        bool   `json:"enabled"`
+	BootstrapToken string `json:"bootstrap_token"`
+}
+
+// envVarRe matches ${VAR_NAME} patterns.
+var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnvVars replaces ${VAR_NAME} with os.Getenv(VAR_NAME) in s.
+func expandEnvVars(s string) string {
+	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
+		name := match[2 : len(match)-1] // strip ${ and }
+		return os.Getenv(name)
+	})
+}
+
 func (c *Config) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Servers json.RawMessage `json:"servers"`
 		Web     WebConfig       `json:"web"`
+		Auth    AuthConfig      `json:"auth"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 
 	c.Web = raw.Web
+	// Expand env vars in auth fields
+	c.Auth = raw.Auth
+	c.Auth.BootstrapToken = expandEnvVars(raw.Auth.BootstrapToken)
+
 	if len(raw.Servers) == 0 {
 		return nil
 	}
@@ -205,6 +230,21 @@ func main() {
 		exitFn(1)
 		return
 	}
+}
+
+// setupAuth initialises the auth store if auth.enabled is true in the config.
+// Returns (nil, nil) when auth is disabled — callers should treat nil store as "no auth".
+func setupAuth(dir string, authCfg AuthConfig) (*auth.Store, *auth.RateLimiter, error) {
+	if !authCfg.Enabled {
+		return nil, nil, nil
+	}
+	authDBPath := filepath.Join(dir, "auth.db")
+	store, err := auth.NewStore(authDBPath, authCfg.BootstrapToken)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init auth store: %w", err)
+	}
+	limiter := auth.NewRateLimiter()
+	return store, limiter, nil
 }
 
 func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
@@ -305,6 +345,7 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
+	srv.SetAuthStore(nil, nil, false) // auth not configured in wrap mode
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {
@@ -382,6 +423,18 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 		return
 	}
 
+	// Initialize auth if enabled
+	authStore, authLimiter, err := setupAuth(dir, cfg.Auth)
+	if err != nil {
+		slog.Error("failed to initialize auth", "error", err)
+		exitFn(1)
+		return
+	}
+	if authStore != nil {
+		defer authStore.Close()
+		slog.Info("auth enabled", "bootstrap_token_set", cfg.Auth.BootstrapToken != "")
+	}
+
 	// Create proxy manager
 	mgr := proxyNewManager()
 	mgr.SetHub(hub)
@@ -390,6 +443,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
+	srv.SetAuthStore(authStore, authLimiter, cfg.Auth.Enabled)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {
@@ -529,6 +583,7 @@ func runNoServers(port int, headless bool) {
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
+	srv.SetAuthStore(nil, nil, false) // no config file in no-servers mode
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {
