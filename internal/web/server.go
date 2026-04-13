@@ -80,14 +80,15 @@ type shipyardTool struct {
 
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
-	port       int
-	store      *capture.Store
-	hub        *Hub
-	proxies    ProxyManager
-	gateway    *gateway.Store
-	authStore  *auth.Store
-	authLimiter *auth.RateLimiter
-	authEnabled bool
+	port          int
+	store         *capture.Store
+	hub           *Hub
+	proxies       ProxyManager
+	gateway       *gateway.Store
+	authStore     *auth.Store
+	authLimiter   *auth.RateLimiter
+	authEnabled   bool
+	toolLogLevels map[string]map[string]string // server → tool → log_level
 }
 
 // NewServer creates a new web server.
@@ -109,6 +110,11 @@ func (s *Server) SetAuthStore(as *auth.Store, limiter *auth.RateLimiter, enabled
 	s.authStore = as
 	s.authLimiter = limiter
 	s.authEnabled = enabled
+}
+
+// SetToolLogLevels sets per-tool log level overrides for access logging.
+func (s *Server) SetToolLogLevels(levels map[string]map[string]string) {
+	s.toolLogLevels = levels
 }
 
 // Start runs the HTTP server. It blocks until the context is cancelled.
@@ -162,9 +168,17 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("PUT /api/tokens/{id}/scopes", s.handleTokenUpdateScopes)
 	mux.HandleFunc("GET /api/tokens/{id}/stats", s.handleTokenStats)
 
+	// Access log endpoints
+	mux.HandleFunc("GET /api/access-log", s.handleAccessLog)
+	mux.HandleFunc("GET /api/access-log/stats", s.handleAccessLogStats)
+
 	// MCP proxy endpoint — auth-gated when auth.enabled: true
 	if s.authEnabled && s.authStore != nil {
 		mcpH := auth.NewMCPHandler(s.authStore, s.authLimiter, s.proxies)
+		mcpH.SetCaptureStore(s.store)
+		if s.toolLogLevels != nil {
+			mcpH.SetToolLogLevels(s.toolLogLevels)
+		}
 		mux.Handle("POST /mcp", mcpH)
 		mux.Handle("POST /mcp/{token}", mcpH)
 	} else {
@@ -1467,4 +1481,68 @@ func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, mess
 		resp["id"] = nil
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleAccessLog handles GET /api/access-log with optional filters and pagination.
+func (s *Server) handleAccessLog(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "no store configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	q := r.URL.Query()
+	filter := capture.AccessLogFilter{
+		TokenName:  q.Get("token_name"),
+		ServerName: q.Get("server_name"),
+		ToolName:   q.Get("tool_name"),
+		Status:     q.Get("status"),
+	}
+
+	if fromStr := q.Get("from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			filter.From = t
+		}
+	}
+	if toStr := q.Get("to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			filter.To = t
+		}
+	}
+
+	if offsetStr := q.Get("offset"); offsetStr != "" {
+		if v, err := strconv.Atoi(offsetStr); err == nil && v >= 0 {
+			filter.Offset = v
+		}
+	}
+	if limitStr := q.Get("limit"); limitStr != "" {
+		if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+			filter.Limit = v
+		}
+	}
+
+	page, err := s.store.GetAccessLog(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(page)
+}
+
+// handleAccessLogStats handles GET /api/access-log/stats.
+func (s *Server) handleAccessLogStats(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "no store configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	stats, err := s.store.GetAccessLogStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }

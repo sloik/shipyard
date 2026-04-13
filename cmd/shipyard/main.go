@@ -116,11 +116,17 @@ type Config struct {
 	Auth        AuthConfig              `json:"auth"`
 }
 
+// ToolConfig holds per-tool configuration within a server config.
+type ToolConfig struct {
+	LogLevel string `json:"log_level"`
+}
+
 type ServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
-	Cwd     string            `json:"cwd"`
+	Command string                `json:"command"`
+	Args    []string              `json:"args"`
+	Env     map[string]string     `json:"env"`
+	Cwd     string                `json:"cwd"`
+	Tools   map[string]ToolConfig `json:"tools"`
 }
 
 type WebConfig struct {
@@ -440,10 +446,25 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	mgr.SetHub(hub)
 	seedConfiguredServers(cfg, mgr, store, hub)
 
+	// Build per-tool log levels from config
+	toolLogLevels := make(map[string]map[string]string)
+	for serverName, sc := range cfg.Servers {
+		if len(sc.Tools) > 0 {
+			levels := make(map[string]string)
+			for toolName, tc := range sc.Tools {
+				if tc.LogLevel != "" {
+					levels[toolName] = tc.LogLevel
+				}
+			}
+			toolLogLevels[serverName] = levels
+		}
+	}
+
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(authStore, authLimiter, cfg.Auth.Enabled)
+	srv.SetToolLogLevels(toolLogLevels)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {

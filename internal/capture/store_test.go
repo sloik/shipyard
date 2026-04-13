@@ -1776,11 +1776,11 @@ func TestMigration_V0ToV1(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 
-	// Verify user_version is now 1
+	// Verify user_version is now at current schema version
 	var version int
 	s.db.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 1 {
-		t.Fatalf("expected user_version 1 after migration, got %d", version)
+	if version != currentSchemaVersion {
+		t.Fatalf("expected user_version %d after migration, got %d", currentSchemaVersion, version)
 	}
 
 	// Verify session_id column exists on traffic

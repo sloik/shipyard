@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/sloik/shipyard/internal/capture"
 )
 
 // ProxyManager is the interface the MCP handler needs.
@@ -23,14 +25,38 @@ type ProxyManager interface {
 // MCPHandler handles POST /mcp and POST /mcp/{token} requests.
 // It enforces bearer token auth, scope filtering, and rate limiting.
 type MCPHandler struct {
-	store   *Store
-	limiter *RateLimiter
-	proxies ProxyManager
+	store         *Store
+	limiter       *RateLimiter
+	proxies       ProxyManager
+	captureLog    *capture.Store
+	toolLogLevels map[string]map[string]string // server → tool → log_level
 }
 
 // NewMCPHandler creates a new MCPHandler.
 func NewMCPHandler(store *Store, limiter *RateLimiter, proxies ProxyManager) *MCPHandler {
 	return &MCPHandler{store: store, limiter: limiter, proxies: proxies}
+}
+
+// SetCaptureStore sets the capture store used for access logging.
+func (h *MCPHandler) SetCaptureStore(store *capture.Store) {
+	h.captureLog = store
+}
+
+// SetToolLogLevels sets per-tool log level overrides.
+func (h *MCPHandler) SetToolLogLevels(levels map[string]map[string]string) {
+	h.toolLogLevels = levels
+}
+
+// getToolLogLevel returns the log level for the given server/tool combination.
+func (h *MCPHandler) getToolLogLevel(server, tool string) string {
+	if h.toolLogLevels != nil {
+		if serverLevels, ok := h.toolLogLevels[server]; ok {
+			if lvl, ok := serverLevels[tool]; ok {
+				return lvl
+			}
+		}
+	}
+	return "full"
 }
 
 // rpcError writes a JSON-RPC error response.
@@ -252,7 +278,17 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 	// Scope enforcement
 	if len(token.Scopes) > 0 {
 		if !MatchScope(token.Scopes, serverName, toolName) {
-			writeRPCError(w, id, -32001, "Tool not authorized for this token")
+			if h.captureLog != nil {
+				go h.captureLog.RecordAccess(capture.AccessLogEntry{
+					Timestamp:  time.Now(),
+					TokenName:  token.Name,
+					ServerName: serverName,
+					ToolName:   toolName,
+					Status:     "denied",
+					LogLevel:   "full", // always full for denied
+				})
+			}
+			writeRPCError(w, id, -32001, "Tool not permitted by token scope")
 			return
 		}
 	}
@@ -267,7 +303,40 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 		return
 	}
 
+	start := time.Now()
 	result, err := h.proxies.SendRequest(r.Context(), serverName, "tools/call", json.RawMessage(downstreamParams))
+	latMs := time.Since(start).Milliseconds()
+
+	if h.captureLog != nil {
+		entry := capture.AccessLogEntry{
+			Timestamp:  time.Now(),
+			TokenName:  token.Name,
+			ServerName: serverName,
+			ToolName:   toolName,
+			LatencyMs:  &latMs,
+			LogLevel:   h.getToolLogLevel(serverName, toolName),
+		}
+		if err != nil {
+			entry.Status = "error"
+			entry.ErrorMsg = err.Error()
+		} else {
+			// Check if downstream returned an error
+			var ds struct {
+				Error json.RawMessage `json:"error"`
+			}
+			if json.Unmarshal(result, &ds) == nil && ds.Error != nil && string(ds.Error) != "null" {
+				entry.Status = "error"
+				entry.ErrorMsg = string(ds.Error)
+			} else {
+				entry.Status = "ok"
+			}
+		}
+		if entry.LogLevel == "full" || entry.LogLevel == "args_only" {
+			entry.ArgsJSON = string(p.Arguments)
+		}
+		go h.captureLog.RecordAccess(entry)
+	}
+
 	if err != nil {
 		writeRPCError(w, id, -32603, fmt.Sprintf("upstream error: %v", err))
 		return

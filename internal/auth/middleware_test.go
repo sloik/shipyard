@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/sloik/shipyard/internal/capture"
 )
 
 // mockProxy implements ProxyManager for testing.
@@ -360,5 +363,157 @@ func TestMCPHandler_Initialize_SessionID(t *testing.T) {
 	sessionID := w.Header().Get("Mcp-Session-Id")
 	if sessionID == "" {
 		t.Error("expected Mcp-Session-Id header on initialize response (R14)")
+	}
+}
+
+// newTestCaptureStore creates a temporary capture store for testing.
+func newTestCaptureStore(t *testing.T) *capture.Store {
+	t.Helper()
+	dir := t.TempDir()
+	cs, err := capture.NewStore(
+		filepath.Join(dir, "capture.db"),
+		filepath.Join(dir, "capture.jsonl"),
+	)
+	if err != nil {
+		t.Fatalf("capture.NewStore: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+// TestHandleToolsCall_ErrorMessage verifies AC5: denied call returns -32001 with exact message.
+func TestHandleToolsCall_ErrorMessage(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+
+	// Token scoped to filesystem only
+	plaintext, _, err := authStore.GenerateToken("scoped", 0, []string{"filesystem:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	limiter := NewRateLimiter()
+	proxy := &mockProxy{servers: []string{"filesystem", "cortex"}}
+	h := NewMCPHandler(authStore, limiter, proxy)
+
+	// Attempt to call cortex (out of scope)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cortex__cortex_search","arguments":{}}}`
+	w := mcpPOST(t, h, body, plaintext)
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected error object, got: %v", resp)
+	}
+	code, _ := errObj["code"].(float64)
+	if int(code) != -32001 {
+		t.Errorf("expected code -32001, got %v", code)
+	}
+	msg, _ := errObj["message"].(string)
+	if msg != "Tool not permitted by token scope" {
+		t.Errorf("expected message %q, got %q", "Tool not permitted by token scope", msg)
+	}
+}
+
+// TestHandleToolsCall_LogsDenied verifies that denied calls are recorded in the access log.
+func TestHandleToolsCall_LogsDenied(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+
+	plaintext, _, err := authStore.GenerateToken("scoped", 0, []string{"filesystem:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	limiter := NewRateLimiter()
+	proxy := &mockProxy{servers: []string{"filesystem", "cortex"}}
+	cs := newTestCaptureStore(t)
+
+	h := NewMCPHandler(authStore, limiter, proxy)
+	h.SetCaptureStore(cs)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cortex__cortex_search","arguments":{}}}`
+	mcpPOST(t, h, body, plaintext)
+
+	// RecordAccess is called in a goroutine; give it a moment to complete
+	// We use a small sleep here since RecordAccess is async via goroutine in the handler
+	time.Sleep(20 * time.Millisecond)
+
+	page, err := cs.GetAccessLog(capture.AccessLogFilter{Status: "denied"})
+	if err != nil {
+		t.Fatalf("GetAccessLog: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Errorf("expected 1 denied access log entry, got %d", page.TotalCount)
+	}
+	if len(page.Items) > 0 {
+		row := page.Items[0]
+		if row.ToolName != "cortex_search" {
+			t.Errorf("expected tool_name=cortex_search, got %q", row.ToolName)
+		}
+		if row.ServerName != "cortex" {
+			t.Errorf("expected server_name=cortex, got %q", row.ServerName)
+		}
+	}
+}
+
+// TestHandleToolsCall_LogsSuccess verifies that successful calls are recorded in the access log.
+func TestHandleToolsCall_LogsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+
+	plaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	limiter := NewRateLimiter()
+	proxy := &mockProxy{
+		servers: []string{"filesystem"},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`), nil
+		},
+	}
+	cs := newTestCaptureStore(t)
+
+	h := NewMCPHandler(authStore, limiter, proxy)
+	h.SetCaptureStore(cs)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{"path":"/tmp/x"}}}`
+	mcpPOST(t, h, body, plaintext)
+
+	// RecordAccess is called in a goroutine; give it a moment to complete
+	time.Sleep(20 * time.Millisecond)
+
+	page, err := cs.GetAccessLog(capture.AccessLogFilter{Status: "ok"})
+	if err != nil {
+		t.Fatalf("GetAccessLog: %v", err)
+	}
+	if page.TotalCount != 1 {
+		t.Errorf("expected 1 ok access log entry, got %d", page.TotalCount)
+	}
+	if len(page.Items) > 0 {
+		row := page.Items[0]
+		if row.Status != "ok" {
+			t.Errorf("expected status=ok, got %q", row.Status)
+		}
+		if row.ToolName != "read_file" {
+			t.Errorf("expected tool_name=read_file, got %q", row.ToolName)
+		}
 	}
 }

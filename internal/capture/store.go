@@ -13,7 +13,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 var openSQLiteDB = func(path string) (*sql.DB, error) {
 	return sql.Open("sqlite3", path)
@@ -74,6 +74,12 @@ func (s *Store) migrate() error {
 	if version < 1 {
 		if err := s.migrateToV1(); err != nil {
 			return fmt.Errorf("migrate to v1: %w", err)
+		}
+	}
+
+	if version < 2 {
+		if err := s.migrateToV2(); err != nil {
+			return fmt.Errorf("migrate to v2: %w", err)
 		}
 	}
 
@@ -153,6 +159,32 @@ func (s *Store) migrateToV1() error {
 		return fmt.Errorf("create v1 tables: %w", err)
 	}
 
+	return nil
+}
+
+// migrateToV2 adds the access_log table and its indexes.
+func (s *Store) migrateToV2() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS access_log (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts          TEXT NOT NULL,
+			token_name  TEXT NOT NULL DEFAULT '',
+			server_name TEXT NOT NULL,
+			tool_name   TEXT NOT NULL,
+			status      TEXT NOT NULL,
+			latency_ms  INTEGER,
+			error_msg   TEXT,
+			args_json   TEXT,
+			log_level   TEXT NOT NULL DEFAULT 'full'
+		);
+		CREATE INDEX IF NOT EXISTS idx_access_ts ON access_log(ts);
+		CREATE INDEX IF NOT EXISTS idx_access_token ON access_log(token_name);
+		CREATE INDEX IF NOT EXISTS idx_access_tool ON access_log(tool_name);
+		CREATE INDEX IF NOT EXISTS idx_access_status ON access_log(status);
+	`)
+	if err != nil {
+		return fmt.Errorf("create access_log table: %w", err)
+	}
 	return nil
 }
 
@@ -283,6 +315,23 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 		);
 		CREATE INDEX IF NOT EXISTS idx_schema_changes_server ON schema_changes(server_name);
 		CREATE INDEX IF NOT EXISTS idx_schema_changes_ack ON schema_changes(acknowledged);
+
+		CREATE TABLE IF NOT EXISTS access_log (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts          TEXT NOT NULL,
+			token_name  TEXT NOT NULL DEFAULT '',
+			server_name TEXT NOT NULL,
+			tool_name   TEXT NOT NULL,
+			status      TEXT NOT NULL,
+			latency_ms  INTEGER,
+			error_msg   TEXT,
+			args_json   TEXT,
+			log_level   TEXT NOT NULL DEFAULT 'full'
+		);
+		CREATE INDEX IF NOT EXISTS idx_access_ts ON access_log(ts);
+		CREATE INDEX IF NOT EXISTS idx_access_token ON access_log(token_name);
+		CREATE INDEX IF NOT EXISTS idx_access_tool ON access_log(tool_name);
+		CREATE INDEX IF NOT EXISTS idx_access_status ON access_log(status);
 	`)
 	if err != nil {
 		db.Close()
