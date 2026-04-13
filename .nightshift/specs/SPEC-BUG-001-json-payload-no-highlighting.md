@@ -2,7 +2,7 @@
 id: SPEC-BUG-001
 priority: 1
 type: bugfix
-status: draft
+status: ready
 after: [SPEC-001]
 created: 2026-04-04
 ---
