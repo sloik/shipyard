@@ -2,7 +2,7 @@
 id: SPEC-005
 priority: 1
 type: main
-status: draft
+status: done
 after: [UX-002]
 created: 2026-04-04
 ---
@@ -400,37 +400,37 @@ Modifiers: `.btn-sm` (compact padding), `.btn-icon-only` (no label)
 ## Acceptance Criteria
 
 ### Tokens
-- [ ] AC-1: All color tokens from the `.pen` file are CSS variables with dark/light values
-- [ ] AC-2: `prefers-color-scheme` auto-detection works
-- [ ] AC-3: `[data-theme="dark"]` / `[data-theme="light"]` manual override works
-- [ ] AC-4: Theme toggle persists to localStorage
+- [x] AC-1: All color tokens from the `.pen` file are CSS variables with dark/light values
+- [x] AC-2: `prefers-color-scheme` auto-detection works
+- [x] AC-3: `[data-theme="dark"]` / `[data-theme="light"]` manual override works
+- [x] AC-4: Theme toggle persists to localStorage
 
 ### Components
-- [ ] AC-5: All 68 components are implemented as CSS classes
-- [ ] AC-6: Every component visually matches its `.pen` design counterpart
-- [ ] AC-7: Components use ONLY token variables — no hardcoded hex/rgb values
-- [ ] AC-8: Components work in both dark and light themes
+- [x] AC-5: All 68 components are implemented as CSS classes
+- [x] AC-6: Every component visually matches its `.pen` design counterpart
+- [x] AC-7: Components use ONLY token variables — no hardcoded hex/rgb values
+- [x] AC-8: Components work in both dark and light themes
 
 ### API Contract
-- [ ] AC-9: Screens can build any Phase 0-3 UI using only classes from ds.css
-- [ ] AC-10: No screen needs to define its own component styles
-- [ ] AC-11: Adding a new screen requires ZERO changes to ds.css (unless a new component type is needed, which triggers a design system extension first)
+- [x] AC-9: Screens can build any Phase 0-3 UI using only classes from ds.css
+- [x] AC-10: No screen needs to define its own component styles
+- [x] AC-11: Adding a new screen requires ZERO changes to ds.css (unless a new component type is needed, which triggers a design system extension first)
 
 ### Interactive
-- [ ] AC-12: Theme switching works (toggle + system preference)
-- [ ] AC-13: Toast system works (show, auto-dismiss, stack)
-- [ ] AC-14: Modal system works (show, actions, dismiss, focus trap)
-- [ ] AC-15: Copy-to-clipboard works with `.btn-copied` feedback
-- [ ] AC-16: Segmented toggles and switches dispatch change events
-- [ ] AC-17: Row expand/collapse works with chevron rotation
-- [ ] AC-18: Resize handle works with drag + min/max constraints
-- [ ] AC-19: JSON filter works in both Text and JQ modes
-- [ ] AC-20: Per-panel JSON filters override combined filter
+- [x] AC-12: Theme switching works (toggle + system preference)
+- [x] AC-13: Toast system works (show, auto-dismiss, stack)
+- [x] AC-14: Modal system works (show, actions, dismiss, focus trap)
+- [x] AC-15: Copy-to-clipboard works with `.btn-copied` feedback
+- [x] AC-16: Segmented toggles and switches dispatch change events
+- [x] AC-17: Row expand/collapse works with chevron rotation
+- [x] AC-18: Resize handle works with drag + min/max constraints
+- [x] AC-19: JSON filter works in both Text and JQ modes
+- [x] AC-20: Per-panel JSON filters override combined filter
 
 ### Integration
-- [ ] AC-21: `/ds.css` and `/ds.js` are served via go:embed
-- [ ] AC-22: `index.html` includes ds.css and ds.js, uses only design system classes
-- [ ] AC-23: No visual regression — existing Phase 0 UI looks identical after migration
+- [x] AC-21: `/ds.css` and `/ds.js` are served via go:embed
+- [x] AC-22: `index.html` includes ds.css and ds.js, uses only design system classes
+- [x] AC-23: No visual regression — existing Phase 0 UI looks identical after migration
 
 ## Design System Gate (from UX-002)
 
