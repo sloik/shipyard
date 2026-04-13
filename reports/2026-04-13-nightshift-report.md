@@ -437,3 +437,51 @@ ok  	github.com/sloik/shipyard/internal/web	(cached)
 - [x] AC 8: `go test ./...` passes — all packages green
 - [x] AC 9: `go vet ./...` passes — clean (pre-commit hook)
 - [x] AC 10: `go build ./...` passes — clean (pre-commit hook)
+
+---
+
+## SPEC-032 — Tool Browser resize handle between form and response sections
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `internal/web/ui/index.html` | Added `<div class="resize-handle" id="tool-resize-handle"></div>` between `#tool-detail-scroll` and `#tool-response-section`; added 45 lines of vanilla JS drag logic with mousedown/mousemove/mouseup handlers, localStorage persistence, and window resize re-clamping |
+| `internal/web/ui_layout_test.go` | Added `TestSPEC032_ToolBrowserResizeHandlePresent` — asserts element presence, class, no inline style, DOM order, and JS event wiring |
+| `.shipyard-dev/verify-spec-032.sh` | New verification script (9 checks) |
+
+### verify-spec-032.sh Output
+
+```
+SPEC-032 Verification
+=====================
+
+  ✅  resize-handle element with id="tool-resize-handle" exists
+  ✅  handle element has class="resize-handle"
+  ✅  DOM order: tool-detail-scroll < tool-resize-handle < tool-response-section
+  ✅  Handle element has no inline style= attribute
+  ✅  JS contains localStorage key 'shipyard_tool_response_height'
+  ✅  JS contains mousedown listener (drag start)
+  ✅  JS contains mousemove listener on document (drag in progress)
+  ✅  JS contains mouseup listener on document (drag end + persist)
+  ✅  go test ./... passes
+
+  Passed: 9 / Failed: 0
+  RESULT: ✅ PASS — safe to merge
+```
+
+### AC Checklist
+
+- [x] AC 1: `.resize-handle` element exists between `#tool-detail-scroll` and `#tool-response-section` in `index.html`
+- [x] AC 2: Dragging handle adjusts response section height — mousedown/mousemove/mouseup handlers implemented
+- [x] AC 3: Height clamped to `[150px, containerH - 150px]` — enforced in mousemove and init
+- [x] AC 4: Height persists across reloads — localStorage read on init in IIFE, written on mouseup
+- [x] AC 5: localStorage key is `shipyard_tool_response_height` — verified by script
+- [x] AC 6: window resize re-clamps stored height — `window.addEventListener('resize', ...)` implemented
+- [x] AC 7: Handle has `cursor:row-resize` — comes from `.resize-handle` class in `ds.css`, no new CSS needed
+- [x] AC 8: No inline style on handle element — verified by script and test
+- [x] AC 9: Layout tests assert handle presence and DOM position — `TestSPEC032_ToolBrowserResizeHandlePresent`
+- [x] AC 10: `.shipyard-dev/verify-spec-032.sh` exits 0 — 9/9 checks passed
+- [x] AC 11: `go test ./...` passes — all packages green
+- [x] AC 12: `go vet ./...` passes — clean (pre-commit hook)
+- [x] AC 13: `go build ./...` passes — clean (pre-commit hook)
