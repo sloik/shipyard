@@ -2,7 +2,7 @@
 id: SPEC-001
 priority: 1
 type: main
-status: draft
+status: done
 children:
   - SPEC-001-001
   - SPEC-001-002
@@ -123,18 +123,18 @@ The client's MCP config points at `shipyard` instead of the real server:
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `shipyard wrap -- <command>` spawns child, proxies stdio, client works normally
-- [ ] AC-2: All JSON-RPC messages captured to SQLite with timestamp, direction, method
-- [ ] AC-3: Request/response pairs correlated by JSON-RPC id with latency calculated
-- [ ] AC-4: `localhost:9417` shows traffic timeline updating in real time via WebSocket
-- [ ] AC-5: Traffic table shows: time, direction, server, method, status badge, latency
-- [ ] AC-6: Clicking a row shows full JSON payload (request and matched response)
-- [ ] AC-7: Filter by server name and method works
-- [ ] AC-8: Traffic persists in SQLite — refreshing the page shows historical data
-- [ ] AC-9: Child crash is logged; proxy remains running
-- [ ] AC-10: SIGTERM/SIGINT triggers graceful shutdown (kill child, close DB, exit)
-- [ ] AC-11: Single static binary with no runtime dependencies
-- [ ] AC-12: Builds for macOS arm64 and Linux amd64 via cross-compilation
+- [x] AC-1: `shipyard wrap -- <command>` spawns child, proxies stdio, client works normally
+- [x] AC-2: All JSON-RPC messages captured to SQLite with timestamp, direction, method
+- [x] AC-3: Request/response pairs correlated by JSON-RPC id with latency calculated
+- [x] AC-4: `localhost:9417` shows traffic timeline updating in real time via WebSocket
+- [x] AC-5: Traffic table shows: time, direction, server, method, status badge, latency
+- [x] AC-6: Clicking a row shows full JSON payload (request and matched response)
+- [x] AC-7: Filter by server name and method works
+- [x] AC-8: Traffic persists in SQLite — refreshing the page shows historical data
+- [x] AC-9: Child crash is logged; proxy remains running
+- [x] AC-10: SIGTERM/SIGINT triggers graceful shutdown (kill child, close DB, exit)
+- [x] AC-11: Single static binary with no runtime dependencies
+- [x] AC-12: Builds for macOS arm64 and Linux amd64 via cross-compilation
 
 ## Out of Scope (deferred to Phase 1+)
 
