@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: [SPEC-BUG-030]
 violates: [UX-002]
 prior_attempts: []
@@ -51,28 +51,28 @@ After:  flex:0 0 300px
 
 ## Requirements
 
-- [ ] R1: A long JSON response must be scrollable within the response section.
-- [ ] R2: The response section must have a visible, usable default height even
+- [x] R1: A long JSON response must be scrollable within the response section.
+- [x] R2: The response section must have a visible, usable default height even
   before any response has been received.
-- [ ] R3: The fix must not break the form section scroll introduced by
+- [x] R3: The fix must not break the form section scroll introduced by
   SPEC-BUG-030.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A long JSON response (>300px of content) scrolls within the
+- [x] AC 1: A long JSON response (>300px of content) scrolls within the
   response section — the section does not expand to natural height.
-- [ ] AC 2: The response section is visible at a usable default height
+- [x] AC 2: The response section is visible at a usable default height
   (≥ 300px) when no response has been received.
-- [ ] AC 3: Form section (`#tool-detail-scroll`) still scrolls for long forms
+- [x] AC 3: Form section (`#tool-detail-scroll`) still scrolls for long forms
   (SPEC-BUG-030 not regressed).
-- [ ] AC 4: `#tool-response-section` has `flex:0 0 300px` in `index.html`.
-- [ ] AC 5: `#tool-response-section` does NOT have `flex:0 0 auto` or
+- [x] AC 4: `#tool-response-section` has `flex:0 0 300px` in `index.html`.
+- [x] AC 5: `#tool-response-section` does NOT have `flex:0 0 auto` or
   `min-height:200px`.
-- [ ] AC 6: All layout tests updated to assert the new value.
-- [ ] AC 7: `.shipyard-dev/verify-bug-031.sh` exits 0.
-- [ ] AC 8: `go test ./...` passes.
-- [ ] AC 9: `go vet ./...` passes.
-- [ ] AC 10: `go build ./...` passes.
+- [x] AC 6: All layout tests updated to assert the new value.
+- [x] AC 7: `.shipyard-dev/verify-bug-031.sh` exits 0.
+- [x] AC 8: `go test ./...` passes.
+- [x] AC 9: `go vet ./...` passes.
+- [x] AC 10: `go build ./...` passes.
 
 ## Verification Script
 
