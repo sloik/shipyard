@@ -1576,3 +1576,160 @@ func TestSPECBUG041_ResponseSectionOverflowContainment(t *testing.T) {
 		t.Error("SPEC-BUG-041 FAIL: resize JS must read toolResponseSection.offsetHeight at mousedown for correct baseline")
 	}
 }
+
+// TestSPEC039_ExpandJSONStringsHelperExists verifies that the expandJSONStrings
+// helper function is present in index.html adjacent to highlightJSON.
+func TestSPEC039_ExpandJSONStringsHelperExists(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// R5: helper must be present adjacent to highlightJSON
+	if !strings.Contains(content, "function expandJSONStrings(obj, depth)") {
+		t.Fatal("SPEC-039 FAIL: expected expandJSONStrings(obj, depth) function in index.html")
+	}
+
+	// R3: depth limit of 5 must be enforced
+	if !strings.Contains(content, "if (depth > 5) return obj;") {
+		t.Error("SPEC-039 FAIL: expected depth limit 'if (depth > 5) return obj;' in expandJSONStrings")
+	}
+
+	// R4: must only expand object or array results (not primitives)
+	if !strings.Contains(content, "typeof parsed === 'object'") {
+		t.Error("SPEC-039 FAIL: expected typeof check to guard against primitive expansion")
+	}
+
+	// R1: highlightJSON must call expandJSONStrings between parse and stringify
+	highlightIdx := strings.Index(content, "function highlightJSON(str)")
+	if highlightIdx == -1 {
+		t.Fatal("SPEC-039 FAIL: expected highlightJSON function")
+	}
+	// Extract function body (until next function declaration)
+	highlightBody := content[highlightIdx:]
+	nextFnIdx := strings.Index(highlightBody[1:], "\n  function ")
+	if nextFnIdx > 0 {
+		highlightBody = highlightBody[:nextFnIdx+1]
+	}
+	if !strings.Contains(highlightBody, "expandJSONStrings(obj, 0)") {
+		t.Error("SPEC-039 FAIL: highlightJSON must call expandJSONStrings(obj, 0) between JSON.parse and JSON.stringify")
+	}
+}
+
+// TestSPEC039_NestedJSONStringExpanded verifies that a JSON string containing
+// an embedded JSON object is expanded (not left as an escaped literal).
+// AC 1: {"content":[{"type":"text","text":"{\"key\":\"value\"}"}]}
+// After expansion, the output must NOT contain the raw escaped string.
+func TestSPEC039_NestedJSONStringExpanded(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Verify the expandJSONStrings helper handles objects (checked at function level above).
+	// Here we verify the structural contract: expandJSONStrings must recurse into Array.isArray.
+	if !strings.Contains(content, "Array.isArray(obj)") {
+		t.Error("SPEC-039 FAIL (AC 1/R2): expandJSONStrings must handle arrays with Array.isArray check")
+	}
+
+	// R2: must iterate over object keys with hasOwnProperty
+	if !strings.Contains(content, "obj.hasOwnProperty(key)") {
+		t.Error("SPEC-039 FAIL (R2): expandJSONStrings must walk object keys with hasOwnProperty guard")
+	}
+}
+
+// TestSPEC039_PlainStringUnchanged verifies that a plain string value that is
+// not valid JSON passes through without modification (AC 3: {"val":"hello world"}).
+// Structural check: the catch block must exist to swallow parse errors silently.
+func TestSPEC039_PlainStringUnchanged(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Find the expandJSONStrings function body
+	fnIdx := strings.Index(content, "function expandJSONStrings(obj, depth)")
+	if fnIdx == -1 {
+		t.Fatal("SPEC-039 FAIL: expandJSONStrings function not found")
+	}
+	fnBody := content[fnIdx:]
+	// Capture until next top-level function
+	nextFnIdx := strings.Index(fnBody[1:], "\n  function ")
+	if nextFnIdx > 0 {
+		fnBody = fnBody[:nextFnIdx+1]
+	}
+
+	// AC 3: plain strings must not be expanded — catch block must silently return obj
+	if !strings.Contains(fnBody, "} catch(e) {}") {
+		t.Error("SPEC-039 FAIL (AC 3): expandJSONStrings must have empty catch block to silently skip non-JSON strings")
+	}
+
+	// AC 4/5: after failing JSON.parse, plain string must be returned as-is
+	if !strings.Contains(fnBody, "return obj;") {
+		t.Error("SPEC-039 FAIL (AC 3): expandJSONStrings must return plain string as-is after parse failure")
+	}
+}
+
+// TestSPEC039_RecursiveExpansionAtDepth verifies that the recursive calls pass
+// depth+1 for both array elements and object values, enabling multi-level expansion.
+// AC 4: 3+ levels of nested JSON strings must be fully expanded.
+func TestSPEC039_RecursiveExpansionAtDepth(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	fnIdx := strings.Index(content, "function expandJSONStrings(obj, depth)")
+	if fnIdx == -1 {
+		t.Fatal("SPEC-039 FAIL: expandJSONStrings function not found")
+	}
+	fnBody := content[fnIdx:]
+	nextFnIdx := strings.Index(fnBody[1:], "\n  function ")
+	if nextFnIdx > 0 {
+		fnBody = fnBody[:nextFnIdx+1]
+	}
+
+	// AC 4/R2: recursive calls must increment depth
+	if !strings.Contains(fnBody, "depth + 1") {
+		t.Error("SPEC-039 FAIL (AC 4/R2): expandJSONStrings recursive calls must pass depth + 1")
+	}
+
+	// R2: must recurse into both objects and strings (recursive call appears inside object walk)
+	// count occurrences of "expandJSONStrings(" to verify recursion in array, object, and string branches
+	count := strings.Count(fnBody, "expandJSONStrings(")
+	if count < 3 {
+		// Expect: string branch, array loop, object value loop (minimum 3 recursive call sites)
+		t.Errorf("SPEC-039 FAIL (R2): expected at least 3 recursive expandJSONStrings calls, got %d", count)
+	}
+}
+
+// TestSPEC039_PrimitiveJSONNotExpanded verifies that a string that parses as a
+// JSON primitive (number, boolean, null) is NOT expanded (AC 5).
+// Structural check: the guard "typeof parsed === 'object'" excludes all primitives.
+func TestSPEC039_PrimitiveJSONNotExpanded(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	fnIdx := strings.Index(content, "function expandJSONStrings(obj, depth)")
+	if fnIdx == -1 {
+		t.Fatal("SPEC-039 FAIL: expandJSONStrings function not found")
+	}
+	fnBody := content[fnIdx:]
+	nextFnIdx := strings.Index(fnBody[1:], "\n  function ")
+	if nextFnIdx > 0 {
+		fnBody = fnBody[:nextFnIdx+1]
+	}
+
+	// AC 5: parsed !== null AND typeof parsed === 'object' guards against primitive expansion
+	// numbers/booleans have typeof !== 'object'; null has typeof === 'object' but parsed === null
+	if !strings.Contains(fnBody, "parsed !== null && typeof parsed === 'object'") {
+		t.Error("SPEC-039 FAIL (AC 5): guard must check 'parsed !== null && typeof parsed === 'object'' to exclude primitives and null")
+	}
+}

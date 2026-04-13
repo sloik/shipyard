@@ -951,9 +951,46 @@
   /* ======================================================================
      JSON Syntax Highlighting
      ====================================================================== */
+
+  // expandJSONStrings recursively walks a parsed JSON value and replaces any
+  // string that is itself valid JSON (object or array) with the parsed value.
+  // Depth limit of 5 prevents infinite expansion on pathological inputs.
+  // Primitive JSON values (numbers, booleans, null, bare strings) are left as-is.
+  function expandJSONStrings(obj, depth) {
+    if (depth > 5) return obj;
+    if (typeof obj === 'string') {
+      try {
+        var parsed = JSON.parse(obj);
+        // Only expand if result is object or array (not primitive)
+        if (parsed !== null && typeof parsed === 'object') {
+          return expandJSONStrings(parsed, depth + 1);
+        }
+      } catch(e) {}
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      var arr = [];
+      for (var i = 0; i < obj.length; i++) {
+        arr.push(expandJSONStrings(obj[i], depth + 1));
+      }
+      return arr;
+    }
+    if (typeof obj === 'object' && obj !== null) {
+      var result = {};
+      for (var key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          result[key] = expandJSONStrings(obj[key], depth + 1);
+        }
+      }
+      return result;
+    }
+    return obj;
+  }
+
   function highlightJSON(str) {
     var obj;
     try { obj = JSON.parse(str); } catch(e) { return escapeHtml(str); }
+    obj = expandJSONStrings(obj, 0);
     var pretty = JSON.stringify(obj, null, 2);
     var lines = pretty.split('\n');
     var result = '';

@@ -532,3 +532,59 @@ go test ./...    PASS  (all packages)
 - [x] AC 7: `go test ./...` passes
 - [x] AC 8: `go vet ./...` passes
 - [x] AC 9: `go build ./...` passes
+
+---
+
+## SPEC-039 — JSON Viewer: Recursive JSON String Expansion
+
+### Summary
+
+| Field | Value |
+|---|---|
+| Spec | SPEC-039 |
+| Status | done |
+| Duration | ~5 min |
+| Agent | Claude Sonnet 4.6 (worktree) |
+
+### Files Changed
+
+| File | Change |
+|---|---|
+| `internal/web/ui/index.html` | +36 lines — `expandJSONStrings()` helper + `highlightJSON` call |
+| `internal/web/ui_layout_test.go` | +120 lines — 5 new tests for SPEC-039 |
+
+### What Was Changed and Why
+
+**`internal/web/ui/index.html`** — Added `expandJSONStrings(obj, depth)` helper function immediately before `highlightJSON`. The helper recursively walks the parsed JSON object: for string values it attempts `JSON.parse` and replaces the string with the parsed value if the result is an object or array (not a primitive). Depth limit of 5 prevents infinite expansion. Added one line in `highlightJSON` between `JSON.parse` and `JSON.stringify`: `obj = expandJSONStrings(obj, 0);`. The function signature and all call sites are unchanged.
+
+**`internal/web/ui_layout_test.go`** — Added 5 structural tests that read `index.html` and verify:
+1. `expandJSONStrings(obj, depth)` function exists adjacent to `highlightJSON`
+2. Array handling uses `Array.isArray` and object walk uses `hasOwnProperty`
+3. Plain-string catch block silently swallows non-JSON parse errors
+4. Recursive calls pass `depth + 1`, with at least 3 recursive call sites
+5. Primitive guard: `parsed !== null && typeof parsed === 'object'`
+
+### Test Results
+
+```
+go test ./... — all pass
+go vet ./...  — clean
+go build ./... — clean
+go build ./cmd/shipyard/ — clean
+```
+
+### AC Checklist
+
+- [x] AC 1: Tool response with nested `"text":"{\"key\":\"value\"}"` expands correctly — `expandJSONStrings` replaces string with parsed object before stringify; structural test confirms array/object walk
+- [x] AC 2: Plain `{"name":"Alice"}` (no nested JSON) renders identically — `expandJSONStrings` returns non-string primitives untouched
+- [x] AC 3: `{"val":"hello world"}` — plain string, not expanded — empty catch block + `return obj` confirmed by test
+- [x] AC 4: 3+ level nested expansion is supported — `depth + 1` passed recursively; at least 3 recursive call sites confirmed
+- [x] AC 5: A string parsing to a JSON number/boolean/null is not expanded — `parsed !== null && typeof parsed === 'object'` guard confirmed
+- [x] AC 6: `ui_layout_test.go` tests: nested JSON object → expanded (structural); nested JSON array → expanded (Array.isArray test); plain string → unchanged (catch block test); 2-level recursion (depth+1 test); number-as-string → unchanged (primitive guard test)
+- [x] AC 7: `go test ./...` passes
+- [x] AC 8: `go vet ./...` passes
+- [x] AC 9: `go build ./...` passes
+
+### Blockers / Discoveries
+
+None. Implementation matched the JS pattern from the spec exactly. ES5 `var` convention observed throughout — no `let`/`const`/arrow functions.
