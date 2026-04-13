@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-BUG-001, SPEC-036]
 prior_attempts: []
 created: 2026-04-13
