@@ -250,3 +250,52 @@ go test -race ./...        PASS for all packages we changed; pre-existing race i
 **Tests:** 9 capture tests + 3 middleware tests added; all pass; `TestMigration_V0ToV1` fixed to compare against `currentSchemaVersion` constant.
 
 **All existing tests pass.**
+
+---
+
+## SPEC-BUG-029 — Tool Browser padding on outer flex container eats scroll height
+
+| Field | Value |
+|---|---|
+| Spec | SPEC-BUG-029 |
+| Status | done |
+| Duration | ~5 min |
+| Agent | Claude Sonnet 4.6 (worktree) |
+| Commit | `1a8a396` |
+
+## Summary
+
+`#tool-detail` had `padding:24px` on the outer flex container. CSS padding reduces the available height for flex children. With `#tool-detail-scroll` sized at `flex:0 1 auto` (content-driven), a tool with many parameters (e.g. `lm_stateful_chat`) caused the scroll region to consume all remaining height and push `#tool-response-section` (`flex:1`) out of view with no scroll path to reach it.
+
+Fix: removed `padding:24px` from `#tool-detail`. Added `padding:24px 24px 0 24px` to `#tool-detail-scroll` (top/sides, no bottom gap before response section). Added `padding:0 24px 24px 24px` to `#tool-response-section` (sides/bottom, no top gap after scroll region). Visual spacing is preserved — padding moved, not removed.
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `internal/web/ui/index.html` | 3 lines: remove `padding:24px` from `#tool-detail`, add split padding to `#tool-detail-scroll` and `#tool-response-section` |
+| `internal/web/ui_layout_test.go` | Updated `TestBUG007_ToolDetailNoMaxWidth` AC-5 (old assertion was wrong: expected padding on outer container); updated 2 exact-match needles in `TestSPECBUG022` and `TestSPECBUG023`; added new `TestSPECBUG029_ToolDetailPaddingIsolationContract` |
+
+## Test Results
+
+```
+go build ./...   PASS
+go vet ./...     PASS
+go test ./...    PASS  (433 tests, 7 packages)
+```
+
+## AC Checklist
+
+- [x] AC 1: `lm_stateful_chat` — form scrollable, all fields reachable, Submit visible (layout contract enforced by test)
+- [x] AC 2: Response section visible without scrolling the page even on a long form (flex:1 now has full height available)
+- [x] AC 3: `lms_load_model` still scrolls correctly — SPEC-BUG-028 test passes (TestSPECBUG028_ToolBrowserLongSchemaFormsUseDedicatedScrollOwner still green)
+- [x] AC 4: Visual spacing unchanged — padding moved from outer to inner regions, total spacing identical
+- [x] AC 5: Padding-isolation contract covered by `TestSPECBUG029_ToolDetailPaddingIsolationContract`
+- [x] AC 6: `go test ./...` passes
+- [x] AC 7: `go vet ./...` passes
+- [x] AC 8: `go build ./...` passes
+
+## Discoveries
+
+- `TestBUG007_ToolDetailNoMaxWidth` AC-5 contained an incorrect assertion that required `padding:24px` on `#tool-detail` — this was the opposite of correct and would have caught the bug fix as a failure. Updated the assertion to match the correct contract (padding must NOT be on the outer container).
+- `TestSPECBUG022` and `TestSPECBUG023` both did exact string matches on the `#tool-response-section` opening tag and needed updating to include the new padding attribute. These tests verify layout structure, not layout correctness, so exact-match updates are appropriate.
