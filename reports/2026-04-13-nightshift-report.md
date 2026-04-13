@@ -375,3 +375,65 @@ ok  github.com/sloik/shipyard/internal/web         3.058s
 - [x] AC 9: `go vet ./...` passes — clean (pre-commit hook)
 - [x] AC 10: `go build ./...` passes — clean (pre-commit hook)
 - [x] AC 11: `.shipyard-dev/verify-bug-030.sh` exits 0 — 7/7 checks passed
+
+---
+
+## SPEC-BUG-031 — Tool Browser response section does not scroll
+
+### What changed
+
+| File | Line | Change |
+|---|---|---|
+| `internal/web/ui/index.html` | 206 | `flex:0 0 auto; min-height:200px` → `flex:0 0 300px` on `#tool-response-section` |
+| `internal/web/ui_layout_test.go` | 527, 1013, 1049, 1081, 1182 | Updated 5 assertions from `flex:0 0 auto`/`min-height:200px` to `flex:0 0 300px` |
+| `.shipyard-dev/verify-bug-031.sh` | new | Verification script for this fix |
+
+Commit: `f228544`
+
+### verify-bug-031.sh output
+
+```
+SPEC-BUG-031 Verification
+=========================
+
+HTML: /Users/ed/Developer/Repos/shipyard/internal/web/ui/index.html
+
+── Flex contract checks ──────────────────────────────────────────────────
+
+  ✅  #tool-response-section has flex:0 0 300px
+  ✅  #tool-response-section does NOT have flex:0 0 auto (old value)
+  ✅  #tool-response-section does NOT have min-height:200px (superseded by 300px basis)
+  ✅  #tool-response-json has overflow:auto (JSON body still scrolls)
+
+── Test suite ────────────────────────────────────────────────────────────
+
+ok  	github.com/sloik/shipyard/cmd/shipyard	(cached)
+ok  	github.com/sloik/shipyard/cmd/shipyard-mcp	(cached)
+ok  	github.com/sloik/shipyard/internal/auth	(cached)
+ok  	github.com/sloik/shipyard/internal/capture	(cached)
+ok  	github.com/sloik/shipyard/internal/gateway	(cached)
+ok  	github.com/sloik/shipyard/internal/proxy	(cached)
+?   	github.com/sloik/shipyard/internal/teststubchild	[no test files]
+ok  	github.com/sloik/shipyard/internal/web	(cached)
+  ✅  go test ./... passes
+
+── Summary ───────────────────────────────────────────────────────────────
+
+  Passed: 5
+  Failed: 0
+
+  RESULT: ✅ PASS — safe to merge
+```
+
+### AC checklist
+
+- [x] AC 1: Long JSON response scrolls within response section — `flex:0 0 300px` bounds the container
+- [x] AC 2: Response section visible at usable default height (≥ 300px) — basis is 300px
+- [x] AC 3: Form section still scrolls — `#tool-detail-scroll` flex contract unchanged, SPEC-BUG-030 tests pass
+- [x] AC 4: `#tool-response-section` has `flex:0 0 300px` in `index.html` — verified by script
+- [x] AC 5: `#tool-response-section` does NOT have `flex:0 0 auto` or `min-height:200px` — verified by script
+- [x] AC 6: All layout tests updated to assert new value — 5 assertions updated
+- [x] AC 7: `.shipyard-dev/verify-bug-031.sh` exits 0 — 5/5 checks passed
+- [x] AC 8: `go test ./...` passes — all packages green
+- [x] AC 9: `go vet ./...` passes — clean (pre-commit hook)
+- [x] AC 10: `go build ./...` passes — clean (pre-commit hook)
