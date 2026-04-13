@@ -1476,7 +1476,7 @@
   (function() {
     var saved = parseInt(localStorage.getItem('shipyard_tool_response_height'), 10);
     if (saved && toolResponseSection) {
-      toolResponseSection.style.height = saved + 'px';
+      toolResponseSection.style.flexBasis = saved + 'px';
     }
   })();
 
@@ -1492,7 +1492,7 @@
     var delta = toolResizeStartY - e.clientY;
     var containerH = toolDetail.getBoundingClientRect().height;
     var newH = Math.min(Math.max(toolResizeStartHeight + delta, 150), containerH - 150);
-    toolResponseSection.style.height = newH + 'px';
+    toolResponseSection.style.flexBasis = newH + 'px';
   });
 
   document.addEventListener('mouseup', function() {
@@ -1506,7 +1506,7 @@
     if (!saved || !toolDetail) return;
     var containerH = toolDetail.getBoundingClientRect().height;
     var clamped = Math.min(Math.max(saved, 150), containerH - 150);
-    toolResponseSection.style.height = clamped + 'px';
+    toolResponseSection.style.flexBasis = clamped + 'px';
     localStorage.setItem('shipyard_tool_response_height', clamped);
   });
 

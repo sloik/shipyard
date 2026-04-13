@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# verify-spec-033.sh — Verifies the SPEC-BUG-033 resize handle drag fix before merge.
+# verify-spec-033.sh — Verifies the SPEC-BUG-033 resize handle drag fix (Attempt 2).
 #
-# Checks that getBoundingClientRect is used instead of offsetHeight in both the
-# mousemove and window resize handlers, that the IIFE does not clamp against
-# offsetHeight, and that the full test suite passes.
+# Checks that style.flexBasis is used (not style.height) for toolResponseSection,
+# that getBoundingClientRect and toolResizeDragging are still present, and that
+# the full test suite passes.
 #
 # Exit codes: 0 = all checks pass, 1 = one or more checks failed.
 
@@ -30,8 +30,8 @@ check() {
 }
 
 echo ""
-echo "SPEC-BUG-033 Verification"
-echo "========================="
+echo "SPEC-BUG-033 Verification (Attempt 2 — flexBasis fix)"
+echo "======================================================"
 echo ""
 echo "HTML: $HTML"
 echo ""
@@ -39,35 +39,42 @@ echo ""
 echo "── JS correctness checks ─────────────────────────────────────────────────"
 echo ""
 
-# AC 3: getBoundingClientRect appears at least twice (mousemove + window resize)
-count=$(grep -cF 'getBoundingClientRect' "$HTML" || true)
-if [[ "$count" -ge 2 ]]; then
+# AC 1 + AC 3: toolResponseSection.style.flexBasis appears at least 3 times
+count=$(grep -cF 'toolResponseSection.style.flexBasis' "$HTML" || true)
+if [[ "$count" -ge 3 ]]; then
+  check "toolResponseSection.style.flexBasis appears at least 3 times" "pass"
+else
+  check "toolResponseSection.style.flexBasis appears at least 3 times" "fail" \
+    "Found $count occurrence(s) — expected at least 3 (IIFE, mousemove, window resize)"
+fi
+
+# AC 2: No toolResponseSection.style.height assignments remain
+height_count=$(grep -cE 'toolResponseSection\.style\.height[[:space:]]*=' "$HTML" || true)
+if [[ "$height_count" -eq 0 ]]; then
+  check "No toolResponseSection.style.height assignments remain" "pass"
+else
+  check "No toolResponseSection.style.height assignments remain" "fail" \
+    "Found $height_count assignment(s) — all must be replaced with style.flexBasis"
+fi
+
+# AC 4: getBoundingClientRect still appears at least 2 times
+brc_count=$(grep -cF 'getBoundingClientRect' "$HTML" || true)
+if [[ "$brc_count" -ge 2 ]]; then
   check "getBoundingClientRect appears at least 2 times (mousemove + window resize)" "pass"
 else
   check "getBoundingClientRect appears at least 2 times (mousemove + window resize)" "fail" \
-    "Found $count occurrence(s) — expected at least 2"
+    "Found $brc_count occurrence(s) — expected at least 2"
 fi
 
-# AC 4: IIFE does NOT call toolDetail.offsetHeight
-# Extract the IIFE block between the localStorage.getItem call and the closing })()
-# and assert toolDetail.offsetHeight is absent from it
-iife_block=$(awk "/localStorage.getItem\('shipyard_tool_response_height'\)/{found=1} found{print} /\}\)\(\);/{if(found) exit}" "$HTML")
-if echo "$iife_block" | grep -qF 'toolDetail.offsetHeight'; then
-  check "IIFE does NOT use toolDetail.offsetHeight (no clamping at init)" "fail" \
-    "Found toolDetail.offsetHeight in the IIFE block — will produce corrupt height when element is hidden"
-else
-  check "IIFE does NOT use toolDetail.offsetHeight (no clamping at init)" "pass"
-fi
-
-# AC 3 (sanity): mousemove handler still uses toolResizeDragging
+# AC 4: toolResizeDragging still present in mousemove handler
 if grep -qF 'toolResizeDragging' "$HTML"; then
-  check "mousemove handler still uses toolResizeDragging" "pass"
+  check "toolResizeDragging still present" "pass"
 else
-  check "mousemove handler still uses toolResizeDragging" "fail" \
+  check "toolResizeDragging still present" "fail" \
     "toolResizeDragging not found — handler may have been removed"
 fi
 
-# AC: window resize listener still exists
+# AC 5: window resize listener still exists
 if grep -qF "window.addEventListener('resize'" "$HTML"; then
   check "window.addEventListener('resize' still exists" "pass"
 else
