@@ -384,6 +384,12 @@ func (s *Server) handleTrafficDetail(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// serverInfoResponse extends ServerInfo with gateway policy state for the API response.
+type serverInfoResponse struct {
+	ServerInfo
+	GatewayDisabled bool `json:"gateway_disabled"`
+}
+
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	if s.proxies == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -392,8 +398,16 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	servers := s.proxies.Servers()
+	result := make([]serverInfoResponse, len(servers))
+	for i, srv := range servers {
+		resp := serverInfoResponse{ServerInfo: srv}
+		if s.gateway != nil && !s.gateway.ServerEnabled(srv.Name) {
+			resp.GatewayDisabled = true
+		}
+		result[i] = resp
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(servers)
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) handleServerRestart(w http.ResponseWriter, r *http.Request) {

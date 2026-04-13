@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: [SPEC-BUG-034]
 violates: []
 prior_attempts: []

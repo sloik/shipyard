@@ -166,6 +166,59 @@ func TestHandleServers_Empty(t *testing.T) {
 	}
 }
 
+func TestHandleServers_GatewayDisabledField(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "enabled-server", Status: "online"},
+			{Name: "disabled-server", Status: "online"},
+		},
+	})
+
+	// Create a gateway store with one server disabled.
+	gs, err := gateway.NewStore(t.TempDir() + "/gateway-policy.json")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetServerEnabled("disabled-server", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var result []struct {
+		Name            string `json:"name"`
+		GatewayDisabled bool   `json:"gateway_disabled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(result))
+	}
+	for _, s := range result {
+		switch s.Name {
+		case "enabled-server":
+			if s.GatewayDisabled {
+				t.Errorf("enabled-server: expected gateway_disabled=false, got true")
+			}
+		case "disabled-server":
+			if !s.GatewayDisabled {
+				t.Errorf("disabled-server: expected gateway_disabled=true, got false")
+			}
+		default:
+			t.Errorf("unexpected server %q", s.Name)
+		}
+	}
+}
+
 func TestNoCache_SetsResponseHeaders(t *testing.T) {
 	h := noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
