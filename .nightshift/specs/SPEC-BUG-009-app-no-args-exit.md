@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-017]
 prior_attempts: []
 violates: "SPEC-017 R1 — Shipyard launches as a native desktop app (double-click .app on macOS)"
