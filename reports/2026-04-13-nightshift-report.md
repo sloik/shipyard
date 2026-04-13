@@ -233,3 +233,20 @@ go test -race ./...        PASS for all packages we changed; pre-existing race i
 - `navigator.clipboard.writeText()` is forbidden by spec; used `document.execCommand('copy')` with hidden textarea instead.
 - Pre-existing data races in `internal/proxy` and `cmd/shipyard` are unrelated to SPEC-011.
 - `GET /api/tokens/{id}/stats` currently returns only `id` and `last_used_at` (SPEC-010 `GetStats` implementation). The UI renders whatever fields are present; additional fields (total_calls, calls_today, etc.) are guarded with `!== undefined` checks and will display when the backend is extended.
+
+## SPEC-012 — Tool Filtering Access Log
+
+**Status:** Implemented and committed (commit `5a42660`).
+
+**Feature A (Tool filtering per token scope):** Already fully implemented by SPEC-010 — no changes made.
+
+**Feature B (Structured access logging):** Fully implemented:
+- `internal/capture/access_log.go` — `AccessLogEntry`, `AccessLogFilter`, `AccessLogPage`, `AccessLogRow`, `AccessLogStats`, `RecordAccess`, `GetAccessLog`, `GetAccessLogStats`
+- `internal/capture/store.go` — schema version bumped 1→2; `migrateToV2()` creates the `access_log` table + 4 indexes; fresh-DB schema block also includes the table
+- `internal/auth/middleware.go` — `captureLog *capture.Store` and `toolLogLevels` fields added; `SetCaptureStore` and `SetToolLogLevels` setter methods added; denied calls logged synchronously (via goroutine at call site); successful/error calls logged after `SendRequest`; error message fixed to "Tool not permitted by token scope" (AC5)
+- `internal/web/server.go` — `GET /api/access-log` and `GET /api/access-log/stats` endpoints registered; `toolLogLevels` field on `Server`; `SetToolLogLevels` method; MCPHandler wired with `SetCaptureStore` and `SetToolLogLevels`
+- `cmd/shipyard/main.go` — `ToolConfig` struct added; `ServerConfig.Tools map[string]ToolConfig` added; tool log levels built from config and passed to web.Server
+
+**Tests:** 9 capture tests + 3 middleware tests added; all pass; `TestMigration_V0ToV1` fixed to compare against `currentSchemaVersion` constant.
+
+**All existing tests pass.**
