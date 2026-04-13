@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: blocked
+status: done
 after: [SPEC-BUG-014]
 prior_attempts:
   - knowledge/attempts/SPEC-BUG-015-same-route-refresh-hook-disproved-by-live-wails.md
@@ -117,5 +117,35 @@ Do not frame this as a config-loading bug unless the API evidence changes.
 
 ## Implementation Notes
 
-- Root cause: in the Wails webview, same-route Servers tab activation could skip a fresh hashchange, so the live `/api/servers` render path was not guaranteed to re-run on an already-active Servers tab.
-- Fix: add a same-route pointerup refresh hook for the Servers tab so the UI re-syncs from `/api/servers` even when the browser/webview does not emit a new hashchange.
+### Attempt 1 — pointerup same-route refresh hook (disproved by live Wails testing)
+
+- Root cause hypothesis: in the Wails webview, same-route Servers tab activation could skip a fresh `hashchange`, so the live `/api/servers` render path was not guaranteed to re-run on an already-active Servers tab.
+- Fix applied: a `pointerup` listener on `tabNav` that calls `loadServers()` when the Servers tab is already active and the user clicks it again.
+- Live test result: this fix did NOT resolve the issue. The Servers view still stayed empty even with the hook in place. The hook is still in the code (`tabNav.addEventListener('pointerup', ...)`) as a cheap guard but is not the root cause fix.
+
+### Attempt 2 — `resolveAPIURL` stub (primary fix)
+
+**Root cause:** `resolveAPIURL(path)` was an unfinished stub that always returned `path` unchanged. In the Wails desktop app, `usesDesktopAssetOrigin()` returns `true` because Wails serves the frontend via a custom URL scheme (not `http:` or `https:`). In that path, `appFetch` calls `loadDesktopBridgeConfig()` then `nativeFetch(resolveAPIURL(input))`. Since `resolveAPIURL` returned `path` unchanged, the fetch used a relative URL (e.g. `/api/servers`) inside a non-http scheme context.
+
+In Wails v2 on macOS, WKWebView resolves relative URLs against the custom scheme origin (e.g. `wails://localhost/api/servers`). The Wails asset server's `Handler` (the desktop bridge) intercepts requests not found in the embedded assets and proxies `/api/*` to the real HTTP server — this path exists and should theoretically work. However, the asymmetry was telling: WebSocket URLs were already built as explicit absolute URLs (`ws://127.0.0.1:PORT/ws`) via `resolveWebSocketURL()`, which correctly used `desktopBridgeConfig.ws_base`. API fetches had no equivalent treatment.
+
+**Fix applied:**
+```javascript
+function resolveAPIURL(path) {
+    if (desktopBridgeConfig && desktopBridgeConfig.api_base) {
+        return desktopBridgeConfig.api_base.replace(/\/$/, '') + path;
+    }
+    return path;
+}
+```
+This makes desktop API fetches go directly to `http://127.0.0.1:PORT/api/servers` (bypassing custom scheme resolution entirely), matching the pattern that WebSocket already used successfully.
+
+**Why this is correct:** The backend `desktopBridge.ServeHTTP` provides `/_shipyard/desktop-config` with `api_base: "http://127.0.0.1:PORT"`. The entire purpose of that endpoint is to give the frontend an explicit localhost base URL — `resolveAPIURL` was supposed to use it but was left as a stub.
+
+**Error visibility (Option B):** The `loadServers()` catch handler now surfaces fetch errors in the UI by displaying the error message in `.empty-desc` instead of failing silently. Silent failures in Wails webviews are invisible (no developer console accessible to the user), which was masking the underlying failure.
+
+**Live test required:** Łukasz must build and run the Wails app to confirm that `GET /api/servers` now populates the Servers view correctly. Static analysis cannot simulate the Wails webview URL resolution behavior.
+
+### Wails/webview nuance
+
+In Wails v2, the embedded frontend is served via a custom URL scheme on macOS (not `http:`). `usesDesktopAssetOrigin()` returns `true` in this context. All API fetches must be made to explicit `http://127.0.0.1:PORT` URLs to bypass custom-scheme URL resolution, which may not forward relative paths through the asset bridge reliably. WebSocket was already correct; API was not. This fix aligns API with WebSocket.

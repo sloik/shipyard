@@ -152,7 +152,7 @@ func TestSPECBUG016_DesktopBridgeConfigBootstrap(t *testing.T) {
 		"nativeFetch('/_shipyard/desktop-config')",
 		"desktopBridgeConfig = config || {};",
 		"function resolveAPIURL(path)",
-		"return path;",
+		"desktopBridgeConfig.api_base",
 		"function appFetch(input, init)",
 		"return nativeFetch(resolveAPIURL(input), init);",
 		"window.fetch = appFetch;",
@@ -1289,5 +1289,105 @@ func TestSPECBUG027_RestartingCardHasCenteredBody(t *testing.T) {
 
 	if !strings.Contains(content, "Waiting for process to start...") {
 		t.Error("SPEC-BUG-027 FAIL: expected 'Waiting for process to start...' text in renderServerCards JS source (AC2)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-015: Desktop Servers view stays empty despite /api/servers returning data
+// ---------------------------------------------------------------------------
+
+// TestSPECBUG015_LoadServersHidesEmptyStateWhenServersPresent verifies that
+// loadServers() hides the empty state and shows the configured-server container
+// when the API returns one or more servers (AC2, AC4).
+func TestSPECBUG015_LoadServersHidesEmptyStateWhenServersPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-BUG-015 FAIL: expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+
+	// When servers are non-empty: hide empty state, show grid and action bar
+	for _, needle := range []string{
+		"serversEmpty.style.display = 'none'",
+		"serversGrid.style.display = ''",
+		"serversActionBar.style.display = ''",
+	} {
+		if !strings.Contains(loadBody, needle) {
+			t.Errorf("SPEC-BUG-015 AC2 FAIL: expected %q in loadServers() non-empty path", needle)
+		}
+	}
+}
+
+// TestSPECBUG015_LoadServersShowsEmptyStateWhenNoServers verifies that
+// loadServers() shows the empty state and hides the server grid when the API
+// returns an empty array (AC3, AC4).
+func TestSPECBUG015_LoadServersShowsEmptyStateWhenNoServers(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-BUG-015 FAIL: expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+
+	// When servers are empty: show empty state, hide grid and action bar
+	for _, needle := range []string{
+		"serversEmpty.style.display = ''",
+		"serversGrid.style.display = 'none'",
+		"serversActionBar.style.display = 'none'",
+	} {
+		if !strings.Contains(loadBody, needle) {
+			t.Errorf("SPEC-BUG-015 AC3 FAIL: expected %q in loadServers() empty path", needle)
+		}
+	}
+}
+
+// TestSPECBUG015_ResolveAPIURLUsesApiBase verifies that resolveAPIURL() uses
+// desktopBridgeConfig.api_base to build an absolute URL for desktop mode
+// fetches, so Wails webview custom-scheme fetches resolve correctly to the
+// localhost HTTP server instead of relying on relative-URL resolution (AC1, AC4).
+func TestSPECBUG015_ResolveAPIURLUsesApiBase(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	resolveIdx := strings.Index(content, "function resolveAPIURL(path)")
+	if resolveIdx == -1 {
+		t.Fatal("SPEC-BUG-015 FAIL: expected resolveAPIURL(path) function in index.html")
+	}
+	resolveBody := content[resolveIdx:]
+	if endIdx := strings.Index(resolveBody[1:], "\n  function appFetch"); endIdx > 0 {
+		resolveBody = resolveBody[:endIdx+1]
+	}
+
+	// Must use api_base from desktopBridgeConfig to build an absolute URL
+	if !strings.Contains(resolveBody, "desktopBridgeConfig.api_base") {
+		t.Error("SPEC-BUG-015 AC1 FAIL: resolveAPIURL() must use desktopBridgeConfig.api_base for desktop mode fetches")
+	}
+	// Must strip trailing slash before concatenation to avoid double slashes
+	if !strings.Contains(resolveBody, ".replace(/\\/$/, '')") {
+		t.Error("SPEC-BUG-015 AC1 FAIL: resolveAPIURL() must strip trailing slash from api_base before concatenation")
+	}
+	// Must fall back to path when api_base is not set
+	if !strings.Contains(resolveBody, "return path;") {
+		t.Error("SPEC-BUG-015 AC1 FAIL: resolveAPIURL() must fall back to returning path unchanged when api_base is not available")
 	}
 }

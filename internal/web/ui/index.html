@@ -757,6 +757,9 @@
   }
 
   function resolveAPIURL(path) {
+    if (desktopBridgeConfig && desktopBridgeConfig.api_base) {
+      return desktopBridgeConfig.api_base.replace(/\/$/, '') + path;
+    }
     return path;
   }
 
@@ -2598,6 +2601,11 @@
       })
       .catch(function(err) {
         console.error('Failed to load servers:', err);
+        if (serversEmpty) {
+          serversEmpty.style.display = '';
+          var errMsg = serversEmpty.querySelector('.empty-desc');
+          if (errMsg) errMsg.textContent = 'Failed to load servers: ' + (err && err.message ? err.message : String(err));
+        }
       });
   }
 
