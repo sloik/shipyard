@@ -2,7 +2,7 @@
 id: SPEC-007
 priority: 7
 type: feature
-status: draft
+status: done
 after: [SPEC-004]
 created: 2026-04-06
 ---
@@ -126,17 +126,17 @@ WebSocket listener for `session_update` events to live-update the recording row.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `POST /api/sessions/start` creates a session row and returns `{id, name, server, status}`
-- [ ] AC-2: All traffic for the matching server is tagged with `session_id` while recording
-- [ ] AC-3: `POST /api/sessions/{id}/stop` sets status to `complete`, computes duration and size
-- [ ] AC-4: `GET /api/sessions` returns paginated list, filterable by `?server=` and `?status=`
-- [ ] AC-5: `GET /api/sessions/{id}/export` returns a self-contained JSON cassette
-- [ ] AC-6: `POST /api/sessions/{id}/replay` re-executes each request via Manager.SendRequest
-- [ ] AC-7: `DELETE /api/sessions/{id}` removes the session and unlinks traffic rows
-- [ ] AC-8: WebSocket broadcasts `session_update` events during recording
-- [ ] AC-9: UI shows session list with Record/Stop toggle, server filter, and pagination
-- [ ] AC-10: Delete and Replay actions require confirmation (DS.modal)
-- [ ] AC-11: All tests pass (`go test ./...`)
+- [x] AC-1: `POST /api/sessions/start` creates a session row and returns `{id, name, server, status}`
+- [x] AC-2: All traffic for the matching server is tagged with `session_id` while recording
+- [x] AC-3: `POST /api/sessions/{id}/stop` sets status to `complete`, computes duration and size
+- [x] AC-4: `GET /api/sessions` returns paginated list, filterable by `?server=` and `?status=`
+- [x] AC-5: `GET /api/sessions/{id}/export` returns a self-contained JSON cassette
+- [x] AC-6: `POST /api/sessions/{id}/replay` re-executes each request via Manager.SendRequest
+- [x] AC-7: `DELETE /api/sessions/{id}` removes the session and unlinks traffic rows
+- [x] AC-8: WebSocket broadcasts `session_update` events during recording
+- [x] AC-9: UI shows session list with Record/Stop toggle, server filter, and pagination
+- [x] AC-10: Delete and Replay actions require confirmation (DS.modal)
+- [x] AC-11: All tests pass (`go test ./...`)
 
 ## Out of Scope
 
