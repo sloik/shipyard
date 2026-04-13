@@ -299,3 +299,79 @@ go test ./...    PASS  (433 tests, 7 packages)
 
 - `TestBUG007_ToolDetailNoMaxWidth` AC-5 contained an incorrect assertion that required `padding:24px` on `#tool-detail` — this was the opposite of correct and would have caught the bug fix as a failure. Updated the assertion to match the correct contract (padding must NOT be on the outer container).
 - `TestSPECBUG022` and `TestSPECBUG023` both did exact string matches on the `#tool-response-section` opening tag and needed updating to include the new padding attribute. These tests verify layout structure, not layout correctness, so exact-match updates are appropriate.
+
+---
+
+## SPEC-BUG-030 — Tool Browser: wrong flex roles cause response section to collapse to 0px
+
+| Field | Value |
+|---|---|
+| Spec | SPEC-BUG-030 |
+| Status | done |
+| Commit | 0b769f0 |
+| Agent | Claude Sonnet 4.6 (worktree) |
+
+### What changed
+
+**`internal/web/ui/index.html`**
+
+- Line 162: `#tool-detail-scroll` — `flex:0 1 auto` → `flex:1 1 0`
+  - Element now grows to fill all available space and shrinks from a 0 basis, enabling `overflow-y:auto` to activate when content overflows.
+- Line 206: `#tool-response-section` — `flex:1; min-height:0` → `flex:0 0 auto; min-height:200px`
+  - Element no longer participates in flex grow/shrink. Always renders at its natural height with a 200px floor. The old `flex-basis:0` gave it zero shrink weight, so all shrinkage went to the scroll section and collapsed it.
+
+**`internal/web/ui_layout_test.go`**
+
+Six assertion updates to match the new flex contract:
+- `TestSPECBUG028` (~line 516): scroll section needle `"flex:0 1 auto"` → `"flex:1 1 0"`
+- `TestSPECBUG028` (~line 527): response section `"flex:1"`, `"min-height:0"` → `"flex:0 0 auto"`, `"min-height:200px"`
+- `TestBUG007_ResponseSectionFillsHeight` (~line 1013): `flex:1` → `flex:0 0 auto`
+- `TestSPECBUG021` (~line 1049): response section `"flex:1"`, `"min-height:0"` → `"flex:0 0 auto"`, `"min-height:200px"`
+- `TestSPECBUG022` (~line 1081): exact-match string updated with new flex values
+- `TestSPECBUG023` (~line 1182): exact-match string updated with new flex values
+
+### Verification output
+
+```
+SPEC-BUG-030 Verification
+=========================
+
+── Flex contract checks ──────────────────────────────────────────────────
+
+  ✅  #tool-detail-scroll has flex:1 1 0
+  ✅  #tool-detail-scroll does NOT have flex:0 1 auto (old broken value)
+  ✅  #tool-response-section has flex:0 0 auto
+  ✅  #tool-response-section has min-height:200px
+  ✅  #tool-response-section does NOT have flex:1 (old broken value)
+  ✅  #tool-detail outer container has no direct padding
+
+── Test suite ────────────────────────────────────────────────────────────
+
+ok  github.com/sloik/shipyard/cmd/shipyard         5.733s
+ok  github.com/sloik/shipyard/cmd/shipyard-mcp     (cached)
+ok  github.com/sloik/shipyard/internal/auth        (cached)
+ok  github.com/sloik/shipyard/internal/capture     (cached)
+ok  github.com/sloik/shipyard/internal/gateway     (cached)
+ok  github.com/sloik/shipyard/internal/proxy       (cached)
+ok  github.com/sloik/shipyard/internal/web         3.058s
+  ✅  go test ./... passes
+
+── Summary ───────────────────────────────────────────────────────────────
+
+  Passed: 7 / Failed: 0
+  RESULT: ✅ PASS — safe to merge
+```
+
+### AC checklist
+
+- [x] AC 1: `lm_stateful_chat` — form scrolls, all fields reachable (scroll section now grows + scrolls)
+- [x] AC 2: Response section visible at all times — `flex:0 0 auto; min-height:200px` guarantees it
+- [x] AC 3: `lms_load_model` scroll not regressed — SPEC-BUG-028 test passes
+- [x] AC 4: Short-form tools unchanged — response section still at natural height below form
+- [x] AC 5: `#tool-detail-scroll` has `flex:1 1 0` in `index.html` — verified by script
+- [x] AC 6: `#tool-response-section` has `flex:0 0 auto` and `min-height:200px` — verified by script
+- [x] AC 7: All layout tests updated to assert the new flex contract — no old broken values remain
+- [x] AC 8: `go test ./...` passes — all packages green
+- [x] AC 9: `go vet ./...` passes — clean (pre-commit hook)
+- [x] AC 10: `go build ./...` passes — clean (pre-commit hook)
+- [x] AC 11: `.shipyard-dev/verify-bug-030.sh` exits 0 — 7/7 checks passed
