@@ -806,9 +806,9 @@ func TestSPEC004_ServersViewElements(t *testing.T) {
 		t.Error("AC-2 FAIL: expected servers-grid element")
 	}
 
-	// AC-2: Server summary in action bar
-	if !strings.Contains(content, `id="servers-summary"`) {
-		t.Error("AC-2 FAIL: expected servers-summary element")
+	// AC-2: Server stat indicators in action bar (SPEC-BUG-034: replaces servers-summary)
+	if !strings.Contains(content, `id="servers-stat-online"`) {
+		t.Error("AC-2 FAIL: expected servers-stat-online element (replaces servers-summary per SPEC-BUG-034)")
 	}
 
 	// AC-4: Restart functionality
@@ -869,15 +869,18 @@ func TestSPECBUG014_LoadServersRefreshesBadge(t *testing.T) {
 		loadBody = loadBody[:endIdx+1]
 	}
 
+	// SPEC-BUG-034: serversSummary.textContent replaced with individual stat elements
 	requiredSnippets := []string{
 		"serverCountEl.textContent = serverCount + ' server'",
-		"serversSummary.textContent = '0 online, 0 tools'",
 		"serversEmpty.style.display = ''",
 		"serversGrid.style.display = 'none'",
 		"serversActionBar.style.display = 'none'",
 		"serversEmpty.style.display = 'none'",
 		"serversGrid.style.display = ''",
 		"serversActionBar.style.display = ''",
+		"servers-stat-online",
+		"servers-stat-crashed",
+		"servers-stat-tools",
 	}
 	for _, needle := range requiredSnippets {
 		if !strings.Contains(loadBody, needle) {
