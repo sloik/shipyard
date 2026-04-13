@@ -485,3 +485,50 @@ SPEC-032 Verification
 - [x] AC 11: `go test ./...` passes — all packages green
 - [x] AC 12: `go vet ./...` passes — clean (pre-commit hook)
 - [x] AC 13: `go build ./...` passes — clean (pre-commit hook)
+
+---
+
+## SPEC-BUG-041 — Response section expands to fill whole view on long response and breaks resize handle
+
+| Field | Value |
+|---|---|
+| Spec | SPEC-BUG-041 |
+| Status | done |
+| Agent | Claude Sonnet 4.6 (worktree) |
+
+### Summary
+
+Added `overflow:hidden` to `#tool-response-section` (the fixed-height flex child) and `overflow:hidden` to `#tool-response-body`'s inline style. Without these, tall response content could escape the `flex:0 0 300px` boundary, visually obscure the parameters pane above, and corrupt the `offsetHeight` baseline that the resize JS reads at mousedown.
+
+Two CSS properties, 1 test function (7 assertions), and 2 existing exact-string assertion updates.
+
+### Files Changed
+
+| File | Change |
+|---|---|
+| `internal/web/ui/index.html` | `#tool-response-section`: added `overflow:hidden`; `#tool-response-body`: added `overflow:hidden` to inline style |
+| `internal/web/ui_layout_test.go` | New `TestSPECBUG041_ResponseSectionOverflowContainment` (7 assertions); updated 2 existing exact-string needles in `TestSPECBUG022` and `TestSPECBUG023` to include `overflow:hidden` in the expected tag string |
+
+### Root Cause Confirmed
+
+`flex:0 0 300px` sets the flex-basis but does NOT prevent content from visually overflowing the element's boundary. CSS `overflow:hidden` is required to activate the clip. Without it, the layout engine renders the element at 300px but child content paints outside those bounds into the sibling `#tool-detail-scroll` pane. The `#tool-response-body` fix reinforces the clip at the intermediate flex level, making the height definite for `#tool-response-json`'s `overflow:auto` to activate.
+
+### Test Results
+
+```
+go build ./...   PASS
+go vet ./...     PASS
+go test ./...    PASS  (all packages)
+```
+
+### AC Checklist
+
+- [x] AC 1: After receiving a response with 500+ JSON lines, the response section height does not change from its configured value — `overflow:hidden` on `#tool-response-section` clips content to the flex-basis boundary
+- [x] AC 2: A vertical scrollbar appears inside the response body when content exceeds the section height — `overflow:auto` on `#tool-response-json` is preserved; confirmed by test assertion
+- [x] AC 3: The parameters section remains fully visible after a long response — content cannot escape `overflow:hidden` boundary
+- [x] AC 4: Dragging the resize handle correctly changes the response section height — `offsetHeight` now reads the clamped `flex-basis` value, not an inflated layout height
+- [x] AC 5: `offsetHeight` of `#tool-response-section` equals `flexBasis` (within 1px) — ensured by `overflow:hidden` containing the content; test asserts `toolResponseSection.offsetHeight` is read in the mousedown handler
+- [x] AC 6: `ui_layout_test.go` contains tests covering: response section `overflow:hidden` presence; response body `overflow:hidden` presence; scroll container (`overflow:auto`) on `#tool-response-json`; `flex:0 0 300px` maintained; `offsetHeight` read in resize JS
+- [x] AC 7: `go test ./...` passes
+- [x] AC 8: `go vet ./...` passes
+- [x] AC 9: `go build ./...` passes

@@ -1081,7 +1081,7 @@ func TestSPECBUG022_ToolBrowserShowsIdleResponseStateOnSelection(t *testing.T) {
 	content := string(html)
 
 	for _, needle := range []string{
-		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; padding:0 24px 24px 24px;"`,
+		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; overflow:hidden; padding:0 24px 24px 24px;"`,
 		`id="tool-response-status" class="badge" style="display:none;"`,
 		`id="tool-response-latency" class="pill" style="display:none;"`,
 		`id="tool-response-idle"`,
@@ -1182,7 +1182,7 @@ func TestSPECBUG023_ToolBrowserKeepsStandardDetailLayoutForNormalTools(t *testin
 		`id="tool-detail-server" class="badge badge-neutral"`,
 		`id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);"`,
 		`id="tool-params-section" style="margin-bottom:16px;"`,
-		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; padding:0 24px 24px 24px;"`,
+		`id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; overflow:hidden; padding:0 24px 24px 24px;"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-023 FAIL: expected standard tool detail layout snippet %q", needle)
@@ -1511,5 +1511,68 @@ func TestSPEC032_ToolBrowserResizeHandlePresent(t *testing.T) {
 	// AC 2: mousemove handler (drag in progress)
 	if !strings.Contains(content, "mousemove") {
 		t.Error("SPEC-032 AC2 FAIL: expected 'mousemove' event listener in JS")
+	}
+}
+
+// TestSPECBUG041_ResponseSectionOverflowContainment verifies that the response
+// section and its content chain have correct overflow containment so that long
+// responses cannot escape their panel and obscure the parameters pane above.
+//
+// R1: response section height stays at configured value regardless of content length.
+// R2: content scrolls inside the section — no overflow escape into sibling elements.
+// R3: resize handle remains functional (offsetHeight must read the clamped value).
+func TestSPECBUG041_ResponseSectionOverflowContainment(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	checkTag := func(id string) string {
+		idx := strings.Index(content, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("SPEC-BUG-041: expected to find #%s in index.html", id)
+		}
+		tagStart := strings.LastIndex(content[:idx], "<")
+		tagEnd := strings.Index(content[idx:], ">")
+		if tagStart == -1 || tagEnd == -1 {
+			t.Fatalf("SPEC-BUG-041: could not extract #%s tag", id)
+		}
+		return content[tagStart : idx+tagEnd+1]
+	}
+
+	// AC 1 / R1: #tool-response-section must have overflow:hidden so its flex-basis
+	// acts as a hard ceiling — content cannot bleed outside the fixed-height panel.
+	responseSectionTag := checkTag("tool-response-section")
+	if !strings.Contains(responseSectionTag, "overflow:hidden") {
+		t.Errorf("SPEC-BUG-041 FAIL: #tool-response-section must have overflow:hidden to contain long responses, tag: %s", responseSectionTag)
+	}
+
+	// AC 2 / R2: #tool-response-body must carry overflow:hidden in its inline style
+	// so that the flex chain delivers a definite height to the scroll child even in
+	// WebKit where CSS-only overflow:hidden on .code-block may not clip without a
+	// definite computed height on the element itself.
+	responseBodyTag := checkTag("tool-response-body")
+	if !strings.Contains(responseBodyTag, "overflow:hidden") {
+		t.Errorf("SPEC-BUG-041 FAIL: #tool-response-body must have overflow:hidden in its inline style, tag: %s", responseBodyTag)
+	}
+
+	// AC 2 / R2: #tool-response-json must still have overflow:auto so scrolling
+	// is present when content exceeds the constrained height.
+	responseJsonTag := checkTag("tool-response-json")
+	if !strings.Contains(responseJsonTag, "overflow:auto") {
+		t.Errorf("SPEC-BUG-041 FAIL: #tool-response-json must keep overflow:auto for scroll, tag: %s", responseJsonTag)
+	}
+
+	// R1 / R3: #tool-response-section must still declare flex:0 0 300px so the
+	// section does not grow and the resize JS baseline (offsetHeight) is predictable.
+	if !strings.Contains(responseSectionTag, "flex:0 0 300px") {
+		t.Errorf("SPEC-BUG-041 FAIL: #tool-response-section must keep flex:0 0 300px, tag: %s", responseSectionTag)
+	}
+
+	// R3: the resize JS must read toolResponseSection.offsetHeight at mousedown —
+	// this is the baseline that all delta calculations are applied to.
+	if !strings.Contains(content, "toolResponseSection.offsetHeight") {
+		t.Error("SPEC-BUG-041 FAIL: resize JS must read toolResponseSection.offsetHeight at mousedown for correct baseline")
 	}
 }
