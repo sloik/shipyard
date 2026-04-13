@@ -1646,6 +1646,24 @@
       html += '</div>';
     }
 
+    // offline/restarting aggregate banner (bottom, SPEC-BUG-026)
+    var offlineCount = 0, restartingCount = 0;
+    var allSrvNames = Object.keys(allTools);
+    for (var si = 0; si < allSrvNames.length; si++) {
+      var st = allTools[allSrvNames[si]].status;
+      if (st === 'offline') offlineCount++;
+      else if (st === 'restarting') restartingCount++;
+    }
+    if (offlineCount > 0 || restartingCount > 0) {
+      var parts = [];
+      if (offlineCount > 0) parts.push(offlineCount + ' server' + (offlineCount !== 1 ? 's' : '') + ' offline');
+      if (restartingCount > 0) parts.push(restartingCount + ' server' + (restartingCount !== 1 ? 's' : '') + ' restarting');
+      html += '<div id="tool-availability-banner" style="display:flex; align-items:center; justify-content:center; gap:8px; padding:8px 12px; background:var(--danger-subtle); font-size:var(--font-size-xs); font-weight:500; color:var(--danger-fg);">';
+      html += '<span style="font-size:14px; line-height:1; flex-shrink:0;">&#9888;</span>';
+      html += '<span>' + parts.join(', ') + '</span>';
+      html += '</div>';
+    }
+
     if (!html) {
       html = '<div style="padding:16px; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center;">No tools found</div>';
     }

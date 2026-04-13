@@ -1198,3 +1198,35 @@ func TestSPECBUG024_ToolBrowserSidebarSearchUsesPhase1StripChrome(t *testing.T) 
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-026: Tool Browser offline/restarting state missing Phase 1 banner
+// ---------------------------------------------------------------------------
+
+// TestSPECBUG026_OfflineBannerMarkupBuilt verifies that renderToolSidebar()
+// constructs the dedicated offline/restarting aggregate banner element (AC1, AC2).
+func TestSPECBUG026_OfflineBannerMarkupBuilt(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="tool-availability-banner"`) {
+		t.Error("SPEC-BUG-026 FAIL: expected tool-availability-banner element id in renderToolSidebar JS source")
+	}
+}
+
+// TestSPECBUG026_OfflineBannerGatedByCount verifies that the banner is only
+// rendered when at least one server is offline or restarting (AC3).
+func TestSPECBUG026_OfflineBannerGatedByCount(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "offlineCount > 0 || restartingCount > 0") {
+		t.Error("SPEC-BUG-026 FAIL: expected conditional gate 'offlineCount > 0 || restartingCount > 0' proving banner is shown/hidden by count")
+	}
+}
