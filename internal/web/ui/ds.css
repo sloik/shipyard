@@ -1160,7 +1160,8 @@ textarea {
 .json-line .lc {
   flex: 1;
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  word-break: normal;
+  overflow-wrap: normal;
   min-width: 0;
 }
 
