@@ -2420,3 +2420,50 @@ func TestHandleMCPPassthrough_NoAuth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
+
+// --- Security: env values must not appear in GET /api/servers ---
+
+// TestHandleServers_NoEnvInResponse verifies that the JSON body returned by
+// GET /api/servers does not contain the literal string "env" as a key, nor any
+// of the test server's environment variable values.
+//
+// This guards against future regressions where a code change accidentally
+// embeds ServerConfig (which carries Env) in the API response.
+func TestHandleServers_NoEnvInResponse(t *testing.T) {
+	srv := newTestServer(t)
+
+	secretValue := "super-secret-api-key-12345"
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "test-server", Status: "online", Command: "echo"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// The response must not contain any env values.
+	if strings.Contains(body, secretValue) {
+		t.Errorf("API response contains secret value %q — env values must not be serialised", secretValue)
+	}
+
+	// The response must not expose an "env" key at the top level of a server object.
+	// We decode into a generic structure to check for unexpected fields.
+	var raw []map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(raw))
+	}
+	if _, hasEnv := raw[0]["env"]; hasEnv {
+		t.Errorf("API response contains an 'env' key — env values must not be exposed: %s", body)
+	}
+}

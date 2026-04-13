@@ -13,6 +13,7 @@ import (
 
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
+	"github.com/sloik/shipyard/internal/secrets"
 	"github.com/sloik/shipyard/internal/web"
 )
 
@@ -253,7 +254,8 @@ func TestSeedConfiguredServers_RegistersVisibleServers(t *testing.T) {
 		ServerOrder: []string{"alpha", "beta"},
 	}
 
-	seedConfiguredServers(cfg, mgr, store, hub)
+	reg := secrets.DefaultRegistry("")
+	seedConfiguredServers(context.Background(), cfg, mgr, store, hub, reg)
 
 	servers := mgr.Servers()
 	if len(servers) != 2 {

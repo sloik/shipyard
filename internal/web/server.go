@@ -385,9 +385,11 @@ func (s *Server) handleTrafficDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 // serverInfoResponse extends ServerInfo with gateway policy state for the API response.
+// Env is explicitly suppressed (json:"-") to prevent accidental credential leakage.
 type serverInfoResponse struct {
 	ServerInfo
-	GatewayDisabled bool `json:"gateway_disabled"`
+	GatewayDisabled bool              `json:"gateway_disabled"`
+	Env             map[string]string `json:"-"` // never expose env values in API responses
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {

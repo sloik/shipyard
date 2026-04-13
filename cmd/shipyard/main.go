@@ -21,6 +21,7 @@ import (
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
 	"github.com/sloik/shipyard/internal/proxy"
+	"github.com/sloik/shipyard/internal/secrets"
 	"github.com/sloik/shipyard/internal/web"
 )
 
@@ -109,11 +110,17 @@ func dataDir() string {
 	return dir
 }
 
+// SecretsConfig holds the optional secrets backend configuration.
+type SecretsConfig struct {
+	Backend string `json:"backend"` // "keychain" | "1password" | "env" | "" (auto)
+}
+
 type Config struct {
 	Servers     map[string]ServerConfig `json:"servers"`
 	ServerOrder []string                `json:"-"`
 	Web         WebConfig               `json:"web"`
 	Auth        AuthConfig              `json:"auth"`
+	Secrets     SecretsConfig           `json:"secrets"`
 }
 
 // ToolConfig holds per-tool configuration within a server config.
@@ -150,17 +157,37 @@ func expandEnvVars(s string) string {
 	})
 }
 
+// resolveEnv resolves secret references in an env map using the given registry.
+// It returns a new map; the original is not mutated.
+// Per-key errors are non-fatal: the original ref is used and a warning is logged.
+// The resolved value is NEVER logged.
+func resolveEnv(ctx context.Context, env map[string]string, reg *secrets.Registry) map[string]string {
+	resolved := make(map[string]string, len(env))
+	for k, v := range env {
+		r, err := reg.Resolve(ctx, v)
+		if err != nil {
+			slog.Warn("secret resolution failed", "key", k, "err", err)
+			resolved[k] = v // use original ref on error
+		} else {
+			resolved[k] = r
+		}
+	}
+	return resolved
+}
+
 func (c *Config) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Servers json.RawMessage `json:"servers"`
 		Web     WebConfig       `json:"web"`
 		Auth    AuthConfig      `json:"auth"`
+		Secrets SecretsConfig   `json:"secrets"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 
 	c.Web = raw.Web
+	c.Secrets = raw.Secrets
 	// Expand env vars in auth fields
 	c.Auth = raw.Auth
 	c.Auth.BootstrapToken = expandEnvVars(raw.Auth.BootstrapToken)
@@ -302,10 +329,11 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func seedConfiguredServers(cfg *Config, mgr *proxy.Manager, store *capture.Store, hub *web.Hub) {
+func seedConfiguredServers(ctx context.Context, cfg *Config, mgr *proxy.Manager, store *capture.Store, hub *web.Hub, reg *secrets.Registry) {
 	for _, name := range cfg.ServerOrder {
 		server := cfg.Servers[name]
-		p := proxy.NewProxy(name, server.Command, server.Args, server.Env, server.Cwd, store, hub)
+		resolvedEnv := resolveEnv(ctx, server.Env, reg)
+		p := proxy.NewProxy(name, server.Command, server.Args, resolvedEnv, server.Cwd, store, hub)
 		mgr.Register(name, p)
 		mgr.SetStatus(name, "starting", "")
 	}
@@ -444,7 +472,10 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	// Create proxy manager
 	mgr := proxyNewManager()
 	mgr.SetHub(hub)
-	seedConfiguredServers(cfg, mgr, store, hub)
+
+	// Build secrets registry once at startup.
+	reg := secrets.DefaultRegistry(cfg.Secrets.Backend)
+	seedConfiguredServers(ctx, cfg, mgr, store, hub, reg)
 
 	// Build per-tool log levels from config
 	toolLogLevels := make(map[string]map[string]string)
@@ -479,7 +510,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 		wg.Add(1)
 		go func(name string, server ServerConfig) {
 			defer wg.Done()
-			runServerWithRestart(ctx, mgr, name, server, store, hub)
+			runServerWithRestart(ctx, mgr, name, server, store, hub, reg)
 		}(name, server)
 	}
 
@@ -513,7 +544,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 
 // runServerWithRestart runs a single server proxy with restart support.
 // It respects manager status to decide whether to restart after exit.
-func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name string, server ServerConfig, store *capture.Store, hub *web.Hub) {
+func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name string, server ServerConfig, store *capture.Store, hub *web.Hub, reg *secrets.Registry) {
 	for {
 		if parentCtx.Err() != nil {
 			return
@@ -525,10 +556,14 @@ func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name st
 			return
 		}
 
+		// Resolve secret references in env at each restart cycle so rotated
+		// secrets take effect automatically.
+		resolvedEnv := resolveEnv(parentCtx, server.Env, reg)
+
 		// Create a per-proxy cancelable context
 		proxyCtx, proxyCancel := context.WithCancel(parentCtx)
 
-		p := proxy.NewProxy(name, server.Command, server.Args, server.Env, server.Cwd, store, hub)
+		p := proxy.NewProxy(name, server.Command, server.Args, resolvedEnv, server.Cwd, store, hub)
 		mp := mgr.Register(name, p)
 		p.SetManaged(mp)
 		mgr.SetCancelFn(name, proxyCancel)
