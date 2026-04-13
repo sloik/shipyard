@@ -1446,3 +1446,67 @@ func TestSPECBUG015_ResolveAPIURLUsesApiBase(t *testing.T) {
 		t.Error("SPEC-BUG-015 AC1 FAIL: resolveAPIURL() must fall back to returning path unchanged when api_base is not available")
 	}
 }
+
+// TestSPEC032_ToolBrowserResizeHandlePresent verifies that the resize handle
+// element is present in the correct DOM position between the form scroll section
+// and the response section, has no inline style, and that the drag JS is wired up.
+func TestSPEC032_ToolBrowserResizeHandlePresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC 1: resize handle element exists with id and class
+	if !strings.Contains(content, `id="tool-resize-handle"`) {
+		t.Fatal("SPEC-032 AC1 FAIL: expected id=\"tool-resize-handle\" in index.html")
+	}
+	if !strings.Contains(content, `class="resize-handle"`) {
+		t.Fatal("SPEC-032 AC1 FAIL: expected class=\"resize-handle\" on handle element")
+	}
+
+	// AC 8: handle element must NOT have inline style attribute
+	// Find the handle tag and check it has no style= attribute
+	handleTagStart := strings.Index(content, `id="tool-resize-handle"`)
+	if handleTagStart == -1 {
+		t.Fatal("SPEC-032 AC8 FAIL: could not locate tool-resize-handle element")
+	}
+	// Search backward to find the opening < of this tag
+	tagOpen := strings.LastIndex(content[:handleTagStart], "<")
+	tagClose := strings.Index(content[handleTagStart:], ">")
+	if tagClose == -1 {
+		t.Fatal("SPEC-032 AC8 FAIL: could not find closing > of resize-handle tag")
+	}
+	handleTag := content[tagOpen : handleTagStart+tagClose+1]
+	if strings.Contains(handleTag, "style=") {
+		t.Errorf("SPEC-032 AC8 FAIL: handle element must NOT have inline style attribute, got: %s", handleTag)
+	}
+
+	// AC 9: DOM order — tool-detail-scroll < tool-resize-handle < tool-response-section
+	scrollIdx := strings.Index(content, `id="tool-detail-scroll"`)
+	handleIdx := strings.Index(content, `id="tool-resize-handle"`)
+	responseIdx := strings.Index(content, `id="tool-response-section"`)
+	if scrollIdx == -1 || handleIdx == -1 || responseIdx == -1 {
+		t.Fatalf("SPEC-032 AC9 FAIL: one or more required elements not found: scroll=%d handle=%d response=%d",
+			scrollIdx, handleIdx, responseIdx)
+	}
+	if !(scrollIdx < handleIdx && handleIdx < responseIdx) {
+		t.Errorf("SPEC-032 AC9 FAIL: expected tool-detail-scroll(%d) < tool-resize-handle(%d) < tool-response-section(%d)",
+			scrollIdx, handleIdx, responseIdx)
+	}
+
+	// AC 5: localStorage key present in JS
+	if !strings.Contains(content, "shipyard_tool_response_height") {
+		t.Error("SPEC-032 AC5 FAIL: expected localStorage key 'shipyard_tool_response_height' in JS")
+	}
+
+	// AC 2: mousedown drag start handler
+	if !strings.Contains(content, "mousedown") {
+		t.Error("SPEC-032 AC2 FAIL: expected 'mousedown' event listener in JS")
+	}
+
+	// AC 2: mousemove handler (drag in progress)
+	if !strings.Contains(content, "mousemove") {
+		t.Error("SPEC-032 AC2 FAIL: expected 'mousemove' event listener in JS")
+	}
+}

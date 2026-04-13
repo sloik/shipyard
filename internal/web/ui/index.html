@@ -202,6 +202,8 @@
         <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
       </div>
 
+      <div class="resize-handle" id="tool-resize-handle"></div>
+
       <!-- Response Section -->
       <div id="tool-response-section" style="display:flex; flex:0 0 300px; flex-direction:column; padding:0 24px 24px 24px;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
@@ -1465,6 +1467,50 @@
   var toolResponseJson    = document.getElementById('tool-response-json');
   var toolResponseCopy    = document.getElementById('tool-response-copy');
   var toolResponseRetry   = document.getElementById('tool-response-retry');
+  var toolResizeHandle    = document.getElementById('tool-resize-handle');
+  var toolResizeDragging  = false;
+  var toolResizeStartY    = 0;
+  var toolResizeStartHeight = 0;
+
+  // Apply saved response section height on init
+  (function() {
+    var saved = parseInt(localStorage.getItem('shipyard_tool_response_height'), 10);
+    if (saved && toolResponseSection) {
+      var containerH = toolDetail.offsetHeight;
+      var clamped = Math.min(Math.max(saved, 150), containerH - 150);
+      toolResponseSection.style.height = clamped + 'px';
+    }
+  })();
+
+  toolResizeHandle.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    toolResizeDragging = true;
+    toolResizeStartY = e.clientY;
+    toolResizeStartHeight = toolResponseSection.offsetHeight;
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!toolResizeDragging) return;
+    var delta = toolResizeStartY - e.clientY;
+    var containerH = toolDetail.offsetHeight;
+    var newH = Math.min(Math.max(toolResizeStartHeight + delta, 150), containerH - 150);
+    toolResponseSection.style.height = newH + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!toolResizeDragging) return;
+    toolResizeDragging = false;
+    localStorage.setItem('shipyard_tool_response_height', toolResponseSection.offsetHeight);
+  });
+
+  window.addEventListener('resize', function() {
+    var saved = parseInt(localStorage.getItem('shipyard_tool_response_height'), 10);
+    if (!saved || !toolDetail) return;
+    var containerH = toolDetail.offsetHeight;
+    var clamped = Math.min(Math.max(saved, 150), containerH - 150);
+    toolResponseSection.style.height = clamped + 'px';
+    localStorage.setItem('shipyard_tool_response_height', clamped);
+  });
 
   var allTools         = {}; // { serverName: [{ name, description, inputSchema }] }
   var selectedTool     = null; // { server, name, description, inputSchema }
