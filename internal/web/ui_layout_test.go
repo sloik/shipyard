@@ -364,9 +364,9 @@ func TestBUG007_ToolDetailNoMaxWidth(t *testing.T) {
 		t.Error("AC-3: expected tool-response-section element to exist")
 	}
 
-	// AC-5: tool-detail must have padding:24px
-	if !strings.Contains(tag, "padding:24px") {
-		t.Errorf("AC-5 FAIL: #tool-detail should have padding:24px, tag: %s", tag)
+	// AC-5: tool-detail must NOT have padding (SPEC-BUG-029: padding moved to inner regions)
+	if strings.Contains(tag, "padding:") {
+		t.Errorf("AC-5 FAIL: #tool-detail must not have padding (padding belongs on inner regions, not outer flex container), tag: %s", tag)
 	}
 }
 
@@ -557,6 +557,61 @@ func TestSPECBUG028_ToolBrowserLongSchemaFormsUseDedicatedScrollOwner(t *testing
 		if !strings.Contains(cssContent, needle) {
 			t.Errorf("SPEC-BUG-028 FAIL: expected %q in scroll ownership CSS", needle)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-029: Tool Browser padding on outer flex container eats scroll height
+// ---------------------------------------------------------------------------
+
+// TestSPECBUG029_ToolDetailPaddingIsolationContract verifies that padding is NOT
+// on the outer #tool-detail flex container and IS on the inner regions
+// (#tool-detail-scroll and #tool-response-section), so the full container height
+// is available for flex layout and the response section is never hidden.
+func TestSPECBUG029_ToolDetailPaddingIsolationContract(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	checkTag := func(id string) string {
+		idx := strings.Index(content, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("expected to find id=%q in index.html", id)
+		}
+		tagStart := strings.LastIndex(content[:idx], "<")
+		tagEnd := strings.Index(content[idx:], ">")
+		if tagStart == -1 || tagEnd == -1 {
+			t.Fatalf("could not extract tag for id=%q", id)
+		}
+		return content[tagStart : idx+tagEnd+1]
+	}
+
+	// AC-5a: #tool-detail must NOT have any padding — the full height must go to flex children
+	detailTag := checkTag("tool-detail")
+	if strings.Contains(detailTag, "padding:") {
+		t.Errorf("SPEC-BUG-029 FAIL: #tool-detail must not have padding (causes scroll height loss), tag: %s", detailTag)
+	}
+
+	// AC-5b: #tool-detail-scroll must have top/side padding (visual spacing inside scroll region)
+	scrollTag := checkTag("tool-detail-scroll")
+	if !strings.Contains(scrollTag, "padding:") {
+		t.Errorf("SPEC-BUG-029 FAIL: #tool-detail-scroll must have padding (visual spacing moved from outer container), tag: %s", scrollTag)
+	}
+	// Must have non-zero bottom padding value of 0 (padding:24px 24px 0 24px)
+	// or equivalent — key contract is that padding exists on the scroll region
+	if !strings.Contains(scrollTag, "padding:24px 24px 0 24px") {
+		t.Errorf("SPEC-BUG-029 FAIL: #tool-detail-scroll should have padding:24px 24px 0 24px (top/sides, no bottom gap before response), tag: %s", scrollTag)
+	}
+
+	// AC-5c: #tool-response-section must have side/bottom padding
+	responseTag := checkTag("tool-response-section")
+	if !strings.Contains(responseTag, "padding:") {
+		t.Errorf("SPEC-BUG-029 FAIL: #tool-response-section must have padding (visual spacing moved from outer container), tag: %s", responseTag)
+	}
+	if !strings.Contains(responseTag, "padding:0 24px 24px 24px") {
+		t.Errorf("SPEC-BUG-029 FAIL: #tool-response-section should have padding:0 24px 24px 24px (sides/bottom, no top gap after scroll region), tag: %s", responseTag)
 	}
 }
 
@@ -1023,7 +1078,7 @@ func TestSPECBUG022_ToolBrowserShowsIdleResponseStateOnSelection(t *testing.T) {
 	content := string(html)
 
 	for _, needle := range []string{
-		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column;"`,
+		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column; padding:0 24px 24px 24px;"`,
 		`id="tool-response-status" class="badge" style="display:none;"`,
 		`id="tool-response-latency" class="pill" style="display:none;"`,
 		`id="tool-response-idle"`,
@@ -1124,7 +1179,7 @@ func TestSPECBUG023_ToolBrowserKeepsStandardDetailLayoutForNormalTools(t *testin
 		`id="tool-detail-server" class="badge badge-neutral"`,
 		`id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);"`,
 		`id="tool-params-section" style="margin-bottom:16px;"`,
-		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column;"`,
+		`id="tool-response-section" style="display:flex; flex:1; min-height:0; flex-direction:column; padding:0 24px 24px 24px;"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-023 FAIL: expected standard tool detail layout snippet %q", needle)
