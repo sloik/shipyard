@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -22,6 +24,54 @@ import (
 
 //go:embed ui
 var uiFS embed.FS
+
+// secretKeyPattern matches env key names that are likely to hold secrets.
+var secretKeyPattern = regexp.MustCompile(`(?i)(KEY|TOKEN|SECRET|PASSWORD|API)`)
+
+// hasPlainTextSecrets returns true if any entry in env has a key matching a
+// common secret-name pattern and a value that is NOT a known secret reference
+// (@keychain:, op://, or ${).  It must be called with the ORIGINAL (unresolved)
+// env map from the config — not with resolved secret values.
+func hasPlainTextSecrets(env map[string]string) bool {
+	for k, v := range env {
+		if !secretKeyPattern.MatchString(k) {
+			continue
+		}
+		if strings.HasPrefix(v, "@keychain:") ||
+			strings.HasPrefix(v, "op://") ||
+			strings.HasPrefix(v, "${") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// SettingsStore holds runtime-mutable application settings.
+// It is safe for concurrent use.
+type SettingsStore struct {
+	mu             sync.RWMutex
+	secretsBackend string
+}
+
+// NewSettingsStore creates a SettingsStore initialised with the given secrets backend.
+func NewSettingsStore(backend string) *SettingsStore {
+	return &SettingsStore{secretsBackend: backend}
+}
+
+// SecretsBackend returns the current secrets backend value.
+func (ss *SettingsStore) SecretsBackend() string {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.secretsBackend
+}
+
+// SetSecretsBackend updates the secrets backend value.
+func (ss *SettingsStore) SetSecretsBackend(backend string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.secretsBackend = backend
+}
 
 type wsConn interface {
 	Read(context.Context) (websocket.MessageType, []byte, error)
@@ -80,15 +130,17 @@ type shipyardTool struct {
 
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
-	port          int
-	store         *capture.Store
-	hub           *Hub
-	proxies       ProxyManager
-	gateway       *gateway.Store
-	authStore     *auth.Store
-	authLimiter   *auth.RateLimiter
-	authEnabled   bool
-	toolLogLevels map[string]map[string]string // server → tool → log_level
+	port           int
+	store          *capture.Store
+	hub            *Hub
+	proxies        ProxyManager
+	gateway        *gateway.Store
+	authStore      *auth.Store
+	authLimiter    *auth.RateLimiter
+	authEnabled    bool
+	toolLogLevels  map[string]map[string]string // server → tool → log_level
+	settingsStore  *SettingsStore
+	rawServerEnvs  map[string]map[string]string // server name → original (unresolved) env
 }
 
 // NewServer creates a new web server.
@@ -115,6 +167,17 @@ func (s *Server) SetAuthStore(as *auth.Store, limiter *auth.RateLimiter, enabled
 // SetToolLogLevels sets per-tool log level overrides for access logging.
 func (s *Server) SetToolLogLevels(levels map[string]map[string]string) {
 	s.toolLogLevels = levels
+}
+
+// SetSettingsStore attaches a SettingsStore for the settings API.
+func (s *Server) SetSettingsStore(ss *SettingsStore) {
+	s.settingsStore = ss
+}
+
+// SetRawServerEnvs stores the original (unresolved) env maps for each server,
+// used by the plain-text secrets detection logic.
+func (s *Server) SetRawServerEnvs(envs map[string]map[string]string) {
+	s.rawServerEnvs = envs
 }
 
 // Start runs the HTTP server. It blocks until the context is cancelled.
@@ -171,6 +234,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// Access log endpoints
 	mux.HandleFunc("GET /api/access-log", s.handleAccessLog)
 	mux.HandleFunc("GET /api/access-log/stats", s.handleAccessLogStats)
+
+	// Settings API
+	mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
+	mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
 
 	// MCP proxy endpoint — auth-gated when auth.enabled: true
 	if s.authEnabled && s.authStore != nil {
@@ -388,8 +455,9 @@ func (s *Server) handleTrafficDetail(w http.ResponseWriter, r *http.Request) {
 // Env is explicitly suppressed (json:"-") to prevent accidental credential leakage.
 type serverInfoResponse struct {
 	ServerInfo
-	GatewayDisabled bool              `json:"gateway_disabled"`
-	Env             map[string]string `json:"-"` // never expose env values in API responses
+	GatewayDisabled    bool              `json:"gateway_disabled"`
+	HasPlainTextSecrets bool             `json:"has_plain_text_secrets"`
+	Env                map[string]string `json:"-"` // never expose env values in API responses
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
@@ -406,6 +474,10 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		if s.gateway != nil && !s.gateway.ServerEnabled(srv.Name) {
 			resp.GatewayDisabled = true
 		}
+		if s.rawServerEnvs != nil {
+			resp.Env = s.rawServerEnvs[srv.Name]
+		}
+		resp.HasPlainTextSecrets = hasPlainTextSecrets(resp.Env)
 		result[i] = resp
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1561,4 +1633,58 @@ func (s *Server) handleAccessLogStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// settingsSecretsRequest is the shape of the secrets sub-object in settings API calls.
+type settingsSecretsRequest struct {
+	Backend string `json:"backend"`
+}
+
+// settingsResponse is the shape returned by GET /api/settings.
+type settingsResponse struct {
+	Secrets settingsSecretsRequest `json:"secrets"`
+}
+
+// handleSettingsGet handles GET /api/settings.
+// Returns current application settings (currently: secrets.backend).
+func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
+	backend := ""
+	if s.settingsStore != nil {
+		backend = s.settingsStore.SecretsBackend()
+	}
+	resp := settingsResponse{
+		Secrets: settingsSecretsRequest{Backend: backend},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleSettingsPost handles POST /api/settings.
+// Accepts {"secrets":{"backend":"..."}} and updates the in-memory settings.
+// Valid backend values: "keychain", "1password", "env", "".
+func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Secrets *settingsSecretsRequest `json:"secrets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Secrets == nil {
+		http.Error(w, "missing secrets field", http.StatusBadRequest)
+		return
+	}
+
+	allowed := map[string]bool{"keychain": true, "1password": true, "env": true, "": true}
+	if !allowed[req.Secrets.Backend] {
+		http.Error(w, "invalid backend value", http.StatusBadRequest)
+		return
+	}
+
+	if s.settingsStore != nil {
+		s.settingsStore.SetSecretsBackend(req.Secrets.Backend)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

@@ -491,11 +491,19 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 		}
 	}
 
+	// Build raw (unresolved) env map for plain-text secrets detection.
+	rawServerEnvs := make(map[string]map[string]string, len(cfg.Servers))
+	for name, sc := range cfg.Servers {
+		rawServerEnvs[name] = sc.Env
+	}
+
 	srv := web.NewServer(port, store, hub)
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(authStore, authLimiter, cfg.Auth.Enabled)
 	srv.SetToolLogLevels(toolLogLevels)
+	srv.SetSettingsStore(web.NewSettingsStore(cfg.Secrets.Backend))
+	srv.SetRawServerEnvs(rawServerEnvs)
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
 		if err := startWebServer(ctx, srv); err != nil {

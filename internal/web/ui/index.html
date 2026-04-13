@@ -20,6 +20,7 @@
     <a class="tab tab-default" href="#history" data-route="history">History</a>
     <a class="tab tab-default" href="#servers" data-route="servers">Servers</a>
     <a class="tab tab-default" href="#tokens" data-route="tokens">Tokens</a>
+    <a class="tab tab-default" href="#settings" data-route="settings">Settings</a>
   </nav>
   <span id="ws-indicator" class="ws-indicator ws-disconnected">Disconnected</span>
   <a href="#servers" id="server-count" class="badge badge-neutral" style="text-decoration:none; cursor:pointer;">0 servers</a>
@@ -30,6 +31,7 @@
 <div id="history" class="route-target" aria-hidden="true"></div>
 <div id="servers" class="route-target" aria-hidden="true"></div>
 <div id="tokens" class="route-target" aria-hidden="true"></div>
+<div id="settings" class="route-target" aria-hidden="true"></div>
 
 <div id="app-chrome">
   <div id="global-banners">
@@ -524,6 +526,14 @@
     <button class="btn btn-primary btn-sm" id="servers-add-btn">&#43; Add Server</button>
   </div>
 
+  <!-- Plain-text secrets warning banner (SPEC-038-003) -->
+  <div id="servers-plain-text-warning" style="display:none; align-items:center; gap:12px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-s); padding:10px 16px; margin:0 24px 12px 24px; font-size:var(--font-size-sm);">
+    <span style="color:var(--warning-fg);">&#9888;</span>
+    <span style="flex:1; color:var(--text-secondary);">One or more servers have plain-text secrets in their config. Consider using a secret manager.</span>
+    <button class="btn btn-default btn-sm" onclick="showView('settings'); document.getElementById('servers-plain-text-warning').style.display='none';">Go to Settings</button>
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('servers-plain-text-warning').style.display='none';">&#10005;</button>
+  </div>
+
   <!-- Empty State (matches design: UX-002 → "Desktop — First Run (0 servers)") -->
   <div id="servers-empty" class="empty-state">
     <div class="empty-icon">&#128421;</div>
@@ -666,6 +676,39 @@
 
 </main>
 
+<!-- ================================================================
+     View: Settings (#/settings)
+     ================================================================ -->
+<main id="view-settings" class="route-view">
+  <div style="max-width:640px; margin:0 auto; padding:24px;">
+
+    <!-- Secret Manager section -->
+    <div class="settings-section">
+      <div class="section-title">Secret Manager</div>
+      <div class="section-desc">Choose how Shipyard resolves secret references in server environment variables.</div>
+      <div id="secrets-backend-section" style="display:flex; flex-direction:column; gap:8px; margin-top:4px;">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:var(--font-size-sm); color:var(--text-primary);">
+          <input type="radio" name="secrets-backend" value="keychain" onchange="saveSecretBackend(this.value)">
+          <span>macOS Keychain <span style="color:var(--text-muted);">(recommended on macOS)</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:var(--font-size-sm); color:var(--text-primary);">
+          <input type="radio" name="secrets-backend" value="1password" onchange="saveSecretBackend(this.value)">
+          <span>1Password <span style="color:var(--text-muted);">(requires op CLI)</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:var(--font-size-sm); color:var(--text-primary);">
+          <input type="radio" name="secrets-backend" value="env" onchange="saveSecretBackend(this.value)">
+          <span>Environment Variables <span style="color:var(--text-muted);">($&#123;VAR&#125; expansion only)</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:var(--font-size-sm); color:var(--text-primary);">
+          <input type="radio" name="secrets-backend" value="" onchange="saveSecretBackend(this.value)">
+          <span>None <span style="color:var(--text-muted);">(plain text, not recommended)</span></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</main>
+
   </div><!-- /route-stack -->
 </div><!-- /app-chrome -->
 
@@ -683,7 +726,8 @@
     tools:    document.getElementById('view-tools'),
     history:  document.getElementById('view-history'),
     servers:  document.getElementById('view-servers'),
-    tokens:   document.getElementById('view-tokens')
+    tokens:   document.getElementById('view-tokens'),
+    settings: document.getElementById('view-settings')
   };
   var timelineEmpty   = document.getElementById('timeline-empty');
   var timelineContent = document.getElementById('timeline-content');
@@ -753,6 +797,9 @@
     views[baseRoute].classList.add('is-active');
     if (baseRoute === 'servers') {
       loadServers();
+    }
+    if (baseRoute === 'settings') {
+      loadSettings();
     }
 
     // Update tabs
@@ -2752,6 +2799,18 @@
         }
 
         renderServerCards(servers);
+
+        // Show plain-text secrets warning banner if any server has plain-text secrets
+        var warningBanner = document.getElementById('servers-plain-text-warning');
+        if (warningBanner) {
+          var anyPlainText = false;
+          for (var j = 0; j < servers.length; j++) {
+            if (servers[j].has_plain_text_secrets) { anyPlainText = true; break; }
+          }
+          if (anyPlainText) {
+            warningBanner.style.display = 'flex';
+          }
+        }
       })
       .catch(function(err) {
         console.error('Failed to load servers:', err);
@@ -2768,6 +2827,47 @@
     serverStateTimer = setInterval(function() {
       loadServers();
     }, 2000);
+  }
+
+  /* ======================================================================
+     Settings — Secrets Backend
+     ====================================================================== */
+
+  // showView navigates to a top-level route view by name.
+  function showView(route) {
+    navigateRoute(route);
+    location.hash = '#' + route;
+  }
+
+  // loadSettings is called when the Settings view becomes active.
+  // It loads all settings sub-sections.
+  function loadSettings() {
+    loadSecretsBackend();
+  }
+
+  // loadSecretsBackend fetches the current secrets.backend from the settings API
+  // and pre-selects the matching radio button.
+  function loadSecretsBackend() {
+    fetch('/api/settings').then(function(r) { return r.json(); }).then(function(d) {
+      var backend = (d.secrets && d.secrets.backend !== undefined) ? d.secrets.backend : '';
+      var radios = document.querySelectorAll('input[name="secrets-backend"]');
+      for (var i = 0; i < radios.length; i++) {
+        radios[i].checked = (radios[i].value === backend);
+      }
+    }).catch(function(err) {
+      console.error('Failed to load settings:', err);
+    });
+  }
+
+  // saveSecretBackend persists the chosen backend to the settings API.
+  function saveSecretBackend(value) {
+    fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({secrets: {backend: value}})
+    }).catch(function(err) {
+      console.error('Failed to save secret backend:', err);
+    });
   }
 
   function renderServerCards(servers) {

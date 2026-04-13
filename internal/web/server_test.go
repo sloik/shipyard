@@ -2467,3 +2467,203 @@ func TestHandleServers_NoEnvInResponse(t *testing.T) {
 		t.Errorf("API response contains an 'env' key — env values must not be exposed: %s", body)
 	}
 }
+
+// --- hasPlainTextSecrets unit tests ---
+
+func TestHasPlainTextSecrets(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{
+			name: "plain-text API key detected",
+			env:  map[string]string{"LMS_API_KEY": "sk-abcdef1234"},
+			want: true,
+		},
+		{
+			name: "plain-text TOKEN detected",
+			env:  map[string]string{"GITHUB_TOKEN": "ghp_plaintext"},
+			want: true,
+		},
+		{
+			name: "plain-text SECRET detected",
+			env:  map[string]string{"MY_SECRET": "hunter2"},
+			want: true,
+		},
+		{
+			name: "plain-text PASSWORD detected",
+			env:  map[string]string{"DB_PASSWORD": "letmein"},
+			want: true,
+		},
+		{
+			name: "keychain ref not flagged",
+			env:  map[string]string{"API_KEY": "@keychain:my-service"},
+			want: false,
+		},
+		{
+			name: "1Password op:// ref not flagged",
+			env:  map[string]string{"API_TOKEN": "op://vault/item/field"},
+			want: false,
+		},
+		{
+			name: "env var ${} ref not flagged",
+			env:  map[string]string{"API_SECRET": "${MY_ENV_VAR}"},
+			want: false,
+		},
+		{
+			name: "non-secret key not flagged",
+			env:  map[string]string{"NODE_ENV": "production", "PORT": "8080"},
+			want: false,
+		},
+		{
+			name: "empty env returns false",
+			env:  map[string]string{},
+			want: false,
+		},
+		{
+			name: "nil env returns false",
+			env:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasPlainTextSecrets(tc.env)
+			if got != tc.want {
+				t.Errorf("hasPlainTextSecrets(%v) = %v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- GET /api/settings ---
+
+func TestHandleSettingsGet_NoStore(t *testing.T) {
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	w := httptest.NewRecorder()
+	srv.handleSettingsGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp settingsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Secrets.Backend != "" {
+		t.Errorf("expected empty backend, got %q", resp.Secrets.Backend)
+	}
+}
+
+func TestHandleSettingsGet_WithStore(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetSettingsStore(NewSettingsStore("keychain"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	w := httptest.NewRecorder()
+	srv.handleSettingsGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp settingsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Secrets.Backend != "keychain" {
+		t.Errorf("expected keychain, got %q", resp.Secrets.Backend)
+	}
+}
+
+func TestHandleSettingsPost_UpdatesBackend(t *testing.T) {
+	srv := newTestServer(t)
+	store := NewSettingsStore("keychain")
+	srv.SetSettingsStore(store)
+
+	body := strings.NewReader(`{"secrets":{"backend":"1password"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSettingsPost(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := store.SecretsBackend(); got != "1password" {
+		t.Errorf("expected 1password backend, got %q", got)
+	}
+}
+
+func TestHandleSettingsPost_InvalidBackend(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetSettingsStore(NewSettingsStore("keychain"))
+
+	body := strings.NewReader(`{"secrets":{"backend":"malicious"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSettingsPost(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid backend, got %d", w.Code)
+	}
+}
+
+// --- has_plain_text_secrets in /api/servers response ---
+
+func TestHandleServers_HasPlainTextSecrets(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "secret-server", Status: "online"}},
+	})
+	srv.SetRawServerEnvs(map[string]map[string]string{
+		"secret-server": {"API_KEY": "sk-plaintext"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(result))
+	}
+	flagged, ok := result[0]["has_plain_text_secrets"].(bool)
+	if !ok {
+		t.Fatalf("has_plain_text_secrets field missing or wrong type")
+	}
+	if !flagged {
+		t.Error("expected has_plain_text_secrets=true for server with plain-text API_KEY")
+	}
+}
+
+func TestHandleServers_NoPlainTextSecrets(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "safe-server", Status: "online"}},
+	})
+	srv.SetRawServerEnvs(map[string]map[string]string{
+		"safe-server": {"API_KEY": "@keychain:my-service"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	var result []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	flagged, _ := result[0]["has_plain_text_secrets"].(bool)
+	if flagged {
+		t.Error("expected has_plain_text_secrets=false for keychain ref")
+	}
+}
