@@ -2,7 +2,7 @@
 id: SPEC-016
 priority: 16
 type: bugfix
-status: draft
+status: done
 after: [SPEC-006]
 created: 2026-04-06
 ---
@@ -83,13 +83,13 @@ Add `s.migrate()` call at the beginning of `initDB()`, before CREATE TABLE state
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Fresh database creates all tables and sets `user_version = 1`
-- [ ] AC-2: Existing v0 database (no sessions/schema tables) is migrated automatically on startup
-- [ ] AC-3: Migration adds `session_id` column to existing `traffic` table
-- [ ] AC-4: Migration creates `sessions`, `schema_snapshots`, `schema_changes` tables
-- [ ] AC-5: Migration is idempotent (running twice doesn't error)
-- [ ] AC-6: `PRAGMA user_version` reflects current schema version after migration
-- [ ] AC-7: All existing tests continue to pass
+- [x] AC-1: Fresh database creates all tables and sets `user_version = 1`
+- [x] AC-2: Existing v0 database (no sessions/schema tables) is migrated automatically on startup
+- [x] AC-3: Migration adds `session_id` column to existing `traffic` table
+- [x] AC-4: Migration creates `sessions`, `schema_snapshots`, `schema_changes` tables
+- [x] AC-5: Migration is idempotent (running twice doesn't error)
+- [x] AC-6: `PRAGMA user_version` reflects current schema version after migration
+- [x] AC-7: All existing tests continue to pass
 
 ## Out of Scope
 
