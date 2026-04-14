@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 1
 type: feature
-status: ready
+status: in_progress
 parent: SPEC-038
 after: [SPEC-038-001]
 prior_attempts: []
