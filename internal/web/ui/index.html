@@ -106,10 +106,13 @@
           <option value="">All methods</option>
         </select>
       </div>
-      <div class="seg-toggle" id="dir-toggle">
-        <button class="seg-active" data-value="">All</button>
-        <button class="seg-inactive" data-value="client%E2%86%92server">REQ &#8594;</button>
-        <button class="seg-inactive" data-value="server%E2%86%92client">&#8592; RES</button>
+      <div class="input-group">
+        <label class="input-label">Direction</label>
+        <div class="seg-toggle" id="dir-toggle">
+          <button class="seg-active" data-value="">All</button>
+          <button class="seg-inactive" data-value="client%E2%86%92server">REQ &#8594;</button>
+          <button class="seg-inactive" data-value="server%E2%86%92client">&#8592; RES</button>
+        </div>
       </div>
       <button class="btn btn-ghost" id="clear-filters-btn">Clear</button>
       <span id="traffic-count" class="badge badge-neutral"></span>

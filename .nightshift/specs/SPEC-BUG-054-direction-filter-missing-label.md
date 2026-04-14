@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -29,19 +29,19 @@ The Timeline filter bar shows "Server" and "Method" labels above their respectiv
 
 ## Root Cause
 
-(Agent fills in during run.)
+The `<div class="seg-toggle" id="dir-toggle">` was a bare sibling inside `#filter-bar` without an `.input-group` wrapper or `.input-label`, unlike the Server and Method groups which were already wrapped.
 
 ## Requirements
 
-- [ ] R1: A "Direction" label appears above the direction seg-toggle in the filter bar
-- [ ] R2: Label styling matches the other filter labels (font-size `--font-size-sm`, font-weight 500, color `--text-muted`)
+- [x] R1: A "Direction" label appears above the direction seg-toggle in the filter bar
+- [x] R2: Label styling matches the other filter labels (font-size `--font-size-sm`, font-weight 500, color `--text-muted`)
 
 ## Acceptance Criteria
 
-- [ ] AC 1: "Direction" label text is visible above the direction toggle
-- [ ] AC 2: Label uses the same `.input-label` class (or equivalent styling) as "Server" and "Method" labels
-- [ ] AC 3: The direction filter group is wrapped in an `.input-group` container (matching Server and Method groups)
-- [ ] AC 4: `go build ./...` passes
+- [x] AC 1: "Direction" label text is visible above the direction toggle
+- [x] AC 2: Label uses the same `.input-label` class (or equivalent styling) as "Server" and "Method" labels
+- [x] AC 3: The direction filter group is wrapped in an `.input-group` container (matching Server and Method groups)
+- [x] AC 4: `go build ./...` passes
 
 ## Context
 
