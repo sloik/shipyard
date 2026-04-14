@@ -216,7 +216,6 @@
             <span id="tool-response-latency" class="pill" style="display:none;"></span>
             <button class="btn btn-copy btn-sm" id="tool-response-copy"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><rect x="4" y="1" width="7" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="3" width="7" height="8" rx="1" fill="var(--btn-default-bg,#fff)" stroke="currentColor" stroke-width="1.2"/></svg>Copy</button>
           </div>
-          <button class="btn btn-default btn-sm" id="tool-response-retry">Retry</button>
         </div>
         <div class="json-filter" style="margin-bottom:8px;">
           <input type="text" id="tool-response-filter" placeholder="Filter JSON...">
@@ -1567,7 +1566,6 @@
   var toolResponseLatency = document.getElementById('tool-response-latency');
   var toolResponseJson    = document.getElementById('tool-response-json');
   var toolResponseCopy    = document.getElementById('tool-response-copy');
-  var toolResponseRetry   = document.getElementById('tool-response-retry');
   var toolResizeHandle    = document.getElementById('tool-resize-handle');
   var toolResizeDragging  = false;
   var toolResizeStartY    = 0;
@@ -1624,7 +1622,6 @@
     toolResponseLatency.className = 'pill';
     toolResponseLatency.textContent = '';
     toolResponseCopy.disabled = true;
-    toolResponseRetry.disabled = false;
     toolResponseCopy.removeAttribute('data-copy');
     var bodyBlock = document.getElementById('tool-response-body');
     if (bodyBlock) bodyBlock.style.borderColor = '';
@@ -2193,10 +2190,6 @@
   });
 
   toolExecuteBtn.addEventListener('click', function() {
-    executeTool();
-  });
-
-  toolResponseRetry.addEventListener('click', function() {
     executeTool();
   });
 

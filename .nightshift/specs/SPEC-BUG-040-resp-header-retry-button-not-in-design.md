@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [UX-002, SPEC-BUG-039]
 violates: [UX-002]
 prior_attempts: []

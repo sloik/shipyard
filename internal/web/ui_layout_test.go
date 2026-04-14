@@ -1848,3 +1848,24 @@ func TestSPECBUG039_LatencyPillIsRightOfSpacer(t *testing.T) {
 		t.Errorf("SPEC-BUG-039 FAIL (AC 2): status badge is to the right of the spacer — should stay on the left (statusIdx=%d > spacerIdx=%d)", statusIdx, spacerIdx)
 	}
 }
+
+// TestSPECBUG040_RetryButtonRemovedFromResponseHeader verifies that the Retry
+// button (#tool-response-retry) is absent from the response header HTML and that
+// all JS references to toolResponseRetry have been removed (AC 1, AC 2, AC 5).
+func TestSPECBUG040_RetryButtonRemovedFromResponseHeader(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC 1: no Retry button element in HTML
+	if strings.Contains(content, `id="tool-response-retry"`) {
+		t.Error("SPEC-BUG-040 FAIL (AC 1): found id=\"tool-response-retry\" in index.html — Retry button must be removed")
+	}
+
+	// AC 2: no JS variable declaration for toolResponseRetry
+	if strings.Contains(content, "toolResponseRetry") {
+		t.Error("SPEC-BUG-040 FAIL (AC 2): found JS reference to 'toolResponseRetry' in index.html — all JS references must be removed")
+	}
+}
