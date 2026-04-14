@@ -4,7 +4,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-TBD-lightgrey)]()
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)]()
+[![CI](https://github.com/sloik/shipyard/actions/workflows/ci.yml/badge.svg)](https://github.com/sloik/shipyard/actions/workflows/ci.yml)
 
 ## What is Shipyard?
 

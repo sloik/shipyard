@@ -152,6 +152,27 @@ checkpointing:
 
 ---
 
+## Spec Status Reference
+#
+# Valid status values for specs in specs/:
+#
+#   draft     — being written; not yet ready for the loop; validation is lenient
+#   ready     — complete and validated; loop will pick this up
+#   in_progress — loop is actively working on this spec
+#   done      — all ACs verified; implementation shipped
+#   blocked   — cannot proceed; waiting on external dependency or decision
+#   ongoing   — ONGOING NFR ONLY: constraint is implemented and monitored indefinitely.
+#               The loop SKIPS ongoing specs when selecting the next spec to run.
+#               Use this for quality/architectural standards with no final done state
+#               (e.g. "app must not crash", "all endpoints must be authenticated").
+#               Never use for feature or bugfix specs — those always reach done.
+#
+# NFR type guidance:
+#   Completable NFR (README, CI, goreleaser) → status: ready → done lifecycle
+#   Ongoing NFR (crash policy, auth standard) → status: ongoing permanently
+
+---
+
 ## Watcher Configuration
 
 watcher:
