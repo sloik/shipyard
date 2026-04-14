@@ -64,3 +64,27 @@ func (h *Hub) Broadcast(msg []byte) {
 		}
 	}
 }
+
+// Subscribe registers a channel to receive all broadcast messages.
+// Useful for testing and internal consumers. The caller must consume
+// the channel promptly; slow consumers will miss messages (non-blocking send).
+// Call Unsubscribe with the returned channel to deregister.
+func (h *Hub) Subscribe() chan []byte {
+	ch := make(chan []byte, 64)
+	c := &Client{send: ch}
+	h.Register(c)
+	return ch
+}
+
+// Unsubscribe removes a channel previously registered with Subscribe.
+func (h *Hub) Unsubscribe(ch chan []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.send == ch {
+			close(c.send)
+			delete(h.clients, c)
+			return
+		}
+	}
+}

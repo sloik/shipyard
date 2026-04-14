@@ -2549,6 +2549,109 @@ func TestSPEC006002_ServerFilter(t *testing.T) {
 	}
 }
 
+// --- SPEC-006-003: Schema Change Detection ---
+
+// TestSPEC006003_SchemaAlertBannerPresent verifies that the schema alert banner
+// element is present in the app layout and is placed inside global-banners
+// (AC 2: warning banner appears at the top of the dashboard).
+func TestSPEC006003_SchemaAlertBannerPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Banner element must exist
+	if !strings.Contains(content, `id="schema-alert-banner"`) {
+		t.Error("SPEC-006-003 FAIL (AC 2): expected schema-alert-banner element in index.html")
+	}
+
+	// Banner must be inside global-banners (before route-stack)
+	bannersIdx := strings.Index(content, `id="global-banners"`)
+	alertIdx := strings.Index(content, `id="schema-alert-banner"`)
+	routeStackIdx := strings.Index(content, `id="route-stack"`)
+
+	if bannersIdx == -1 {
+		t.Fatal("SPEC-006-003 FAIL: expected global-banners container")
+	}
+	if alertIdx == -1 {
+		t.Fatal("SPEC-006-003 FAIL (AC 2): expected schema-alert-banner inside global-banners")
+	}
+	if routeStackIdx == -1 {
+		t.Fatal("SPEC-006-003 FAIL: expected route-stack container")
+	}
+	if !(bannersIdx < alertIdx && alertIdx < routeStackIdx) {
+		t.Fatalf("SPEC-006-003 FAIL (AC 2): schema-alert-banner must be in global-banners before route-stack; got banners=%d alert=%d routeStack=%d",
+			bannersIdx, alertIdx, routeStackIdx)
+	}
+}
+
+// TestSPEC006003_SchemaChangeViewPresent verifies that the schema change history
+// sub-view exists within the Servers view (AC 4, AC 6, AC 7).
+func TestSPEC006003_SchemaChangeViewPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	elements := []struct {
+		id   string
+		desc string
+	}{
+		{"servers-schema-view", "AC 6: schema change history sub-view"},
+		{"schema-change-list", "AC 6: schema change list sidebar"},
+		{"schema-change-detail", "AC 7: schema diff detail panel"},
+		{"schema-empty", "AC 6: empty state for no changes"},
+	}
+	for _, el := range elements {
+		if !strings.Contains(content, `id="`+el.id+`"`) {
+			t.Errorf("SPEC-006-003 FAIL (%s): missing element id=%q in index.html", el.desc, el.id)
+		}
+	}
+}
+
+// TestSPEC006003_SchemaAPIEndpointsReferenced verifies that the UI references
+// the schema API endpoints defined in the spec (AC 3, AC 4, AC 8, AC 10).
+func TestSPEC006003_SchemaAPIEndpointsReferenced(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	endpoints := []struct {
+		desc string
+		path string
+	}{
+		{"AC 3: list changes endpoint", "/api/schema/changes"},
+		{"AC 8: acknowledge endpoint", "/ack"},
+		{"AC 10: unacknowledged count endpoint", "/api/schema/unacknowledged-count"},
+	}
+	for _, ep := range endpoints {
+		if !strings.Contains(content, ep.path) {
+			t.Errorf("SPEC-006-003 FAIL (%s): missing endpoint reference %q in index.html", ep.desc, ep.path)
+		}
+	}
+}
+
+// TestSPEC006003_SchemaWebSocketHandlerPresent verifies that the UI contains
+// the WebSocket schema_change event handler (AC 9).
+func TestSPEC006003_SchemaWebSocketHandlerPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `'schema_change'`) && !strings.Contains(content, `"schema_change"`) {
+		t.Error("SPEC-006-003 FAIL (AC 9): expected schema_change event type in WebSocket handler")
+	}
+	if !strings.Contains(content, "checkSchemaAlertBanner") {
+		t.Error("SPEC-006-003 FAIL (AC 9): expected checkSchemaAlertBanner call in WebSocket handler")
+	}
+}
+
 // TestSPEC006002_APIEndpointsReferenced verifies that the UI references
 // the profiling API endpoints (AC 8, AC 9).
 func TestSPEC006002_APIEndpointsReferenced(t *testing.T) {
