@@ -7,7 +7,7 @@ type: bugfix
 status: done
 after: []
 violates: [UX-002]
-prior_attempts: [SPEC-BUG-034]
+prior_attempts: [SPEC-BUG-034, SPEC-BUG-045-attempt-1]
 created: 2026-04-14
 ---
 
@@ -346,3 +346,40 @@ for `lucide`, `svg`, or `data-lucide`. Follow the existing pattern. If none exis
   `border:1px solid var(--border-default);` from the tools pill inline style on line 3313.
 - `ui_layout_test.go` may have assertions about card HTML structure — check and update
   if any assertions reference Unicode entities or inline border on the tools pill.
+
+## Post-Implementation Notes (2026-04-14)
+
+### What the Nightshift agent actually fixed
+
+The agent correctly implemented all 8 requirements and 19 ACs:
+- R1–R2: Replaced all Unicode entities with Lucide inline SVGs
+- R3–R4: Dual-color label/value stats; Restarts always visible
+- R5: Removed tools pill border
+- R6: Crashed state shows "Last crash:" + "Restarts:" in danger-fg
+- R7–R8: Crash banner uses font-size-base, text wraps
+
+### What the Nightshift agent missed (found during visual verification)
+
+The spec's requirements were all **card content** changes. Neither the agent nor the spec noticed a pre-existing **layout bug** that was masking all visual progress:
+
+**Root cause:** `servers-grid` had two `display` declarations in the same inline style attribute:
+```html
+<div id="servers-grid" style="display:none; padding:24px; display:grid; ...">
+```
+`display:grid` wins initially (last value wins in CSS). When JS called `element.style.display = ''` to show the grid, it cleared **both** inline display values — the element fell back to `display:block`. Result: all cards full-width and stacked, no 2-column grid, no gap. This made all card content changes invisible because the cards looked completely structurally wrong.
+
+**What actually fixed the visual**: Two changes in a separate commit:
+1. Removed `display:none` from the inline style (kept grid properties)
+2. Changed `serversGrid.style.display = ''` → `serversGrid.style.display = 'grid'` in JS
+
+Also fixed in the same session: `btn-sm` was applied to server card action buttons, giving wrong
+padding (`3px 8px` instead of `6px 10px`) and font-size (`11px` instead of `12px`). Fixed by
+removing `btn-sm` and applying `padding:6px 10px; color:var(--text-secondary)` inline.
+
+### Lesson
+
+When verifying a visual spec, check layout structure first. A broken `display` type collapses the
+entire grid and makes all content-level changes invisible. The spec should have included an AC
+that verified the grid was `display:grid` in the JS show path.
+
+**DevKB entry:** `Argo Home/DevKB/frontend.md` — "Duplicate `display` in inline style silently breaks JS show/hide"
