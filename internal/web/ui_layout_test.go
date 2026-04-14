@@ -1869,3 +1869,62 @@ func TestSPECBUG040_RetryButtonRemovedFromResponseHeader(t *testing.T) {
 		t.Error("SPEC-BUG-040 FAIL (AC 2): found JS reference to 'toolResponseRetry' in index.html — all JS references must be removed")
 	}
 }
+
+// TestSPEC040_JSONViewerLineNumbers verifies that the JSON viewer renders
+// line-number nodes with incrementing content and that the CSS layout
+// satisfies the SPEC-040 column constraints (AC 1–6, AC 7).
+func TestSPEC040_JSONViewerLineNumbers(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	jsContent := string(html)
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+
+	// AC 1 + AC 7: highlightJSON must generate <span class="ln"> with an
+	// incrementing counter expression — verifies line numbers are produced
+	// dynamically per logical JSON line.
+	if !strings.Contains(jsContent, `<span class="ln">`) {
+		t.Error("SPEC-040 FAIL (AC 1/AC 7): highlightJSON does not emit '<span class=\"ln\">' nodes")
+	}
+	// The counter must increment: pattern is (i + 1) inside the ln span.
+	if !strings.Contains(jsContent, `'<span class="ln">' + (i + 1) + '</span>'`) {
+		t.Error("SPEC-040 FAIL (AC 7): highlightJSON does not use incrementing counter (i + 1) for line numbers")
+	}
+
+	// AC 2: line-number cell must use --text-muted colour.
+	if !strings.Contains(cssContent, "color: var(--text-muted)") {
+		t.Error("SPEC-040 FAIL (AC 2): .json-line .ln does not use --text-muted colour")
+	}
+
+	// AC 3 + AC 4: 12px gap between number cell and content; 24px fixed width.
+	if !strings.Contains(cssContent, "gap: 12px") {
+		t.Error("SPEC-040 FAIL (AC 3): .json-line does not have gap: 12px between number cell and content")
+	}
+	if !strings.Contains(cssContent, "width: 24px") {
+		t.Error("SPEC-040 FAIL (AC 4): .json-line .ln does not have width: 24px")
+	}
+	if !strings.Contains(cssContent, "max-width: 24px") {
+		t.Error("SPEC-040 FAIL (AC 4): .json-line .ln does not have max-width: 24px")
+	}
+
+	// AC 5: continuation visual lines get a blank spacer — satisfied by the
+	// flex layout (align-items: flex-start) where .ln only spans one line height.
+	// Verify align-items: flex-start is present on .json-line.
+	if !strings.Contains(cssContent, "align-items: flex-start") {
+		t.Error("SPEC-040 FAIL (AC 5): .json-line must have align-items: flex-start for continuation spacer behaviour")
+	}
+
+	// AC 6: outer container padding-left is 0; row gap is 2px.
+	if !strings.Contains(cssContent, "padding: 12px 12px 12px 0") {
+		t.Error("SPEC-040 FAIL (AC 6): .json-viewer padding must be '12px 12px 12px 0' (left padding 0)")
+	}
+	if !strings.Contains(cssContent, "margin-bottom: 2px") {
+		t.Error("SPEC-040 FAIL (AC 6): .json-line must have margin-bottom: 2px (row gap)")
+	}
+}
