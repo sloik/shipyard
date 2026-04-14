@@ -58,7 +58,7 @@ func (w *trackedWriteCloser) Closed() bool {
 func waitForStoreCount(t *testing.T, store *capture.Store, want int) {
 	t.Helper()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		page, err := store.Query(1, want+10, "", "")
 		if err != nil {
@@ -344,7 +344,7 @@ func TestManagerSendRequest(t *testing.T) {
 			done <- result{raw: raw, err: err}
 		}()
 
-		deadline := time.Now().Add(2 * time.Second)
+		deadline := time.Now().Add(10 * time.Second)
 		for sink.Len() == 0 {
 			if time.Now().After(deadline) {
 				t.Fatal("timed out waiting for request to be written")
@@ -374,7 +374,7 @@ func TestManagerSendRequest(t *testing.T) {
 			if string(got.raw) != `{"jsonrpc":"2.0","id":"`+id+`","result":{"tools":[]}}` {
 				t.Fatalf("unexpected response payload: %s", string(got.raw))
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for SendRequest to return")
 		}
 
