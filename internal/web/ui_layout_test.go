@@ -1733,3 +1733,60 @@ func TestSPEC039_PrimitiveJSONNotExpanded(t *testing.T) {
 		t.Error("SPEC-039 FAIL (AC 5): guard must check 'parsed !== null && typeof parsed === 'object'' to exclude primitives and null")
 	}
 }
+
+// TestSPECBUG038_ResponseCopyButtonHasIconAndLabel verifies that the response
+// header Copy button (#tool-response-copy) contains both an SVG icon child and
+// the "Copy" text label (AC 1, AC 2, AC 3).
+func TestSPECBUG038_ResponseCopyButtonHasIconAndLabel(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Locate the button by its id
+	btnMarker := `id="tool-response-copy"`
+	btnIdx := strings.Index(content, btnMarker)
+	if btnIdx == -1 {
+		t.Fatal("SPEC-BUG-038 FAIL (AC 1): #tool-response-copy button not found in index.html")
+	}
+
+	// Extract the button element up to the closing tag
+	btnStart := strings.LastIndex(content[:btnIdx], "<button")
+	if btnStart == -1 {
+		t.Fatal("SPEC-BUG-038 FAIL (AC 1): could not locate opening <button tag for #tool-response-copy")
+	}
+	btnEnd := strings.Index(content[btnStart:], "</button>")
+	if btnEnd == -1 {
+		t.Fatal("SPEC-BUG-038 FAIL (AC 1): could not locate closing </button> for #tool-response-copy")
+	}
+	btnHTML := content[btnStart : btnStart+btnEnd+len("</button>")]
+
+	// AC 1: button must contain an <svg> child element
+	if !strings.Contains(btnHTML, "<svg") {
+		t.Error("SPEC-BUG-038 FAIL (AC 1): Copy button must contain an <svg> icon element")
+	}
+
+	// AC 1: button must contain the "Copy" text label
+	if !strings.Contains(btnHTML, "Copy") {
+		t.Error("SPEC-BUG-038 FAIL (AC 1): Copy button must contain the text label 'Copy'")
+	}
+
+	// AC 2: svg must specify width="12" and height="12"
+	if !strings.Contains(btnHTML, `width="12"`) || !strings.Contains(btnHTML, `height="12"`) {
+		t.Error("SPEC-BUG-038 FAIL (AC 2): Copy button SVG icon must be 12x12 px (width=\"12\" height=\"12\")")
+	}
+
+	// AC 2: icon must use currentColor (inherits muted colour from .btn-copy)
+	if !strings.Contains(btnHTML, "currentColor") {
+		t.Error("SPEC-BUG-038 FAIL (AC 2): Copy button SVG must use currentColor for muted colour inheritance")
+	}
+
+	// AC 4: id and class wiring must be preserved
+	if !strings.Contains(btnHTML, `id="tool-response-copy"`) {
+		t.Error("SPEC-BUG-038 FAIL (AC 4): id=\"tool-response-copy\" must remain on the button")
+	}
+	if !strings.Contains(btnHTML, "btn-copy") {
+		t.Error("SPEC-BUG-038 FAIL (AC 4): btn-copy class must remain on the button")
+	}
+}

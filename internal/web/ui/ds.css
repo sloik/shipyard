@@ -421,6 +421,7 @@ body {
   border-color: var(--border-default);
   padding: 3px 8px;
   font-size: var(--font-size-xs);
+  gap: 4px;
 }
 .btn-copy:hover {
   background: var(--btn-default-hover);
