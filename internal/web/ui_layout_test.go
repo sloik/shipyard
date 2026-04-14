@@ -2361,3 +2361,213 @@ func TestSPEC006001_WebSocketSessionUpdate(t *testing.T) {
 		t.Error("SPEC-006-001 FAIL (AC 1): WebSocket handler must process session_update events")
 	}
 }
+
+// --- SPEC-006-002: Latency Profiling ---
+
+// TestSPEC006002_PerformanceTabPresent verifies that the Performance tab exists in the
+// History sub-navigation and the performance view container is present (AC 1, AC 6).
+func TestSPEC006002_PerformanceTabPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="sub-nav-performance"`) {
+		t.Error("SPEC-006-002 FAIL (AC 6): missing sub-nav-performance tab link")
+	}
+	if !strings.Contains(content, `data-sub="performance"`) {
+		t.Error("SPEC-006-002 FAIL (AC 6): missing data-sub=performance attribute")
+	}
+	if !strings.Contains(content, `id="history-performance-view"`) {
+		t.Error("SPEC-006-002 FAIL (AC 6): missing history-performance-view container")
+	}
+}
+
+// TestSPEC006002_SummaryCardsPresent verifies that all four summary stat cards
+// exist with delta elements (AC 1, AC 2).
+func TestSPEC006002_SummaryCardsPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredIDs := []string{
+		`id="perf-total-calls"`,
+		`id="perf-total-calls-delta"`,
+		`id="perf-avg-latency"`,
+		`id="perf-avg-latency-delta"`,
+		`id="perf-p95-latency"`,
+		`id="perf-error-rate"`,
+		`id="perf-error-rate-delta"`,
+	}
+	for _, id := range requiredIDs {
+		if !strings.Contains(content, id) {
+			t.Errorf("SPEC-006-002 FAIL (AC 1/2): missing summary card element %q", id)
+		}
+	}
+}
+
+// TestSPEC006002_PerToolTableColumns verifies that the per-tool latency table
+// has all required columns (AC 3).
+func TestSPEC006002_PerToolTableColumns(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Find the perf-table-header
+	if !strings.Contains(content, `id="perf-table-header"`) {
+		t.Fatal("SPEC-006-002 FAIL (AC 3): missing perf-table-header")
+	}
+
+	// Check columns exist via data-sort attributes
+	requiredSortCols := []string{
+		`data-sort="tool"`,
+		`data-sort="server"`,
+		`data-sort="calls"`,
+		`data-sort="min"`,
+		`data-sort="avg"`,
+		`data-sort="p50"`,
+		`data-sort="p95"`,
+		`data-sort="max"`,
+		`data-sort="error_rate"`,
+	}
+	for _, col := range requiredSortCols {
+		if !strings.Contains(content, col) {
+			t.Errorf("SPEC-006-002 FAIL (AC 3): missing table column with %q", col)
+		}
+	}
+}
+
+// TestSPEC006002_TableSortable verifies that column headers trigger sort updates (AC 4).
+func TestSPEC006002_TableSortable(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Sort state variables must exist
+	if !strings.Contains(content, "perfSort") {
+		t.Error("SPEC-006-002 FAIL (AC 4): missing perfSort state variable")
+	}
+	if !strings.Contains(content, "perfOrder") {
+		t.Error("SPEC-006-002 FAIL (AC 4): missing perfOrder state variable")
+	}
+	// Header click handler must exist
+	if !strings.Contains(content, "perfTableHeader.addEventListener('click'") {
+		t.Error("SPEC-006-002 FAIL (AC 4): missing perf table header click handler")
+	}
+}
+
+// TestSPEC006002_LatencyColorFunction verifies that latencyColor produces
+// semantic coloring for the three thresholds (AC 5).
+func TestSPEC006002_LatencyColorFunction(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	fnIdx := strings.Index(content, "function latencyColor(ms)")
+	if fnIdx == -1 {
+		t.Fatal("SPEC-006-002 FAIL (AC 5): missing latencyColor function")
+	}
+	fnBody := content[fnIdx:]
+	if endIdx := strings.Index(fnBody[1:], "\n  function "); endIdx > 0 {
+		fnBody = fnBody[:endIdx+1]
+	}
+
+	// Must reference success (green), warning (yellow), danger (red) color vars
+	if !strings.Contains(fnBody, "var(--success-fg)") {
+		t.Error("SPEC-006-002 FAIL (AC 5): latencyColor must return success color for fast latencies")
+	}
+	if !strings.Contains(fnBody, "var(--warning-fg)") {
+		t.Error("SPEC-006-002 FAIL (AC 5): latencyColor must return warning color for medium latencies")
+	}
+	if !strings.Contains(fnBody, "var(--danger-fg)") {
+		t.Error("SPEC-006-002 FAIL (AC 5): latencyColor must return danger color for slow latencies")
+	}
+	// Thresholds: <100ms = green, 100-500ms = yellow, >500ms = red
+	if !strings.Contains(fnBody, "100") {
+		t.Error("SPEC-006-002 FAIL (AC 5): latencyColor must use 100ms threshold")
+	}
+	if !strings.Contains(fnBody, "500") {
+		t.Error("SPEC-006-002 FAIL (AC 5): latencyColor must use 500ms threshold")
+	}
+}
+
+// TestSPEC006002_TimeRangeFilter verifies that the time range selector
+// exists with all required presets and triggers data reload (AC 6).
+func TestSPEC006002_TimeRangeFilter(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="perf-range"`) {
+		t.Fatal("SPEC-006-002 FAIL (AC 6): missing perf-range selector")
+	}
+
+	// All required range presets
+	requiredRanges := []string{
+		`value="1h"`,
+		`value="24h"`,
+		`value="7d"`,
+		`value="30d"`,
+	}
+	for _, r := range requiredRanges {
+		if !strings.Contains(content, r) {
+			t.Errorf("SPEC-006-002 FAIL (AC 6): missing time range option %q", r)
+		}
+	}
+
+	// Change handler must reload data
+	if !strings.Contains(content, "perfRange.addEventListener('change'") {
+		t.Error("SPEC-006-002 FAIL (AC 6): perf-range must have change handler that reloads data")
+	}
+}
+
+// TestSPEC006002_ServerFilter verifies that the server filter selector
+// exists and triggers data reload (AC 7).
+func TestSPEC006002_ServerFilter(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="perf-server"`) {
+		t.Fatal("SPEC-006-002 FAIL (AC 7): missing perf-server selector")
+	}
+	if !strings.Contains(content, "perfServer.addEventListener('change'") {
+		t.Error("SPEC-006-002 FAIL (AC 7): perf-server must have change handler that reloads data")
+	}
+}
+
+// TestSPEC006002_APIEndpointsReferenced verifies that the UI references
+// the profiling API endpoints (AC 8, AC 9).
+func TestSPEC006002_APIEndpointsReferenced(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	endpoints := []struct {
+		desc     string
+		endpoint string
+	}{
+		{"summary endpoint", "/api/profiling/summary"},
+		{"tools endpoint", "/api/profiling/tools"},
+	}
+	for _, ep := range endpoints {
+		if !strings.Contains(content, ep.endpoint) {
+			t.Errorf("SPEC-006-002 FAIL (%s): missing endpoint reference %q in UI", ep.desc, ep.endpoint)
+		}
+	}
+}
