@@ -1790,3 +1790,61 @@ func TestSPECBUG038_ResponseCopyButtonHasIconAndLabel(t *testing.T) {
 		t.Error("SPEC-BUG-038 FAIL (AC 4): btn-copy class must remain on the button")
 	}
 }
+
+// TestSPECBUG039_LatencyPillIsRightOfSpacer verifies the DOM order of the response
+// header: the flex spacer must appear BEFORE the latency pill, and the latency pill
+// must appear BEFORE the Copy button. This ensures the latency pill is in the right-hand
+// meta group, not the left-hand title group (AC 1, AC 2, AC 4 of SPEC-BUG-039).
+func TestSPECBUG039_LatencyPillIsRightOfSpacer(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Locate the response header container by the "Response" label
+	respHeaderIdx := strings.Index(content, `id="tool-response-section"`)
+	if respHeaderIdx == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL: tool-response-section not found")
+	}
+	// Narrow to just the header row (ends at the json-filter div)
+	headerEnd := strings.Index(content[respHeaderIdx:], `class="json-filter"`)
+	if headerEnd == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL: could not locate end of response header area")
+	}
+	headerHTML := content[respHeaderIdx : respHeaderIdx+headerEnd]
+
+	// Find key element positions within the header
+	spacerIdx := strings.Index(headerHTML, `flex:1`)
+	latencyIdx := strings.Index(headerHTML, `id="tool-response-latency"`)
+	copyIdx := strings.Index(headerHTML, `id="tool-response-copy"`)
+
+	if spacerIdx == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL: flex spacer (flex:1) not found in response header")
+	}
+	if latencyIdx == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL: #tool-response-latency not found in response header")
+	}
+	if copyIdx == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL: #tool-response-copy not found in response header")
+	}
+
+	// AC 1: spacer must appear before latency pill (latency is on the right)
+	if latencyIdx < spacerIdx {
+		t.Errorf("SPEC-BUG-039 FAIL (AC 1): latency pill appears before the spacer (latencyIdx=%d < spacerIdx=%d) — latency is on the wrong side", latencyIdx, spacerIdx)
+	}
+
+	// AC 1: latency pill must appear before Copy button
+	if copyIdx < latencyIdx {
+		t.Errorf("SPEC-BUG-039 FAIL (AC 1): Copy button appears before latency pill (copyIdx=%d < latencyIdx=%d) — latency should precede Copy", copyIdx, latencyIdx)
+	}
+
+	// AC 2: status badge must remain on the LEFT of the spacer
+	statusIdx := strings.Index(headerHTML, `id="tool-response-status"`)
+	if statusIdx == -1 {
+		t.Fatal("SPEC-BUG-039 FAIL (AC 2): #tool-response-status not found in response header")
+	}
+	if statusIdx > spacerIdx {
+		t.Errorf("SPEC-BUG-039 FAIL (AC 2): status badge is to the right of the spacer — should stay on the left (statusIdx=%d > spacerIdx=%d)", statusIdx, spacerIdx)
+	}
+}
