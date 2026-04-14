@@ -3,7 +3,7 @@ id: SPEC-041
 priority: 2
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-BUG-005, SPEC-BUG-044]
 prior_attempts: []
 created: 2026-04-14
