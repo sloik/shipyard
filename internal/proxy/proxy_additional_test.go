@@ -237,14 +237,11 @@ func TestProxyClientInput(t *testing.T) {
 	sink := &trackedWriteCloser{}
 	cw.attach(sink)
 
-	oldStdin := os.Stdin
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stdin = r
 	t.Cleanup(func() {
-		os.Stdin = oldStdin
 		_ = r.Close()
 	})
 
@@ -254,7 +251,7 @@ func TestProxyClientInput(t *testing.T) {
 	}
 	_ = w.Close()
 
-	if err := p.proxyClientInput(context.Background(), cw); err != nil {
+	if err := p.proxyClientInput(context.Background(), cw, r); err != nil {
 		t.Fatalf("proxyClientInput: %v", err)
 	}
 	if got := sink.String(); got != line+"\n" {

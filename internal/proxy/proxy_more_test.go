@@ -152,9 +152,10 @@ func TestChildInputWriter_WriteLineRetriesAfterFailure(t *testing.T) {
 
 func TestChildInputWriter_WriteLineRetriesAfterNewlineFailure(t *testing.T) {
 	cw := newChildInputWriter()
+	failedCh := make(chan struct{})
 	failing := &failSecondWriteCloser{
 		failErr:  errors.New("newline failed"),
-		failedCh: make(chan struct{}),
+		failedCh: failedCh,
 	}
 	recovery := &trackedWriteCloser{}
 	cw.attach(failing)
@@ -165,7 +166,7 @@ func TestChildInputWriter_WriteLineRetriesAfterNewlineFailure(t *testing.T) {
 	}()
 
 	select {
-	case <-failing.failedCh:
+	case <-failedCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for newline failure")
 	}
@@ -241,14 +242,11 @@ func TestProxyClientInput_LongLineReturnsScannerError(t *testing.T) {
 	p, _ := newTestProxy(t)
 	cw := newChildInputWriter()
 
-	oldStdin := os.Stdin
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stdin = r
 	t.Cleanup(func() {
-		os.Stdin = oldStdin
 		_ = r.Close()
 		_ = w.Close()
 	})
@@ -259,7 +257,7 @@ func TestProxyClientInput_LongLineReturnsScannerError(t *testing.T) {
 		_ = w.Close()
 	}()
 
-	err = p.proxyClientInput(context.Background(), cw)
+	err = p.proxyClientInput(context.Background(), cw, r)
 	if !errors.Is(err, bufio.ErrTooLong) {
 		t.Fatalf("expected bufio.ErrTooLong, got %v", err)
 	}
@@ -289,14 +287,11 @@ func TestProxyClientInput_EOFAndCanceledWriteReturnNil(t *testing.T) {
 			p, _ := newTestProxy(t)
 			cw := newChildInputWriter()
 
-			oldStdin := os.Stdin
 			r, w, err := os.Pipe()
 			if err != nil {
 				t.Fatalf("os.Pipe: %v", err)
 			}
-			os.Stdin = r
 			t.Cleanup(func() {
-				os.Stdin = oldStdin
 				_ = r.Close()
 				_ = w.Close()
 			})
@@ -309,7 +304,7 @@ func TestProxyClientInput_EOFAndCanceledWriteReturnNil(t *testing.T) {
 			}
 			_ = w.Close()
 
-			if err := p.proxyClientInput(ctx, cw); err != nil {
+			if err := p.proxyClientInput(ctx, cw, r); err != nil {
 				t.Fatalf("expected nil, got %v", err)
 			}
 		})
@@ -326,14 +321,11 @@ func TestProxyClientInput_WriteErrorReturnsError(t *testing.T) {
 	}
 	t.Cleanup(func() { proxyInputWriteLine = origWrite })
 
-	oldStdin := os.Stdin
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stdin = r
 	t.Cleanup(func() {
-		os.Stdin = oldStdin
 		_ = r.Close()
 		_ = w.Close()
 	})
@@ -343,7 +335,7 @@ func TestProxyClientInput_WriteErrorReturnsError(t *testing.T) {
 	}
 	_ = w.Close()
 
-	err = p.proxyClientInput(context.Background(), cw)
+	err = p.proxyClientInput(context.Background(), cw, r)
 	if err == nil || err.Error() != "write failed hard" {
 		t.Fatalf("expected hard write error, got %v", err)
 	}
@@ -492,14 +484,11 @@ func TestSeamHelpers_DefaultPassthrough(t *testing.T) {
 	sink := &trackedWriteCloser{}
 	cw.attach(sink)
 
-	oldStdin := os.Stdin
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stdin = r
 	t.Cleanup(func() {
-		os.Stdin = oldStdin
 		_ = r.Close()
 		_ = w.Close()
 	})
@@ -508,7 +497,7 @@ func TestSeamHelpers_DefaultPassthrough(t *testing.T) {
 	}
 	_ = w.Close()
 
-	if err := p.proxyClientInputWithSeams(context.Background(), cw); err != nil {
+	if err := p.proxyClientInputWithSeams(context.Background(), cw, r); err != nil {
 		t.Fatalf("proxyClientInputWithSeams: %v", err)
 	}
 	if got := sink.String(); got == "" {

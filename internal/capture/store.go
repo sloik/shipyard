@@ -16,7 +16,18 @@ import (
 const currentSchemaVersion = 2
 
 var openSQLiteDB = func(path string) (*sql.DB, error) {
-	return sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, err
+	}
+	// SQLite is a single-file database — a connection pool of more than one
+	// concurrent writer causes "database is locked" errors. Use a single
+	// connection with no idle pool so the database/sql connection-management
+	// goroutines complete within each Exec/Query call scope.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(0)
+	return db, nil
 }
 
 var openJSONLFile = func(path string) (*os.File, error) {

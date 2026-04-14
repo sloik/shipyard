@@ -192,9 +192,13 @@ func (p *Proxy) Run(ctx context.Context) error {
 		inputWriter.close()
 	}()
 
+	// Capture os.Stdin at goroutine-creation time so that test helpers
+	// restoring os.Stdin after Run returns cannot race with the goroutine
+	// reading the global at execution time.
+	stdin := os.Stdin
 	clientDone := make(chan error, 1)
 	go func() {
-		clientDone <- p.proxyClientInputWithSeams(ctx, inputWriter)
+		clientDone <- p.proxyClientInputWithSeams(ctx, inputWriter, stdin)
 	}()
 
 	var crashTimes []time.Time
@@ -235,11 +239,11 @@ func (p *Proxy) runChildWithSeams(ctx context.Context, inputWriter *childInputWr
 	return p.runChild(ctx, inputWriter)
 }
 
-func (p *Proxy) proxyClientInputWithSeams(ctx context.Context, inputWriter *childInputWriter) error {
+func (p *Proxy) proxyClientInputWithSeams(ctx context.Context, inputWriter *childInputWriter, stdin io.Reader) error {
 	if p.proxyClientInputFn != nil {
 		return p.proxyClientInputFn(ctx, inputWriter)
 	}
-	return p.proxyClientInput(ctx, inputWriter)
+	return p.proxyClientInput(ctx, inputWriter, stdin)
 }
 
 func (p *Proxy) now() time.Time {
@@ -310,8 +314,8 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 	}
 }
 
-func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWriter) error {
-	scanner := bufio.NewScanner(os.Stdin)
+func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWriter, stdin io.Reader) error {
+	scanner := bufio.NewScanner(stdin)
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 

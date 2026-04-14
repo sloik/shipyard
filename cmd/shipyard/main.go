@@ -380,9 +380,16 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(nil, nil, false) // auth not configured in wrap mode
+
+	// Capture function variable values at goroutine-creation time so that test
+	// helpers restoring these variables after runProxy returns cannot race with
+	// the goroutine reading them at execution time.
+	webServerFn := startWebServer
+	managedProxyFn := runManagedProxy
+
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
-		if err := startWebServer(ctx, srv); err != nil {
+		if err := webServerFn(ctx, srv); err != nil {
 			slog.Error("web server error", "error", err)
 		}
 	}()
@@ -390,7 +397,7 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	if !headless {
 		// Desktop mode: start proxy in background, open Wails window
 		go func() {
-			if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
+			if err := managedProxyFn(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
 				slog.Error("proxy error", "error", err)
 			}
 		}()
@@ -398,7 +405,7 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 		runDesktopFn(port, cancel)
 	} else {
 		// Headless mode: start proxy (blocks until child exits or context cancelled)
-		if err := runManagedProxy(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
+		if err := managedProxyFn(ctx, mgr, name, command, args, env, cwd, store, hub); err != nil {
 			slog.Error("proxy error", "error", err)
 		}
 	}
@@ -504,9 +511,12 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	srv.SetToolLogLevels(toolLogLevels)
 	srv.SetSettingsStore(web.NewSettingsStore(cfg.Secrets.Backend))
 	srv.SetRawServerEnvs(rawServerEnvs)
+
+	// Capture function variable value at goroutine-creation time.
+	webServerFn := startWebServer
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
-		if err := startWebServer(ctx, srv); err != nil {
+		if err := webServerFn(ctx, srv); err != nil {
 			slog.Error("web server error", "error", err)
 		}
 	}()
@@ -648,9 +658,12 @@ func runNoServers(port int, headless bool) {
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(nil, nil, false) // no config file in no-servers mode
+
+	// Capture function variable value at goroutine-creation time.
+	webServerFn := startWebServer
 	go func() {
 		slog.Info("web dashboard starting", "url", fmt.Sprintf("http://localhost:%d", port))
-		if err := startWebServer(ctx, srv); err != nil {
+		if err := webServerFn(ctx, srv); err != nil {
 			slog.Error("web server error", "error", err)
 		}
 	}()
