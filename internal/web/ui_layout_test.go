@@ -876,7 +876,7 @@ func TestSPECBUG014_LoadServersRefreshesBadge(t *testing.T) {
 		"serversGrid.style.display = 'none'",
 		"serversActionBar.style.display = 'none'",
 		"serversEmpty.style.display = 'none'",
-		"serversGrid.style.display = ''",
+		"serversGrid.style.display = 'grid'",
 		"serversActionBar.style.display = ''",
 		"servers-stat-online",
 		"servers-stat-crashed",
@@ -1376,7 +1376,7 @@ func TestSPECBUG015_LoadServersHidesEmptyStateWhenServersPresent(t *testing.T) {
 	// When servers are non-empty: hide empty state, show grid and action bar
 	for _, needle := range []string{
 		"serversEmpty.style.display = 'none'",
-		"serversGrid.style.display = ''",
+		"serversGrid.style.display = 'grid'",
 		"serversActionBar.style.display = ''",
 	} {
 		if !strings.Contains(loadBody, needle) {

@@ -548,7 +548,7 @@
   </div>
 
   <!-- Server Card Grid -->
-  <div id="servers-grid" style="display:none; padding:24px; display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:16px;"></div>
+  <div id="servers-grid" style="display:none; padding:24px; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:16px;"></div>
 
   <!-- Schema Sub-View (SPEC-009) -->
   <div id="servers-schema-view" style="display:none; height:calc(100vh - 96px);">
@@ -3089,7 +3089,7 @@
 
         // Always show the grid (it always has at least the Shipyard card).
         serversEmpty.style.display = 'none';
-        serversGrid.style.display = '';
+        serversGrid.style.display = 'grid';
         // Show action bar only when there are child servers to manage.
         if (childServers.length > 0) {
           serversActionBar.style.display = '';
