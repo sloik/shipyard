@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -30,24 +30,24 @@ created: 2026-04-14
 
 ## Root Cause
 
-(Agent fills in during run.)
+The Settings route was added as a `<a class="tab">` element inside `<nav id="tab-nav">` alongside Timeline, Tools, History, Servers, and Tokens. The UX-002 design places Settings as a standalone gear icon in the header right group (after the server count pill), not as a navigation tab. The fix removes the `<a data-route="settings">` tab element and adds a `<button id="settings-btn">` with the Lucide settings SVG after `#server-count`, with a JS click handler that calls `navigateRoute('settings')` and updates the hash.
 
 ## Requirements
 
-- [ ] R1: "Settings" tab is removed from `<nav id="tab-nav">`
-- [ ] R2: A Lucide `settings` gear icon (18px, `--text-muted`) appears in the header right group
-- [ ] R3: Clicking the gear icon navigates to `#settings` view
-- [ ] R4: Settings view continues to work correctly
+- [x] R1: "Settings" tab is removed from `<nav id="tab-nav">`
+- [x] R2: A Lucide `settings` gear icon (18px, `--text-muted`) appears in the header right group
+- [x] R3: Clicking the gear icon navigates to `#settings` view
+- [x] R4: Settings view continues to work correctly
 
 ## Acceptance Criteria
 
-- [ ] AC 1: No "Settings" text tab appears in the tab navigation
-- [ ] AC 2: A Lucide `settings` icon (18px) exists in the header right group, after the server count pill
-- [ ] AC 3: Icon color is `var(--text-muted)` by default
-- [ ] AC 4: Clicking the icon navigates to the Settings view
-- [ ] AC 5: Settings view renders correctly
-- [ ] AC 6: `go build ./...` passes
-- [ ] AC 7: `go test ./...` passes
+- [x] AC 1: No "Settings" text tab appears in the tab navigation
+- [x] AC 2: A Lucide `settings` icon (18px) exists in the header right group, after the server count pill
+- [x] AC 3: Icon color is `var(--text-muted)` by default
+- [x] AC 4: Clicking the icon navigates to the Settings view
+- [x] AC 5: Settings view renders correctly
+- [x] AC 6: `go build ./...` passes
+- [x] AC 7: `go test ./...` passes
 
 ## Context
 
