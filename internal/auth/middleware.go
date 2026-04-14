@@ -22,12 +22,30 @@ type ProxyManager interface {
 	ServersForAuth() []string
 }
 
+// SelfDispatcher is implemented by the web server to handle Shipyard's own management tools.
+// MCPHandler calls it when a tools/call targets a shipyard__ prefixed tool.
+type SelfDispatcher interface {
+	// DispatchSelf executes the named Shipyard management tool (bare name, no prefix)
+	// and returns the MCP content result, or an error.
+	DispatchSelf(ctx context.Context, toolName string, arguments json.RawMessage) (map[string]interface{}, error)
+	// SelfTools returns the list of Shipyard's built-in tools for tools/list injection.
+	SelfTools() []SelfTool
+}
+
+// SelfTool describes one of Shipyard's built-in management tools for listing.
+type SelfTool struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
 // MCPHandler handles POST /mcp and POST /mcp/{token} requests.
 // It enforces bearer token auth, scope filtering, and rate limiting.
 type MCPHandler struct {
 	store         *Store
 	limiter       *RateLimiter
 	proxies       ProxyManager
+	selfDispatch  SelfDispatcher // optional — if set, routes shipyard__ tools internally
 	captureLog    *capture.Store
 	toolLogLevels map[string]map[string]string // server → tool → log_level
 }
@@ -35,6 +53,11 @@ type MCPHandler struct {
 // NewMCPHandler creates a new MCPHandler.
 func NewMCPHandler(store *Store, limiter *RateLimiter, proxies ProxyManager) *MCPHandler {
 	return &MCPHandler{store: store, limiter: limiter, proxies: proxies}
+}
+
+// SetSelfDispatcher sets the dispatcher used to route shipyard__ tool calls internally.
+func (h *MCPHandler) SetSelfDispatcher(d SelfDispatcher) {
+	h.selfDispatch = d
 }
 
 // SetCaptureStore sets the capture store used for access logging.
@@ -197,10 +220,28 @@ func (h *MCPHandler) handleInitialize(w http.ResponseWriter, r *http.Request, to
 }
 
 // handleToolsList proxies tools/list to all online servers and filters by scope.
+// Shipyard's own management tools are prepended first.
 func (h *MCPHandler) handleToolsList(w http.ResponseWriter, r *http.Request, token *TokenRecord, id json.RawMessage, params json.RawMessage) {
-	serverNames := h.proxies.ServersForAuth()
-
 	var allTools []map[string]interface{}
+
+	// Inject Shipyard's built-in management tools first.
+	if h.selfDispatch != nil {
+		for _, tool := range h.selfDispatch.SelfTools() {
+			// Apply scope filter for shipyard tools.
+			if len(token.Scopes) > 0 && !MatchScope(token.Scopes, "shipyard", tool.Name) {
+				continue
+			}
+			var schema map[string]interface{}
+			_ = json.Unmarshal(tool.InputSchema, &schema)
+			allTools = append(allTools, map[string]interface{}{
+				"name":        "shipyard__" + tool.Name,
+				"description": tool.Description,
+				"inputSchema": schema,
+			})
+		}
+	}
+
+	serverNames := h.proxies.ServersForAuth()
 
 	for _, serverName := range serverNames {
 		result, err := h.proxies.SendRequest(r.Context(), serverName, "tools/list", json.RawMessage("{}"))
@@ -291,6 +332,42 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 			writeRPCError(w, id, -32001, "Tool not permitted by token scope")
 			return
 		}
+	}
+
+	// Route Shipyard's built-in management tools to the internal dispatcher.
+	if serverName == "shipyard" && h.selfDispatch != nil {
+		start := time.Now()
+		result, err := h.selfDispatch.DispatchSelf(r.Context(), toolName, p.Arguments)
+		latMs := time.Since(start).Milliseconds()
+		if h.captureLog != nil {
+			entry := capture.AccessLogEntry{
+				Timestamp:  time.Now(),
+				TokenName:  token.Name,
+				ServerName: serverName,
+				ToolName:   toolName,
+				LatencyMs:  &latMs,
+				LogLevel:   h.getToolLogLevel(serverName, toolName),
+			}
+			if err != nil {
+				entry.Status = "error"
+				entry.ErrorMsg = err.Error()
+			} else {
+				entry.Status = "ok"
+			}
+			go h.captureLog.RecordAccess(entry)
+		}
+		if err != nil {
+			writeRPCError(w, id, -32603, err.Error())
+			return
+		}
+		resultBytes, _ := json.Marshal(result)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      json.RawMessage(id),
+			"result":  json.RawMessage(resultBytes),
+		})
+		return
 	}
 
 	// Build downstream params (strip server prefix from name)

@@ -115,6 +115,38 @@ type ServerInfo struct {
 	Uptime       int64  `json:"uptime_ms"`
 	RestartCount int    `json:"restart_count"`
 	ErrorMessage string `json:"error_message,omitempty"`
+	IsSelf       bool   `json:"is_self,omitempty"` // true for the built-in Shipyard entry
+}
+
+// shipyardManagementTool describes one of Shipyard's built-in management tools.
+type shipyardManagementTool struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// shipyardTools is the static catalog of Shipyard's built-in management tools.
+var shipyardTools = []shipyardManagementTool{
+	{
+		Name:        "status",
+		Description: "Get status of the running Shipyard instance and its managed servers",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	},
+	{
+		Name:        "list_servers",
+		Description: "List all servers managed by Shipyard, including their status and tool counts",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	},
+	{
+		Name:        "restart",
+		Description: "Restart a named child server managed by Shipyard",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Name of the server to restart"}},"required":["name"]}`),
+	},
+	{
+		Name:        "stop",
+		Description: "Stop a named child server managed by Shipyard",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Name of the server to stop"}},"required":["name"]}`),
+	},
 }
 
 // Server is the HTTP + WebSocket server for the web dashboard.
@@ -232,6 +264,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.authEnabled && s.authStore != nil {
 		mcpH := auth.NewMCPHandler(s.authStore, s.authLimiter, s.proxies)
 		mcpH.SetCaptureStore(s.store)
+		mcpH.SetSelfDispatcher(s)
 		if s.toolLogLevels != nil {
 			mcpH.SetToolLogLevels(s.toolLogLevels)
 		}
@@ -450,9 +483,20 @@ type serverInfoResponse struct {
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
+	// Synthetic Shipyard self-entry — always first, regardless of child servers.
+	selfEntry := serverInfoResponse{
+		ServerInfo: ServerInfo{
+			Name:      "shipyard",
+			Status:    "running",
+			ToolCount: len(shipyardTools),
+			IsSelf:    true,
+		},
+		GatewayDisabled: false, // Shipyard cannot be disabled
+	}
+
 	if s.proxies == nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]interface{}{})
+		json.NewEncoder(w).Encode([]serverInfoResponse{selfEntry})
 		return
 	}
 
@@ -469,6 +513,8 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		resp.HasPlainTextSecrets = hasPlainTextSecrets(resp.Env)
 		result[i] = resp
 	}
+	// Prepend self-entry as the first item.
+	result = append([]serverInfoResponse{selfEntry}, result...)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
@@ -691,6 +737,40 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server and tool fields required", http.StatusBadRequest)
 		return
 	}
+
+	// Route Shipyard's built-in tools to the internal dispatcher.
+	if req.Server == "shipyard" {
+		// Per-tool gateway policy applies to Shipyard tools too.
+		if s.gateway != nil && !s.gateway.ToolEnabled("shipyard", req.Tool) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":      fmt.Sprintf("tool %q on server %q is disabled by Shipyard gateway policy", req.Tool, req.Server),
+				"latency_ms": int64(0),
+			})
+			return
+		}
+		start := time.Now()
+		result, err := s.dispatchShipyardTool(r.Context(), req.Tool, req.Arguments)
+		elapsed := time.Since(start)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":      err.Error(),
+				"latency_ms": elapsed.Milliseconds(),
+			})
+			return
+		}
+		resultBytes, _ := json.Marshal(result)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result":     json.RawMessage(resultBytes),
+			"latency_ms": elapsed.Milliseconds(),
+		})
+		return
+	}
+
 	if s.gateway != nil {
 		if !s.gateway.ServerEnabled(req.Server) {
 			w.Header().Set("Content-Type", "application/json")
@@ -759,6 +839,136 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// dispatchShipyardTool executes one of Shipyard's built-in management tools
+// and returns a JSON-RPC-style result map suitable for returning to callers.
+// toolName is the bare name (without the "shipyard__" prefix).
+// arguments is the raw JSON arguments object (may be nil).
+func (s *Server) dispatchShipyardTool(ctx context.Context, toolName string, arguments json.RawMessage) (map[string]interface{}, error) {
+	switch toolName {
+	case "status":
+		var servers []serverInfoResponse
+		if s.proxies != nil {
+			for _, srv := range s.proxies.Servers() {
+				servers = append(servers, serverInfoResponse{ServerInfo: srv})
+			}
+		}
+		count := len(servers)
+		text := fmt.Sprintf("Shipyard running on port %d with %d child server(s).", s.port, count)
+		return map[string]interface{}{
+			"content": []map[string]string{{"type": "text", "text": text}},
+			"structuredContent": map[string]interface{}{
+				"status":       "running",
+				"port":         s.port,
+				"server_count": count,
+				"servers":      servers,
+			},
+		}, nil
+
+	case "list_servers":
+		// Build the full server list including the self-entry.
+		selfEntry := serverInfoResponse{
+			ServerInfo: ServerInfo{
+				Name:      "shipyard",
+				Status:    "running",
+				ToolCount: len(shipyardTools),
+				IsSelf:    true,
+			},
+		}
+		var childEntries []serverInfoResponse
+		if s.proxies != nil {
+			for _, srv := range s.proxies.Servers() {
+				entry := serverInfoResponse{ServerInfo: srv}
+				if s.gateway != nil && !s.gateway.ServerEnabled(srv.Name) {
+					entry.GatewayDisabled = true
+				}
+				childEntries = append(childEntries, entry)
+			}
+		}
+		all := append([]serverInfoResponse{selfEntry}, childEntries...)
+		allBytes, _ := json.Marshal(all)
+		text := fmt.Sprintf("%d server(s) managed by Shipyard.", len(all))
+		return map[string]interface{}{
+			"content":           []map[string]string{{"type": "text", "text": text}},
+			"structuredContent": json.RawMessage(allBytes),
+		}, nil
+
+	case "restart":
+		if s.proxies == nil {
+			return nil, fmt.Errorf("no proxy manager configured")
+		}
+		var args struct {
+			Name string `json:"name"`
+		}
+		if len(arguments) > 0 {
+			if err := json.Unmarshal(arguments, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+		}
+		if args.Name == "" {
+			return nil, fmt.Errorf("argument 'name' is required")
+		}
+		if args.Name == "shipyard" {
+			return nil, fmt.Errorf("cannot restart shipyard itself")
+		}
+		if err := s.proxies.RestartServer(args.Name); err != nil {
+			return nil, err
+		}
+		text := fmt.Sprintf("Server %q is restarting.", args.Name)
+		return map[string]interface{}{
+			"content":           []map[string]string{{"type": "text", "text": text}},
+			"structuredContent": map[string]interface{}{"status": "restarting", "server": args.Name},
+		}, nil
+
+	case "stop":
+		if s.proxies == nil {
+			return nil, fmt.Errorf("no proxy manager configured")
+		}
+		var args struct {
+			Name string `json:"name"`
+		}
+		if len(arguments) > 0 {
+			if err := json.Unmarshal(arguments, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+		}
+		if args.Name == "" {
+			return nil, fmt.Errorf("argument 'name' is required")
+		}
+		if args.Name == "shipyard" {
+			return nil, fmt.Errorf("cannot stop shipyard itself")
+		}
+		if err := s.proxies.StopServer(args.Name); err != nil {
+			return nil, err
+		}
+		text := fmt.Sprintf("Server %q has been stopped.", args.Name)
+		return map[string]interface{}{
+			"content":           []map[string]string{{"type": "text", "text": text}},
+			"structuredContent": map[string]interface{}{"status": "stopped", "server": args.Name},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown shipyard tool: %q", toolName)
+	}
+}
+
+// DispatchSelf implements auth.SelfDispatcher for the auth-gated MCP path.
+func (s *Server) DispatchSelf(ctx context.Context, toolName string, arguments json.RawMessage) (map[string]interface{}, error) {
+	return s.dispatchShipyardTool(ctx, toolName, arguments)
+}
+
+// SelfTools implements auth.SelfDispatcher, returning the built-in Shipyard tool list.
+func (s *Server) SelfTools() []auth.SelfTool {
+	tools := make([]auth.SelfTool, len(shipyardTools))
+	for i, t := range shipyardTools {
+		tools[i] = auth.SelfTool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		}
+	}
+	return tools
+}
+
 func (s *Server) handleGatewayTools(w http.ResponseWriter, r *http.Request) {
 	if s.proxies == nil {
 		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
@@ -811,6 +1021,11 @@ func (s *Server) handleGatewayServerToggle(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "server name required", http.StatusBadRequest)
 		return
 	}
+	// Shipyard cannot be disabled at server level — it is the gateway itself.
+	if name == "shipyard" {
+		http.Error(w, "shipyard cannot be disabled at server level", http.StatusBadRequest)
+		return
+	}
 	if err := s.gateway.SetServerEnabled(name, enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -843,8 +1058,35 @@ func (s *Server) handleGatewayToolToggle(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) gatewayCatalog(_ context.Context, includeDisabled bool) ([]gatewayToolInfo, error) {
-	servers := s.proxies.Servers()
 	result := make([]gatewayToolInfo, 0)
+
+	// Prepend Shipyard's built-in management tools first.
+	// Shipyard cannot be disabled at server level; only per-tool policy applies.
+	for _, tool := range shipyardTools {
+		toolEnabled := true
+		if s.gateway != nil {
+			toolEnabled = s.gateway.ToolEnabled("shipyard", tool.Name)
+		}
+		if !includeDisabled && !toolEnabled {
+			continue
+		}
+		result = append(result, gatewayToolInfo{
+			Name:          "shipyard__" + tool.Name,
+			Server:        "shipyard",
+			Tool:          tool.Name,
+			Description:   tool.Description,
+			InputSchema:   tool.InputSchema,
+			ServerEnabled: true, // Shipyard server is always enabled
+			ToolEnabled:   toolEnabled,
+			Enabled:       toolEnabled,
+		})
+	}
+
+	if s.proxies == nil {
+		return result, nil
+	}
+
+	servers := s.proxies.Servers()
 	for _, srv := range servers {
 		if srv.Status != "online" {
 			continue
@@ -1491,6 +1733,90 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &rpcReq); err != nil {
 		writeJSONRPCError(w, nil, -32700, "parse error")
 		return
+	}
+
+	switch rpcReq.Method {
+	case "tools/list":
+		// Build a merged tools/list: Shipyard tools first, then child server tools.
+		var allTools []map[string]interface{}
+		// Prepend Shipyard built-in tools.
+		for _, tool := range shipyardTools {
+			toolEnabled := true
+			if s.gateway != nil {
+				toolEnabled = s.gateway.ToolEnabled("shipyard", tool.Name)
+			}
+			if !toolEnabled {
+				continue
+			}
+			var schema map[string]interface{}
+			_ = json.Unmarshal(tool.InputSchema, &schema)
+			allTools = append(allTools, map[string]interface{}{
+				"name":        "shipyard__" + tool.Name,
+				"description": tool.Description,
+				"inputSchema": schema,
+			})
+		}
+		// Append tools from all child servers.
+		for _, name := range s.proxies.ServersForAuth() {
+			raw, err := s.proxies.SendRequest(r.Context(), name, "tools/list", json.RawMessage("{}"))
+			if err != nil {
+				continue
+			}
+			var resp struct {
+				Result struct {
+					Tools []json.RawMessage `json:"tools"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				continue
+			}
+			for _, rawTool := range resp.Result.Tools {
+				var toolObj map[string]interface{}
+				if err := json.Unmarshal(rawTool, &toolObj); err != nil {
+					continue
+				}
+				toolName, _ := toolObj["name"].(string)
+				if toolName == "" {
+					continue
+				}
+				toolObj["name"] = name + "__" + toolName
+				allTools = append(allTools, toolObj)
+			}
+		}
+		if allTools == nil {
+			allTools = []map[string]interface{}{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      json.RawMessage(rpcReq.ID),
+			"result":  map[string]interface{}{"tools": allTools},
+		})
+		return
+
+	case "tools/call":
+		// Check if the tool name has the shipyard__ prefix and route internally.
+		var callParams struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(rpcReq.Params, &callParams); err == nil && strings.HasPrefix(callParams.Name, "shipyard__") {
+			toolName := strings.TrimPrefix(callParams.Name, "shipyard__")
+			result, err := s.dispatchShipyardTool(r.Context(), toolName, callParams.Arguments)
+			if err != nil {
+				writeJSONRPCError(w, rpcReq.ID, -32603, err.Error())
+				return
+			}
+			resultBytes, _ := json.Marshal(result)
+			w.Header().Set("Content-Type", "application/json")
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      json.RawMessage(rpcReq.ID),
+				"result":  json.RawMessage(resultBytes),
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 	}
 
 	// For passthrough we forward to the server named in params, or "default".

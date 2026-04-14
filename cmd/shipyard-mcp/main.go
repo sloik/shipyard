@@ -178,13 +178,10 @@ func (s *mcpServer) handle(ctx context.Context, req rpcRequest, id interface{}) 
 }
 
 func (s *mcpServer) listTools(ctx context.Context) ([]map[string]interface{}, error) {
-	tools := []map[string]interface{}{
-		{
-			"name":        "shipyard_status",
-			"description": "Get status of the running Shipyard instance and its managed servers",
-			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
-		},
-	}
+	// Shipyard's built-in management tools (shipyard__status, etc.) are now returned
+	// by GET /api/gateway/tools as the first entries. No hardcoded entries needed here.
+	// (R8: removes the old hardcoded shipyard_status entry — SPEC-044)
+	var tools []map[string]interface{}
 
 	envelope, err := s.fetchGatewayTools(ctx)
 	if err != nil {
@@ -221,21 +218,9 @@ func (s *mcpServer) callTool(ctx context.Context, params json.RawMessage) (map[s
 		return nil, errors.New("tool name is required")
 	}
 
-	if req.Name == "shipyard_status" {
-		servers, err := s.fetchServers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		content := fmt.Sprintf("Shipyard reachable at %s with %d managed server(s).", s.apiBase, len(servers))
-		return map[string]interface{}{
-			"content": []map[string]string{{"type": "text", "text": content}},
-			"structuredContent": map[string]interface{}{
-				"api_base": s.apiBase,
-				"servers":  servers,
-			},
-		}, nil
-	}
-
+	// All tools now flow through the server__tool dispatch pattern.
+	// shipyard__* tools are handled by the server's internal dispatcher.
+	// (R8: removed hardcoded shipyard_status special-case — SPEC-044)
 	parts := strings.SplitN(req.Name, "__", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("tool %q is not namespaced as {server}__{tool}", req.Name)

@@ -108,12 +108,19 @@ func TestHandleServers_NoProxyManager(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var result []interface{}
+	var result []struct {
+		Name   string `json:"name"`
+		IsSelf bool   `json:"is_self"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 0 {
-		t.Fatalf("expected empty array, got %d items", len(result))
+	// Even with no proxy manager, the Shipyard self-entry is always returned.
+	if len(result) != 1 {
+		t.Fatalf("expected 1 item (Shipyard self-entry), got %d", len(result))
+	}
+	if result[0].Name != "shipyard" || !result[0].IsSelf {
+		t.Fatalf("expected Shipyard self-entry first, got %+v", result[0])
 	}
 }
 
@@ -138,8 +145,12 @@ func TestHandleServers_WithServers(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 servers, got %d", len(result))
+	// Shipyard self-entry is always prepended, so 2 child servers + 1 self = 3.
+	if len(result) != 3 {
+		t.Fatalf("expected 3 servers (shipyard + 2 children), got %d", len(result))
+	}
+	if result[0].Name != "shipyard" || !result[0].IsSelf {
+		t.Fatalf("expected Shipyard self-entry first, got %+v", result[0])
 	}
 }
 
@@ -161,8 +172,12 @@ func TestHandleServers_Empty(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 0 {
-		t.Fatalf("expected 0 servers, got %d", len(result))
+	// Even with no child servers, the Shipyard self-entry is returned.
+	if len(result) != 1 {
+		t.Fatalf("expected 1 (Shipyard self-entry), got %d", len(result))
+	}
+	if result[0].Name != "shipyard" || !result[0].IsSelf {
+		t.Fatalf("expected Shipyard self-entry, got %+v", result[0])
 	}
 }
 
@@ -200,11 +215,16 @@ func TestHandleServers_GatewayDisabledField(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 servers, got %d", len(result))
+	// Shipyard self-entry + 2 child servers = 3 total.
+	if len(result) != 3 {
+		t.Fatalf("expected 3 servers (shipyard + 2 children), got %d", len(result))
 	}
 	for _, s := range result {
 		switch s.Name {
+		case "shipyard":
+			if s.GatewayDisabled {
+				t.Errorf("shipyard: expected gateway_disabled=false (cannot be disabled), got true")
+			}
 		case "enabled-server":
 			if s.GatewayDisabled {
 				t.Errorf("enabled-server: expected gateway_disabled=false, got true")
@@ -332,15 +352,22 @@ func TestSPECBUG042_GatewayCatalogUsesSnapshotNotLiveRPC(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Tools) != 2 {
-		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): expected 2 tools from snapshot, got %d — gatewayCatalog may be using live RPC instead of snapshot cache", len(resp.Tools))
+	// 4 Shipyard built-in tools + 2 alpha snapshot tools = 6 total.
+	if len(resp.Tools) != 6 {
+		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): expected 6 tools (4 shipyard + 2 from snapshot), got %d — gatewayCatalog may be using live RPC instead of snapshot cache", len(resp.Tools))
 	}
 	names := make(map[string]bool, len(resp.Tools))
 	for _, tool := range resp.Tools {
 		names[tool.Name] = true
 	}
 	if !names["alpha__read_file"] || !names["alpha__write_file"] {
-		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): unexpected tool names: %+v", resp.Tools)
+		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): alpha snapshot tools missing: %+v", resp.Tools)
+	}
+	// Also verify the first 4 entries are Shipyard tools (SPEC-044 AC 2).
+	for i, expected := range []string{"shipyard__status", "shipyard__list_servers", "shipyard__restart", "shipyard__stop"} {
+		if resp.Tools[i].Name != expected {
+			t.Fatalf("SPEC-BUG-042 FAIL: expected tool[%d] = %q, got %q", i, expected, resp.Tools[i].Name)
+		}
 	}
 }
 
@@ -443,11 +470,20 @@ func TestHandleGatewayTools_FiltersDisabledEntries(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Tools) != 1 {
-		t.Fatalf("expected 1 enabled tool, got %d", len(resp.Tools))
+	// 4 Shipyard built-in tools (always enabled) + 1 alpha__read_file (write_file disabled, beta server disabled) = 5.
+	if len(resp.Tools) != 5 {
+		t.Fatalf("expected 5 enabled tools (4 shipyard + alpha__read_file), got %d", len(resp.Tools))
 	}
-	if resp.Tools[0].Name != "alpha__read_file" || !resp.Tools[0].Enabled {
-		t.Fatalf("unexpected filtered tool: %+v", resp.Tools[0])
+	// The last tool should be alpha__read_file.
+	lastTool := resp.Tools[len(resp.Tools)-1]
+	if lastTool.Name != "alpha__read_file" || !lastTool.Enabled {
+		t.Fatalf("unexpected last tool: %+v", lastTool)
+	}
+	// First 4 should be Shipyard built-in tools.
+	for i, expected := range []string{"shipyard__status", "shipyard__list_servers", "shipyard__restart", "shipyard__stop"} {
+		if resp.Tools[i].Name != expected {
+			t.Fatalf("expected tool[%d] = %q, got %q", i, expected, resp.Tools[i].Name)
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/gateway/tools?include_disabled=1", nil)
@@ -459,8 +495,9 @@ func TestHandleGatewayTools_FiltersDisabledEntries(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal include_disabled: %v", err)
 	}
-	if len(resp.Tools) != 3 {
-		t.Fatalf("expected 3 tools with disabled included, got %d", len(resp.Tools))
+	// 4 Shipyard built-in tools + 3 child tools (alpha__read_file, alpha__write_file disabled, beta__chat server-disabled) = 7.
+	if len(resp.Tools) != 7 {
+		t.Fatalf("expected 7 tools with disabled included (4 shipyard + 3 child), got %d", len(resp.Tools))
 	}
 	var foundDisabledTool, foundDisabledServer bool
 	for _, item := range resp.Tools {
@@ -511,6 +548,286 @@ func TestHandleGatewayToggleEndpointsPersistPolicy(t *testing.T) {
 	}
 	if reloaded.ToolEnabled("lmstudio", "lms_chat") {
 		t.Fatal("expected lms_chat tool policy to persist disabled")
+	}
+}
+
+// --- SPEC-044: Shipyard Self-Server ---
+
+func TestSPEC044_ServersFirstEntryIsShipyard(t *testing.T) {
+	// AC 1: GET /api/servers first element has "name":"shipyard","status":"running","is_self":true
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "child", Status: "online"}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	var result []ServerInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result) < 1 {
+		t.Fatal("expected at least one server entry")
+	}
+	first := result[0]
+	if first.Name != "shipyard" {
+		t.Errorf("AC 1: expected first entry name 'shipyard', got %q", first.Name)
+	}
+	if first.Status != "running" {
+		t.Errorf("AC 1: expected first entry status 'running', got %q", first.Status)
+	}
+	if !first.IsSelf {
+		t.Errorf("AC 1: expected first entry is_self=true")
+	}
+	if first.ToolCount != 4 {
+		t.Errorf("AC 1: expected 4 tools in self-entry, got %d", first.ToolCount)
+	}
+}
+
+func TestSPEC044_GatewayToolsFirstFourAreShipyard(t *testing.T) {
+	// AC 2: GET /api/gateway/tools first 4 entries are shipyard__*
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/gateway/tools", nil)
+	w := httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+
+	var resp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Tools) < 4 {
+		t.Fatalf("AC 2: expected at least 4 tools, got %d", len(resp.Tools))
+	}
+	expected := []string{"shipyard__status", "shipyard__list_servers", "shipyard__restart", "shipyard__stop"}
+	for i, name := range expected {
+		if resp.Tools[i].Name != name {
+			t.Errorf("AC 2: expected tool[%d] = %q, got %q", i, name, resp.Tools[i].Name)
+		}
+		if resp.Tools[i].Server != "shipyard" {
+			t.Errorf("AC 2: expected tool[%d].Server = 'shipyard', got %q", i, resp.Tools[i].Server)
+		}
+	}
+}
+
+func TestSPEC044_ToolCallShipyardStatus(t *testing.T) {
+	// AC 4: POST /api/tools/call server=shipyard tool=status returns success
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "child", Status: "online"}},
+	})
+
+	body := `{"server":"shipyard","tool":"status","arguments":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/call", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleToolCall(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("AC 4: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, hasResult := resp["result"]; !hasResult {
+		t.Errorf("AC 4: expected 'result' in response, got: %v", resp)
+	}
+	if _, hasError := resp["error"]; hasError {
+		t.Errorf("AC 4: expected no error in response, got: %v", resp["error"])
+	}
+}
+
+func TestSPEC044_ToolCallShipyardRestart(t *testing.T) {
+	// AC 5: shipyard__restart triggers restart of named child
+	restarted := ""
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "lmstudio", Status: "online"}},
+		restartFunc: func(name string) error {
+			restarted = name
+			return nil
+		},
+	})
+
+	body := `{"server":"shipyard","tool":"restart","arguments":{"name":"lmstudio"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/call", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleToolCall(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("AC 5: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if restarted != "lmstudio" {
+		t.Errorf("AC 5: expected 'lmstudio' to be restarted, got %q", restarted)
+	}
+}
+
+func TestSPEC044_ToolCallShipyardRestartSelfGuard(t *testing.T) {
+	// AC 6: shipyard__restart with name=shipyard returns error
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	body := `{"server":"shipyard","tool":"restart","arguments":{"name":"shipyard"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/call", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleToolCall(w, req)
+
+	// Should return an error status (502 or similar), not 200.
+	if w.Code == http.StatusOK {
+		t.Errorf("AC 6: expected non-200 response when restarting self, got 200: %s", w.Body.String())
+	}
+}
+
+func TestSPEC044_DisableShipyardAtServerLevelReturns400(t *testing.T) {
+	// AC 8: Attempting to disable shipyard at server level returns 400
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/gateway/servers/shipyard/disable", nil)
+	req.SetPathValue("name", "shipyard")
+	w := httptest.NewRecorder()
+	srv.handleGatewayServerDisable(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("AC 8: expected 400 when disabling shipyard at server level, got %d", w.Code)
+	}
+}
+
+func TestSPEC044_DisableShipyardToolDropsItFromCatalog(t *testing.T) {
+	// AC 7: Disabling shipyard__stop via gateway policy removes it from catalog
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetToolEnabled("shipyard", "stop", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/gateway/tools", nil)
+	w := httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+
+	var resp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, tool := range resp.Tools {
+		if tool.Name == "shipyard__stop" {
+			t.Errorf("AC 7: shipyard__stop should be absent after being disabled, but found it")
+		}
+	}
+	// Other shipyard tools should still be present.
+	var foundStatus bool
+	for _, tool := range resp.Tools {
+		if tool.Name == "shipyard__status" {
+			foundStatus = true
+		}
+	}
+	if !foundStatus {
+		t.Errorf("AC 7: shipyard__status should still be enabled, but was absent")
+	}
+}
+
+func TestSPEC044_MCPPassthroughToolsListIncludesShipyard(t *testing.T) {
+	// AC 3: POST /mcp tools/list includes the 4 shipyard__* tools
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`), nil
+		},
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Result struct {
+			Tools []map[string]interface{} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, tool := range resp.Result.Tools {
+		if name, ok := tool["name"].(string); ok {
+			names[name] = true
+		}
+	}
+	for _, expected := range []string{"shipyard__status", "shipyard__list_servers", "shipyard__restart", "shipyard__stop"} {
+		if !names[expected] {
+			t.Errorf("AC 3: expected %q in tools/list result, got: %v", expected, names)
+		}
+	}
+}
+
+func TestSPEC044_MCPPassthroughToolsCallShipyardStatus(t *testing.T) {
+	// AC 4: POST /mcp tools/call shipyard__status returns success
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shipyard__status","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("AC 4: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, hasResult := resp["result"]; !hasResult {
+		t.Errorf("AC 4: expected 'result' in MCP response, got: %v", resp)
+	}
+	if _, hasError := resp["error"]; hasError {
+		t.Errorf("AC 4: expected no error, got: %v", resp["error"])
+	}
+}
+
+func TestSPEC044_MCPPassthroughToolsCallShipyardRestartSelf(t *testing.T) {
+	// AC 6: calling shipyard__restart with name=shipyard returns MCP error
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shipyard__restart","arguments":{"name":"shipyard"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, hasError := resp["error"]; !hasError {
+		t.Errorf("AC 6: expected 'error' in MCP response for restart-self, got: %v", resp)
 	}
 }
 
@@ -1404,11 +1721,12 @@ func TestHandleServers_EnrichedInfo(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 servers, got %d", len(result))
+	// Shipyard self-entry + 2 child servers = 3.
+	if len(result) != 3 {
+		t.Fatalf("expected 3 servers (shipyard + 2 children), got %d", len(result))
 	}
 
-	// Check enriched fields
+	// Check enriched fields on child servers.
 	for _, s := range result {
 		if s.Name == "alpha" {
 			if s.Command != "node server.js" {
@@ -2561,10 +2879,12 @@ func TestHandleServers_NoEnvInResponse(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &raw); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if len(raw) != 1 {
-		t.Fatalf("expected 1 server, got %d", len(raw))
+	// Shipyard self-entry + 1 child server = 2 total.
+	if len(raw) != 2 {
+		t.Fatalf("expected 2 servers (shipyard + test-server), got %d", len(raw))
 	}
-	if _, hasEnv := raw[0]["env"]; hasEnv {
+	// Check child server (index 1) has no env key.
+	if _, hasEnv := raw[1]["env"]; hasEnv {
 		t.Errorf("API response contains an 'env' key — env values must not be exposed: %s", body)
 	}
 }
@@ -2734,10 +3054,12 @@ func TestHandleServers_HasPlainTextSecrets(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 server, got %d", len(result))
+	// Shipyard self-entry + 1 child server = 2.
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers (shipyard + secret-server), got %d", len(result))
 	}
-	flagged, ok := result[0]["has_plain_text_secrets"].(bool)
+	// Child server is at index 1.
+	flagged, ok := result[1]["has_plain_text_secrets"].(bool)
 	if !ok {
 		t.Fatalf("has_plain_text_secrets field missing or wrong type")
 	}

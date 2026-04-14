@@ -15,8 +15,18 @@ func TestRun_InitializeAndToolsList(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/gateway/tools":
+			// Simulate what the server returns: Shipyard built-in tools first,
+			// then child server tools. (SPEC-044 R8: bridge reads all tools from API)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"tools": []map[string]interface{}{
+					{
+						"name":        "shipyard__status",
+						"server":      "shipyard",
+						"tool":        "status",
+						"enabled":     true,
+						"description": "Get status of the running Shipyard instance",
+						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+					},
 					{
 						"name":        "lmstudio__chat",
 						"server":      "lmstudio",
@@ -63,13 +73,14 @@ func TestRun_InitializeAndToolsList(t *testing.T) {
 	}
 	tools := listResp["result"].(map[string]interface{})["tools"].([]interface{})
 	if len(tools) != 2 {
-		t.Fatalf("expected 2 tools (shipyard_status + namespaced tool), got %d", len(tools))
+		t.Fatalf("expected 2 tools (shipyard__status + lmstudio__chat), got %d", len(tools))
 	}
 	names := make([]string, 0, len(tools))
 	for _, item := range tools {
 		names = append(names, item.(map[string]interface{})["name"].(string))
 	}
-	if !contains(names, "shipyard_status") || !contains(names, "lmstudio__chat") {
+	// SPEC-044 R8: shipyard__status (double underscore) comes from the API, not hardcoded
+	if !contains(names, "shipyard__status") || !contains(names, "lmstudio__chat") {
 		t.Fatalf("unexpected tool names: %v", names)
 	}
 }
@@ -193,8 +204,19 @@ func TestRun_ToolsListUsesBackendFilteredGatewayCatalog(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/gateway/tools":
+			// Simulate the server returning Shipyard tools first, then child tools.
+			// The lmstudio__chat tool is absent (filtered out by gateway policy on the server side).
+			// (SPEC-044 R8: bridge reads all tools from API, no hardcoded entries)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"tools": []map[string]interface{}{
+					{
+						"name":        "shipyard__status",
+						"server":      "shipyard",
+						"tool":        "status",
+						"enabled":     true,
+						"description": "Get Shipyard status",
+						"inputSchema": map[string]interface{}{"type": "object"},
+					},
 					{
 						"name":        "filesystem__read_file",
 						"server":      "filesystem",
@@ -223,17 +245,21 @@ func TestRun_ToolsListUsesBackendFilteredGatewayCatalog(t *testing.T) {
 	}
 	tools := resp["result"].(map[string]interface{})["tools"].([]interface{})
 	if len(tools) != 2 {
-		t.Fatalf("expected shipyard_status + filtered gateway tool, got %d", len(tools))
+		t.Fatalf("expected shipyard__status + filesystem__read_file from gateway catalog, got %d", len(tools))
 	}
-	names := []string{
-		tools[0].(map[string]interface{})["name"].(string),
-		tools[1].(map[string]interface{})["name"].(string),
+	names := make([]string, 0, len(tools))
+	for _, item := range tools {
+		names = append(names, item.(map[string]interface{})["name"].(string))
 	}
 	if contains(names, "lmstudio__chat") {
 		t.Fatalf("expected disabled/stale tools to stay absent, got %v", names)
 	}
 	if !contains(names, "filesystem__read_file") {
 		t.Fatalf("expected filtered gateway tool in list, got %v", names)
+	}
+	// SPEC-044 R8: shipyard tools now come from the API, not hardcoded
+	if !contains(names, "shipyard__status") {
+		t.Fatalf("expected shipyard__status from gateway catalog, got %v", names)
 	}
 }
 

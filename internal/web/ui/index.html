@@ -1954,56 +1954,81 @@
      Tool Browser — Load Tools
      ====================================================================== */
   function loadTools() {
-    fetch('/api/servers')
+    // Load Shipyard's built-in tools via gateway catalog first, then child server tools.
+    fetch('/api/gateway/tools')
       .then(function(resp) { return resp.json(); })
-      .then(function(servers) {
-        if (!servers || servers.length === 0) {
-          toolGroups.innerHTML = '<div style="padding:16px; color:var(--text-muted); font-size:var(--font-size-sm); text-align:center;">No servers connected</div>';
-          return;
-        }
+      .then(function(catalogData) {
+        var gatewayTools = catalogData.tools || [];
 
-        var pending = servers.length;
-        allTools = {};
-
-        servers.forEach(function(srv) {
-          fetch('/api/tools?server=' + encodeURIComponent(srv.name))
-            .then(function(resp) {
-              if (!resp.ok) throw new Error('Failed to fetch tools');
-              return resp.json();
-            })
-            .then(function(data) {
-              var tools = data.tools || [];
-              allTools[srv.name] = { status: srv.status, tools: tools };
-            })
-            .catch(function(err) {
-              console.error('Failed to load tools for', srv.name, err);
-              allTools[srv.name] = { status: 'offline', tools: [] };
-            })
-            .then(function() {
-              pending--;
-              if (pending <= 0) {
-                toolsLoaded = true;
-                // Fetch tool conflicts
-                fetch('/api/tools/conflicts')
-                  .then(function(resp) { return resp.json(); })
-                  .then(function(conflicts) {
-                    toolConflicts = {};
-                    if (conflicts && conflicts.length > 0) {
-                      for (var c = 0; c < conflicts.length; c++) {
-                        toolConflicts[conflicts[c].tool_name] = conflicts[c].servers;
-                      }
-                    }
-                    renderToolSidebar();
-                  })
-                  .catch(function() {
-                    renderToolSidebar();
-                  });
-              }
+        // Build the Shipyard group from shipyard__* entries in the catalog.
+        var shipyardToolList = [];
+        for (var g = 0; g < gatewayTools.length; g++) {
+          var gt = gatewayTools[g];
+          if (gt.server === 'shipyard') {
+            shipyardToolList.push({
+              name: gt.tool,          // bare name (e.g. "status")
+              description: gt.description || '',
+              inputSchema: gt.inputSchema || null
             });
-        });
+          }
+        }
+        allTools = {};
+        // Shipyard group is always first.
+        allTools['shipyard'] = { status: 'online', tools: shipyardToolList, isSelf: true };
+
+        // Now load child servers.
+        return fetch('/api/servers')
+          .then(function(resp) { return resp.json(); })
+          .then(function(servers) {
+            var childServers = (servers || []).filter(function(s) { return !s.is_self; });
+
+            if (childServers.length === 0) {
+              toolsLoaded = true;
+              renderToolSidebar();
+              return;
+            }
+
+            var pending = childServers.length;
+            childServers.forEach(function(srv) {
+              fetch('/api/tools?server=' + encodeURIComponent(srv.name))
+                .then(function(resp) {
+                  if (!resp.ok) throw new Error('Failed to fetch tools');
+                  return resp.json();
+                })
+                .then(function(data) {
+                  var tools = data.tools || [];
+                  allTools[srv.name] = { status: srv.status, tools: tools };
+                })
+                .catch(function(err) {
+                  console.error('Failed to load tools for', srv.name, err);
+                  allTools[srv.name] = { status: 'offline', tools: [] };
+                })
+                .then(function() {
+                  pending--;
+                  if (pending <= 0) {
+                    toolsLoaded = true;
+                    // Fetch tool conflicts
+                    fetch('/api/tools/conflicts')
+                      .then(function(resp) { return resp.json(); })
+                      .then(function(conflicts) {
+                        toolConflicts = {};
+                        if (conflicts && conflicts.length > 0) {
+                          for (var c = 0; c < conflicts.length; c++) {
+                            toolConflicts[conflicts[c].tool_name] = conflicts[c].servers;
+                          }
+                        }
+                        renderToolSidebar();
+                      })
+                      .catch(function() {
+                        renderToolSidebar();
+                      });
+                  }
+                });
+            });
+          });
       })
       .catch(function(err) {
-        console.error('Failed to load servers:', err);
+        console.error('Failed to load tools:', err);
         toolGroups.innerHTML = '<div style="padding:16px; color:var(--danger-fg); font-size:var(--font-size-sm); text-align:center;">Failed to load servers</div>';
       });
   }
@@ -2031,6 +2056,7 @@
       var tools = srvData.tools || [];
       var isOffline = srvData.status === 'offline';
       var isRestarting = srvData.status === 'restarting';
+      var isSelf = !!srvData.isSelf; // true for the Shipyard built-in group
 
       // Filter tools by search
       var filteredTools = tools;
@@ -2043,24 +2069,30 @@
       }
 
       var groupClass = 'tool-group';
-      if (isOffline || isRestarting) groupClass += ' is-collapsed';
+      if (!isSelf && (isOffline || isRestarting)) groupClass += ' is-collapsed';
 
       var statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
       var statusLabel = '';
-      if (isOffline) {
-        statusDot = '<span class="badge-dot" style="background:var(--danger-fg);"></span>';
-        statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--danger-fg);">offline</span>';
-      } else if (isRestarting) {
-        statusDot = '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
-        statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--warning-fg);">restarting</span>';
+      if (!isSelf) {
+        if (isOffline) {
+          statusDot = '<span class="badge-dot" style="background:var(--danger-fg);"></span>';
+          statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--danger-fg);">offline</span>';
+        } else if (isRestarting) {
+          statusDot = '<span class="badge-dot" style="background:var(--warning-fg);"></span>';
+          statusLabel = ' <span style="font-size:var(--font-size-xs); color:var(--warning-fg);">restarting</span>';
+        }
       }
 
-      html += '<div class="' + groupClass + '" style="' + (isOffline ? 'opacity:0.5;' : '') + '">';
+      var groupOpacity = (!isSelf && isOffline) ? 'opacity:0.5;' : '';
+      html += '<div class="' + groupClass + '" style="' + groupOpacity + '">';
       html += '<div class="tool-group-header">';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += statusDot;
-      html += escapeHtml(srvName);
+      html += escapeHtml(isSelf ? 'Shipyard' : srvName);
       html += statusLabel;
+      if (isSelf) {
+        html += ' <span class="badge badge-neutral" style="font-size:var(--font-size-xs);">Built-in</span>';
+      }
       html += '</span>';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">' + filteredTools.length + '</span>';
@@ -3041,9 +3073,13 @@
     fetch('/api/servers')
       .then(function(resp) { return resp.json(); })
       .then(function(servers) {
-        var serverCount = servers ? servers.length : 0;
+        // Count only child servers (exclude the Shipyard self-entry) for the header badge.
+        var childServers = (servers || []).filter(function(s) { return !s.is_self; });
+        var serverCount = childServers.length;
         serverCountEl.textContent = serverCount + ' server' + (serverCount !== 1 ? 's' : '');
 
+        // Always show the grid (Shipyard card is always visible).
+        // Show empty state for child servers only when there are no child servers.
         if (!servers || servers.length === 0) {
           serversEmpty.style.display = '';
           serversGrid.style.display = 'none';
@@ -3051,13 +3087,20 @@
           return;
         }
 
+        // Always show the grid (it always has at least the Shipyard card).
         serversEmpty.style.display = 'none';
         serversGrid.style.display = '';
-        serversActionBar.style.display = '';
+        // Show action bar only when there are child servers to manage.
+        if (childServers.length > 0) {
+          serversActionBar.style.display = '';
+        } else {
+          serversActionBar.style.display = 'none';
+        }
 
-        // Build summary
+        // Build summary from child servers only (exclude Shipyard self-entry).
         var online = 0, crashed = 0, totalTools = 0, conflicts = 0;
         for (var i = 0; i < servers.length; i++) {
+          if (servers[i].is_self) continue;
           if (servers[i].status === 'online') online++;
           if (servers[i].status === 'crashed') crashed++;
           totalTools += servers[i].tool_count || 0;
@@ -3159,8 +3202,32 @@
 
   function renderServerCards(servers) {
     var html = '';
+    var hasChildCards = false;
     for (var i = 0; i < servers.length; i++) {
       var s = servers[i];
+
+      // Render the Shipyard self-entry as a permanent first card.
+      if (s.is_self) {
+        html += '<div class="server-card" data-server="shipyard" style="border:1px solid var(--border-muted); border-radius:var(--radius-m); overflow:hidden; background:var(--bg-raised);">';
+        // Header: green dot + Shipyard label (left) | Built-in badge (right)
+        html += '<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border-muted);">';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        html += '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--success-fg); flex-shrink:0;"></span>';
+        html += '<span class="server-name">Shipyard</span>';
+        html += '</div>';
+        html += '<div style="display:flex; align-items:center; gap:6px;">';
+        html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border:1px solid var(--border-default); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">&#128295; ' + (s.tool_count || 0) + ' tools</div>';
+        html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">Built-in</span>';
+        html += '</div>';
+        html += '</div>';
+        // Body: description
+        html += '<div style="padding:12px 16px; font-size:var(--font-size-sm); color:var(--text-secondary);">MCP gateway and management server. Always running.</div>';
+        // No action buttons for the self-entry.
+        html += '</div>';
+        continue;
+      }
+
+      hasChildCards = true;
       var cardClass = 'server-card';
       if (s.status === 'crashed') cardClass += ' is-crashed';
       else if (s.status === 'restarting') cardClass += ' is-restarting';

@@ -138,7 +138,12 @@ func TestShipyardE2E_ConfigMode_RealProcessFlow(t *testing.T) {
 		if err := json.Unmarshal(body, &servers); err != nil {
 			return false
 		}
-		return len(servers) == 1 && servers[0].Name == "alpha"
+		// Expect shipyard self-entry (first) + alpha child server.
+		// Wait until alpha is online (len >= 2 and last entry is alpha).
+		if len(servers) < 2 {
+			return false
+		}
+		return servers[0].Name == "shipyard" && servers[1].Name == "alpha"
 	})
 
 	waitForHTTP(t, baseURL+"/api/tools?server=alpha", func(resp *http.Response, body []byte) bool {
