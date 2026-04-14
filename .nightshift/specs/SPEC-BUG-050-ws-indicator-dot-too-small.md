@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -29,17 +29,17 @@ The live/disconnected status indicator dot in the header renders at 6×6px. The 
 
 ## Root Cause
 
-(Agent fills in during run.)
+CSS typo: `.ws-indicator::before` in `ds.css` had `width: 6px; height: 6px` instead of the UX-002-specified 8px. One-line fix in the design system stylesheet.
 
 ## Requirements
 
-- [ ] R1: WebSocket indicator dot is 8×8px matching the UX-002 design
+- [x] R1: WebSocket indicator dot is 8×8px matching the UX-002 design
 
 ## Acceptance Criteria
 
-- [ ] AC 1: `.ws-indicator::before` has `width: 8px; height: 8px` in `ds.css`
-- [ ] AC 2: Dot remains circular (border-radius: 50%)
-- [ ] AC 3: `go build ./...` passes
+- [x] AC 1: `.ws-indicator::before` has `width: 8px; height: 8px` in `ds.css`
+- [x] AC 2: Dot remains circular (border-radius: 50%)
+- [x] AC 3: `go build ./...` passes
 
 ## Context
 
