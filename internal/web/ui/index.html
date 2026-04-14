@@ -1151,30 +1151,55 @@
   /* ======================================================================
      JSON Filter Logic
      ====================================================================== */
+  function getLineIndent(line) {
+    var lc = line.querySelector('.lc');
+    if (!lc) return 0;
+    var text = lc.textContent;
+    var count = 0;
+    while (count < text.length && text[count] === ' ') { count++; }
+    return count;
+  }
+
   function filterJsonLines(viewer, query) {
     var lines = viewer.querySelectorAll('.json-line');
     var lowerQuery = query.toLowerCase();
+
+    if (!query) {
+      // Restore all lines
+      for (var j = 0; j < lines.length; j++) {
+        lines[j].style.display = '';
+      }
+      return;
+    }
+
+    // Phase 1: determine which lines match content
+    var matched = [];
     for (var i = 0; i < lines.length; i++) {
-      var text = lines[i].textContent;
-      if (!query || text.toLowerCase().indexOf(lowerQuery) !== -1) {
-        lines[i].style.display = '';
-        // Highlight match
-        if (query && lines[i].getAttribute('data-original') === null) {
-          lines[i].setAttribute('data-original', lines[i].innerHTML);
+      var lc = lines[i].querySelector('.lc');
+      var text = lc ? lc.textContent : '';
+      matched.push(text.toLowerCase().indexOf(lowerQuery) !== -1);
+    }
+
+    // Phase 2: mark ancestor structural lines of each match as visible
+    // Structural lines are jt-bracket or jt-key lines that open context
+    var visible = matched.slice();
+    for (var i = 0; i < lines.length; i++) {
+      if (!matched[i]) continue;
+      var matchIndent = getLineIndent(lines[i]);
+      // Walk backward — show any line with strictly less indent
+      for (var k = i - 1; k >= 0; k--) {
+        var kIndent = getLineIndent(lines[k]);
+        if (kIndent < matchIndent) {
+          visible[k] = true;
+          matchIndent = kIndent; // only need to go up one level at a time
+          if (kIndent === 0) break;
         }
-      } else {
-        lines[i].style.display = 'none';
       }
     }
-    // Restore all lines when query is cleared
-    if (!query) {
-      for (var j = 0; j < lines.length; j++) {
-        var orig = lines[j].getAttribute('data-original');
-        if (orig !== null) {
-          lines[j].innerHTML = orig;
-          lines[j].removeAttribute('data-original');
-        }
-      }
+
+    // Phase 3: apply visibility
+    for (var i = 0; i < lines.length; i++) {
+      lines[i].style.display = visible[i] ? '' : 'none';
     }
   }
 

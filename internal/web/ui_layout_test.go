@@ -1870,6 +1870,50 @@ func TestSPECBUG040_RetryButtonRemovedFromResponseHeader(t *testing.T) {
 	}
 }
 
+// TestSPECBUG044_FilterUsesLCNotParentTextContent verifies that
+// filterJsonLines() matches against the .lc child content only — not the
+// parent .json-line textContent (which would include line-number digits).
+func TestSPECBUG044_FilterUsesLCNotParentTextContent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Locate filterJsonLines function body
+	fnIdx := strings.Index(content, "function filterJsonLines(viewer, query)")
+	if fnIdx == -1 {
+		t.Fatal("BUG-044 FAIL (AC 1): filterJsonLines not found in index.html")
+	}
+	// Extract a reasonable window of the function body
+	fnBody := content[fnIdx:]
+	if endIdx := strings.Index(fnBody[1:], "\n  function "); endIdx > 0 {
+		fnBody = fnBody[:endIdx+1]
+	}
+
+	// AC 1: must use .querySelector('.lc') or querySelector(".lc") for matching
+	if !strings.Contains(fnBody, "querySelector('.lc')") && !strings.Contains(fnBody, `querySelector(".lc")`) {
+		t.Error("BUG-044 FAIL (AC 1): filterJsonLines must match against .lc child content, not parent textContent")
+	}
+
+	// AC 1: must NOT use lines[i].textContent for the match text
+	// (it may use lines[i] for visibility toggling, but not for the content comparison)
+	// The dangerous pattern is: lines[i].textContent followed by indexOf — check it's gone
+	if strings.Contains(fnBody, "var text = lines[i].textContent") {
+		t.Error("BUG-044 FAIL (AC 1): filterJsonLines still reads parent .json-line textContent for matching — must use .lc child instead")
+	}
+
+	// AC 2 + AC 4: clearing query restores all lines — verify the clear branch exists
+	if !strings.Contains(fnBody, "!query") {
+		t.Error("BUG-044 FAIL (AC 4): filterJsonLines must have a clear-query branch to restore all lines")
+	}
+
+	// AC 3: ancestor context lines — verify backward-walk logic exists
+	if !strings.Contains(fnBody, "getLineIndent") {
+		t.Error("BUG-044 FAIL (AC 3): filterJsonLines must call getLineIndent to keep ancestor structural lines visible")
+	}
+}
+
 // TestSPEC040_JSONViewerLineNumbers verifies that the JSON viewer renders
 // line-number nodes with incrementing content and that the CSS layout
 // satisfies the SPEC-040 column constraints (AC 1–6, AC 7).
