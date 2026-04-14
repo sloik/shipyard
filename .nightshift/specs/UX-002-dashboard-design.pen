@@ -13713,108 +13713,324 @@
                           "width": "fill_container",
                           "height": "fill_container",
                           "layout": "vertical",
-                          "gap": 1,
-                          "padding": 12,
+                          "gap": 2,
+                          "padding": [
+                            12,
+                            12,
+                            12,
+                            0
+                          ],
                           "children": [
                             {
-                              "type": "text",
-                              "id": "GLP3g",
-                              "name": "rl1",
-                              "fill": "$json-bracket",
-                              "content": "{",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "KLPwR",
+                              "name": "row1",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "jS9qe",
+                                  "fill": "$text-muted",
+                                  "content": "1",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "qFD8g",
+                                  "fill": "$json-bracket",
+                                  "content": "{",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "1ebCn",
-                              "name": "rl2",
-                              "fill": "$json-key",
-                              "content": "  \"content\": [",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "sp9o1",
+                              "name": "row2",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "N1KOR",
+                                  "fill": "$text-muted",
+                                  "content": "2",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "JsZKP",
+                                  "fill": "$json-key",
+                                  "content": "  \"content\": [",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "Nn2x0",
-                              "name": "rl3",
-                              "fill": "$json-bracket",
-                              "content": "    {",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "urRFJ",
+                              "name": "row3",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "i1eaW",
+                                  "fill": "$text-muted",
+                                  "content": "3",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "mOJeA",
+                                  "fill": "$json-bracket",
+                                  "content": "    {",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "gLQuh",
-                              "name": "rl4",
-                              "fill": "$json-string",
-                              "content": "      \"type\": \"text\",",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "l8o0q",
+                              "name": "row4",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "kD3s1",
+                                  "fill": "$text-muted",
+                                  "content": "4",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "CDCDW",
+                                  "fill": "$json-string",
+                                  "content": "      \"type\": \"text\",",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "g1iKc",
-                              "name": "rl5",
-                              "fill": "$json-string",
-                              "content": "      \"text\": \"# Project README\\n\\nThis is...\",",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "i3IXJ",
+                              "name": "row5",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "children": [
+                                {
+                                  "type": "frame",
+                                  "id": "sGGCG",
+                                  "width": "fill_container",
+                                  "gap": 12,
+                                  "children": [
+                                    {
+                                      "type": "text",
+                                      "id": "6GPQD",
+                                      "fill": "$text-muted",
+                                      "content": "5",
+                                      "textAlign": "right",
+                                      "fontFamily": "$font-mono",
+                                      "fontSize": "$font-size-base",
+                                      "fontWeight": "normal"
+                                    },
+                                    {
+                                      "type": "text",
+                                      "id": "084QB",
+                                      "fill": "$json-string",
+                                      "content": "      \"text\": \"# Project README\\n\\nThis is a long string value that",
+                                      "fontFamily": "$font-mono",
+                                      "fontSize": "$font-size-base",
+                                      "fontWeight": "normal"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "type": "frame",
+                                  "id": "XLENC",
+                                  "width": "fill_container",
+                                  "gap": 12,
+                                  "children": [
+                                    {
+                                      "type": "frame",
+                                      "id": "CFOyi",
+                                      "width": 24,
+                                      "height": "fit_content(0)"
+                                    },
+                                    {
+                                      "type": "text",
+                                      "id": "AHYHh",
+                                      "fill": "$json-string",
+                                      "content": "               wraps onto the next visual line...\",",
+                                      "fontFamily": "$font-mono",
+                                      "fontSize": "$font-size-base",
+                                      "fontWeight": "normal"
+                                    }
+                                  ]
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "UO6Ny",
-                              "name": "rl6",
-                              "fill": "$json-string",
-                              "content": "      \"mimeType\": \"text/plain\"",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "e4jIR",
+                              "name": "row6",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "4dlPO",
+                                  "fill": "$text-muted",
+                                  "content": "6",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "PhrFg",
+                                  "fill": "$json-string",
+                                  "content": "      \"mimeType\": \"text/plain\"",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "domBk",
-                              "name": "rl7",
-                              "fill": "$json-bracket",
-                              "content": "    }",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "laeRx",
+                              "name": "row7",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "LwUM6",
+                                  "fill": "$text-muted",
+                                  "content": "7",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "GIHtZ",
+                                  "fill": "$json-bracket",
+                                  "content": "    }",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "UOHR8",
-                              "name": "rl8",
-                              "fill": "$json-bracket",
-                              "content": "  ],",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "BWn1d",
+                              "name": "row8",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "nDNnQ",
+                                  "fill": "$text-muted",
+                                  "content": "8",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "s78uI",
+                                  "fill": "$json-bracket",
+                                  "content": "  ],",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "I1XKi",
-                              "name": "rl9",
-                              "fill": "$json-boolean",
-                              "content": "  \"isError\": false",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "DvHuw",
+                              "name": "row9",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "RIsWV",
+                                  "fill": "$text-muted",
+                                  "content": "9",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "RIylH",
+                                  "fill": "$json-boolean",
+                                  "content": "  \"isError\": false",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "6JadW",
-                              "name": "rl10",
-                              "fill": "$json-bracket",
-                              "content": "}",
-                              "fontFamily": "$font-mono",
-                              "fontSize": "$font-size-base",
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "oevBO",
+                              "name": "row10",
+                              "width": "fill_container",
+                              "gap": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "TcLlG",
+                                  "fill": "$text-muted",
+                                  "content": "10",
+                                  "textAlign": "right",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "EDRmS",
+                                  "fill": "$json-bracket",
+                                  "content": "}",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": "$font-size-base",
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             }
                           ]
                         }
