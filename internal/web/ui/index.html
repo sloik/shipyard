@@ -3348,7 +3348,7 @@
 
         // Actions: Enable only
         html += '<div class="server-actions">';
-        html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_enableServer(\'' + escapeHtml(s.name) + '\')">Enable</button>';
+        html += '<button class="btn btn-default" onclick="window.__shipyard_enableServer(\'' + escapeHtml(s.name) + '\')" style="padding:6px 10px; color:var(--text-secondary);">Enable</button>';
         html += '</div>';
       } else {
         // Header: left group (dot + name) | right group (tools pill or crashed badge)
@@ -3430,19 +3430,19 @@
         // Actions — R1, R2 (AC2, AC3)
         html += '<div class="server-actions">';
         if (s.status === 'online') {
-          // Stop: Lucide square (AC2)
-          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          // Stop: Lucide square (AC2) — padding/color match UX-002 button spec [6,10], #b1bac4
+          html += '<button class="btn btn-default" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')" style="gap:4px; padding:6px 10px; color:var(--text-secondary);">';
           html += iconSquare(12, 'var(--text-secondary)');
           html += '<span>Stop</span>';
           html += '</button>';
           // Restart: Lucide rotate-ccw (AC2)
-          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          html += '<button class="btn btn-default" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="gap:4px; padding:6px 10px; color:var(--text-secondary);">';
           html += iconRotateCcw(12, 'var(--text-secondary)');
           html += '<span>Restart</span>';
           html += '</button>';
         } else if (s.status === 'crashed' || s.status === 'stopped') {
-          // Crashed Restart: Lucide play (AC3)
-          html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          // Crashed Restart: Lucide play (AC3) — padding matches UX-002 [6,10]
+          html += '<button class="btn btn-primary" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="gap:4px; padding:6px 10px;">';
           html += iconPlay(12, 'var(--text-on-emphasis)');
           html += '<span>Restart</span>';
           html += '</button>';
