@@ -56,6 +56,16 @@ to reference specific lines in conversation.
 - [ ] AC 9: `go vet ./...` passes.
 - [ ] AC 10: `go build ./...` passes.
 
+## Scope
+
+Line numbers apply to **all** JSON-displaying views across the app:
+- Phase 0: Traffic detail panel (REQUEST/RESPONSE split view) — updated in UX-002
+- Phase 1: Tool browser response viewer — primary target of this spec
+- Phase 2: History response body (`resBody` frame in UX-002) — updated in UX-002
+- Phase 3: Server detail error body (`codeBody` frame in UX-002) — updated in UX-002
+- Diff/SideBySide component: both before/after panels — updated in UX-002
+- Design system: Code/Block and Panel/SplitView components — updated in UX-002
+
 ## Context
 
 - **Design frame:** UX-002 JSON viewer

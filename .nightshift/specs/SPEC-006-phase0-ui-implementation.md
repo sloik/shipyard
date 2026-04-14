@@ -116,6 +116,8 @@ The main Phase 0 screen. Two states:
   - RESPONSE panel: per-panel filter, green header, scrollable JSON body
   - Both have copy buttons (`.btn.btn-copy` → `.btn.btn-copied` on click)
   - Scrollbar on JSON body (fixed height, overflow-y: auto)
+  - Line numbers: fixed-width gutter (`.json-line-number`) on the left edge of each JSON body, right-aligned, muted color
+  - Word wrapping: long values wrap at word boundaries (`word-wrap: break-word`), line number stays top-aligned while wrapped content flows below
 - Resize handle (`.resize-handle`) at the bottom
 
 **Detail Panel — Pending State:**
@@ -204,6 +206,8 @@ The main Phase 0 screen. Two states:
 - [x] AC-8: Rows show direction badges, status badges, latency pills, relative timestamps
 - [x] AC-9: Clicking a row expands it with detail panel, clicking again collapses
 - [x] AC-10: Detail panel shows split REQUEST/RESPONSE with syntax-highlighted JSON
+- [ ] AC-10a: JSON panels display line numbers in a fixed-width gutter along the left edge
+- [ ] AC-10b: Long JSON values use whole-word line wrapping (word-wrap: break-word) — line number stays top-aligned while content wraps below
 - [x] AC-11: JSON panels scroll with fixed height, not expand infinitely
 - [x] AC-12: Copy button copies JSON payload and shows "Copied!" feedback
 - [x] AC-13: Combined JSON filter searches both panels

@@ -1,9 +1,20 @@
 ---
 id: SPEC-006
+template_version: 2
 priority: 6
+layer: 2
 type: main
-status: draft
+status: ready
+children:
+  - SPEC-006-001
+  - SPEC-006-002
+  - SPEC-006-003
+implementation_order:
+  - SPEC-006-001
+  - SPEC-006-002
+  - SPEC-006-003
 after: [SPEC-004]
+prior_attempts: []
 created: 2026-04-06
 ---
 
