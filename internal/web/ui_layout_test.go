@@ -1972,3 +1972,161 @@ func TestSPEC040_JSONViewerLineNumbers(t *testing.T) {
 		t.Error("SPEC-040 FAIL (AC 6): .json-line must have margin-bottom: 2px (row gap)")
 	}
 }
+
+// TestSPEC041_JqEvalFunctionExists verifies that a client-side jq evaluator
+// function is present and wired to the mode toggle (AC 7).
+func TestSPEC041_JqEvalFunctionExists(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC 7: jqEval function must exist and return ok/error shape
+	if !strings.Contains(content, "function jqEval(expr, data)") {
+		t.Fatal("SPEC-041 FAIL (AC 7): jqEval(expr, data) function not found in index.html")
+	}
+
+	// jqEval must return an object with ok and error fields
+	if !strings.Contains(content, "{ ok: true, value:") {
+		t.Error("SPEC-041 FAIL (AC 7): jqEval must return { ok: true, value: ... } on success")
+	}
+	if !strings.Contains(content, "{ ok: false, error:") {
+		t.Error("SPEC-041 FAIL (AC 7): jqEval must return { ok: false, error: ... } on invalid expression")
+	}
+
+	// AC 3: invalid expression shows inline error in viewer (not blank)
+	if !strings.Contains(content, "jq error:") {
+		t.Error("SPEC-041 FAIL (AC 3): applyJqToViewer must render inline 'jq error:' message for invalid expressions")
+	}
+
+	// AC 4: empty input restores original content
+	if !strings.Contains(content, "function applyJqToViewer(viewer, expr)") {
+		t.Fatal("SPEC-041 FAIL: applyJqToViewer function not found")
+	}
+	applyIdx := strings.Index(content, "function applyJqToViewer(viewer, expr)")
+	applyBody := content[applyIdx:]
+	if endIdx := strings.Index(applyBody[1:], "\n  // "); endIdx > 0 {
+		applyBody = applyBody[:endIdx+1]
+	}
+	if !strings.Contains(applyBody, "data-raw-json") {
+		t.Error("SPEC-041 FAIL (AC 4/AC 7): applyJqToViewer must read data-raw-json attribute")
+	}
+	if !strings.Contains(applyBody, "highlightJSON(rawJson)") {
+		t.Error("SPEC-041 FAIL (AC 4): applyJqToViewer must restore original content via highlightJSON when expr is empty")
+	}
+
+	// AC 6: debounce helper must exist
+	if !strings.Contains(content, "function debounce(fn, ms)") {
+		t.Error("SPEC-041 FAIL (AC 6): debounce function not found — evaluation must be debounced")
+	}
+
+	// AC 6: debounce used in filter wiring
+	if !strings.Contains(content, "debounce(function()") {
+		t.Error("SPEC-041 FAIL (AC 6): debounce must be used in filter input wiring")
+	}
+
+	// AC 1 + AC 2: jq result rendered via highlightJSON
+	if !strings.Contains(applyBody, "highlightJSON(JSON.stringify(result.value") {
+		t.Error("SPEC-041 FAIL (AC 1/AC 2): applyJqToViewer must render result with highlightJSON")
+	}
+
+	// R7: data-raw-json stored on viewer when toolResponseBody is called
+	toolBodyIdx := strings.Index(content, "function toolResponseBody(data)")
+	if toolBodyIdx == -1 {
+		t.Fatal("SPEC-041 FAIL: toolResponseBody function not found")
+	}
+	toolBody := content[toolBodyIdx:]
+	if endIdx := strings.Index(toolBody[1:], "\n  /* ="); endIdx > 0 {
+		toolBody = toolBody[:endIdx+1]
+	}
+	if !strings.Contains(toolBody, `setAttribute('data-raw-json'`) {
+		t.Error("SPEC-041 FAIL (R7): toolResponseBody must store raw JSON in data-raw-json attribute")
+	}
+
+	// R7: data-raw-json stored in renderDetailPanel
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-041 FAIL: renderDetailPanel function not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody[1:], "\n  /* ="); endIdx > 0 {
+		detailBody = detailBody[:endIdx+1]
+	}
+	if !strings.Contains(detailBody, "data-raw-json") {
+		t.Error("SPEC-041 FAIL (R7): renderDetailPanel must embed data-raw-json attribute on json-viewer elements")
+	}
+}
+
+// TestSPEC042_HighlightJSONSortsKeysAlphabetically verifies that highlightJSON
+// sorts object keys case-insensitively before rendering (SPEC-042).
+func TestSPEC042_HighlightJSONSortsKeysAlphabetically(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// AC 1 + AC 2: sortKeysRecursive (or equivalent) must exist
+	if !strings.Contains(content, "function sortKeysRecursive(") {
+		t.Fatal("SPEC-042 FAIL (AC 1): sortKeysRecursive function not found in index.html")
+	}
+
+	// AC 1: case-insensitive sort using localeCompare
+	if !strings.Contains(content, "localeCompare") {
+		t.Error("SPEC-042 FAIL (AC 1): sortKeysRecursive must use localeCompare for case-insensitive alphabetical sort")
+	}
+
+	// AC 2: recursive — must handle nested objects
+	sortIdx := strings.Index(content, "function sortKeysRecursive(")
+	if sortIdx == -1 {
+		t.Fatal("SPEC-042 FAIL: sortKeysRecursive function not found")
+	}
+	sortBody := content[sortIdx:]
+	if endIdx := strings.Index(sortBody[1:], "\n  function "); endIdx > 0 {
+		sortBody = sortBody[:endIdx+1]
+	}
+	if !strings.Contains(sortBody, "sortKeysRecursive(") {
+		t.Error("SPEC-042 FAIL (AC 2): sortKeysRecursive must be recursive (call itself for nested objects)")
+	}
+
+	// AC 3: arrays must NOT be sorted — they should preserve order
+	if !strings.Contains(sortBody, "Array.isArray") {
+		t.Error("SPEC-042 FAIL (AC 3): sortKeysRecursive must check Array.isArray to preserve array element order")
+	}
+
+	// AC 4 + AC 5: highlightJSON must call sortKeysRecursive before rendering
+	highlightIdx := strings.Index(content, "function highlightJSON(str)")
+	if highlightIdx == -1 {
+		t.Fatal("SPEC-042 FAIL: highlightJSON function not found")
+	}
+	highlightBody := content[highlightIdx:]
+	if endIdx := strings.Index(highlightBody[1:], "\n  /* ="); endIdx > 0 {
+		highlightBody = highlightBody[:endIdx+1]
+	}
+	if !strings.Contains(highlightBody, "sortKeysRecursive(") {
+		t.Error("SPEC-042 FAIL (AC 5): highlightJSON must call sortKeysRecursive before rendering")
+	}
+
+	// AC 4: data-raw-json must NOT go through sortKeysRecursive — it is stored
+	// before sorting. Verify sortKeysRecursive is called AFTER data-raw-json storage
+	// in toolResponseBody.
+	toolBodyIdx := strings.Index(content, "function toolResponseBody(data)")
+	if toolBodyIdx == -1 {
+		t.Fatal("SPEC-042 FAIL: toolResponseBody not found")
+	}
+	toolBody := content[toolBodyIdx:]
+	if endIdx := strings.Index(toolBody[1:], "\n  /* ="); endIdx > 0 {
+		toolBody = toolBody[:endIdx+1]
+	}
+	// highlightJSON (which sorts) is called first in toolResponseBody,
+	// but raw JSON is stored via setAttribute separately — it must NOT call
+	// sortKeysRecursive on the stored string.
+	rawJsonIdx := strings.Index(toolBody, "setAttribute('data-raw-json'")
+	sortCallIdx := strings.Index(toolBody, "sortKeysRecursive(")
+	if sortCallIdx != -1 && rawJsonIdx != -1 && sortCallIdx < rawJsonIdx {
+		// sortKeysRecursive should not be called before data-raw-json is stored
+		// within toolResponseBody itself — the sort happens inside highlightJSON
+		t.Error("SPEC-042 FAIL (AC 4): sortKeysRecursive must not be called on the raw JSON before it is stored in data-raw-json")
+	}
+}

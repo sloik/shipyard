@@ -988,10 +988,35 @@
     return obj;
   }
 
+  // sortKeysRecursive sorts object keys alphabetically (case-insensitive,
+  // ascending) for display purposes. Arrays preserve original element order.
+  function sortKeysRecursive(obj) {
+    if (Array.isArray(obj)) {
+      var arr = [];
+      for (var i = 0; i < obj.length; i++) {
+        arr.push(sortKeysRecursive(obj[i]));
+      }
+      return arr;
+    }
+    if (obj !== null && typeof obj === 'object') {
+      var keys = Object.keys(obj);
+      keys.sort(function(a, b) {
+        return a.localeCompare(b, undefined, { sensitivity: 'base' });
+      });
+      var sorted = {};
+      for (var k = 0; k < keys.length; k++) {
+        sorted[keys[k]] = sortKeysRecursive(obj[keys[k]]);
+      }
+      return sorted;
+    }
+    return obj;
+  }
+
   function highlightJSON(str) {
     var obj;
     try { obj = JSON.parse(str); } catch(e) { return escapeHtml(str); }
     obj = expandJSONStrings(obj, 0);
+    obj = sortKeysRecursive(obj);
     var pretty = JSON.stringify(obj, null, 2);
     var lines = pretty.split('\n');
     var result = '';
@@ -1091,7 +1116,11 @@
       '<span>REQUEST</span>' +
       '<button class="btn btn-copy">Copy</button>' +
     '</div>';
-    html += '<div class="json-viewer code-body">' + (reqEntry ? highlightJSON(reqEntry.payload) : '<span class="spinner">No request data</span>') + '</div>';
+    if (reqEntry) {
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
+    } else {
+      html += '<div class="json-viewer code-body"><span class="spinner">No request data</span></div>';
+    }
     html += '</div>';
     html += '</div>';
 
@@ -1108,13 +1137,13 @@
         '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
       html += '<div class="code-header" data-res-header>' +
         '<span>RESPONSE</span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
       html += '<div class="code-header" data-res-header><span>RESPONSE</span></div>';
       html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
@@ -1203,18 +1232,149 @@
     }
   }
 
+  /* ======================================================================
+     Minimal jq Evaluator (client-side, no dependencies)
+     ====================================================================== */
+
+  // debounce returns a function that delays invoking fn until after ms have
+  // elapsed since the last invocation.
+  function debounce(fn, ms) {
+    var timer = null;
+    return function() {
+      var args = arguments;
+      var ctx = this;
+      clearTimeout(timer);
+      timer = setTimeout(function() { fn.apply(ctx, args); }, ms);
+    };
+  }
+
+  // jqEval evaluates a jq-like expression against a parsed JSON value.
+  // Supported: . (identity), .foo, .foo.bar, .foo[], .[N], .foo[N]
+  // Returns { ok: true, value: <result> } or { ok: false, error: <string> }
+  function jqEval(expr, data) {
+    var e = expr.trim();
+    if (e === '' || e === '.') {
+      return { ok: true, value: data };
+    }
+    // Tokenise: split on '.' but keep array accessors intact
+    // Strategy: parse character by character
+    var steps = [];
+    var i = 0;
+    // leading dot required
+    if (e[0] !== '.') {
+      return { ok: false, error: 'jq expression must start with "."' };
+    }
+    i = 1; // skip leading dot
+    while (i <= e.length) {
+      if (i === e.length) break;
+      // Read a key segment (letters, digits, _, -)
+      var keyStart = i;
+      while (i < e.length && e[i] !== '.' && e[i] !== '[') { i++; }
+      var key = e.substring(keyStart, i);
+      if (key !== '') {
+        steps.push({ type: 'key', key: key });
+      }
+      // Read array accessor if present
+      if (i < e.length && e[i] === '[') {
+        var closeIdx = e.indexOf(']', i);
+        if (closeIdx === -1) {
+          return { ok: false, error: 'unclosed "[" in expression' };
+        }
+        var inner = e.substring(i + 1, closeIdx).trim();
+        if (inner === '') {
+          steps.push({ type: 'iter' });
+        } else {
+          var idx = parseInt(inner, 10);
+          if (isNaN(idx)) {
+            return { ok: false, error: 'invalid array index: "' + inner + '"' };
+          }
+          steps.push({ type: 'index', idx: idx });
+        }
+        i = closeIdx + 1;
+      }
+      // Skip dot separator
+      if (i < e.length && e[i] === '.') {
+        i++;
+      }
+    }
+
+    // Walk the steps
+    var cur = data;
+    for (var s = 0; s < steps.length; s++) {
+      var step = steps[s];
+      if (step.type === 'key') {
+        if (cur === null || typeof cur !== 'object' || Array.isArray(cur)) {
+          return { ok: false, error: 'cannot index ' + (Array.isArray(cur) ? 'array' : typeof cur) + ' with key "' + step.key + '"' };
+        }
+        if (!cur.hasOwnProperty(step.key)) {
+          return { ok: true, value: null };
+        }
+        cur = cur[step.key];
+      } else if (step.type === 'index') {
+        if (!Array.isArray(cur)) {
+          return { ok: false, error: 'cannot index ' + typeof cur + ' with number' };
+        }
+        cur = cur[step.idx];
+        if (cur === undefined) cur = null;
+      } else if (step.type === 'iter') {
+        if (!Array.isArray(cur)) {
+          return { ok: false, error: 'cannot iterate over ' + typeof cur };
+        }
+        return { ok: true, value: cur };
+      }
+    }
+    return { ok: true, value: cur };
+  }
+
+  // applyJqToViewer evaluates expr against viewer's data-raw-json and renders
+  // the result (or an inline error) into the viewer.
+  function applyJqToViewer(viewer, expr) {
+    var rawJson = viewer.getAttribute('data-raw-json');
+    if (!rawJson) return;
+    if (!expr) {
+      viewer.innerHTML = highlightJSON(rawJson);
+      return;
+    }
+    var parsed;
+    try { parsed = JSON.parse(rawJson); } catch(e) {
+      viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">Invalid JSON in viewer</div>';
+      return;
+    }
+    var result = jqEval(expr, parsed);
+    if (!result.ok) {
+      viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">jq error: ' + escapeHtml(result.error) + '</div>';
+      return;
+    }
+    viewer.innerHTML = highlightJSON(JSON.stringify(result.value, null, 2));
+  }
+
+  // getActiveMode returns 'text' or 'jq' for the mode toggle associated with
+  // a filter container element (json-filter div).
+  function getActiveMode(filterEl) {
+    var activeBtn = filterEl.querySelector('.mode-toggle button.is-active');
+    if (!activeBtn) return 'text';
+    return activeBtn.getAttribute('data-mode') || 'text';
+  }
+
   function wireFilterInputs(container) {
     // Combined filter — filters all json-viewers in the container
     var combinedFilter = container.querySelector('.json-filter:not(.panel-filter)');
     if (combinedFilter) {
       var combinedInput = combinedFilter.querySelector('input');
       if (combinedInput) {
-        combinedInput.addEventListener('input', function() {
+        var debouncedCombined = debounce(function() {
+          var mode = getActiveMode(combinedFilter);
+          var val = combinedInput.value.trim();
           var viewers = container.querySelectorAll('.split-view .json-viewer');
           for (var i = 0; i < viewers.length; i++) {
-            filterJsonLines(viewers[i], combinedInput.value.trim());
+            if (mode === 'jq') {
+              applyJqToViewer(viewers[i], val);
+            } else {
+              filterJsonLines(viewers[i], val);
+            }
           }
-        });
+        }, 200);
+        combinedInput.addEventListener('input', debouncedCombined);
       }
     }
 
@@ -1228,9 +1388,16 @@
         if (!codeBlock) return;
         var viewer = codeBlock.querySelector('.json-viewer');
         if (!viewer) return;
-        input.addEventListener('input', function() {
-          filterJsonLines(viewer, input.value.trim());
-        });
+        var debouncedPanel = debounce(function() {
+          var mode = getActiveMode(pf);
+          var val = input.value.trim();
+          if (mode === 'jq') {
+            applyJqToViewer(viewer, val);
+          } else {
+            filterJsonLines(viewer, val);
+          }
+        }, 200);
+        input.addEventListener('input', debouncedPanel);
       })(panelFilters[p]);
     }
   }
@@ -1247,8 +1414,41 @@
         siblings[i].classList.remove('is-active');
       }
       modeBtn.classList.add('is-active');
-      if (mode === 'jq') {
-        DS.toast('JQ mode is not yet implemented', 'info');
+      // Find the associated filter input and viewer
+      var filterEl = modeBtn.closest('.json-filter');
+      if (!filterEl) return;
+      var input = filterEl.querySelector('input');
+      var viewer = null;
+      // Combined filter targets all split-view viewers in the container
+      var container = filterEl.closest('.detail-panel');
+      if (filterEl.classList.contains('panel-filter')) {
+        // Per-panel filter: viewer is in the next sibling code-block
+        var codeBlock = filterEl.nextElementSibling;
+        if (codeBlock) viewer = codeBlock.querySelector('.json-viewer');
+      }
+      if (input) {
+        input.placeholder = mode === 'jq' ? 'jq expression...' : 'Filter JSON...';
+        var val = input.value.trim();
+        if (mode === 'jq') {
+          if (viewer) applyJqToViewer(viewer, val);
+          else if (container) {
+            var viewers = container.querySelectorAll('.split-view .json-viewer');
+            for (var j = 0; j < viewers.length; j++) { applyJqToViewer(viewers[j], val); }
+          }
+        } else {
+          if (viewer) {
+            var rawJson = viewer.getAttribute('data-raw-json');
+            if (rawJson) viewer.innerHTML = highlightJSON(rawJson);
+            filterJsonLines(viewer, val);
+          } else if (container) {
+            var viewers = container.querySelectorAll('.split-view .json-viewer');
+            for (var j = 0; j < viewers.length; j++) {
+              var rj = viewers[j].getAttribute('data-raw-json');
+              if (rj) viewers[j].innerHTML = highlightJSON(rj);
+              filterJsonLines(viewers[j], val);
+            }
+          }
+        }
       }
       return;
     }
@@ -2184,16 +2384,37 @@
   function toolResponseBody(data) {
     var str = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     toolResponseJson.innerHTML = highlightJSON(str);
-    toolResponseCopy.setAttribute('data-copy', typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+    // Store raw (unsorted) JSON for jq evaluation and mode-switching
+    toolResponseJson.setAttribute('data-raw-json', str);
+    toolResponseCopy.setAttribute('data-copy', str);
     toolResponseCopy.disabled = false;
 
-    // Wire tool response filter
+    // Reset filter input and mode toggle to text mode
     var toolFilter = document.getElementById('tool-response-filter');
     if (toolFilter) {
       toolFilter.value = '';
-      toolFilter.oninput = function() {
-        filterJsonLines(toolResponseJson, toolFilter.value.trim());
-      };
+      toolFilter.placeholder = 'Filter JSON...';
+    }
+    var toolModeToggleEl = document.querySelector('#tool-response-section .mode-toggle');
+    if (toolModeToggleEl) {
+      var modeBtns = toolModeToggleEl.querySelectorAll('button');
+      for (var i = 0; i < modeBtns.length; i++) {
+        modeBtns[i].classList.toggle('is-active', modeBtns[i].getAttribute('data-mode') === 'text');
+      }
+    }
+
+    // Wire tool response filter with debounce and mode awareness
+    if (toolFilter) {
+      var debouncedToolFilter = debounce(function() {
+        var mode = toolModeToggleEl ? getActiveMode(toolModeToggleEl.closest('.json-filter') || toolModeToggleEl.parentNode) : 'text';
+        var val = toolFilter.value.trim();
+        if (mode === 'jq') {
+          applyJqToViewer(toolResponseJson, val);
+        } else {
+          filterJsonLines(toolResponseJson, val);
+        }
+      }, 200);
+      toolFilter.oninput = debouncedToolFilter;
     }
   }
 
@@ -2230,8 +2451,17 @@
         siblings[i].classList.remove('is-active');
       }
       btn.classList.add('is-active');
-      if (mode === 'jq') {
-        DS.toast('JQ mode is not yet implemented', 'info');
+      var toolFilter = document.getElementById('tool-response-filter');
+      if (toolFilter) {
+        toolFilter.placeholder = mode === 'jq' ? 'jq expression...' : 'Filter JSON...';
+        var val = toolFilter.value.trim();
+        if (mode === 'jq') {
+          applyJqToViewer(toolResponseJson, val);
+        } else {
+          var rawJson = toolResponseJson.getAttribute('data-raw-json');
+          if (rawJson) toolResponseJson.innerHTML = highlightJSON(rawJson);
+          filterJsonLines(toolResponseJson, val);
+        }
       }
     });
   }
