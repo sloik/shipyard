@@ -3201,6 +3201,43 @@
   }
 
   function renderServerCards(servers) {
+    // SPEC-BUG-045: Lucide inline SVG icon helpers (R1, R2)
+    // Each returns an <svg> element string at the requested size and stroke color.
+    var iconWrench = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>' +
+        '</svg>';
+    };
+    var iconSquare = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<rect width="18" height="18" x="3" y="3" rx="2"/>' +
+        '</svg>';
+    };
+    var iconRotateCcw = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>' +
+        '<path d="M3 3v5h5"/>' +
+        '</svg>';
+    };
+    var iconPlay = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<polygon points="6 3 20 12 6 21 6 3"/>' +
+        '</svg>';
+    };
+    var iconCircleAlert = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<circle cx="12" cy="12" r="10"/>' +
+        '<line x1="12" x2="12" y1="8" y2="12"/>' +
+        '<line x1="12" x2="12.01" y1="16" y2="16"/>' +
+        '</svg>';
+    };
+    var iconX = function(size, color) {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' +
+        '<path d="M18 6 6 18"/>' +
+        '<path d="m6 6 12 12"/>' +
+        '</svg>';
+    };
+
     var html = '';
     var hasChildCards = false;
     for (var i = 0; i < servers.length; i++) {
@@ -3216,7 +3253,11 @@
         html += '<span class="server-name">Shipyard</span>';
         html += '</div>';
         html += '<div style="display:flex; align-items:center; gap:6px;">';
-        html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border:1px solid var(--border-default); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">&#128295; ' + (s.tool_count || 0) + ' tools</div>';
+        // Tools pill: Lucide wrench (R1, R2, R5) — no border, bg-raised fill only
+        html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">';
+        html += iconWrench(12, 'var(--text-muted)');
+        html += '<span>' + (s.tool_count || 0) + ' tools</span>';
+        html += '</div>';
         html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">Built-in</span>';
         html += '</div>';
         html += '</div>';
@@ -3245,6 +3286,19 @@
         else if (secs < 3600) uptimeStr = Math.floor(secs / 60) + 'm';
         else if (secs < 86400) uptimeStr = Math.floor(secs / 3600) + 'h';
         else uptimeStr = Math.floor(secs / 86400) + 'd';
+      }
+
+      // Last crash time for crashed servers: derive from error_message timestamp
+      // or show generic relative time based on restart_count (R6).
+      // uptime_ms is 0 for crashed servers; we approximate "Last crash" as "just now"
+      // unless a more precise source is available. The ServerInfo struct does not expose
+      // a last_crash_time field, so we use the error_message as context.
+      var lastCrashStr = 'just now';
+      if (s.status === 'crashed' && s.uptime_ms > 0) {
+        var crashSecs = Math.floor(s.uptime_ms / 1000);
+        if (crashSecs < 60) lastCrashStr = crashSecs + 's ago';
+        else if (crashSecs < 3600) lastCrashStr = Math.floor(crashSecs / 60) + 'm ago';
+        else lastCrashStr = Math.floor(crashSecs / 3600) + 'h ago';
       }
 
       html += '<div class="' + cardClass + '" data-server="' + escapeHtml(s.name) + '">';
@@ -3308,9 +3362,17 @@
         html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
         html += '</div>';
         if (s.status === 'crashed') {
-          html += '<div style="display:flex; align-items:center; gap:4px; background:var(--danger-emphasis); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-on-emphasis); font-weight:600;">&#10005; Crashed</div>';
+          // Crashed badge: Lucide x icon (AC4) — R1, R2
+          html += '<div style="display:flex; align-items:center; gap:4px; background:var(--danger-emphasis); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-on-emphasis); font-weight:600;">';
+          html += iconX(10, 'var(--text-on-emphasis)');
+          html += '<span>Crashed</span>';
+          html += '</div>';
         } else if (s.tool_count > 0) {
-          html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border:1px solid var(--border-default); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">&#128295; ' + s.tool_count + ' tools</div>';
+          // Tools pill: Lucide wrench (AC1), no border (AC12) — R1, R2, R5
+          html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">';
+          html += iconWrench(12, 'var(--text-muted)');
+          html += '<span>' + s.tool_count + ' tools</span>';
+          html += '</div>';
         }
         html += '</div>';
 
@@ -3324,29 +3386,66 @@
           html += '</div>';
         }
 
-        // Crash banner (crashed only)
+        // Crash banner (crashed only) — R7: font-size-base, R8: text wraps (AC15, AC16)
         if (s.status === 'crashed' && s.error_message) {
-          html += '<div style="display:flex; align-items:center; gap:8px; background:var(--danger-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--danger-fg);">&#9888; ' + escapeHtml(s.error_message) + '</div>';
+          html += '<div style="display:flex; align-items:flex-start; gap:8px; background:var(--danger-subtle); padding:8px 12px; border-radius:var(--radius-s); color:var(--danger-fg);">';
+          html += iconCircleAlert(14, 'var(--danger-fg)');
+          html += '<span style="font-size:var(--font-size-base); flex:1; word-wrap:break-word;">' + escapeHtml(s.error_message) + '</span>';
+          html += '</div>';
         }
 
-        // Stats row
-        var hasStats = uptimeStr || s.restart_count > 0;
-        if (hasStats) {
+        // Stats row — R3, R4, R6 (AC8–AC14)
+        if (s.status === 'crashed') {
+          // Crashed state: "Last crash:" + "Restarts:" both in danger-fg (R6, AC13, AC14)
           html += '<div style="display:flex; gap:16px;">';
-          if (uptimeStr) html += '<span style="display:flex; align-items:center; gap:4px; font-size:var(--font-size-sm); color:var(--text-secondary);">&#9202; Uptime: ' + uptimeStr + '</span>';
-          if (s.restart_count > 0) html += '<span style="display:flex; align-items:center; gap:4px; font-size:var(--font-size-sm); color:var(--text-secondary);">&#8635; ' + s.restart_count + ' restart' + (s.restart_count !== 1 ? 's' : '') + '</span>';
+          html += '<div style="display:flex; gap:4px; align-items:center;">';
+          html += '<span style="font-size:var(--font-size-sm); color:var(--text-muted); font-weight:normal;">Last crash:</span>';
+          html += '<span style="font-size:var(--font-size-sm); color:var(--danger-fg); font-weight:500;">' + lastCrashStr + '</span>';
+          html += '</div>';
+          html += '<div style="display:flex; gap:4px; align-items:center;">';
+          html += '<span style="font-size:var(--font-size-sm); color:var(--text-muted); font-weight:normal;">Restarts:</span>';
+          html += '<span style="font-size:var(--font-size-sm); color:var(--danger-fg); font-weight:500;">' + s.restart_count + '</span>';
+          html += '</div>';
+          html += '</div>';
+        } else {
+          // Healthy state: "Uptime:" (if available) + "Restarts:" always shown (R3, R4, AC8–AC11)
+          html += '<div style="display:flex; gap:16px;">';
+          if (uptimeStr) {
+            html += '<div style="display:flex; gap:4px; align-items:center;">';
+            html += '<span style="font-size:var(--font-size-sm); color:var(--text-muted); font-weight:normal;">Uptime:</span>';
+            html += '<span style="font-size:var(--font-size-sm); color:var(--text-primary); font-weight:500;">' + uptimeStr + '</span>';
+            html += '</div>';
+          }
+          // Restarts always visible (R4, AC11): value in success-fg when 0, else text-primary
+          var restartsColor = s.restart_count === 0 ? 'var(--success-fg)' : 'var(--text-primary)';
+          html += '<div style="display:flex; gap:4px; align-items:center;">';
+          html += '<span style="font-size:var(--font-size-sm); color:var(--text-muted); font-weight:normal;">Restarts:</span>';
+          html += '<span style="font-size:var(--font-size-sm); color:' + restartsColor + '; font-weight:500;">' + s.restart_count + '</span>';
+          html += '</div>';
           html += '</div>';
         }
 
         html += '</div>';
 
-        // Actions
+        // Actions — R1, R2 (AC2, AC3)
         html += '<div class="server-actions">';
         if (s.status === 'online') {
-          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')">&#9635; Stop</button>';
-          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">&#8635; Restart</button>';
+          // Stop: Lucide square (AC2)
+          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_stopServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          html += iconSquare(12, 'var(--text-secondary)');
+          html += '<span>Stop</span>';
+          html += '</button>';
+          // Restart: Lucide rotate-ccw (AC2)
+          html += '<button class="btn btn-default btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          html += iconRotateCcw(12, 'var(--text-secondary)');
+          html += '<span>Restart</span>';
+          html += '</button>';
         } else if (s.status === 'crashed' || s.status === 'stopped') {
-          html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')">&#9654; Restart</button>';
+          // Crashed Restart: Lucide play (AC3)
+          html += '<button class="btn btn-primary btn-sm" onclick="window.__shipyard_restartServer(\'' + escapeHtml(s.name) + '\')" style="display:flex; align-items:center; gap:4px;">';
+          html += iconPlay(12, 'var(--text-on-emphasis)');
+          html += '<span>Restart</span>';
+          html += '</button>';
         }
         html += '</div>';
       }

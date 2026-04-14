@@ -2674,3 +2674,302 @@ func TestSPEC006002_APIEndpointsReferenced(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-045: Server cards visual parity with UX-002
+// ---------------------------------------------------------------------------
+
+// renderServerCardsJS extracts the renderServerCards() function body from index.html.
+func renderServerCardsJS(t *testing.T) string {
+	t.Helper()
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	startIdx := strings.Index(content, "function renderServerCards(servers)")
+	if startIdx == -1 {
+		t.Fatal("SPEC-BUG-045: renderServerCards function not found in index.html")
+	}
+	body := content[startIdx:]
+	// Terminate at the next top-level function to avoid false positives.
+	if endIdx := strings.Index(body[1:], "\n  function "); endIdx > 0 {
+		body = body[:endIdx+1]
+	}
+	return body
+}
+
+// TestSPECBUG045_LucideWrenchInToolsPill verifies that the tools pill uses a
+// Lucide wrench SVG (12×12) in var(--text-muted), not a Unicode entity (AC 1).
+func TestSPECBUG045_LucideWrenchInToolsPill(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if strings.Contains(body, "&#128295;") {
+		t.Error("SPEC-BUG-045 AC1 FAIL: Unicode wrench entity &#128295; still present in renderServerCards()")
+	}
+	if !strings.Contains(body, `iconWrench(12`) {
+		t.Error("SPEC-BUG-045 AC1 FAIL: expected iconWrench(12 ...) call for tools pill in renderServerCards()")
+	}
+	if !strings.Contains(body, `var(--text-muted)`) {
+		t.Error("SPEC-BUG-045 AC1 FAIL: expected var(--text-muted) stroke color for wrench icon")
+	}
+}
+
+// TestSPECBUG045_LucideStopRestartButtons verifies that the Stop button uses
+// Lucide square (12×12) and the Restart button uses rotate-ccw (12×12), both
+// in var(--text-secondary) (AC 2).
+func TestSPECBUG045_LucideStopRestartButtons(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if strings.Contains(body, "&#9635;") {
+		t.Error("SPEC-BUG-045 AC2 FAIL: Unicode square entity &#9635; still present (Stop button)")
+	}
+	if strings.Contains(body, "&#8635;") {
+		t.Error("SPEC-BUG-045 AC2 FAIL: Unicode rotate entity &#8635; still present (Restart button)")
+	}
+	if !strings.Contains(body, "iconSquare(12") {
+		t.Error("SPEC-BUG-045 AC2 FAIL: expected iconSquare(12 ...) for Stop button")
+	}
+	if !strings.Contains(body, "iconRotateCcw(12") {
+		t.Error("SPEC-BUG-045 AC2 FAIL: expected iconRotateCcw(12 ...) for Restart button")
+	}
+}
+
+// TestSPECBUG045_LucidePlayCrashedRestart verifies that the crashed-state
+// Restart button uses Lucide play (12×12) in var(--text-on-emphasis) (AC 3).
+func TestSPECBUG045_LucidePlayCrashedRestart(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if strings.Contains(body, "&#9654;") {
+		t.Error("SPEC-BUG-045 AC3 FAIL: Unicode play entity &#9654; still present (crashed Restart button)")
+	}
+	if !strings.Contains(body, "iconPlay(12") {
+		t.Error("SPEC-BUG-045 AC3 FAIL: expected iconPlay(12 ...) for crashed Restart button")
+	}
+	if !strings.Contains(body, `var(--text-on-emphasis)`) {
+		t.Error("SPEC-BUG-045 AC3 FAIL: expected var(--text-on-emphasis) for play icon color")
+	}
+}
+
+// TestSPECBUG045_LucideXCrashedBadge verifies that the crashed badge uses
+// Lucide x (10×10) in var(--text-on-emphasis), not &#10005; (AC 4).
+func TestSPECBUG045_LucideXCrashedBadge(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if strings.Contains(body, "&#10005;") {
+		t.Error("SPEC-BUG-045 AC4 FAIL: Unicode x entity &#10005; still present (crashed badge)")
+	}
+	if !strings.Contains(body, "iconX(10") {
+		t.Error("SPEC-BUG-045 AC4 FAIL: expected iconX(10 ...) for crashed badge")
+	}
+}
+
+// TestSPECBUG045_LucideCircleAlertCrashBanner verifies that the crash banner
+// uses Lucide circle-alert (14×14) in var(--danger-fg), not &#9888; (AC 5).
+func TestSPECBUG045_LucideCircleAlertCrashBanner(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if strings.Contains(body, "&#9888;") {
+		t.Error("SPEC-BUG-045 AC5 FAIL: Unicode warning entity &#9888; still present (crash banner)")
+	}
+	if !strings.Contains(body, "iconCircleAlert(14") {
+		t.Error("SPEC-BUG-045 AC5 FAIL: expected iconCircleAlert(14 ...) for crash banner")
+	}
+}
+
+// TestSPECBUG045_NoUnicodeEntityIconsInRenderServerCards verifies that no
+// Unicode HTML entity icons remain in renderServerCards() (AC 6).
+func TestSPECBUG045_NoUnicodeEntityIconsInRenderServerCards(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	forbidden := []struct {
+		entity string
+		name   string
+	}{
+		{"&#128295;", "wrench"},
+		{"&#9635;", "square"},
+		{"&#8635;", "rotate"},
+		{"&#9654;", "play"},
+		{"&#9888;", "warning"},
+		{"&#10005;", "x"},
+		{"&#9202;", "timer"},
+	}
+	for _, f := range forbidden {
+		if strings.Contains(body, f.entity) {
+			t.Errorf("SPEC-BUG-045 AC6 FAIL: Unicode entity %s (%s) still present in renderServerCards()", f.entity, f.name)
+		}
+	}
+}
+
+// TestSPECBUG045_IconsAsSeparateDOMElements verifies that icons are separate
+// SVG elements (not concatenated strings), each using an icon helper function
+// that returns an svg element (AC 7).
+func TestSPECBUG045_IconsAsSeparateDOMElements(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	// Each icon helper is called separately and followed by a <span> text element.
+	// We verify the helper functions are defined and used.
+	helpers := []string{"iconWrench", "iconSquare", "iconRotateCcw", "iconPlay", "iconCircleAlert", "iconX"}
+	for _, h := range helpers {
+		if !strings.Contains(body, "var "+h+" = function") {
+			t.Errorf("SPEC-BUG-045 AC7 FAIL: icon helper %s not defined as separate function", h)
+		}
+	}
+	// Each helper call is followed by a separate <span> text element
+	if !strings.Contains(body, `html += '<span>'`) && !strings.Contains(body, `html += '<span>`) {
+		t.Error("SPEC-BUG-045 AC7 FAIL: expected separate <span> text elements alongside icon calls")
+	}
+}
+
+// TestSPECBUG045_StatsDualColorLabelValue verifies that each stat uses two
+// <span> elements: label in var(--text-muted) and value in accent color (AC 8).
+func TestSPECBUG045_StatsDualColorLabelValue(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, `color:var(--text-muted); font-weight:normal`) {
+		t.Error("SPEC-BUG-045 AC8 FAIL: expected stat label span with var(--text-muted) and normal weight")
+	}
+	if !strings.Contains(body, `font-weight:500`) {
+		t.Error("SPEC-BUG-045 AC8 FAIL: expected stat value span with font-weight:500")
+	}
+}
+
+// TestSPECBUG045_HealthyUptimeValueTextPrimary verifies that healthy server
+// uptime value uses var(--text-primary) (AC 9).
+func TestSPECBUG045_HealthyUptimeValueTextPrimary(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, `color:var(--text-primary); font-weight:500`) {
+		t.Error("SPEC-BUG-045 AC9 FAIL: expected uptime value span with var(--text-primary) and font-weight:500")
+	}
+}
+
+// TestSPECBUG045_HealthyRestartsSuccessFg verifies that the restarts "0" value
+// uses var(--success-fg) on healthy servers (AC 10).
+func TestSPECBUG045_HealthyRestartsSuccessFg(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, `var(--success-fg)`) {
+		t.Error("SPEC-BUG-045 AC10 FAIL: expected var(--success-fg) for restarts=0 value color")
+	}
+}
+
+// TestSPECBUG045_RestartsAlwaysVisible verifies that the "Restarts:" stat is
+// always rendered in the healthy branch, not conditionally hidden (AC 11).
+func TestSPECBUG045_RestartsAlwaysVisible(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	// Locate the healthy stats branch ("Healthy state:" comment or the else clause
+	// after the crashed stats block).
+	healthyIdx := strings.Index(body, "// Healthy state:")
+	if healthyIdx == -1 {
+		t.Fatal("SPEC-BUG-045 AC11: could not locate healthy stats branch")
+	}
+	healthyBranch := body[healthyIdx:]
+	// The healthy branch ends at the closing brace of the else block.
+	// Find a sentinel that comes after it to trim cleanly.
+	if endIdx := strings.Index(healthyBranch, "html += '</div>'; // end body"); endIdx > 0 {
+		healthyBranch = healthyBranch[:endIdx]
+	}
+
+	// "Restarts:" must appear in the healthy branch.
+	if !strings.Contains(healthyBranch, "Restarts:") {
+		t.Error("SPEC-BUG-045 AC11 FAIL: expected 'Restarts:' label in healthy server stats branch")
+	}
+	// The healthy branch must NOT gate restarts on restart_count > 0.
+	if strings.Contains(healthyBranch, "if (s.restart_count > 0)") {
+		t.Error("SPEC-BUG-045 AC11 FAIL: Restarts stat is gated by restart_count > 0 in healthy branch — should always be visible")
+	}
+}
+
+// TestSPECBUG045_ToolsPillNoBorder verifies that the tools pill has no border
+// property — only background fill and border-radius (AC 12).
+func TestSPECBUG045_ToolsPillNoBorder(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	// The tools pill must NOT have "border:1px solid var(--border-default)"
+	if strings.Contains(body, "border:1px solid var(--border-default)") {
+		t.Error("SPEC-BUG-045 AC12 FAIL: tools pill still has 'border:1px solid var(--border-default)'")
+	}
+	// Must still have background and border-radius
+	if !strings.Contains(body, "background:var(--bg-raised)") {
+		t.Error("SPEC-BUG-045 AC12 FAIL: expected 'background:var(--bg-raised)' on tools pill")
+	}
+}
+
+// TestSPECBUG045_CrashedLastCrashStat verifies that crashed server cards show
+// "Last crash:" stat with value in var(--danger-fg) (AC 13).
+func TestSPECBUG045_CrashedLastCrashStat(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, "Last crash:") {
+		t.Error("SPEC-BUG-045 AC13 FAIL: expected 'Last crash:' label in crashed server stats")
+	}
+	if !strings.Contains(body, `color:var(--danger-fg); font-weight:500`) {
+		t.Error("SPEC-BUG-045 AC13 FAIL: expected crashed stat value in var(--danger-fg) with font-weight:500")
+	}
+}
+
+// TestSPECBUG045_CrashedRestartsValueDangerFg verifies that crashed server
+// restarts value uses var(--danger-fg) (AC 14).
+func TestSPECBUG045_CrashedRestartsValueDangerFg(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	// The crashed branch should have restarts value in danger-fg
+	crashIdx := strings.Index(body, "if (s.status === 'crashed')")
+	if crashIdx == -1 {
+		t.Fatal("SPEC-BUG-045 AC14: could not locate crashed stats branch")
+	}
+	crashBranch := body[crashIdx:]
+	// Find end of crashed branch (the else clause)
+	elseIdx := strings.Index(crashBranch, "} else {")
+	if elseIdx > 0 {
+		crashBranch = crashBranch[:elseIdx]
+	}
+	if !strings.Contains(crashBranch, "var(--danger-fg)") {
+		t.Error("SPEC-BUG-045 AC14 FAIL: expected var(--danger-fg) for restarts value in crashed branch")
+	}
+}
+
+// TestSPECBUG045_CrashBannerFontSizeBase verifies that crash banner message
+// text uses var(--font-size-base) (12px), not var(--font-size-sm) (AC 15).
+func TestSPECBUG045_CrashBannerFontSizeBase(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, "var(--font-size-base)") {
+		t.Error("SPEC-BUG-045 AC15 FAIL: expected var(--font-size-base) on crash banner text span")
+	}
+	// The crash banner text must not use font-size-sm
+	bannerIdx := strings.Index(body, "Crash banner")
+	if bannerIdx == -1 {
+		bannerIdx = strings.Index(body, "danger-subtle")
+	}
+	if bannerIdx != -1 {
+		bannerSection := body[bannerIdx:]
+		// Extract just the banner block (up to next comment or closing brace)
+		endIdx := strings.Index(bannerSection[1:], "// Stats row")
+		if endIdx > 0 {
+			bannerSection = bannerSection[:endIdx+1]
+		}
+		if strings.Contains(bannerSection, "var(--font-size-sm)") {
+			t.Error("SPEC-BUG-045 AC15 FAIL: crash banner text uses var(--font-size-sm) instead of var(--font-size-base)")
+		}
+	}
+}
+
+// TestSPECBUG045_CrashBannerTextWraps verifies that the crash banner text
+// element has flex:1 and word-wrap:break-word, and the banner uses
+// align-items:flex-start (AC 16).
+func TestSPECBUG045_CrashBannerTextWraps(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	if !strings.Contains(body, "align-items:flex-start") {
+		t.Error("SPEC-BUG-045 AC16 FAIL: expected 'align-items:flex-start' on crash banner container")
+	}
+	if !strings.Contains(body, "flex:1") {
+		t.Error("SPEC-BUG-045 AC16 FAIL: expected 'flex:1' on crash banner text element")
+	}
+	if !strings.Contains(body, "word-wrap:break-word") {
+		t.Error("SPEC-BUG-045 AC16 FAIL: expected 'word-wrap:break-word' on crash banner text element")
+	}
+}
