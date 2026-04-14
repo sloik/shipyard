@@ -293,6 +293,105 @@ func TestHandleTools_MissingServerParam(t *testing.T) {
 	}
 }
 
+// TestSPECBUG042_GatewayCatalogUsesSnapshotNotLiveRPC verifies that gatewayCatalog
+// reads tools from the schema snapshot cache rather than making live RPC calls.
+// This prevents the bridge's short HTTP client timeout from cancelling the request
+// context before child servers can respond (AC 1, AC 2, AC 6 of SPEC-BUG-042).
+func TestSPECBUG042_GatewayCatalogUsesSnapshotNotLiveRPC(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Populate the store snapshot — simulates what StartSchemaWatcher does after
+	// the child server comes online.
+	alphaTools := []capture.ToolSchema{
+		{Name: "read_file", Description: "read a file", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "write_file", Description: "write a file", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	if _, err := srv.store.SaveSnapshot("alpha", alphaTools); err != nil {
+		t.Fatalf("SaveSnapshot alpha: %v", err)
+	}
+
+	// The proxy manager has online servers but sendFunc is NOT wired — if
+	// gatewayCatalog makes live RPC calls, it will panic with a nil sendFunc.
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "alpha", Status: "online"},
+		},
+		// sendFunc intentionally nil: if called, mockProxyManager returns error
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/gateway/tools", nil)
+	w := httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Tools) != 2 {
+		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): expected 2 tools from snapshot, got %d — gatewayCatalog may be using live RPC instead of snapshot cache", len(resp.Tools))
+	}
+	names := make(map[string]bool, len(resp.Tools))
+	for _, tool := range resp.Tools {
+		names[tool.Name] = true
+	}
+	if !names["alpha__read_file"] || !names["alpha__write_file"] {
+		t.Fatalf("SPEC-BUG-042 FAIL (AC 1): unexpected tool names: %+v", resp.Tools)
+	}
+}
+
+// TestSPECBUG042_GatewayCatalogContextCancelDoesNotDropTools verifies that a
+// cancelled HTTP request context (simulating the bridge's 2-second timeout
+// firing and closing the connection) does NOT cause gatewayCatalog to return
+// empty tools. This directly tests the root cause of SPEC-BUG-042.
+func TestSPECBUG042_GatewayCatalogContextCancelDoesNotDropTools(t *testing.T) {
+	srv := newTestServer(t)
+
+	alphaTools := []capture.ToolSchema{
+		{Name: "lms_chat", Description: "chat", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	if _, err := srv.store.SaveSnapshot("lmstudio", alphaTools); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "lmstudio", Status: "online"}},
+	})
+
+	// Simulate the bridge closing its HTTP connection (context cancelled)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately cancel — simulates bridge 2s timeout firing
+
+	req := httptest.NewRequest(http.MethodGet, "/api/gateway/tools", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	srv.handleGatewayTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 even with cancelled context, got %d", w.Code)
+	}
+	var resp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Must return tools even though request context is cancelled
+	var found bool
+	for _, tool := range resp.Tools {
+		if tool.Name == "lmstudio__lms_chat" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("SPEC-BUG-042 FAIL: cancelled context caused tools to be dropped; got %+v", resp.Tools)
+	}
+}
+
 func TestHandleGatewayTools_FiltersDisabledEntries(t *testing.T) {
 	srv := newTestServer(t)
 	policy, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
@@ -307,24 +406,26 @@ func TestHandleGatewayTools_FiltersDisabledEntries(t *testing.T) {
 	}
 	srv.SetGatewayPolicyStore(policy)
 
+	// Populate the store with snapshots for both servers — gatewayCatalog reads
+	// from the snapshot cache (not live RPC) since SPEC-BUG-042 fix.
+	alphaTools := []capture.ToolSchema{
+		{Name: "read_file", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "write_file", Description: "write", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	betaTools := []capture.ToolSchema{
+		{Name: "chat", Description: "chat", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	if _, err := srv.store.SaveSnapshot("alpha", alphaTools); err != nil {
+		t.Fatalf("SaveSnapshot alpha: %v", err)
+	}
+	if _, err := srv.store.SaveSnapshot("beta", betaTools); err != nil {
+		t.Fatalf("SaveSnapshot beta: %v", err)
+	}
+
 	srv.SetProxyManager(&mockProxyManager{
 		servers: []ServerInfo{
 			{Name: "alpha", Status: "online"},
 			{Name: "beta", Status: "online"},
-		},
-		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			if method != "tools/list" {
-				t.Fatalf("expected tools/list, got %s", method)
-			}
-			switch server {
-			case "alpha":
-				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file","description":"read","inputSchema":{"type":"object"}},{"name":"write_file","description":"write","inputSchema":{"type":"object"}}]}}`), nil
-			case "beta":
-				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"chat","description":"chat","inputSchema":{"type":"object"}}]}}`), nil
-			default:
-				t.Fatalf("unexpected server %s", server)
-			}
-			return nil, nil
 		},
 	})
 

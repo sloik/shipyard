@@ -117,17 +117,6 @@ type ServerInfo struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
-type toolsEnvelope struct {
-	Tools []shipyardTool `json:"tools"`
-}
-
-type shipyardTool struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description,omitempty"`
-	InputSchema  json.RawMessage `json:"inputSchema,omitempty"`
-	InputSchema2 json.RawMessage `json:"input_schema,omitempty"`
-}
-
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
 	port           int
@@ -853,18 +842,24 @@ func (s *Server) handleGatewayToolToggle(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (s *Server) gatewayCatalog(ctx context.Context, includeDisabled bool) ([]gatewayToolInfo, error) {
+func (s *Server) gatewayCatalog(_ context.Context, includeDisabled bool) ([]gatewayToolInfo, error) {
 	servers := s.proxies.Servers()
 	result := make([]gatewayToolInfo, 0)
 	for _, srv := range servers {
 		if srv.Status != "online" {
 			continue
 		}
-		tools, err := s.fetchRawTools(ctx, srv.Name)
+		// Read tools from the schema snapshot cache (populated by StartSchemaWatcher)
+		// rather than making live RPC calls. Live RPC calls are avoided because the
+		// HTTP request context may be cancelled by short-lived clients (e.g., the
+		// bridge's 2-second HTTP timeout), which would silently drop all tools from
+		// the catalog. The snapshot is kept fresh by the schema watcher. (SPEC-BUG-042)
+		snapTools, _, err := s.store.GetLatestSnapshot(srv.Name)
 		if err != nil {
+			slog.Warn("gatewayCatalog: snapshot error", "server", srv.Name, "err", err)
 			continue
 		}
-		for _, tool := range tools {
+		for _, tool := range snapTools {
 			serverEnabled := true
 			toolEnabled := true
 			effectiveEnabled := true
@@ -895,29 +890,6 @@ func (s *Server) fetchToolsResult(ctx context.Context, serverName string) (json.
 	return s.proxies.SendRequest(ctx, serverName, "tools/list", json.RawMessage("{}"))
 }
 
-func (s *Server) fetchRawTools(ctx context.Context, serverName string) ([]shipyardTool, error) {
-	result, err := s.fetchToolsResult(ctx, serverName)
-	if err != nil {
-		return nil, err
-	}
-
-	var rpcResp struct {
-		Result toolsEnvelope   `json:"result"`
-		Error  json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(result, &rpcResp); err != nil {
-		return nil, fmt.Errorf("invalid response from server")
-	}
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("server returned error: %s", string(rpcResp.Error))
-	}
-	for i := range rpcResp.Result.Tools {
-		if len(rpcResp.Result.Tools[i].InputSchema) == 0 && len(rpcResp.Result.Tools[i].InputSchema2) > 0 {
-			rpcResp.Result.Tools[i].InputSchema = rpcResp.Result.Tools[i].InputSchema2
-		}
-	}
-	return rpcResp.Result.Tools, nil
-}
 
 // --- Session Recording Handlers (SPEC-007) ---
 
