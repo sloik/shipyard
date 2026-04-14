@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -29,19 +29,19 @@ The app bar has no visual separator between the "Shipyard" brand text and the ta
 
 ## Root Cause
 
-(Agent fills in during run.)
+The separator element was simply missing from the HTML. The `<header class="app-bar">` went directly from `<strong>Shipyard</strong>` to `<nav id="tab-nav">` with no intervening divider element.
 
 ## Requirements
 
-- [ ] R1: A vertical separator element exists between the brand text and tab navigation in the app bar
-- [ ] R2: Separator is 1px wide × 20px tall, colored `var(--border-default)`
+- [x] R1: A vertical separator element exists between the brand text and tab navigation in the app bar
+- [x] R2: Separator is 1px wide × 20px tall, colored `var(--border-default)`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A separator element is visible between "Shipyard" and the first tab
-- [ ] AC 2: Separator dimensions are 1px × 20px
-- [ ] AC 3: Separator color is `var(--border-default)`
-- [ ] AC 4: `go build ./...` passes
+- [x] AC 1: A separator element is visible between "Shipyard" and the first tab
+- [x] AC 2: Separator dimensions are 1px × 20px
+- [x] AC 3: Separator color is `var(--border-default)`
+- [x] AC 4: `go build ./...` passes
 
 ## Context
 
