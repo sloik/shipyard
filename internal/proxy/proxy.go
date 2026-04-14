@@ -46,6 +46,10 @@ type Proxy struct {
 	hub     *web.Hub
 	managed *managedProxy // set when running under a Manager
 
+	// sessionIDFn returns the active recording session ID for this proxy's
+	// server, or 0 if no recording is active. Set by Manager.Register.
+	sessionIDFn func() int64
+
 	// Narrow test seams for deterministic lifecycle coverage of Run.
 	runChildFn         func(context.Context, *childInputWriter) error
 	proxyClientInputFn func(context.Context, *childInputWriter) error
@@ -174,6 +178,12 @@ func (cw *childInputWriter) waitForWriter(ctx context.Context) (io.WriteCloser, 
 // SetManaged associates this proxy with a managed proxy entry.
 func (p *Proxy) SetManaged(mp *managedProxy) {
 	p.managed = mp
+}
+
+// SetSessionIDFn sets a function that returns the active recording session ID
+// for this proxy's server. Returns 0 when no recording is active.
+func (p *Proxy) SetSessionIDFn(fn func() int64) {
+	p.sessionIDFn = fn
 }
 
 // Run starts the child process and proxies stdio. It blocks until the context
@@ -517,8 +527,18 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 		IsResponse: isResponse,
 	}
 
-	// Store and correlate
-	id, latencyMs := p.store.Insert(entry)
+	// Store and correlate — tag with session ID if recording is active
+	var id int64
+	var latencyMs *int64
+	if p.sessionIDFn != nil {
+		if sid := p.sessionIDFn(); sid > 0 {
+			id, latencyMs = p.store.InsertWithSession(entry, sid)
+		} else {
+			id, latencyMs = p.store.Insert(entry)
+		}
+	} else {
+		id, latencyMs = p.store.Insert(entry)
+	}
 
 	// Build the broadcast event
 	evt := capture.TrafficEvent{

@@ -121,6 +121,66 @@ func TestCaptureMessage_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestCaptureMessage_TagsSessionIDWhenRecording verifies that when sessionIDFn
+// returns a non-zero ID, captureMessage inserts traffic tagged with that session.
+func TestCaptureMessage_TagsSessionIDWhenRecording(t *testing.T) {
+	p, store := newTestProxy(t)
+
+	// Start a recording session in the store
+	sessionID, err := store.StartSession("test-recording", "test-server")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Attach the session ID function
+	p.SetSessionIDFn(func() int64 { return sessionID })
+
+	msg := `{"jsonrpc":"2.0","method":"tools/list","id":1}`
+	p.captureMessage([]byte(msg), capture.DirectionClientToServer, time.Now())
+
+	// Export the session — should contain the captured message
+	cassette, err := store.ExportSession(sessionID)
+	if err != nil {
+		t.Fatalf("ExportSession: %v", err)
+	}
+	if len(cassette.Requests) == 0 {
+		t.Fatal("expected session to contain at least one captured request")
+	}
+}
+
+// TestCaptureMessage_NoSessionTagWhenIdle verifies that when sessionIDFn returns
+// 0, traffic is inserted without a session tag (normal capture path).
+func TestCaptureMessage_NoSessionTagWhenIdle(t *testing.T) {
+	p, store := newTestProxy(t)
+
+	// sessionIDFn returns 0 — no active recording
+	p.SetSessionIDFn(func() int64 { return 0 })
+
+	msg := `{"jsonrpc":"2.0","method":"tools/list","id":1}`
+	p.captureMessage([]byte(msg), capture.DirectionClientToServer, time.Now())
+
+	// Traffic should exist in store
+	evt := lastEvent(t, store)
+	if evt.Method != "tools/list" {
+		t.Fatalf("expected method 'tools/list', got '%s'", evt.Method)
+	}
+}
+
+// TestCaptureMessage_NilSessionIDFn verifies that captureMessage works correctly
+// when no sessionIDFn is set (default behavior, no session tracking).
+func TestCaptureMessage_NilSessionIDFn(t *testing.T) {
+	p, store := newTestProxy(t)
+	// No SetSessionIDFn call — sessionIDFn is nil
+
+	msg := `{"jsonrpc":"2.0","method":"tools/list","id":1}`
+	p.captureMessage([]byte(msg), capture.DirectionClientToServer, time.Now())
+
+	evt := lastEvent(t, store)
+	if evt.Status != "pending" {
+		t.Fatalf("expected status 'pending', got '%s'", evt.Status)
+	}
+}
+
 func TestCaptureMessage_StatusNeverRequest(t *testing.T) {
 	// SPEC-BUG-006 AC-4: status must never be "request" - it should be "pending"
 	p, store := newTestProxy(t)

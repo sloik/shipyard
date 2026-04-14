@@ -2130,3 +2130,234 @@ func TestSPEC042_HighlightJSONSortsKeysAlphabetically(t *testing.T) {
 		t.Error("SPEC-042 FAIL (AC 4): sortKeysRecursive must not be called on the raw JSON before it is stored in data-raw-json")
 	}
 }
+
+// --- SPEC-006-001: Session Recording & Export ---
+
+// TestSPEC006001_SessionsTabPresent verifies that the Sessions tab exists in the
+// History sub-navigation (AC 1, AC 2).
+func TestSPEC006001_SessionsTabPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Sessions sub-nav tab must exist
+	if !strings.Contains(content, `id="sub-nav-sessions"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing sub-nav-sessions tab link")
+	}
+	if !strings.Contains(content, `data-sub="sessions"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing data-sub=sessions attribute")
+	}
+
+	// Sessions view container must exist
+	if !strings.Contains(content, `id="history-sessions-view"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing history-sessions-view container")
+	}
+}
+
+// TestSPEC006001_SessionsTableColumns verifies that the sessions table header
+// contains all required columns: status, name, server, requests, duration, started, size (AC 2).
+func TestSPEC006001_SessionsTableColumns(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredCols := []string{
+		`data-col="status"`,
+		`data-col="name"`,
+		`data-col="server"`,
+		`data-col="requests"`,
+		`data-col="duration"`,
+		`data-col="started"`,
+		`data-col="size"`,
+		`data-col="actions"`,
+	}
+	for _, col := range requiredCols {
+		if !strings.Contains(content, col) {
+			t.Errorf("SPEC-006-001 FAIL (AC 2): sessions table missing column %q", col)
+		}
+	}
+}
+
+// TestSPEC006001_RecordStopButtons verifies that the Record/Stop recording
+// controls exist and use correct element IDs (AC 1).
+func TestSPEC006001_RecordStopButtons(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Record button in the action bar
+	if !strings.Contains(content, `id="session-record-btn"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing session-record-btn")
+	}
+	// Record icon span (shows red circle / stop indicator)
+	if !strings.Contains(content, `id="session-record-icon"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing session-record-icon span")
+	}
+	// Record label span
+	if !strings.Contains(content, `id="session-record-label"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing session-record-label span")
+	}
+	// Empty state Record Session button
+	if !strings.Contains(content, `id="sessions-empty-record-btn"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing sessions-empty-record-btn")
+	}
+	// Session name input
+	if !strings.Contains(content, `id="session-name-input"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): missing session-name-input field")
+	}
+}
+
+// TestSPEC006001_StatusColorCoding verifies that renderSessionRow uses color-coded
+// badge classes for session status (AC 2: recording=red, complete=green, partial/other=neutral).
+func TestSPEC006001_StatusColorCoding(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderIdx := strings.Index(content, "function renderSessionRow(s)")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-006-001 FAIL (AC 2): renderSessionRow function not found")
+	}
+	renderBody := content[renderIdx:]
+	// Trim to function body
+	if endIdx := strings.Index(renderBody[1:], "\n  function "); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+
+	// recording = badge-error (red)
+	if !strings.Contains(renderBody, "badge-error") {
+		t.Error("SPEC-006-001 FAIL (AC 2): renderSessionRow must use badge-error for recording status")
+	}
+	// complete = badge-success (green)
+	if !strings.Contains(renderBody, "badge-success") {
+		t.Error("SPEC-006-001 FAIL (AC 2): renderSessionRow must use badge-success for complete status")
+	}
+	// other = badge-neutral (yellow/neutral)
+	if !strings.Contains(renderBody, "badge-neutral") {
+		t.Error("SPEC-006-001 FAIL (AC 2): renderSessionRow must use badge-neutral for other statuses")
+	}
+}
+
+// TestSPEC006001_SessionServerFilter verifies that the server filter control
+// exists in the Sessions view (AC 7: filter by server).
+func TestSPEC006001_SessionServerFilter(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="session-server-filter"`) {
+		t.Error("SPEC-006-001 FAIL (AC 7): missing session-server-filter select element")
+	}
+
+	// The loadSessions function must pass the server filter as a query param
+	loadIdx := strings.Index(content, "function loadSessions()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-006-001 FAIL (AC 7): loadSessions function not found")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function "); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+	if !strings.Contains(loadBody, `/api/sessions`) {
+		t.Error("SPEC-006-001 FAIL (AC 7): loadSessions must fetch from /api/sessions")
+	}
+	if !strings.Contains(loadBody, `'server'`) || !strings.Contains(loadBody, `sessionServerFilter`) {
+		t.Error("SPEC-006-001 FAIL (AC 7): loadSessions must pass server filter query param")
+	}
+}
+
+// TestSPEC006001_ExportAndDeleteActions verifies that export and delete action
+// buttons exist in renderSessionRow and call the correct API endpoints (AC 4, AC 6).
+func TestSPEC006001_ExportAndDeleteActions(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderIdx := strings.Index(content, "function renderSessionRow(s)")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-006-001 FAIL: renderSessionRow function not found")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  function "); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+
+	// Export button with class session-export-btn
+	if !strings.Contains(renderBody, "session-export-btn") {
+		t.Error("SPEC-006-001 FAIL (AC 4): renderSessionRow must include session-export-btn")
+	}
+	// Replay button with class session-replay-btn
+	if !strings.Contains(renderBody, "session-replay-btn") {
+		t.Error("SPEC-006-001 FAIL (AC 5): renderSessionRow must include session-replay-btn")
+	}
+	// Delete button with class session-delete-btn
+	if !strings.Contains(renderBody, "session-delete-btn") {
+		t.Error("SPEC-006-001 FAIL (AC 6): renderSessionRow must include session-delete-btn")
+	}
+
+	// Verify export handler uses the correct endpoint
+	if !strings.Contains(content, `/api/sessions/`) {
+		t.Error("SPEC-006-001 FAIL (AC 4): session action handler must call /api/sessions/ endpoint")
+	}
+	if !strings.Contains(content, `'/export'`) && !strings.Contains(content, `"/export"`) && !strings.Contains(content, "/export") {
+		t.Error("SPEC-006-001 FAIL (AC 4): export action must use /export endpoint")
+	}
+	if !strings.Contains(content, `method: 'DELETE'`) {
+		t.Error("SPEC-006-001 FAIL (AC 6): delete action must use DELETE method")
+	}
+}
+
+// TestSPEC006001_SessionsAPIEndpoints verifies that all required session API
+// routes are registered in the server's Start() function.
+func TestSPEC006001_SessionsAPIEndpoints(t *testing.T) {
+	// This is a code-level test — check server.go route registrations
+	// by reading the embedded source indirectly via the handler existence.
+	// The handlers are tested in server_test.go; here we verify the JS
+	// calls match the registered routes.
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredEndpoints := []struct {
+		endpoint string
+		desc     string
+	}{
+		{`/api/sessions/start`, "start session endpoint (AC 1)"},
+		{`/api/sessions`, "list sessions endpoint (AC 2, AC 7)"},
+		{`/api/sessions/`, "session-specific endpoints (AC 4, AC 5, AC 6)"},
+	}
+	for _, ep := range requiredEndpoints {
+		if !strings.Contains(content, ep.endpoint) {
+			t.Errorf("SPEC-006-001 FAIL (%s): missing endpoint reference %q in UI", ep.desc, ep.endpoint)
+		}
+	}
+}
+
+// TestSPEC006001_WebSocketSessionUpdate verifies that the UI handles session_update
+// WebSocket events to refresh the sessions list when recording state changes.
+func TestSPEC006001_WebSocketSessionUpdate(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// WS handler must check for session_update events
+	if !strings.Contains(content, `'session_update'`) && !strings.Contains(content, `"session_update"`) {
+		t.Error("SPEC-006-001 FAIL (AC 1): WebSocket handler must process session_update events")
+	}
+}

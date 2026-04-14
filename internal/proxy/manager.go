@@ -111,6 +111,14 @@ func (m *Manager) Register(name string, p *Proxy) *managedProxy {
 		startedAt: time.Now(),
 	}
 	m.proxies[name] = mp
+
+	// Wire up session ID lookup so the proxy can tag captured traffic with the
+	// active recording session for this server.
+	serverName := name
+	p.SetSessionIDFn(func() int64 {
+		return m.ActiveSessionID(serverName)
+	})
+
 	return mp
 }
 
