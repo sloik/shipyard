@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -33,15 +33,15 @@ The app bar logo renders as a Unicode anchor character (`&#9875;` / ⚓) with no
 
 ## Requirements
 
-- [ ] R1: The header logo uses the Lucide `anchor` icon, not a Unicode character
-- [ ] R2: The icon is 20×20px and colored `var(--accent-fg)`
+- [x] R1: The header logo uses the Lucide `anchor` icon, not a Unicode character
+- [x] R2: The icon is 20×20px and colored `var(--accent-fg)`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Header logo is a Lucide `anchor` icon element (not a Unicode character)
-- [ ] AC 2: Icon is 20px in size
-- [ ] AC 3: Icon color is `var(--accent-fg)` (#58a6ff)
-- [ ] AC 4: `go build ./...` passes
+- [x] AC 1: Header logo is a Lucide `anchor` icon element (not a Unicode character)
+- [x] AC 2: Icon is 20px in size
+- [x] AC 3: Icon color is `var(--accent-fg)` (#58a6ff)
+- [x] AC 4: `go build ./...` passes
 
 ## Context
 
