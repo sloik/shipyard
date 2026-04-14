@@ -2,7 +2,7 @@ name: Desktop Build
 
 on:
   push:
-    branches: [v2/main]
+    branches: [main]
     tags: ["v*"]
 
 permissions:
