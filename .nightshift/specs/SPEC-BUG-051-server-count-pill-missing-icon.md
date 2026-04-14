@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -29,20 +29,20 @@ The server count pill in the header right group shows only text (e.g. "1 server"
 
 ## Root Cause
 
-(Agent fills in during run.)
+The server-count `<a>` element contained only the text node "0 servers" with no SVG child. The `.badge` CSS class already provides `display:inline-flex; align-items:center; gap:5px` so layout was ready — the icon simply had not been added to the HTML.
 
 ## Requirements
 
-- [ ] R1: Server count pill contains a Lucide `server` icon before the text
-- [ ] R2: Icon is 12px, colored `var(--text-muted)`
+- [x] R1: Server count pill contains a Lucide `server` icon before the text
+- [x] R2: Icon is 12px, colored `var(--text-muted)`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A Lucide `server` icon appears inside the server count pill, before the text
-- [ ] AC 2: Icon is 12px in size
-- [ ] AC 3: Icon color is `var(--text-muted)`
-- [ ] AC 4: Pill styling (background, border, border-radius) remains unchanged
-- [ ] AC 5: `go build ./...` passes
+- [x] AC 1: A Lucide `server` icon appears inside the server count pill, before the text
+- [x] AC 2: Icon is 12px in size
+- [x] AC 3: Icon color is `var(--text-muted)`
+- [x] AC 4: Pill styling (background, border, border-radius) remains unchanged
+- [x] AC 5: `go build ./...` passes
 
 ## Context
 
