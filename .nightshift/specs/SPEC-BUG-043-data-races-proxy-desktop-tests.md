@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 1
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-NFR-001]
 prior_attempts: []
@@ -71,12 +71,12 @@ Concurrent write
 
 ## Acceptance Criteria
 
-- [ ] AC 1: `go test -race -count=1 -timeout 5m ./internal/proxy/...` reports zero races.
-- [ ] AC 2: `go test -race -count=1 -timeout 5m ./cmd/shipyard/...` reports zero races.
-- [ ] AC 3: `go test -race -count=1 -timeout 5m ./...` passes with zero races overall.
-- [ ] AC 4: `go vet ./...` passes.
-- [ ] AC 5: `go build ./...` passes.
-- [ ] AC 6: No existing tests are removed or skipped to achieve the above.
+- [x] AC 1: `go test -race -count=1 -timeout 5m ./internal/proxy/...` reports zero races.
+- [x] AC 2: `go test -race -count=1 -timeout 5m ./cmd/shipyard/...` reports zero races.
+- [x] AC 3: `go test -race -count=1 -timeout 5m ./...` passes with zero races overall.
+- [x] AC 4: `go vet ./...` passes.
+- [x] AC 5: `go build ./...` passes.
+- [x] AC 6: No existing tests are removed or skipped to achieve the above.
 
 ## Context
 
