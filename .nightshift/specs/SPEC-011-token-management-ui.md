@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: feature
-status: draft
+status: done
 after: [SPEC-010]
 prior_attempts: []
 parent:

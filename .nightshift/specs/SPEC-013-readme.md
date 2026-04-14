@@ -2,7 +2,7 @@
 id: SPEC-013
 priority: 13
 type: nfr
-status: draft
+status: done
 after: [SPEC-006]
 created: 2026-04-06
 ---

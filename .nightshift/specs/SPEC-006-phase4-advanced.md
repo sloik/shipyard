@@ -2,7 +2,7 @@
 id: SPEC-006
 priority: 6
 type: main
-status: design-complete
+status: draft
 after: [SPEC-004]
 created: 2026-04-06
 ---
