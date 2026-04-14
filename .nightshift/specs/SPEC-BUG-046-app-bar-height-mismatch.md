@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [UX-002]
 prior_attempts: []
@@ -33,14 +33,14 @@ The main app bar (header) renders at 44px height. The UX-002 design specifies 48
 
 ## Requirements
 
-- [ ] R1: App bar height matches the UX-002 design value of 48px
+- [x] R1: App bar height matches the UX-002 design value of 48px
 
 ## Acceptance Criteria
 
-- [ ] AC 1: `.app-bar` has `height: 48px` in `ds.css`
-- [ ] AC 2: Tab items inside the app bar remain vertically centered
-- [ ] AC 3: `go build ./...` passes
-- [ ] AC 4: `go vet ./...` passes
+- [x] AC 1: `.app-bar` has `height: 48px` in `ds.css`
+- [x] AC 2: Tab items inside the app bar remain vertically centered
+- [x] AC 3: `go build ./...` passes
+- [x] AC 4: `go vet ./...` passes
 
 ## Context
 
