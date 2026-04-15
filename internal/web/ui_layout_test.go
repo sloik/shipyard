@@ -2993,3 +2993,101 @@ func TestSPECBUG045_CrashBannerTextWraps(t *testing.T) {
 		t.Error("SPEC-BUG-045 AC16 FAIL: expected 'word-wrap:break-word' on crash banner text element")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-BUG-103: Servers page shows "No servers configured" despite servers online
+// ---------------------------------------------------------------------------
+
+// TestSPECBUG103_ServersEmptyStartsHidden verifies that the servers-empty element
+// starts with display:none so it never flashes before loadServers() completes (AC3).
+func TestSPECBUG103_ServersEmptyStartsHidden(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Find the servers-empty element tag
+	idx := strings.Index(content, `id="servers-empty"`)
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-103 FAIL: expected servers-empty element in index.html")
+	}
+	// Walk back to the opening <div tag
+	tagStart := strings.LastIndex(content[:idx], "<div")
+	if tagStart == -1 {
+		t.Fatal("SPEC-BUG-103 FAIL: could not find opening <div for servers-empty")
+	}
+	tagEnd := strings.Index(content[idx:], ">")
+	if tagEnd == -1 {
+		t.Fatal("SPEC-BUG-103 FAIL: could not find closing > for servers-empty opening tag")
+	}
+	openTag := content[tagStart : idx+tagEnd+1]
+
+	// AC3: element must start hidden so it doesn't appear before loadServers() resolves
+	if !strings.Contains(openTag, "display:none") {
+		t.Errorf("SPEC-BUG-103 AC3 FAIL: servers-empty must have display:none in its initial HTML tag so it is hidden before loadServers() completes; got: %s", openTag)
+	}
+}
+
+// TestSPECBUG103_RenderServerCardsShowsNameStatusTools verifies that
+// renderServerCards() renders server name, status dot, and tool count for
+// both the Shipyard self-entry and child servers (AC1, AC2).
+func TestSPECBUG103_RenderServerCardsShowsNameStatusTools(t *testing.T) {
+	body := renderServerCardsJS(t)
+
+	// AC1: Shipyard self-entry card rendered (always present)
+	if !strings.Contains(body, `data-server="shipyard"`) {
+		t.Error("SPEC-BUG-103 AC1 FAIL: expected Shipyard self-entry card (data-server=\"shipyard\") in renderServerCards()")
+	}
+
+	// AC2: Shipyard self-entry shows name "Shipyard"
+	if !strings.Contains(body, ">Shipyard<") {
+		t.Error("SPEC-BUG-103 AC2 FAIL: expected server name 'Shipyard' in renderServerCards()")
+	}
+
+	// AC2: tool count rendered for self-entry (s.tool_count reference)
+	if !strings.Contains(body, "s.tool_count") && !strings.Contains(body, "(s.tool_count || 0)") {
+		t.Error("SPEC-BUG-103 AC2 FAIL: expected tool_count rendered in server card")
+	}
+
+	// AC2: child server cards render status dot based on s.status
+	if !strings.Contains(body, "s.status === 'online'") {
+		t.Error("SPEC-BUG-103 AC2 FAIL: expected status check 's.status === \"online\"' for child server cards")
+	}
+
+	// AC2: child server card renders server name via escapeHtml(s.name)
+	if !strings.Contains(body, "escapeHtml(s.name)") {
+		t.Error("SPEC-BUG-103 AC2 FAIL: expected 'escapeHtml(s.name)' in child server card rendering")
+	}
+}
+
+// TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
+// that loadServers() hides the empty state and shows the grid when the API
+// returns one or more servers (AC3).
+func TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-BUG-103 FAIL: expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+
+	// AC3: when servers present, empty state must be hidden and grid must show
+	for _, needle := range []string{
+		"serversEmpty.style.display = 'none'",
+		"serversGrid.style.display = 'grid'",
+		"renderServerCards(servers)",
+	} {
+		if !strings.Contains(loadBody, needle) {
+			t.Errorf("SPEC-BUG-103 AC3 FAIL: expected %q in loadServers() non-empty path", needle)
+		}
+	}
+}
