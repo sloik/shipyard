@@ -792,14 +792,16 @@ textarea {
 }
 
 .tab {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
-  font-size: var(--font-size-md);
+  padding: 0 12px;
+  height: 48px;
+  font-size: var(--font-size-base);
   font-weight: 500;
   color: var(--text-muted);
   border-bottom: 2px solid transparent;
+  border-radius: var(--radius-m) var(--radius-m) 0 0;
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
   white-space: nowrap;
