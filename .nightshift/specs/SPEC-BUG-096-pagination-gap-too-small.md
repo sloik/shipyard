@@ -4,7 +4,8 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: done
+status: superseded
+superseded_by: SPEC-BUG-113
 after: []
 violates: [UX-002]
 prior_attempts: []
