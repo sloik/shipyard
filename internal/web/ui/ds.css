@@ -1561,9 +1561,17 @@ textarea {
 .pagination {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 4px;
-  padding: 12px;
+  padding: 10px 16px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-default);
+}
+
+.pagination-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .page-num {
