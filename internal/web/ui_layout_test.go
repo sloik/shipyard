@@ -889,8 +889,9 @@ func TestSPECBUG014_LoadServersRefreshesBadge(t *testing.T) {
 	}
 
 	// SPEC-BUG-034: serversSummary.textContent replaced with individual stat elements
+	// SPEC-BUG-100: server count moved to Servers tab label
 	requiredSnippets := []string{
-		"serverCountEl.textContent = serverCount + ' server'",
+		"serverCountEl.textContent = serverCount > 0 ? ' (' + serverCount + ')' : ''",
 		"serversEmpty.style.display = ''",
 		"serversGrid.style.display = 'none'",
 		"serversActionBar.style.display = 'none'",
