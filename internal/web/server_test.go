@@ -271,7 +271,7 @@ func TestWithCORS_SetsResponseHeaders(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("expected Access-Control-Allow-Origin *, got %q", got)
 	}
-	if got := w.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, DELETE, OPTIONS" {
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, PUT, DELETE, OPTIONS" {
 		t.Fatalf("unexpected Access-Control-Allow-Methods %q", got)
 	}
 	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type" {
@@ -3088,5 +3088,316 @@ func TestHandleServers_NoPlainTextSecrets(t *testing.T) {
 	flagged, _ := result[0]["has_plain_text_secrets"].(bool)
 	if flagged {
 		t.Error("expected has_plain_text_secrets=false for keychain ref")
+	}
+}
+
+// =============================================================================
+// SPEC-028: Tool & Server Enable/Disable Toggles
+// =============================================================================
+
+func TestSPEC028_APIToggleServerEndpoint(t *testing.T) {
+	// AC 7: PUT /api/servers/{name}/enabled with {"enabled": false} returns 200.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "lmstudio", Status: "online"}},
+	})
+
+	// Disable server via PUT
+	body := strings.NewReader(`{"enabled":false}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/servers/lmstudio/enabled", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("name", "lmstudio")
+	w := httptest.NewRecorder()
+	srv.handleServerEnabledPUT(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["enabled"] != false {
+		t.Errorf("expected enabled=false in response, got %v", result["enabled"])
+	}
+	if result["server"] != "lmstudio" {
+		t.Errorf("expected server=lmstudio in response, got %v", result["server"])
+	}
+
+	// Confirm gateway state was updated
+	if gs.ServerEnabled("lmstudio") {
+		t.Error("expected lmstudio to be disabled in gateway store")
+	}
+}
+
+func TestSPEC028_APIToggleToolEndpoint(t *testing.T) {
+	// AC 8: PUT /api/tools/{server}/{tool}/enabled with {"enabled": false} returns 200.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+
+	body := strings.NewReader(`{"enabled":false}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/filesystem/write_file/enabled", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("server", "filesystem")
+	req.SetPathValue("tool", "write_file")
+	w := httptest.NewRecorder()
+	srv.handleToolEnabledPUT(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["enabled"] != false {
+		t.Errorf("expected enabled=false in response, got %v", result["enabled"])
+	}
+
+	// Confirm gateway state was updated
+	if gs.ToolEnabled("filesystem", "write_file") {
+		t.Error("expected write_file to be disabled in gateway store")
+	}
+}
+
+func TestSPEC028_ShipyardServerCannotBeDisabled(t *testing.T) {
+	// AC 30: Shipyard built-in server cannot be disabled
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+
+	body := strings.NewReader(`{"enabled":false}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/servers/shipyard/enabled", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("name", "shipyard")
+	w := httptest.NewRecorder()
+	srv.handleServerEnabledPUT(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disabling shipyard, got %d", w.Code)
+	}
+}
+
+func TestSPEC028_GatewayFiltersDisabledToolsFromMCPPassthrough(t *testing.T) {
+	// AC 12: Disabled tool is excluded from tools/list sent to Claude (passthrough path).
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetToolEnabled("filesystem", "write_file", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "filesystem", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"},{"name":"write_file"}]}}`), nil
+		},
+	})
+
+	rpcBody := `{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "write_file") {
+		t.Error("expected disabled write_file to be filtered from tools/list")
+	}
+	if !strings.Contains(body, "read_file") {
+		t.Error("expected enabled read_file to appear in tools/list")
+	}
+}
+
+func TestSPEC028_GatewayFiltersDisabledServerFromMCPPassthrough(t *testing.T) {
+	// AC 12: Disabled server's tools are excluded from tools/list.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetServerEnabled("filesystem", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+
+	called := false
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "filesystem", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			called = true
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"}]}}`), nil
+		},
+	})
+
+	rpcBody := `{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if called {
+		t.Error("expected disabled server to be skipped without calling SendRequest")
+	}
+	if strings.Contains(w.Body.String(), "read_file") {
+		t.Error("expected disabled server's tools to not appear in tools/list")
+	}
+}
+
+func TestSPEC028_GatewayErrorOnDisabledToolCall(t *testing.T) {
+	// AC 13: Calling disabled tool returns JSON-RPC error -32601 with "disabled" in message.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetToolEnabled("filesystem", "write_file", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "filesystem", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			t.Fatal("SendRequest should not be called for disabled tool")
+			return nil, nil
+		},
+	})
+
+	rpcBody := `{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"filesystem__write_file","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (JSON-RPC error in body), got %d", w.Code)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	errObj, ok := result["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected error object, got: %v", result)
+	}
+	code, _ := errObj["code"].(float64)
+	if int(code) != -32601 {
+		t.Errorf("expected error code -32601, got %d", int(code))
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "disabled") {
+		t.Errorf("expected 'disabled' in error message, got: %s", msg)
+	}
+}
+
+func TestSPEC028_GatewayErrorOnDisabledServerCall(t *testing.T) {
+	// AC 14: Calling tool on disabled server returns JSON-RPC error -32601 with "disabled" in message.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetServerEnabled("filesystem", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "filesystem", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			t.Fatal("SendRequest should not be called for disabled server")
+			return nil, nil
+		},
+	})
+
+	rpcBody := `{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"filesystem__read_file","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	errObj, ok := result["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected error object, got: %v", result)
+	}
+	code, _ := errObj["code"].(float64)
+	if int(code) != -32601 {
+		t.Errorf("expected error code -32601, got %d", int(code))
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "disabled") {
+		t.Errorf("expected 'disabled' in error message, got: %s", msg)
+	}
+}
+
+func TestSPEC028_ServersAPIIncludesEnabledField(t *testing.T) {
+	// AC 9: GET /api/servers includes "enabled": true/false per server.
+	srv := newTestServer(t)
+	gs, err := gateway.NewStore(filepath.Join(t.TempDir(), "gateway-policy.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := gs.SetServerEnabled("lmstudio", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(gs)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "filesystem", Status: "online"},
+			{Name: "lmstudio", Status: "online"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+
+	var result []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// result[0] is the Shipyard self-entry
+	selfEnabled, _ := result[0]["enabled"].(bool)
+	if !selfEnabled {
+		t.Error("expected Shipyard self-entry to have enabled=true")
+	}
+
+	// Find filesystem and lmstudio entries
+	var fsEnabled, lmsEnabled *bool
+	for _, entry := range result[1:] {
+		name, _ := entry["name"].(string)
+		e, _ := entry["enabled"].(bool)
+		switch name {
+		case "filesystem":
+			fsEnabled = &e
+		case "lmstudio":
+			lmsEnabled = &e
+		}
+	}
+	if fsEnabled == nil || !*fsEnabled {
+		t.Error("expected filesystem to have enabled=true")
+	}
+	if lmsEnabled == nil || *lmsEnabled {
+		t.Error("expected lmstudio to have enabled=false")
 	}
 }

@@ -3211,3 +3211,128 @@ func TestSPECBUG111_ServerCountIncludesBuiltIn(t *testing.T) {
 		t.Error("BUG-111 FAIL (AC-1): SSE handler must use servers.length (all servers) for tab label count")
 	}
 }
+
+// =============================================================================
+// SPEC-028: Tool & Server Enable/Disable Toggles — UI Layout Tests
+// =============================================================================
+
+func TestSPEC028_UISwitchComponentInCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read ds.css: %v", err)
+	}
+	content := string(css)
+
+	// Switch base class
+	if !strings.Contains(content, ".switch {") {
+		t.Error("AC 27 FAIL: expected .switch class in ds.css")
+	}
+	if !strings.Contains(content, ".switch-on {") {
+		t.Error("AC 27 FAIL: expected .switch-on class in ds.css")
+	}
+	if !strings.Contains(content, ".switch-off {") {
+		t.Error("AC 27 FAIL: expected .switch-off class in ds.css")
+	}
+	if !strings.Contains(content, ".switch-knob {") {
+		t.Error("AC 27 FAIL: expected .switch-knob class in ds.css")
+	}
+	// Switch/On uses accent-emphasis fill
+	if !strings.Contains(content, "var(--accent-emphasis)") {
+		t.Error("AC 27 FAIL: expected accent-emphasis token for Switch/On")
+	}
+	// Switch/Off uses border-default fill
+	if !strings.Contains(content, "var(--border-default)") {
+		t.Error("AC 27 FAIL: expected border-default token for Switch/Off")
+	}
+}
+
+func TestSPEC028_UISwitchComponentInToolRows(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// Tool rows in renderToolSidebar should emit switch buttons
+	if !strings.Contains(content, "class=\"switch switch-on\"") && !strings.Contains(content, "class=\"' + switchClass + '\"") {
+		// Allow dynamic construction too
+		if !strings.Contains(content, "switchClass") {
+			t.Error("AC 16 FAIL: expected switch-on class in tool sidebar rendering")
+		}
+	}
+
+	// toggleTool function must exist
+	if !strings.Contains(content, "function toggleTool(btn)") {
+		t.Error("AC 16 FAIL: expected toggleTool function in index.html")
+	}
+
+	// toggleServer function must exist
+	if !strings.Contains(content, "function toggleServer(name, newEnabled)") {
+		t.Error("AC 17 FAIL: expected toggleServer function in index.html")
+	}
+}
+
+func TestSPEC028_UIServerCardHasSwitch(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// renderServerCards must call toggleServer
+	if !strings.Contains(content, "toggleServer(") {
+		t.Error("AC 17 FAIL: expected toggleServer call in server card rendering")
+	}
+
+	// Server card header switch should be present for enabled and disabled states
+	if !strings.Contains(content, "switch-off") {
+		t.Error("AC 17 FAIL: expected switch-off class in server card rendering (disabled state)")
+	}
+}
+
+func TestSPEC028_UIDetailPanelHasSwitch(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// tool-detail-toggle element must exist in the detail header
+	if !strings.Contains(content, `id="tool-detail-toggle"`) {
+		t.Error("AC 18 FAIL: expected tool-detail-toggle element in tool detail header")
+	}
+
+	// toggleDetailPanelTool function must exist
+	if !strings.Contains(content, "function toggleDetailPanelTool()") {
+		t.Error("AC 18 FAIL: expected toggleDetailPanelTool function in index.html")
+	}
+}
+
+func TestSPEC028_UIToggleChangedWSHandlerExists(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// WebSocket handler for toggle_changed events
+	if !strings.Contains(content, "toggle_changed") {
+		t.Error("AC 11 FAIL: expected toggle_changed WebSocket handler in index.html")
+	}
+}
+
+func TestSPEC028_UIExecuteButtonDisabledHint(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// updateExecuteButtonState function must disable Execute button when tool is disabled
+	if !strings.Contains(content, "function updateExecuteButtonState(toolEnabled)") {
+		t.Error("AC 26 FAIL: expected updateExecuteButtonState function in index.html")
+	}
+	if !strings.Contains(content, "Tool is disabled") {
+		t.Error("AC 26 FAIL: expected 'Tool is disabled' hint text in index.html")
+	}
+}

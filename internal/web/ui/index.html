@@ -182,11 +182,16 @@
     <div id="tool-detail" style="display:none; height:100%; min-height:0; flex-direction:column; overflow:hidden;">
       <div id="tool-detail-scroll" style="display:flex; flex:1 1 0; min-height:0; flex-direction:column; overflow-y:auto; padding:24px 24px 0 24px;">
 
-        <!-- Tool Header -->
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-          <span id="tool-detail-name" style="font-family:var(--font-mono); font-size:var(--font-size-2xl); font-weight:600; color:var(--text-primary);"></span>
-          <span id="tool-detail-server" class="badge badge-neutral"></span>
+        <!-- Tool Header (SPEC-028: switch toggle on right) -->
+        <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-bottom:8px;">
+          <div style="display:flex; align-items:center; gap:10px; flex:1; min-width:0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            <span id="tool-detail-name" style="font-family:var(--font-mono); font-size:var(--font-size-2xl); font-weight:600; color:var(--text-primary);"></span>
+            <span id="tool-detail-server" class="badge badge-neutral"></span>
+          </div>
+          <button id="tool-detail-toggle" class="switch switch-on" title="Toggle tool enabled/disabled" onclick="toggleDetailPanelTool()">
+            <span class="switch-knob"></span>
+          </button>
         </div>
         <div id="tool-detail-desc" style="font-size:var(--font-size-md); color:var(--text-secondary); margin-bottom:16px;"></div>
 
@@ -217,7 +222,7 @@
           <button class="btn btn-primary" id="tool-execute-btn" style="display:inline-flex; align-items:center; gap:6px;">
             <span>&#9654;</span> Execute
           </button>
-          <span style="font-size:var(--font-size-sm); color:var(--text-muted);">Sends tools/call to the child server</span>
+          <span id="tool-execute-hint" style="font-size:var(--font-size-sm); color:var(--text-muted);">Sends tools/call to the child server</span>
         </div>
 
         <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
@@ -1976,7 +1981,7 @@
      ====================================================================== */
   function loadTools() {
     // Load Shipyard's built-in tools via gateway catalog first, then child server tools.
-    fetch('/api/gateway/tools')
+    fetch('/api/gateway/tools?include_disabled=1')
       .then(function(resp) { return resp.json(); })
       .then(function(catalogData) {
         var gatewayTools = catalogData.tools || [];
@@ -1989,13 +1994,15 @@
             shipyardToolList.push({
               name: gt.tool,          // bare name (e.g. "status")
               description: gt.description || '',
-              inputSchema: gt.inputSchema || null
+              inputSchema: gt.inputSchema || null,
+              enabled: gt.enabled !== false,
+              server_enabled: true
             });
           }
         }
         allTools = {};
-        // Shipyard group is always first.
-        allTools['shipyard'] = { status: 'online', tools: shipyardToolList, isSelf: true };
+        // Shipyard group is always first — always enabled (cannot be disabled).
+        allTools['shipyard'] = { status: 'online', tools: shipyardToolList, isSelf: true, enabled: true };
 
         // Now load child servers.
         return fetch('/api/servers')
@@ -2011,6 +2018,7 @@
 
             var pending = childServers.length;
             childServers.forEach(function(srv) {
+              var srvEnabled = srv.enabled !== false; // SPEC-028: track server enabled state
               fetch('/api/tools?server=' + encodeURIComponent(srv.name))
                 .then(function(resp) {
                   if (!resp.ok) throw new Error('Failed to fetch tools');
@@ -2018,11 +2026,11 @@
                 })
                 .then(function(data) {
                   var tools = data.tools || [];
-                  allTools[srv.name] = { status: srv.status, tools: tools };
+                  allTools[srv.name] = { status: srv.status, tools: tools, enabled: srvEnabled };
                 })
                 .catch(function(err) {
                   console.error('Failed to load tools for', srv.name, err);
-                  allTools[srv.name] = { status: 'offline', tools: [] };
+                  allTools[srv.name] = { status: 'offline', tools: [], enabled: srvEnabled };
                 })
                 .then(function() {
                   pending--;
@@ -2126,19 +2134,41 @@
         var tool = filteredTools[t];
         var isActive = selectedTool && selectedTool.server === srvName && selectedTool.name === tool.name;
         var isConflict = toolConflicts[tool.name] && toolConflicts[tool.name].length > 1;
+        // SPEC-028: tool-level enabled state (tool.enabled may be undefined = enabled, or false = disabled)
+        var toolEnabledState = tool.enabled !== false;
+        var srvEnabledState = !!srvData.enabled; // server-level enabled (default true for isSelf)
+        if (isSelf) { srvEnabledState = true; toolEnabledState = tool.enabled !== false; }
+        var effectiveEnabled = srvEnabledState && toolEnabledState;
         var itemClass = 'tool-item' + (isActive ? ' is-active' : '');
         var itemStyle = isConflict ? 'background:var(--warning-subtle);' : '';
-        html += '<div class="' + itemClass + '" style="' + itemStyle + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '">';
-        if (isConflict) {
-          html += '<span style="color:var(--warning-fg);">&#9888;</span>';
-        } else {
-          html += '<span style="color:var(--text-muted);">&#128295;</span>';
+        if (!effectiveEnabled) {
+          itemStyle += 'opacity:0.5;';
         }
-        html += '<span style="font-family:var(--font-mono); font-size:var(--font-size-sm);">' + escapeHtml(tool.name) + '</span>';
+        // Row layout: flex with space-between (SPEC-028 AC16)
+        html += '<div class="' + itemClass + '" style="' + itemStyle + ' display:flex; align-items:center; justify-content:space-between; padding:6px 12px 6px 32px; width:100%; box-sizing:border-box;" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '">';
+        // Left: icon + name
+        html += '<div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0; overflow:hidden;">';
+        if (isConflict) {
+          html += '<span style="color:var(--warning-fg); flex-shrink:0;">&#9888;</span>';
+        } else {
+          html += '<span style="color:var(--text-muted); flex-shrink:0; font-size:14px; width:14px; height:14px; display:inline-flex; align-items:center; justify-content:center;">&#128295;</span>';
+        }
+        html += '<span style="font-family:var(--font-mono); font-size:var(--font-size-sm); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + escapeHtml(tool.name) + '</span>';
         if (isConflict) {
           var otherServers = toolConflicts[tool.name].filter(function(n) { return n !== srvName; });
           if (otherServers.length > 0) {
-            html += '<span style="font-size:var(--font-size-xs); color:var(--warning-fg); margin-left:auto;">also in: ' + escapeHtml(otherServers.join(', ')) + '</span>';
+            html += '<span style="font-size:var(--font-size-xs); color:var(--warning-fg); white-space:nowrap;">also in: ' + escapeHtml(otherServers.join(', ')) + '</span>';
+          }
+        }
+        html += '</div>';
+        // Right: Switch toggle (conflict rows don't get toggle, self rows get disabled toggle)
+        if (!isConflict) {
+          var switchClass = effectiveEnabled ? 'switch switch-on' : 'switch switch-off';
+          var switchDisabled = (isSelf || !srvEnabledState) ? ' disabled style="cursor:not-allowed;"' : '';
+          if (!isSelf && srvEnabledState) {
+            html += '<button class="' + switchClass + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '" onclick="event.stopPropagation(); toggleTool(this)" title="Toggle tool enabled/disabled"><span class="switch-knob"></span></button>';
+          } else {
+            html += '<button class="' + switchClass + '"' + switchDisabled + ' title="' + (isSelf ? 'Built-in tools cannot be disabled' : 'Enable server first') + '"><span class="switch-knob"></span></button>';
           }
         }
         html += '</div>';
@@ -2209,6 +2239,25 @@
     toolDetailServer.className = 'badge ' + (toolConflicts[tool.name] && toolConflicts[tool.name].length > 1 ? 'badge-warning' : 'badge-neutral');
     toolDetailDesc.textContent = tool.description || 'No description available.';
     renderToolConflictState(tool);
+
+    // SPEC-028: sync detail panel toggle with tool enabled state
+    var detailToggle = document.getElementById('tool-detail-toggle');
+    var srvData = allTools[serverName] || {};
+    var srvEnabled = srvData.enabled !== false;
+    var toolEnabled = tool.enabled !== false;
+    var effectiveEnabled = srvEnabled && toolEnabled;
+    if (detailToggle) {
+      // Self server: always on, toggle hidden
+      if (srvData.isSelf) {
+        detailToggle.style.display = 'none';
+      } else {
+        detailToggle.style.display = '';
+        detailToggle.classList.toggle('switch-on', effectiveEnabled);
+        detailToggle.classList.toggle('switch-off', !effectiveEnabled);
+        detailToggle.disabled = !srvEnabled; // disabled if server is off
+      }
+    }
+    updateExecuteButtonState(effectiveEnabled);
 
     // Render form
     renderToolForm(tool.inputSchema);
@@ -3308,13 +3357,23 @@
         }
         html += '</div>';
       } else if (s.gateway_disabled) {
-        // Gateway-disabled state: grey dot + Disabled badge + warning banner + Enable button
+        // Gateway-disabled state: grey dot + Disabled badge + Switch/Off toggle + warning banner
         html += '<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border-muted);">';
         html += '<div style="display:flex; align-items:center; gap:8px;">';
         html += '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--text-muted); flex-shrink:0;"></span>';
         html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
         html += '</div>';
-        html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border:1px solid var(--border-muted); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-muted);">&#8856; Disabled</div>';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        // Tools badge (if available)
+        if (s.tool_count > 0) {
+          html += '<div style="display:flex; align-items:center; gap:4px; background:var(--bg-raised); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-secondary);">';
+          html += iconWrench(12, 'var(--text-muted)');
+          html += '<span>' + s.tool_count + ' tools</span>';
+          html += '</div>';
+        }
+        // Switch/Off toggle (SPEC-028)
+        html += '<button class="switch switch-off" onclick="toggleServer(\'' + escapeHtml(s.name) + '\', true)" title="Enable server"><span class="switch-knob"></span></button>';
+        html += '</div>';
         html += '</div>';
 
         // Body
@@ -3324,15 +3383,11 @@
           html += escapeHtml(s.command);
           html += '</div>';
         }
-        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">&#128274; Blocked by gateway policy</div>';
+        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">&#128274; Blocked by gateway policy. Use the toggle to re-enable.</div>';
         html += '</div>';
-
-        // Actions: Enable only
-        html += '<div class="server-actions">';
-        html += '<button class="btn btn-default" onclick="window.__shipyard_enableServer(\'' + escapeHtml(s.name) + '\')" style="padding:6px 10px; color:var(--text-secondary);">Enable</button>';
-        html += '</div>';
+        // No separate actions area for gateway-disabled — the Switch/Off toggle in header handles it.
       } else {
-        // Header: left group (dot + name) | right group (tools pill or crashed badge)
+        // Header: left group (dot + name) | right group (tools pill or crashed badge + Switch toggle)
         html += '<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border-muted);">';
         html += '<div style="display:flex; align-items:center; gap:8px;">';
         html += '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:';
@@ -3342,6 +3397,7 @@
         html += '; flex-shrink:0;"></span>';
         html += '<span class="server-name">' + escapeHtml(s.name) + '</span>';
         html += '</div>';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
         if (s.status === 'crashed') {
           // Crashed badge: Lucide x icon (AC4) — R1, R2
           html += '<div style="display:flex; align-items:center; gap:4px; background:var(--danger-emphasis); border-radius:100px; padding:2px 8px; font-size:var(--font-size-sm); color:var(--text-on-emphasis); font-weight:600;">';
@@ -3355,6 +3411,9 @@
           html += '<span>' + s.tool_count + ' tools</span>';
           html += '</div>';
         }
+        // SPEC-028: Switch/On toggle in server card header
+        html += '<button class="switch switch-on" onclick="toggleServer(\'' + escapeHtml(s.name) + '\', false)" title="Disable server"><span class="switch-knob"></span></button>';
+        html += '</div>';
         html += '</div>';
 
         // Body
@@ -3489,6 +3548,128 @@
       method: 'POST'
     }).then(function() { loadServers(); });
   };
+
+  /* ======================================================================
+     SPEC-028: Toggle functions for server/tool enable/disable
+     ====================================================================== */
+
+  // toggleServer: called from Switch button in server card header.
+  // newEnabled=true means we want to enable (currently disabled → enable it)
+  // newEnabled=false means we want to disable (currently enabled → disable it)
+  function toggleServer(name, newEnabled) {
+    fetch('/api/servers/' + encodeURIComponent(name) + '/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    }).then(function() {
+      loadServers();
+      if (getRoute() === 'tools') { loadTools(); }
+    }).catch(function(err) { console.error('Toggle server failed:', err); });
+  }
+
+  // toggleTool: called from Switch button in tool sidebar row.
+  // btn is the <button> element with data-server and data-tool attributes.
+  function toggleTool(btn) {
+    var server = btn.getAttribute('data-server');
+    var tool = btn.getAttribute('data-tool');
+    if (!server || !tool) return;
+    var currentlyOn = btn.classList.contains('switch-on');
+    var newEnabled = !currentlyOn;
+    // Optimistic UI update
+    btn.classList.toggle('switch-on', newEnabled);
+    btn.classList.toggle('switch-off', !newEnabled);
+    // Update row opacity
+    var row = btn.closest('[data-server][data-tool]') || btn.parentElement;
+    if (row) row.style.opacity = newEnabled ? '' : '0.5';
+    fetch('/api/tools/' + encodeURIComponent(server) + '/' + encodeURIComponent(tool) + '/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    }).then(function(resp) {
+      if (!resp.ok) {
+        // Revert on error
+        btn.classList.toggle('switch-on', !newEnabled);
+        btn.classList.toggle('switch-off', newEnabled);
+        if (row) row.style.opacity = !newEnabled ? '' : '0.5';
+      }
+      // Sync detail panel toggle if same tool is selected
+      if (selectedTool && selectedTool.server === server && selectedTool.name === tool) {
+        var detailToggle = document.getElementById('tool-detail-toggle');
+        if (detailToggle) {
+          detailToggle.classList.toggle('switch-on', newEnabled);
+          detailToggle.classList.toggle('switch-off', !newEnabled);
+          updateExecuteButtonState(newEnabled);
+        }
+      }
+      // Update in-memory state
+      if (allTools[server]) {
+        for (var i = 0; i < allTools[server].tools.length; i++) {
+          if (allTools[server].tools[i].name === tool) {
+            allTools[server].tools[i].enabled = newEnabled;
+            break;
+          }
+        }
+      }
+    }).catch(function(err) {
+      console.error('Toggle tool failed:', err);
+      btn.classList.toggle('switch-on', !newEnabled);
+      btn.classList.toggle('switch-off', newEnabled);
+    });
+  }
+
+  // toggleDetailPanelTool: called from the Switch button in the tool detail header.
+  function toggleDetailPanelTool() {
+    if (!selectedTool) return;
+    var detailToggle = document.getElementById('tool-detail-toggle');
+    if (!detailToggle) return;
+    var currentlyOn = detailToggle.classList.contains('switch-on');
+    var newEnabled = !currentlyOn;
+    // Optimistic update
+    detailToggle.classList.toggle('switch-on', newEnabled);
+    detailToggle.classList.toggle('switch-off', !newEnabled);
+    updateExecuteButtonState(newEnabled);
+    fetch('/api/tools/' + encodeURIComponent(selectedTool.server) + '/' + encodeURIComponent(selectedTool.name) + '/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    }).then(function(resp) {
+      if (!resp.ok) {
+        detailToggle.classList.toggle('switch-on', !newEnabled);
+        detailToggle.classList.toggle('switch-off', newEnabled);
+        updateExecuteButtonState(!newEnabled);
+        return;
+      }
+      // Sync sidebar toggle
+      if (allTools[selectedTool.server]) {
+        for (var i = 0; i < allTools[selectedTool.server].tools.length; i++) {
+          if (allTools[selectedTool.server].tools[i].name === selectedTool.name) {
+            allTools[selectedTool.server].tools[i].enabled = newEnabled;
+            break;
+          }
+        }
+      }
+      renderToolSidebar();
+    }).catch(function(err) {
+      console.error('Toggle tool from detail failed:', err);
+      detailToggle.classList.toggle('switch-on', !newEnabled);
+      detailToggle.classList.toggle('switch-off', newEnabled);
+      updateExecuteButtonState(!newEnabled);
+    });
+  }
+
+  // updateExecuteButtonState: disable/hint the Execute button when tool is disabled.
+  function updateExecuteButtonState(toolEnabled) {
+    var execBtn = document.getElementById('tool-execute-btn');
+    var execHint = document.getElementById('tool-execute-hint');
+    if (!execBtn) return;
+    if (!toolEnabled) {
+      execBtn.disabled = true;
+      if (execHint) execHint.textContent = 'Tool is disabled. Enable it to execute.';
+    } else {
+      execBtn.disabled = false;
+      if (execHint) execHint.textContent = 'Sends tools/call to the child server';
+    }
+  }
 
   // Auto-Import
   function openAutoImport() {
@@ -4096,6 +4277,38 @@
               // Refresh sessions view if currently visible
               if (historySessionsView && historySessionsView.style.display !== 'none') {
                 loadSessions();
+              }
+              return;
+            }
+            // SPEC-028: toggle_changed — update switch states without full reload
+            if (data.type === 'toggle_changed') {
+              if (data.target === 'server') {
+                if (allTools[data.name]) {
+                  allTools[data.name].enabled = data.enabled;
+                }
+                // Refresh tool sidebar if on tools view
+                if (getRoute() === 'tools' && toolsLoaded) { renderToolSidebar(); }
+                // Refresh servers view if on servers view
+                if (getRoute() === 'servers') { loadServers(); }
+              } else if (data.target === 'tool') {
+                if (data.server && allTools[data.server]) {
+                  for (var ti = 0; ti < allTools[data.server].tools.length; ti++) {
+                    if (allTools[data.server].tools[ti].name === data.tool) {
+                      allTools[data.server].tools[ti].enabled = data.enabled;
+                      break;
+                    }
+                  }
+                }
+                if (getRoute() === 'tools' && toolsLoaded) { renderToolSidebar(); }
+                // Sync detail panel toggle if same tool visible
+                if (selectedTool && selectedTool.server === data.server && selectedTool.name === data.tool) {
+                  var dtToggle = document.getElementById('tool-detail-toggle');
+                  if (dtToggle) {
+                    dtToggle.classList.toggle('switch-on', data.enabled);
+                    dtToggle.classList.toggle('switch-off', !data.enabled);
+                  }
+                  updateExecuteButtonState(data.enabled);
+                }
               }
               return;
             }

@@ -2005,3 +2005,44 @@ textarea {
 .detail-panel.is-visible {
   display: block;
 }
+
+/* ==========================================================================
+   30. Switch Toggle Component (SPEC-028)
+   ========================================================================== */
+
+.switch {
+  display: inline-flex;
+  width: 36px;
+  height: 20px;
+  border-radius: var(--radius-full, 9999px);
+  padding: 2px;
+  cursor: pointer;
+  transition: background 0.15s;
+  align-items: center;
+  flex-shrink: 0;
+  border: none;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.switch:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-emphasis);
+}
+
+.switch-on {
+  background: var(--accent-emphasis);
+  justify-content: flex-end;
+}
+
+.switch-off {
+  background: var(--border-default);
+  justify-content: flex-start;
+}
+
+.switch-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-on-emphasis);
+  flex-shrink: 0;
+}

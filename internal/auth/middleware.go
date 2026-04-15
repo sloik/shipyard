@@ -39,6 +39,12 @@ type SelfTool struct {
 	InputSchema json.RawMessage
 }
 
+// GatewayPolicy provides enable/disable state for servers and tools (SPEC-028).
+type GatewayPolicy interface {
+	ServerEnabled(server string) bool
+	ToolEnabled(server, tool string) bool
+}
+
 // MCPHandler handles POST /mcp and POST /mcp/{token} requests.
 // It enforces bearer token auth, scope filtering, and rate limiting.
 type MCPHandler struct {
@@ -48,6 +54,7 @@ type MCPHandler struct {
 	selfDispatch  SelfDispatcher // optional — if set, routes shipyard__ tools internally
 	captureLog    *capture.Store
 	toolLogLevels map[string]map[string]string // server → tool → log_level
+	gatewayPolicy GatewayPolicy               // optional — if set, filters disabled tools (SPEC-028)
 }
 
 // NewMCPHandler creates a new MCPHandler.
@@ -68,6 +75,12 @@ func (h *MCPHandler) SetCaptureStore(store *capture.Store) {
 // SetToolLogLevels sets per-tool log level overrides.
 func (h *MCPHandler) SetToolLogLevels(levels map[string]map[string]string) {
 	h.toolLogLevels = levels
+}
+
+// SetGatewayPolicy sets the gateway policy used to filter disabled tools from tools/list
+// and reject tools/call on disabled tools (SPEC-028).
+func (h *MCPHandler) SetGatewayPolicy(gp GatewayPolicy) {
+	h.gatewayPolicy = gp
 }
 
 // getToolLogLevel returns the log level for the given server/tool combination.
@@ -244,6 +257,11 @@ func (h *MCPHandler) handleToolsList(w http.ResponseWriter, r *http.Request, tok
 	serverNames := h.proxies.ServersForAuth()
 
 	for _, serverName := range serverNames {
+		// SPEC-028: skip entire server if gateway-disabled
+		if h.gatewayPolicy != nil && !h.gatewayPolicy.ServerEnabled(serverName) {
+			continue
+		}
+
 		result, err := h.proxies.SendRequest(r.Context(), serverName, "tools/list", json.RawMessage("{}"))
 		if err != nil {
 			slog.Warn("tools/list failed for server", "server", serverName, "error", err)
@@ -266,6 +284,11 @@ func (h *MCPHandler) handleToolsList(w http.ResponseWriter, r *http.Request, tok
 			}
 			toolName, _ := toolObj["name"].(string)
 			if toolName == "" {
+				continue
+			}
+
+			// SPEC-028: skip tool if tool-level disabled
+			if h.gatewayPolicy != nil && !h.gatewayPolicy.ToolEnabled(serverName, toolName) {
 				continue
 			}
 
@@ -330,6 +353,18 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 				})
 			}
 			writeRPCError(w, id, -32001, "Tool not permitted by token scope")
+			return
+		}
+	}
+
+	// SPEC-028: check gateway policy — disabled server/tool returns -32601
+	if h.gatewayPolicy != nil && serverName != "shipyard" {
+		if !h.gatewayPolicy.ServerEnabled(serverName) {
+			writeRPCError(w, id, -32601, fmt.Sprintf("Server '%s' is disabled. Enable it in the Shipyard dashboard.", serverName))
+			return
+		}
+		if !h.gatewayPolicy.ToolEnabled(serverName, toolName) {
+			writeRPCError(w, id, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", p.Name))
 			return
 		}
 	}

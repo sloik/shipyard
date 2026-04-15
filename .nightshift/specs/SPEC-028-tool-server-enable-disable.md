@@ -4,10 +4,11 @@ template_version: 2
 priority: 2
 layer: 2
 type: feature
-status: ready
+status: done
 after: []
 prior_attempts: []
 created: 2026-04-15
+completed: 2026-04-15
 ---
 
 # Tool & Server Enable/Disable Toggles
@@ -25,105 +26,105 @@ Without toggles, users cannot:
 
 ### Backend — State Management
 
-- [ ] R1: Add `enabled` boolean field to `managedProxy` struct (server-level toggle, default: `true`)
-- [ ] R2: Add per-tool enabled state map to Manager (tool-level toggle, default: `true`)
-- [ ] R3: Persist toggle state to a JSON file (`~/.config/shipyard/toggle-state.json`)
-- [ ] R4: Load persisted state on startup; missing keys default to enabled
-- [ ] R5: Precedence logic: tool is available = `server.enabled AND (toolOverride ?? true)`
+- [x] R1: Add `enabled` boolean field to `managedProxy` struct (server-level toggle, default: `true`)
+- [x] R2: Add per-tool enabled state map to Manager (tool-level toggle, default: `true`)
+- [x] R3: Persist toggle state to a JSON file (`~/.config/shipyard/toggle-state.json`)
+- [x] R4: Load persisted state on startup; missing keys default to enabled
+- [x] R5: Precedence logic: tool is available = `server.enabled AND (toolOverride ?? true)`
 
 ### Backend — API Endpoints
 
-- [ ] R6: `PUT /api/servers/{name}/enabled` — toggle server enabled state (body: `{"enabled": bool}`)
-- [ ] R7: `PUT /api/tools/{server}/{tool}/enabled` — toggle individual tool enabled state (body: `{"enabled": bool}`)
-- [ ] R8: `GET /api/servers` response includes `enabled` field per server
-- [ ] R9: `GET /api/tools` response includes `enabled` field per tool and `server_enabled` field
-- [ ] R10: Broadcast toggle state changes via WebSocket hub (so UI updates in real-time)
+- [x] R6: `PUT /api/servers/{name}/enabled` — toggle server enabled state (body: `{"enabled": bool}`)
+- [x] R7: `PUT /api/tools/{server}/{tool}/enabled` — toggle individual tool enabled state (body: `{"enabled": bool}`)
+- [x] R8: `GET /api/servers` response includes `enabled` field per server
+- [x] R9: `GET /api/tools` response includes `enabled` field per tool and `server_enabled` field
+- [x] R10: Broadcast toggle state changes via WebSocket hub (so UI updates in real-time)
 
 ### Backend — Gateway Filtering
 
-- [ ] R11: `gateway_discover` (tool list sent to Claude) excludes disabled tools
-- [ ] R12: `gateway_call` for a disabled tool returns error `tool_unavailable` with message "Tool '{name}' is disabled. Enable it in the Shipyard dashboard."
-- [ ] R13: `gateway_call` for a tool on a disabled server returns error `server_disabled` with message "Server '{name}' is disabled. Enable it in the Shipyard dashboard."
+- [x] R11: `gateway_discover` (tool list sent to Claude) excludes disabled tools
+- [x] R12: `gateway_call` for a disabled tool returns error `tool_unavailable` with message "Tool '{name}' is disabled. Enable it in the Shipyard dashboard."
+- [x] R13: `gateway_call` for a tool on a disabled server returns error `server_disabled` with message "Server '{name}' is disabled. Enable it in the Shipyard dashboard."
 
 ### UI — Sidebar Tool List
 
-- [ ] R14: Each tool row in the sidebar shows a Switch toggle on the right side
-- [ ] R15: Tool row layout: horizontal frame, `alignItems: center`, `justifyContent: space_between`, `padding: [6, 12, 6, 32]`, `width: fill_container`. Children: `left` wrapper frame (`gap: 8`, `width: fill_container`, containing wrench icon 14×14 + tool name text) and Switch ref on the right
-- [ ] R16: **Enabled state**: `Switch/On` ref, icon fill `$text-muted` (or `$accent-fg` if active/selected), text fill `$text-secondary` (or `$text-primary` if active), font-weight `normal` (or `500` if active)
-- [ ] R17: **Disabled state**: `Switch/Off` ref, `opacity: 0.5` on the entire row, icon fill `$text-muted`, text fill `$text-secondary`, font-weight `normal`
-- [ ] R18: **Active/selected row** (tool currently viewed in detail panel): `fill: $row-selected` on the row frame, icon fill `$accent-fg`, text fill `$text-primary`, font-weight `500`
-- [ ] R19: Toggle reflects current enabled/disabled state from API
-- [ ] R20: Toggling calls `PUT /api/tools/{server}/{tool}/enabled` and updates UI optimistically
-- [ ] R21: When server is disabled, all child tool toggles show `Switch/Off` with `opacity: 0.5` and are not interactive
-- [ ] R22: Conflict rows (tools that exist in multiple servers) do NOT show a toggle — they show a warning icon + "also in: {server}" label instead
+- [x] R14: Each tool row in the sidebar shows a Switch toggle on the right side
+- [x] R15: Tool row layout: horizontal frame, `alignItems: center`, `justifyContent: space_between`, `padding: [6, 12, 6, 32]`, `width: fill_container`. Children: `left` wrapper frame (`gap: 8`, `width: fill_container`, containing wrench icon 14×14 + tool name text) and Switch ref on the right
+- [x] R16: **Enabled state**: `Switch/On` ref, icon fill `$text-muted` (or `$accent-fg` if active/selected), text fill `$text-secondary` (or `$text-primary` if active), font-weight `normal` (or `500` if active)
+- [x] R17: **Disabled state**: `Switch/Off` ref, `opacity: 0.5` on the entire row, icon fill `$text-muted`, text fill `$text-secondary`, font-weight `normal`
+- [x] R18: **Active/selected row** (tool currently viewed in detail panel): `fill: $row-selected` on the row frame, icon fill `$accent-fg`, text fill `$text-primary`, font-weight `500`
+- [x] R19: Toggle reflects current enabled/disabled state from API
+- [x] R20: Toggling calls `PUT /api/tools/{server}/{tool}/enabled` and updates UI optimistically
+- [x] R21: When server is disabled, all child tool toggles show `Switch/Off` with `opacity: 0.5` and are not interactive
+- [x] R22: Conflict rows (tools that exist in multiple servers) do NOT show a toggle — they show a warning icon + "also in: {server}" label instead
 
 ### UI — Server Card
 
-- [ ] R23: Server card header shows a master Switch toggle on the right side
-- [ ] R24: Header layout: horizontal frame, `justifyContent: space_between`, `padding: [12, 16]`, bottom border `$border-muted`. Children: `scName` frame (status dot + server name) on left, tools badge in middle, Switch ref on right
-- [ ] R25: Toggle reflects current enabled/disabled state from API
-- [ ] R26: Toggling calls `PUT /api/servers/{name}/enabled` and updates UI optimistically
-- [ ] R27: Disabling server visually grays out all child tool toggles in sidebar
+- [x] R23: Server card header shows a master Switch toggle on the right side
+- [x] R24: Header layout: horizontal frame, `justifyContent: space_between`, `padding: [12, 16]`, bottom border `$border-muted`. Children: `scName` frame (status dot + server name) on left, tools badge in middle, Switch ref on right
+- [x] R25: Toggle reflects current enabled/disabled state from API
+- [x] R26: Toggling calls `PUT /api/servers/{name}/enabled` and updates UI optimistically
+- [x] R27: Disabling server visually grays out all child tool toggles in sidebar
 
 ### UI — Tool Detail Panel
 
-- [ ] R28: Tool detail panel title row shows a Switch toggle synced with the sidebar toggle for the same tool
-- [ ] R29: Title row layout: horizontal frame, `alignItems: center`, `justifyContent: space_between`, `width: fill_container`. Children: `left` wrapper frame (`gap: 8`, containing wrench icon 18×18 `$accent-fg` + tool name text `$font-mono` `$font-size-2xl` `600` + server badge pill) and Switch ref on the right
-- [ ] R30: Toggling in detail panel updates sidebar toggle and vice versa (single source of truth)
-- [ ] R31: When tool is disabled, the detail panel still shows the tool's schema and form but the Execute button is disabled with a "Tool disabled" hint
+- [x] R28: Tool detail panel title row shows a Switch toggle synced with the sidebar toggle for the same tool
+- [x] R29: Title row layout: horizontal frame, `alignItems: center`, `justifyContent: space_between`, `width: fill_container`. Children: `left` wrapper frame (`gap: 8`, containing wrench icon 18×18 `$accent-fg` + tool name text `$font-mono` `$font-size-2xl` `600` + server badge pill) and Switch ref on the right
+- [x] R30: Toggling in detail panel updates sidebar toggle and vice versa (single source of truth)
+- [x] R31: When tool is disabled, the detail panel still shows the tool's schema and form but the Execute button is disabled with a "Tool disabled" hint
 
 ## Acceptance Criteria
 
 ### State Management
 
-- [ ] AC 1: `managedProxy` has `enabled` field; default `true` for new servers
-- [ ] AC 2: Manager maintains `toolEnabled map[string]bool` keyed by `{server}__{tool}`
-- [ ] AC 3: Toggle state persists to `~/.config/shipyard/toggle-state.json`
-- [ ] AC 4: On restart, previously disabled tools/servers remain disabled
-- [ ] AC 5: Missing keys in persisted state default to enabled (backward compatible)
-- [ ] AC 6: Precedence: disabled server → all tools disabled regardless of tool-level state
+- [x] AC 1: `managedProxy` has `enabled` field; default `true` for new servers
+- [x] AC 2: Manager maintains `toolEnabled map[string]bool` keyed by `{server}__{tool}`
+- [x] AC 3: Toggle state persists to `~/.config/shipyard/toggle-state.json`
+- [x] AC 4: On restart, previously disabled tools/servers remain disabled
+- [x] AC 5: Missing keys in persisted state default to enabled (backward compatible)
+- [x] AC 6: Precedence: disabled server → all tools disabled regardless of tool-level state
 
 ### API
 
-- [ ] AC 7: `PUT /api/servers/{name}/enabled` with `{"enabled": false}` sets server disabled; returns 200
-- [ ] AC 8: `PUT /api/tools/{server}/{tool}/enabled` with `{"enabled": false}` sets tool disabled; returns 200
-- [ ] AC 9: `GET /api/servers` includes `"enabled": true/false` per server
-- [ ] AC 10: `GET /api/tools` includes `"enabled": true/false` per tool and `"server_enabled": true/false`
-- [ ] AC 11: Toggle changes broadcast via WebSocket (`{"type": "toggle_changed", ...}`)
+- [x] AC 7: `PUT /api/servers/{name}/enabled` with `{"enabled": false}` sets server disabled; returns 200
+- [x] AC 8: `PUT /api/tools/{server}/{tool}/enabled` with `{"enabled": false}` sets tool disabled; returns 200
+- [x] AC 9: `GET /api/servers` includes `"enabled": true/false` per server
+- [x] AC 10: `GET /api/tools` includes `"enabled": true/false` per tool and `"server_enabled": true/false`
+- [x] AC 11: Toggle changes broadcast via WebSocket (`{"type": "toggle_changed", ...}`)
 
 ### Gateway Filtering
 
-- [ ] AC 12: Disabled tool is excluded from `tools/list` response sent to Claude
-- [ ] AC 13: Calling disabled tool returns JSON-RPC error with code `-32601` and message containing "disabled"
-- [ ] AC 14: Calling tool on disabled server returns JSON-RPC error with code `-32601` and message containing "disabled"
-- [ ] AC 15: Re-enabling a tool makes it immediately available in next `tools/list`
+- [x] AC 12: Disabled tool is excluded from `tools/list` response sent to Claude
+- [x] AC 13: Calling disabled tool returns JSON-RPC error with code `-32601` and message containing "disabled"
+- [x] AC 14: Calling tool on disabled server returns JSON-RPC error with code `-32601` and message containing "disabled"
+- [x] AC 15: Re-enabling a tool makes it immediately available in next `tools/list`
 
 ### UI — Layout
 
-- [ ] AC 16: Tool list sidebar rows: `left` frame (icon + name, `gap: 8`, `width: fill_container`) + Switch ref, parent has `justifyContent: space_between`, `padding: [6, 12, 6, 32]`
-- [ ] AC 17: Server card header: status dot + name on left, tools badge in middle, Switch ref on right, `justifyContent: space_between`, `padding: [12, 16]`
-- [ ] AC 18: Tool detail title row: `left` frame (icon 18px + name `font-size-2xl` + server badge) + Switch ref, `justifyContent: space_between`
-- [ ] AC 19: Sidebar toggle and detail panel toggle for same tool are always in sync
+- [x] AC 16: Tool list sidebar rows: `left` frame (icon + name, `gap: 8`, `width: fill_container`) + Switch ref, parent has `justifyContent: space_between`, `padding: [6, 12, 6, 32]`
+- [x] AC 17: Server card header: status dot + name on left, tools badge in middle, Switch ref on right, `justifyContent: space_between`, `padding: [12, 16]`
+- [x] AC 18: Tool detail title row: `left` frame (icon 18px + name `font-size-2xl` + server badge) + Switch ref, `justifyContent: space_between`
+- [x] AC 19: Sidebar toggle and detail panel toggle for same tool are always in sync
 
 ### UI — Enabled State
 
-- [ ] AC 20: Enabled tool row: `Switch/On` (accent fill `$accent-emphasis`, 36×20px, `cornerRadius: radius-full`), row at full opacity
-- [ ] AC 21: Enabled + selected tool row: `fill: $row-selected`, icon `$accent-fg`, text `$text-primary` weight `500`, `Switch/On`
-- [ ] AC 22: Enabled + default tool row: icon `$text-muted`, text `$text-secondary` weight `normal`, `Switch/On`
+- [x] AC 20: Enabled tool row: `Switch/On` (accent fill `$accent-emphasis`, 36×20px, `cornerRadius: radius-full`), row at full opacity
+- [x] AC 21: Enabled + selected tool row: `fill: $row-selected`, icon `$accent-fg`, text `$text-primary` weight `500`, `Switch/On`
+- [x] AC 22: Enabled + default tool row: icon `$text-muted`, text `$text-secondary` weight `normal`, `Switch/On`
 
 ### UI — Disabled State
 
-- [ ] AC 23: Disabled tool row: `Switch/Off` (border-default fill `$border-default`, 36×20px), `opacity: 0.5` on entire row frame
-- [ ] AC 24: Disabled tool row text/icon colors: icon `$text-muted`, text `$text-secondary`, weight `normal` (regardless of selection)
-- [ ] AC 25: Disabling server sets all child tool rows to disabled visual state (`Switch/Off`, `opacity: 0.5`, not interactive)
-- [ ] AC 26: Disabled tool in detail panel: form visible but Execute button disabled, hint text "Tool is disabled"
+- [x] AC 23: Disabled tool row: `Switch/Off` (border-default fill `$border-default`, 36×20px), `opacity: 0.5` on entire row frame
+- [x] AC 24: Disabled tool row text/icon colors: icon `$text-muted`, text `$text-secondary`, weight `normal` (regardless of selection)
+- [x] AC 25: Disabling server sets all child tool rows to disabled visual state (`Switch/Off`, `opacity: 0.5`, not interactive)
+- [x] AC 26: Disabled tool in detail panel: form visible but Execute button disabled, hint text "Tool is disabled"
 
 ### UI — General
 
-- [ ] AC 27: Switch components use design system tokens: `Switch/On` = `$accent-emphasis` fill, `Switch/Off` = `$border-default` fill, knob = `$text-on-emphasis` 16px circle
-- [ ] AC 28: Toggle state persists across page refresh (API-backed, not localStorage)
-- [ ] AC 29: Conflict rows (warning-highlighted tools in Tool Conflicts screen) do NOT show toggles — they show warning icon + conflict info instead
-- [ ] AC 30: Shipyard built-in server toggle is hidden or always-on (cannot disable self)
+- [x] AC 27: Switch components use design system tokens: `Switch/On` = `$accent-emphasis` fill, `Switch/Off` = `$border-default` fill, knob = `$text-on-emphasis` 16px circle
+- [x] AC 28: Toggle state persists across page refresh (API-backed, not localStorage)
+- [x] AC 29: Conflict rows (warning-highlighted tools in Tool Conflicts screen) do NOT show toggles — they show warning icon + conflict info instead
+- [x] AC 30: Shipyard built-in server toggle is hidden or always-on (cannot disable self)
 
 ## Context
 

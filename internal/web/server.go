@@ -116,6 +116,7 @@ type ServerInfo struct {
 	RestartCount int    `json:"restart_count"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	IsSelf       bool   `json:"is_self,omitempty"` // true for the built-in Shipyard entry
+	Enabled      bool   `json:"enabled"`           // false when server is disabled by gateway policy (SPEC-028)
 }
 
 // shipyardManagementTool describes one of Shipyard's built-in management tools.
@@ -228,6 +229,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/gateway/servers/{name}/disable", s.handleGatewayServerDisable)
 	mux.HandleFunc("POST /api/gateway/tools/{server}/{tool}/enable", s.handleGatewayToolEnable)
 	mux.HandleFunc("POST /api/gateway/tools/{server}/{tool}/disable", s.handleGatewayToolDisable)
+	// SPEC-028: REST-style PUT endpoints for toggle state
+	mux.HandleFunc("PUT /api/servers/{name}/enabled", s.handleServerEnabledPUT)
+	mux.HandleFunc("PUT /api/tools/{server}/{tool}/enabled", s.handleToolEnabledPUT)
 	mux.HandleFunc("POST /api/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/sessions/start", s.handleSessionStart)
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
@@ -267,6 +271,9 @@ func (s *Server) Start(ctx context.Context) error {
 		mcpH.SetSelfDispatcher(s)
 		if s.toolLogLevels != nil {
 			mcpH.SetToolLogLevels(s.toolLogLevels)
+		}
+		if s.gateway != nil {
+			mcpH.SetGatewayPolicy(s.gateway) // SPEC-028: filter disabled tools
 		}
 		mux.Handle("POST /mcp", mcpH)
 		mux.Handle("POST /mcp/{token}", mcpH)
@@ -309,7 +316,7 @@ func noCache(next http.Handler) http.Handler {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 		if r.Method == http.MethodOptions {
@@ -499,6 +506,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			Status:    "running",
 			ToolCount: len(shipyardTools),
 			IsSelf:    true,
+			Enabled:   true, // Shipyard cannot be disabled
 		},
 		GatewayDisabled: false, // Shipyard cannot be disabled
 	}
@@ -513,9 +521,12 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	result := make([]serverInfoResponse, len(servers))
 	for i, srv := range servers {
 		resp := serverInfoResponse{ServerInfo: srv}
+		enabled := true
 		if s.gateway != nil && !s.gateway.ServerEnabled(srv.Name) {
 			resp.GatewayDisabled = true
+			enabled = false
 		}
+		resp.ServerInfo.Enabled = enabled
 		if s.rawServerEnvs != nil {
 			resp.Env = s.rawServerEnvs[srv.Name]
 		}
@@ -714,6 +725,25 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 			"error": json.RawMessage(rpcResp.Error),
 		})
 		return
+	}
+
+	// SPEC-028: augment each tool with enabled/server_enabled fields from gateway policy.
+	if s.gateway != nil {
+		var toolsResult struct {
+			Tools []map[string]interface{} `json:"tools"`
+		}
+		if err := json.Unmarshal(rpcResp.Result, &toolsResult); err == nil {
+			serverEnabled := s.gateway.ServerEnabled(serverName)
+			for i, t := range toolsResult.Tools {
+				toolName, _ := t["name"].(string)
+				toolEnabled := s.gateway.ToolEnabled(serverName, toolName)
+				toolsResult.Tools[i]["enabled"] = serverEnabled && toolEnabled
+				toolsResult.Tools[i]["server_enabled"] = serverEnabled
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(toolsResult)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1063,6 +1093,93 @@ func (s *Server) handleGatewayToolToggle(w http.ResponseWriter, r *http.Request,
 		"server":  serverName,
 		"tool":    toolName,
 		"enabled": enabled,
+	})
+}
+
+// handleServerEnabledPUT handles PUT /api/servers/{name}/enabled (SPEC-028).
+// Body: {"enabled": bool}. Returns 200 with the new state, broadcasts WS event.
+func (s *Server) handleServerEnabledPUT(w http.ResponseWriter, r *http.Request) {
+	if s.gateway == nil {
+		http.Error(w, "no gateway policy store configured", http.StatusServiceUnavailable)
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+	if name == "shipyard" {
+		http.Error(w, "shipyard cannot be disabled at server level", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := s.gateway.SetServerEnabled(name, body.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Broadcast toggle change via WebSocket
+	if s.hub != nil {
+		evt := map[string]interface{}{
+			"type":    "toggle_changed",
+			"target":  "server",
+			"name":    name,
+			"enabled": body.Enabled,
+		}
+		data, _ := json.Marshal(evt)
+		s.hub.Broadcast(data)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"server": name, "enabled": body.Enabled})
+}
+
+// handleToolEnabledPUT handles PUT /api/tools/{server}/{tool}/enabled (SPEC-028).
+// Body: {"enabled": bool}. Returns 200 with the new state, broadcasts WS event.
+func (s *Server) handleToolEnabledPUT(w http.ResponseWriter, r *http.Request) {
+	if s.gateway == nil {
+		http.Error(w, "no gateway policy store configured", http.StatusServiceUnavailable)
+		return
+	}
+	serverName := r.PathValue("server")
+	toolName := r.PathValue("tool")
+	if serverName == "" || toolName == "" {
+		http.Error(w, "server and tool required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := s.gateway.SetToolEnabled(serverName, toolName, body.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Broadcast toggle change via WebSocket
+	if s.hub != nil {
+		evt := map[string]interface{}{
+			"type":    "toggle_changed",
+			"target":  "tool",
+			"name":    serverName + "__" + toolName,
+			"server":  serverName,
+			"tool":    toolName,
+			"enabled": body.Enabled,
+		}
+		data, _ := json.Marshal(evt)
+		s.hub.Broadcast(data)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"server":  serverName,
+		"tool":    toolName,
+		"enabled": body.Enabled,
 	})
 }
 
@@ -1765,8 +1882,12 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 				"inputSchema": schema,
 			})
 		}
-		// Append tools from all child servers.
+		// Append tools from all child servers, filtering by gateway policy (SPEC-028).
 		for _, name := range s.proxies.ServersForAuth() {
+			// Skip entire server if gateway-disabled
+			if s.gateway != nil && !s.gateway.ServerEnabled(name) {
+				continue
+			}
 			raw, err := s.proxies.SendRequest(r.Context(), name, "tools/list", json.RawMessage("{}"))
 			if err != nil {
 				continue
@@ -1786,6 +1907,10 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 				}
 				toolName, _ := toolObj["name"].(string)
 				if toolName == "" {
+					continue
+				}
+				// Skip tool if tool-level disabled
+				if s.gateway != nil && !s.gateway.ToolEnabled(name, toolName) {
 					continue
 				}
 				toolObj["name"] = name + "__" + toolName
@@ -1809,22 +1934,45 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
 		}
-		if err := json.Unmarshal(rpcReq.Params, &callParams); err == nil && strings.HasPrefix(callParams.Name, "shipyard__") {
-			toolName := strings.TrimPrefix(callParams.Name, "shipyard__")
-			result, err := s.dispatchShipyardTool(r.Context(), toolName, callParams.Arguments)
-			if err != nil {
-				writeJSONRPCError(w, rpcReq.ID, -32603, err.Error())
+		if err := json.Unmarshal(rpcReq.Params, &callParams); err == nil {
+			if strings.HasPrefix(callParams.Name, "shipyard__") {
+				toolName := strings.TrimPrefix(callParams.Name, "shipyard__")
+				// Check shipyard tool-level gateway policy
+				if s.gateway != nil && !s.gateway.ToolEnabled("shipyard", toolName) {
+					writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", callParams.Name))
+					return
+				}
+				result, err := s.dispatchShipyardTool(r.Context(), toolName, callParams.Arguments)
+				if err != nil {
+					writeJSONRPCError(w, rpcReq.ID, -32603, err.Error())
+					return
+				}
+				resultBytes, _ := json.Marshal(result)
+				w.Header().Set("Content-Type", "application/json")
+				resp := map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      json.RawMessage(rpcReq.ID),
+					"result":  json.RawMessage(resultBytes),
+				}
+				json.NewEncoder(w).Encode(resp)
 				return
 			}
-			resultBytes, _ := json.Marshal(result)
-			w.Header().Set("Content-Type", "application/json")
-			resp := map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      json.RawMessage(rpcReq.ID),
-				"result":  json.RawMessage(resultBytes),
+			// For non-shipyard tools, check gateway policy before forwarding.
+			// Tool names in server__tool format.
+			if strings.Contains(callParams.Name, "__") {
+				parts := strings.SplitN(callParams.Name, "__", 2)
+				srvName, toolName := parts[0], parts[1]
+				if s.gateway != nil {
+					if !s.gateway.ServerEnabled(srvName) {
+						writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Server '%s' is disabled. Enable it in the Shipyard dashboard.", srvName))
+						return
+					}
+					if !s.gateway.ToolEnabled(srvName, toolName) {
+						writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", callParams.Name))
+						return
+					}
+				}
 			}
-			json.NewEncoder(w).Encode(resp)
-			return
 		}
 	}
 
