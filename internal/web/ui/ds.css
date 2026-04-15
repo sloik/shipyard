@@ -1021,7 +1021,7 @@ textarea {
 
 .table-row > * {
   padding: 8px 16px;
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-base);
 }
 
 .table-row:hover {
