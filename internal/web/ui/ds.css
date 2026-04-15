@@ -923,6 +923,12 @@ textarea {
   font-family: var(--font-mono);
 }
 
+/* UX-002: time column in data rows uses Inter (sans-serif), not monospace.
+   Scoped to data-col="time" to avoid affecting detail panel timestamps. */
+.timestamp[data-col="time"] {
+  font-family: var(--font-sans);
+}
+
 /* ==========================================================================
    13. Code (4)
    ========================================================================== */
