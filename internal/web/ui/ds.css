@@ -897,38 +897,6 @@ textarea {
   border-radius: 0 var(--radius-s) var(--radius-s) 0;
 }
 
-.switch {
-  display: inline-flex;
-  align-items: center;
-  width: 36px;
-  height: 20px;
-  background: var(--border-default);
-  border-radius: var(--radius-full);
-  cursor: pointer;
-  transition: background 0.2s;
-  position: relative;
-  flex-shrink: 0;
-}
-
-.switch::after {
-  content: '';
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--text-on-emphasis);
-  position: absolute;
-  left: 3px;
-  transition: transform 0.2s;
-}
-
-.switch.is-on {
-  background: var(--accent-emphasis);
-}
-
-.switch.is-on::after {
-  transform: translateX(16px);
-}
-
 /* ==========================================================================
    12. Data Display (5)
    ========================================================================== */

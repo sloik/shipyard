@@ -2313,7 +2313,7 @@
 
     if (type === 'boolean') {
       return '<div class="field field-boolean ' + widthClass + '">' +
-        '<div class="switch" data-field="' + escapeHtml(name) + '"></div>' +
+        '<div class="switch switch-off" data-field="' + escapeHtml(name) + '"><span class="switch-knob"></span></div>' +
         '<label>' + escapeHtml(name) + reqMark + typeBadge + '</label>' +
         (desc ? '<span class="field-help">' + escapeHtml(desc) + '</span>' : '') +
         '</div>';
@@ -2377,7 +2377,7 @@
 
       if (type === 'boolean') {
         var sw = toolParamsForm.querySelector('.switch[data-field="' + key + '"]');
-        if (sw) args[key] = sw.classList.contains('is-on');
+        if (sw) args[key] = sw.classList.contains('switch-on');
       } else if (type === 'array') {
         var container = toolParamsForm.querySelector('.field-array[data-field="' + key + '"]');
         if (container) {
@@ -2942,8 +2942,8 @@
                 var name = fields[i].getAttribute('data-field');
                 if (args[name] !== undefined) {
                   if (fields[i].classList.contains('switch')) {
-                    if (args[name]) fields[i].classList.add('is-on');
-                    else fields[i].classList.remove('is-on');
+                    if (args[name]) { fields[i].classList.add('switch-on'); fields[i].classList.remove('switch-off'); }
+                    else { fields[i].classList.add('switch-off'); fields[i].classList.remove('switch-on'); }
                   } else {
                     fields[i].value = typeof args[name] === 'object' ? JSON.stringify(args[name]) : String(args[name]);
                   }

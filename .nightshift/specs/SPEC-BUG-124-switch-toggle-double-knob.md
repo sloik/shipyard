@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -28,7 +28,7 @@ Every switch toggle in the tool browser shows two white circles instead of one. 
 
 ## Root Cause
 
-(Agent fills in during run.)
+Two `.switch` CSS blocks coexisted in `ds.css`. The original block (~line 900) used `position: relative` on `.switch` and a `::after` pseudo-element (14×14px white circle, absolutely positioned) with `.switch.is-on::after { transform: translateX(16px) }`. SPEC-028 added a second `.switch` block at line ~2013 using flexbox and a `.switch-knob` child span (16×16px), but never removed the old block. Because both blocks targeted `.switch` elements, both the `::after` pseudo-element and the `.switch-knob` span rendered simultaneously — producing two visible knob circles. Additionally, the old block used `.switch.is-on` while new HTML used `.switch-on`/`.switch-off`, so the old toggle logic was also broken for all SPEC-028 switches.
 
 Two `.switch` CSS blocks exist in `ds.css`:
 
@@ -40,18 +40,18 @@ Both blocks target `.switch` elements. The old `::after` pseudo-element and the 
 
 ## Requirements
 
-- [ ] R1: Remove the old `.switch` CSS block (lines ~900-930) including `.switch::after`, `.switch.is-on`, and `.switch.is-on::after`
-- [ ] R2: Verify no other UI elements use the old `.switch.is-on` class convention
-- [ ] R3: Only the SPEC-028 switch block (line ~2013) remains active
+- [x] R1: Remove the old `.switch` CSS block (lines ~900-930) including `.switch::after`, `.switch.is-on`, and `.switch.is-on::after`
+- [x] R2: Verify no other UI elements use the old `.switch.is-on` class convention
+- [x] R3: Only the SPEC-028 switch block (line ~2013) remains active
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Each switch toggle renders exactly one knob circle (16px)
-- [ ] AC 2: Switch/On: knob at flex-end (right side), blue pill background
-- [ ] AC 3: Switch/Off: knob at flex-start (left side), gray pill background
-- [ ] AC 4: No `::after` pseudo-element on `.switch` elements
-- [ ] AC 5: AC 27 from SPEC-028 passes (correct switch design tokens)
-- [ ] AC 6: No regressions — search for `.switch.is-on` class usage in HTML/JS; if any exist, migrate them to `.switch-on`
+- [x] AC 1: Each switch toggle renders exactly one knob circle (16px)
+- [x] AC 2: Switch/On: knob at flex-end (right side), blue pill background
+- [x] AC 3: Switch/Off: knob at flex-start (left side), gray pill background
+- [x] AC 4: No `::after` pseudo-element on `.switch` elements
+- [x] AC 5: AC 27 from SPEC-028 passes (correct switch design tokens)
+- [x] AC 6: No regressions — `is-on` class usage in `index.html`, `ds.js` migrated to `switch-on`/`switch-off`; zero remaining `is-on` references in `internal/`
 
 ## Context
 

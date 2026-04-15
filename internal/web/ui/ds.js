@@ -239,10 +239,12 @@
      ======================================================================== */
 
   function handleSwitch(el) {
-    el.classList.toggle('is-on');
+    var nowOn = !el.classList.contains('switch-on');
+    el.classList.toggle('switch-on', nowOn);
+    el.classList.toggle('switch-off', !nowOn);
     var event = new CustomEvent('change', {
       bubbles: true,
-      detail: { value: el.classList.contains('is-on') }
+      detail: { value: nowOn }
     });
     el.dispatchEvent(event);
   }
