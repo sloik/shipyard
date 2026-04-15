@@ -1937,9 +1937,9 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(rpcReq.Params, &callParams); err == nil {
 			if strings.HasPrefix(callParams.Name, "shipyard__") {
 				toolName := strings.TrimPrefix(callParams.Name, "shipyard__")
-				// Check shipyard tool-level gateway policy
+				// Check shipyard tool-level gateway policy (SPEC-029: -32602 Unknown tool)
 				if s.gateway != nil && !s.gateway.ToolEnabled("shipyard", toolName) {
-					writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", callParams.Name))
+					writeJSONRPCError(w, rpcReq.ID, -32602, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 					return
 				}
 				result, err := s.dispatchShipyardTool(r.Context(), toolName, callParams.Arguments)
@@ -1964,11 +1964,13 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 				srvName, toolName := parts[0], parts[1]
 				if s.gateway != nil {
 					if !s.gateway.ServerEnabled(srvName) {
-						writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Server '%s' is disabled. Enable it in the Shipyard dashboard.", srvName))
+						// SPEC-029: -32602 Unknown tool (disabled server = tools don't exist)
+						writeJSONRPCError(w, rpcReq.ID, -32602, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 						return
 					}
 					if !s.gateway.ToolEnabled(srvName, toolName) {
-						writeJSONRPCError(w, rpcReq.ID, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", callParams.Name))
+						// SPEC-029: -32602 Unknown tool (disabled tool = doesn't exist)
+						writeJSONRPCError(w, rpcReq.ID, -32602, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 						return
 					}
 				}

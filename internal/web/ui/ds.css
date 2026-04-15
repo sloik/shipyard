@@ -2023,3 +2023,17 @@ textarea {
   background: var(--text-on-emphasis);
   flex-shrink: 0;
 }
+
+/* SPEC-029: Disabled tool banner shown in detail panel when tool or server is disabled */
+.disabled-tool-banner {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  background: var(--warning-subtle, rgba(210, 153, 34, 0.12));
+  border: 1px solid var(--warning-fg);
+  border-radius: var(--radius-m);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--warning-fg);
+}

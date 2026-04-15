@@ -271,3 +271,32 @@ func contains(items []string, want string) bool {
 	}
 	return false
 }
+
+// TestSPEC029_BridgeInitializeListChanged verifies AC 8 (bridge path):
+// The shipyard-mcp bridge's initialize response declares listChanged: true.
+func TestSPEC029_BridgeInitializeListChanged(t *testing.T) {
+	srv := newMCPServer("http://127.0.0.1:9999", nil)
+	req := rpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "initialize",
+		Params:  json.RawMessage(`{"protocolVersion":"2025-11-25","capabilities":{}}`),
+	}
+	resp := srv.handle(context.Background(), req, 1)
+
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected result map, got: %T", resp.Result)
+	}
+	caps, ok := result["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected capabilities map, got: %v", result["capabilities"])
+	}
+	tools, ok := caps["tools"].(map[string]bool)
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected tools capability map, got: %T", caps["tools"])
+	}
+	if !tools["listChanged"] {
+		t.Errorf("SPEC-029 AC 8: expected listChanged=true, got: %v", tools["listChanged"])
+	}
+}

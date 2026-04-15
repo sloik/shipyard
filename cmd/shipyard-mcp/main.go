@@ -156,7 +156,7 @@ func (s *mcpServer) handle(ctx context.Context, req rpcRequest, id interface{}) 
 					"version": "0.1.0",
 				},
 				"capabilities": map[string]interface{}{
-					"tools": map[string]bool{"listChanged": false},
+					"tools": map[string]bool{"listChanged": true},
 				},
 			},
 		}

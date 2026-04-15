@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -516,4 +517,128 @@ func TestHandleToolsCall_LogsSuccess(t *testing.T) {
 			t.Errorf("expected tool_name=read_file, got %q", row.ToolName)
 		}
 	}
+}
+
+// --- SPEC-029 Tests ---
+
+// TestSPEC029_AuthInitializeListChanged verifies AC 8:
+// The auth MCPHandler's initialize response declares listChanged: true.
+func TestSPEC029_AuthInitializeListChanged(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	plaintext, _, err := store.GenerateToken("spec029-token", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	limiter := NewRateLimiter()
+	proxy := &mockProxy{servers: []string{}}
+	h := NewMCPHandler(store, limiter, proxy)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
+	w := mcpPOST(t, h, body, plaintext)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	result, ok := resp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected result object, got: %v", resp)
+	}
+	caps, ok := result["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected capabilities object, got: %v", result)
+	}
+	tools, ok := caps["tools"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected tools capability object, got: %v", caps)
+	}
+	listChanged, _ := tools["listChanged"].(bool)
+	if !listChanged {
+		t.Errorf("SPEC-029 AC 8: expected capabilities.tools.listChanged=true, got: %v", tools["listChanged"])
+	}
+}
+
+// TestSPEC029_AuthDisabledToolCallReturns32602 verifies AC 11 (auth path):
+// Calling a disabled tool via the auth MCPHandler returns JSON-RPC -32602 with "Unknown tool".
+func TestSPEC029_AuthDisabledToolCallReturns32602(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+
+	plaintext, _, err := authStore.GenerateToken("spec029", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	limiter := NewRateLimiter()
+	proxy := &mockProxy{servers: []string{"myserver"}}
+	h := NewMCPHandler(authStore, limiter, proxy)
+
+	// Set up a mock gateway policy that disables "my_tool" on "myserver"
+	h.SetGatewayPolicy(&mockGatewayPolicySpec029{
+		serverEnabled: map[string]bool{"myserver": true},
+		toolEnabled:   map[string]map[string]bool{"myserver": {"my_tool": false}},
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"myserver__my_tool","arguments":{}}}`
+	w := mcpPOST(t, h, body, plaintext)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("SPEC-029 R10: expected HTTP 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	errObj, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 R10: expected error in response, got: %v", resp)
+	}
+	code, _ := errObj["code"].(float64)
+	if int(code) != -32602 {
+		t.Errorf("SPEC-029 R10: expected -32602, got %d", int(code))
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "Unknown tool") {
+		t.Errorf("SPEC-029 R10: expected 'Unknown tool' in message, got: %q", msg)
+	}
+}
+
+// mockGatewayPolicySpec029 is a simple mock GatewayPolicy for SPEC-029 tests.
+type mockGatewayPolicySpec029 struct {
+	serverEnabled map[string]bool
+	toolEnabled   map[string]map[string]bool
+}
+
+func (m *mockGatewayPolicySpec029) ServerEnabled(server string) bool {
+	if v, ok := m.serverEnabled[server]; ok {
+		return v
+	}
+	return true
+}
+
+func (m *mockGatewayPolicySpec029) ToolEnabled(server, tool string) bool {
+	if tools, ok := m.toolEnabled[server]; ok {
+		if v, ok2 := tools[tool]; ok2 {
+			return v
+		}
+	}
+	return true
 }

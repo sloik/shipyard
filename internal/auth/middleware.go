@@ -225,7 +225,7 @@ func (h *MCPHandler) handleInitialize(w http.ResponseWriter, r *http.Request, to
 				"version": "0.1.0",
 			},
 			"capabilities": map[string]interface{}{
-				"tools": map[string]bool{"listChanged": false},
+				"tools": map[string]bool{"listChanged": true},
 			},
 		},
 	}
@@ -357,14 +357,24 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 		}
 	}
 
-	// SPEC-028: check gateway policy — disabled server/tool returns -32601
+	// SPEC-028/SPEC-029: check gateway policy — disabled server/tool returns -32602 (Unknown tool).
+	// From the MCP client's perspective a disabled tool does not exist — use the same error
+	// as for an unknown tool so clients cannot distinguish disabled from absent.
 	if h.gatewayPolicy != nil && serverName != "shipyard" {
 		if !h.gatewayPolicy.ServerEnabled(serverName) {
-			writeRPCError(w, id, -32601, fmt.Sprintf("Server '%s' is disabled. Enable it in the Shipyard dashboard.", serverName))
+			writeRPCError(w, id, -32602, fmt.Sprintf("Unknown tool: %s", p.Name))
 			return
 		}
 		if !h.gatewayPolicy.ToolEnabled(serverName, toolName) {
-			writeRPCError(w, id, -32601, fmt.Sprintf("Tool '%s' is disabled. Enable it in the Shipyard dashboard.", p.Name))
+			writeRPCError(w, id, -32602, fmt.Sprintf("Unknown tool: %s", p.Name))
+			return
+		}
+	}
+
+	// SPEC-029: also enforce shipyard tool-level gateway policy (previously only checked in passthrough path).
+	if h.gatewayPolicy != nil && serverName == "shipyard" {
+		if !h.gatewayPolicy.ToolEnabled("shipyard", toolName) {
+			writeRPCError(w, id, -32602, fmt.Sprintf("Unknown tool: %s", p.Name))
 			return
 		}
 	}

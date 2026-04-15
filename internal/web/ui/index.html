@@ -41,6 +41,9 @@
 <div id="tokens" class="route-target" aria-hidden="true"></div>
 <div id="settings" class="route-target" aria-hidden="true"></div>
 
+<!-- Toast container (SPEC-029: R3) -->
+<div id="toast-container" class="toast-container"></div>
+
 <div id="app-chrome">
   <div id="global-banners">
     <!-- ================================================================
@@ -208,6 +211,9 @@
             <div id="tool-conflict-cards" style="display:flex; flex-direction:column; gap:12px;"></div>
           </div>
         </div>
+
+        <!-- Disabled Tool Banner (SPEC-029: R4, R6) -->
+        <div id="disabled-tool-banner" class="disabled-tool-banner" style="display:none;"></div>
 
         <hr style="border:none; border-top:1px solid var(--border-muted); margin:0 0 16px 0;">
 
@@ -2161,14 +2167,16 @@
           }
         }
         html += '</div>';
-        // Right: Switch toggle (conflict rows don't get toggle, self rows get disabled toggle)
+        // Right: Switch toggle (conflict rows don't get toggle; SPEC-029 R12: is_self tools ARE toggleable)
         if (!isConflict) {
           var switchClass = effectiveEnabled ? 'switch switch-on' : 'switch switch-off';
-          var switchDisabled = (isSelf || !srvEnabledState) ? ' disabled style="cursor:not-allowed;"' : '';
-          if (!isSelf && srvEnabledState) {
+          // For is_self (Shipyard built-in) tools: server is always enabled, so tool toggle works
+          // For regular tools: disable toggle button only when server is disabled
+          var canToggleTool = isSelf || srvEnabledState;
+          if (canToggleTool) {
             html += '<button class="' + switchClass + '" data-server="' + escapeHtml(srvName) + '" data-tool="' + escapeHtml(tool.name) + '" onclick="event.stopPropagation(); toggleTool(this)" title="Toggle tool enabled/disabled"><span class="switch-knob"></span></button>';
           } else {
-            html += '<button class="' + switchClass + '"' + switchDisabled + ' title="' + (isSelf ? 'Built-in tools cannot be disabled' : 'Enable server first') + '"><span class="switch-knob"></span></button>';
+            html += '<button class="' + switchClass + '" disabled style="cursor:not-allowed;" title="Enable server first"><span class="switch-knob"></span></button>';
           }
         }
         html += '</div>';
@@ -2240,27 +2248,32 @@
     toolDetailDesc.textContent = tool.description || 'No description available.';
     renderToolConflictState(tool);
 
-    // SPEC-028: sync detail panel toggle with tool enabled state
+    // SPEC-028/SPEC-029: sync detail panel toggle with tool enabled state
     var detailToggle = document.getElementById('tool-detail-toggle');
     var srvData = allTools[serverName] || {};
     var srvEnabled = srvData.enabled !== false;
     var toolEnabled = tool.enabled !== false;
     var effectiveEnabled = srvEnabled && toolEnabled;
     if (detailToggle) {
-      // Self server: always on, toggle hidden
-      if (srvData.isSelf) {
-        detailToggle.style.display = 'none';
-      } else {
-        detailToggle.style.display = '';
-        detailToggle.classList.toggle('switch-on', effectiveEnabled);
-        detailToggle.classList.toggle('switch-off', !effectiveEnabled);
-        detailToggle.disabled = !srvEnabled; // disabled if server is off
-      }
+      // SPEC-029 R12: is_self tools are now toggleable; server is always enabled for them
+      // Show the tool-level toggle for all tools, including built-in Shipyard tools.
+      // For is_self: srvEnabled is always true, so toggle is always enabled.
+      // For regular tools: disable toggle if server is disabled.
+      detailToggle.style.display = '';
+      detailToggle.classList.toggle('switch-on', effectiveEnabled);
+      detailToggle.classList.toggle('switch-off', !effectiveEnabled);
+      detailToggle.disabled = !srvEnabled && !srvData.isSelf; // disabled only if server is off (and not self)
     }
+    updateDetailPanelDisabledState(effectiveEnabled, srvEnabled, srvData.isSelf);
     updateExecuteButtonState(effectiveEnabled);
 
     // Render form
     renderToolForm(tool.inputSchema);
+    // SPEC-029 R4: after rendering form, apply disabled state to inputs if tool is disabled
+    if (!effectiveEnabled) {
+      var formEls = document.querySelectorAll('#tool-params-form input, #tool-params-form textarea, #tool-params-form select');
+      for (var fi = 0; fi < formEls.length; fi++) { formEls[fi].disabled = true; }
+    }
 
     toolResponseSection.style.display = 'flex';
     showToolResponseIdle();
@@ -3569,6 +3582,8 @@
 
   // toggleTool: called from Switch button in tool sidebar row.
   // btn is the <button> element with data-server and data-tool attributes.
+  // SPEC-029 R2: updates detail panel toggle directly (no full re-render).
+  // SPEC-029 R3: shows toast on API failure and reverts state.
   function toggleTool(btn) {
     var server = btn.getAttribute('data-server');
     var tool = btn.getAttribute('data-tool');
@@ -3591,15 +3606,8 @@
         btn.classList.toggle('switch-on', !newEnabled);
         btn.classList.toggle('switch-off', newEnabled);
         if (row) row.style.opacity = !newEnabled ? '' : '0.5';
-      }
-      // Sync detail panel toggle if same tool is selected
-      if (selectedTool && selectedTool.server === server && selectedTool.name === tool) {
-        var detailToggle = document.getElementById('tool-detail-toggle');
-        if (detailToggle) {
-          detailToggle.classList.toggle('switch-on', newEnabled);
-          detailToggle.classList.toggle('switch-off', !newEnabled);
-          updateExecuteButtonState(newEnabled);
-        }
+        showToast('Failed to update toggle', 'error');
+        return;
       }
       // Update in-memory state
       if (allTools[server]) {
@@ -3610,36 +3618,72 @@
           }
         }
       }
+      // SPEC-029 R2: Sync detail panel toggle directly if same tool is selected (no re-render)
+      if (selectedTool && selectedTool.server === server && selectedTool.name === tool) {
+        var detailToggle = document.getElementById('tool-detail-toggle');
+        if (detailToggle) {
+          detailToggle.classList.toggle('switch-on', newEnabled);
+          detailToggle.classList.toggle('switch-off', !newEnabled);
+        }
+        var srvData = allTools[server] || {};
+        var srvEnabled = srvData.enabled !== false;
+        updateDetailPanelDisabledState(newEnabled, srvEnabled, srvData.isSelf);
+        updateExecuteButtonState(newEnabled);
+      }
     }).catch(function(err) {
       console.error('Toggle tool failed:', err);
       btn.classList.toggle('switch-on', !newEnabled);
       btn.classList.toggle('switch-off', newEnabled);
+      if (row) row.style.opacity = !newEnabled ? '' : '0.5';
+      showToast('Failed to update toggle', 'error');
     });
   }
 
   // toggleDetailPanelTool: called from the Switch button in the tool detail header.
+  // SPEC-029 R1: Updates sidebar toggle DOM directly (no full re-render) for same-render-frame sync.
   function toggleDetailPanelTool() {
     if (!selectedTool) return;
     var detailToggle = document.getElementById('tool-detail-toggle');
     if (!detailToggle) return;
     var currentlyOn = detailToggle.classList.contains('switch-on');
     var newEnabled = !currentlyOn;
-    // Optimistic update
+    // Optimistic update: detail panel
     detailToggle.classList.toggle('switch-on', newEnabled);
     detailToggle.classList.toggle('switch-off', !newEnabled);
+    var srvData = allTools[selectedTool.server] || {};
+    var srvEnabled = srvData.enabled !== false;
+    updateDetailPanelDisabledState(newEnabled, srvEnabled, srvData.isSelf);
     updateExecuteButtonState(newEnabled);
+    // Optimistic update: sidebar toggle (SPEC-029 R1 — targeted DOM update, no re-render)
+    var sidebarBtn = document.querySelector('[data-server="' + escapeHtml(selectedTool.server) + '"][data-tool="' + escapeHtml(selectedTool.name) + '"]');
+    if (sidebarBtn) {
+      sidebarBtn.classList.toggle('switch-on', newEnabled);
+      sidebarBtn.classList.toggle('switch-off', !newEnabled);
+      var row = sidebarBtn.closest('[data-server][data-tool]') || sidebarBtn.parentElement;
+      if (row) row.style.opacity = newEnabled ? '' : '0.5';
+    }
     fetch('/api/tools/' + encodeURIComponent(selectedTool.server) + '/' + encodeURIComponent(selectedTool.name) + '/enabled', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: newEnabled })
     }).then(function(resp) {
       if (!resp.ok) {
+        // Revert: detail panel
         detailToggle.classList.toggle('switch-on', !newEnabled);
         detailToggle.classList.toggle('switch-off', newEnabled);
+        updateDetailPanelDisabledState(!newEnabled, srvEnabled, srvData.isSelf);
         updateExecuteButtonState(!newEnabled);
+        // Revert: sidebar toggle
+        if (sidebarBtn) {
+          sidebarBtn.classList.toggle('switch-on', !newEnabled);
+          sidebarBtn.classList.toggle('switch-off', newEnabled);
+          var row2 = sidebarBtn.closest('[data-server][data-tool]') || sidebarBtn.parentElement;
+          if (row2) row2.style.opacity = !newEnabled ? '' : '0.5';
+        }
+        showToast('Failed to update toggle', 'error');
         return;
       }
-      // Sync sidebar toggle
+      // Update in-memory state
       if (allTools[selectedTool.server]) {
         for (var i = 0; i < allTools[selectedTool.server].tools.length; i++) {
           if (allTools[selectedTool.server].tools[i].name === selectedTool.name) {
@@ -3648,27 +3692,79 @@
           }
         }
       }
-      renderToolSidebar();
     }).catch(function(err) {
       console.error('Toggle tool from detail failed:', err);
+      // Revert: detail panel
       detailToggle.classList.toggle('switch-on', !newEnabled);
       detailToggle.classList.toggle('switch-off', newEnabled);
+      updateDetailPanelDisabledState(!newEnabled, srvEnabled, srvData.isSelf);
       updateExecuteButtonState(!newEnabled);
+      // Revert: sidebar toggle
+      if (sidebarBtn) {
+        sidebarBtn.classList.toggle('switch-on', !newEnabled);
+        sidebarBtn.classList.toggle('switch-off', newEnabled);
+        var row3 = sidebarBtn.closest('[data-server][data-tool]') || sidebarBtn.parentElement;
+        if (row3) row3.style.opacity = !newEnabled ? '' : '0.5';
+      }
+      showToast('Failed to update toggle', 'error');
     });
   }
 
   // updateExecuteButtonState: disable/hint the Execute button when tool is disabled.
+  // SPEC-029 R4: changes button label to "Tool Disabled" when disabled.
   function updateExecuteButtonState(toolEnabled) {
     var execBtn = document.getElementById('tool-execute-btn');
     var execHint = document.getElementById('tool-execute-hint');
     if (!execBtn) return;
     if (!toolEnabled) {
       execBtn.disabled = true;
-      if (execHint) execHint.textContent = 'Tool is disabled. Enable it to execute.';
+      execBtn.innerHTML = '<span>&#9654;</span> Tool Disabled';
+      if (execHint) execHint.textContent = '';
     } else {
       execBtn.disabled = false;
+      execBtn.innerHTML = '<span>&#9654;</span> Execute';
       if (execHint) execHint.textContent = 'Sends tools/call to the child server';
     }
+  }
+
+  // updateDetailPanelDisabledState: show/hide the disabled banner and disable/enable form inputs.
+  // SPEC-029 R4, R5, R6.
+  function updateDetailPanelDisabledState(effectiveEnabled, serverEnabled, isSelf) {
+    var banner = document.getElementById('disabled-tool-banner');
+    var form = document.getElementById('tool-params-form');
+    if (!banner) return;
+    if (!effectiveEnabled) {
+      var msg = (!serverEnabled && !isSelf)
+        ? 'Server is disabled. Enable the server first.'
+        : 'This tool is disabled. Enable it to execute.';
+      banner.textContent = msg;
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+      banner.textContent = '';
+    }
+    // Disable/enable all form inputs
+    if (form) {
+      var inputs = form.querySelectorAll('input, textarea, select');
+      for (var i = 0; i < inputs.length; i++) {
+        inputs[i].disabled = !effectiveEnabled;
+      }
+    }
+  }
+
+  // showToast: display a temporary toast notification.
+  // SPEC-029 R3: used for API failure feedback.
+  function showToast(message, type) {
+    var container = document.getElementById('toast-container');
+    if (!container) return;
+    var toast = document.createElement('div');
+    toast.className = 'toast' + (type ? ' toast-' + type : '');
+    toast.textContent = message;
+    toast.onclick = function() { container.removeChild(toast); };
+    container.appendChild(toast);
+    setTimeout(function() {
+      if (toast.parentNode === container) container.removeChild(toast);
+    }, 3000);
   }
 
   // Auto-Import
@@ -4280,7 +4376,7 @@
               }
               return;
             }
-            // SPEC-028: toggle_changed — update switch states without full reload
+            // SPEC-028/SPEC-029: toggle_changed — targeted DOM updates without full re-render (R2)
             if (data.type === 'toggle_changed') {
               if (data.target === 'server') {
                 if (allTools[data.name]) {
@@ -4290,6 +4386,29 @@
                 if (getRoute() === 'tools' && toolsLoaded) { renderToolSidebar(); }
                 // Refresh servers view if on servers view
                 if (getRoute() === 'servers') { loadServers(); }
+                // SPEC-029 R5: if currently selected tool belongs to this server, update detail panel in-place
+                if (selectedTool && selectedTool.server === data.name) {
+                  var srvDt = allTools[data.name] || {};
+                  var toolEnabledDt = false;
+                  var srvEnabledDt = data.enabled;
+                  if (srvDt.tools) {
+                    for (var tIdx = 0; tIdx < srvDt.tools.length; tIdx++) {
+                      if (srvDt.tools[tIdx].name === selectedTool.name) {
+                        toolEnabledDt = srvDt.tools[tIdx].enabled !== false;
+                        break;
+                      }
+                    }
+                  }
+                  var effectiveDt = srvEnabledDt && toolEnabledDt;
+                  var dtToggleSrv = document.getElementById('tool-detail-toggle');
+                  if (dtToggleSrv) {
+                    dtToggleSrv.classList.toggle('switch-on', effectiveDt);
+                    dtToggleSrv.classList.toggle('switch-off', !effectiveDt);
+                    dtToggleSrv.disabled = !srvEnabledDt && !srvDt.isSelf;
+                  }
+                  updateDetailPanelDisabledState(effectiveDt, srvEnabledDt, srvDt.isSelf);
+                  updateExecuteButtonState(effectiveDt);
+                }
               } else if (data.target === 'tool') {
                 if (data.server && allTools[data.server]) {
                   for (var ti = 0; ti < allTools[data.server].tools.length; ti++) {
@@ -4299,14 +4418,29 @@
                     }
                   }
                 }
-                if (getRoute() === 'tools' && toolsLoaded) { renderToolSidebar(); }
-                // Sync detail panel toggle if same tool visible
+                // SPEC-029 R2: targeted sidebar toggle update (no full re-render)
+                if (getRoute() === 'tools' && toolsLoaded) {
+                  var sidebarBtnWs = document.querySelector('[data-server="' + data.server + '"][data-tool="' + data.tool + '"]');
+                  if (sidebarBtnWs) {
+                    sidebarBtnWs.classList.toggle('switch-on', data.enabled);
+                    sidebarBtnWs.classList.toggle('switch-off', !data.enabled);
+                    var rowWs = sidebarBtnWs.closest('[data-server][data-tool]') || sidebarBtnWs.parentElement;
+                    if (rowWs) rowWs.style.opacity = data.enabled ? '' : '0.5';
+                  } else {
+                    // Fallback: full re-render if button not found
+                    renderToolSidebar();
+                  }
+                }
+                // SPEC-029 R5: sync detail panel toggle if same tool visible
                 if (selectedTool && selectedTool.server === data.server && selectedTool.name === data.tool) {
                   var dtToggle = document.getElementById('tool-detail-toggle');
                   if (dtToggle) {
                     dtToggle.classList.toggle('switch-on', data.enabled);
                     dtToggle.classList.toggle('switch-off', !data.enabled);
                   }
+                  var srvDataWs = allTools[data.server] || {};
+                  var srvEnabledWs = srvDataWs.enabled !== false;
+                  updateDetailPanelDisabledState(data.enabled, srvEnabledWs, srvDataWs.isSelf);
                   updateExecuteButtonState(data.enabled);
                 }
               }

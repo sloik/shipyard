@@ -3332,7 +3332,74 @@ func TestSPEC028_UIExecuteButtonDisabledHint(t *testing.T) {
 	if !strings.Contains(content, "function updateExecuteButtonState(toolEnabled)") {
 		t.Error("AC 26 FAIL: expected updateExecuteButtonState function in index.html")
 	}
-	if !strings.Contains(content, "Tool is disabled") {
-		t.Error("AC 26 FAIL: expected 'Tool is disabled' hint text in index.html")
+	// SPEC-029 R4: Execute button label changes to "Tool Disabled" (not hint text)
+	if !strings.Contains(content, "Tool Disabled") {
+		t.Error("AC 26 / SPEC-029 R4 FAIL: expected 'Tool Disabled' button label in index.html")
+	}
+}
+
+// --- SPEC-029 UI Tests ---
+
+// TestSPEC029_UIDisabledBannerPresent verifies AC 5:
+// The disabled-tool-banner element is present in index.html (SPEC-029 R4).
+func TestSPEC029_UIDisabledBannerPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, `id="disabled-tool-banner"`) {
+		t.Error("SPEC-029 R4 FAIL: expected 'disabled-tool-banner' element in index.html")
+	}
+	if !strings.Contains(content, "This tool is disabled. Enable it to execute.") {
+		t.Error("SPEC-029 R4 FAIL: expected disabled tool banner message text in index.html")
+	}
+	if !strings.Contains(content, "Server is disabled. Enable the server first.") {
+		t.Error("SPEC-029 R6 FAIL: expected server-disabled banner message text in index.html")
+	}
+	if !strings.Contains(content, "function updateDetailPanelDisabledState(") {
+		t.Error("SPEC-029 R4 FAIL: expected updateDetailPanelDisabledState function in index.html")
+	}
+}
+
+// TestSPEC029_UIShipyardToolHasToggle verifies AC 14:
+// is_self tools (Shipyard built-ins) now have functional toggle buttons (SPEC-029 R12).
+// The old guard that prevented toggling is_self tools has been removed.
+func TestSPEC029_UIShipyardToolHasToggle(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	// R12: The is_self guard that completely blocked toggle must be removed.
+	// The old code had: if (!isSelf && srvEnabledState) { ... toggle ... } else { disabled button }
+	// The new code: canToggleTool = isSelf || srvEnabledState → is_self tools get functional toggles.
+	if strings.Contains(content, "'Built-in tools cannot be disabled'") {
+		t.Error("SPEC-029 R12 FAIL: found 'Built-in tools cannot be disabled' tooltip — is_self toggle guard must be removed")
+	}
+	if !strings.Contains(content, "canToggleTool") {
+		t.Error("SPEC-029 R12 FAIL: expected 'canToggleTool' variable in index.html — is_self tools should be toggleable")
+	}
+}
+
+// TestSPEC029_UIToastFunctionPresent verifies AC 4 (R3):
+// A showToast function exists for displaying error feedback on toggle failure.
+func TestSPEC029_UIToastFunctionPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "function showToast(") {
+		t.Error("SPEC-029 R3 FAIL: expected 'showToast' function in index.html")
+	}
+	if !strings.Contains(content, `id="toast-container"`) {
+		t.Error("SPEC-029 R3 FAIL: expected 'toast-container' element in index.html")
+	}
+	if !strings.Contains(content, "Failed to update toggle") {
+		t.Error("SPEC-029 R3 FAIL: expected 'Failed to update toggle' toast message in index.html")
 	}
 }
