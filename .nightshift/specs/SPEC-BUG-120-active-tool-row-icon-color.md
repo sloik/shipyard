@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -29,18 +29,18 @@ When a tool is selected in the sidebar, the wrench icon color remains `var(--tex
 
 ## Root Cause
 
-(Agent fills in during run.)
+The tool row icon span in `index.html` used a hardcoded inline `color:var(--text-muted)` style with no class, so the `.tool-item.is-active` CSS rule had no way to target and override it for the selected state. Fix: added `class="tool-icon"` to the span (removing the inline color), then added `.tool-item .tool-icon { color: var(--text-muted); }` and `.tool-item.is-active .tool-icon { color: var(--accent-fg); }` in `ds.css`.
 
 ## Requirements
 
-- [ ] R1: Active/selected tool row icon uses `var(--accent-fg)` color
+- [x] R1: Active/selected tool row icon uses `var(--accent-fg)` color
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Selected tool row icon renders in `$accent-fg` (#58a6ff)
-- [ ] AC 2: Non-selected tool icons remain `$text-muted`
-- [ ] AC 3: AC 21 from SPEC-028 passes
-- [ ] AC 4: No regressions
+- [x] AC 1: Selected tool row icon renders in `$accent-fg` (#58a6ff)
+- [x] AC 2: Non-selected tool icons remain `$text-muted`
+- [x] AC 3: AC 21 from SPEC-028 passes
+- [x] AC 4: No regressions
 
 ## Context
 

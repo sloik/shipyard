@@ -1824,6 +1824,14 @@ textarea {
   font-weight: 500;
 }
 
+.tool-item .tool-icon {
+  color: var(--text-muted);
+}
+
+.tool-item.is-active .tool-icon {
+  color: var(--accent-fg);
+}
+
 .tool-item.has-conflict {
   border-left: 2px solid var(--warning-fg);
 }
