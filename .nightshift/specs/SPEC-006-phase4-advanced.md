@@ -4,7 +4,7 @@ template_version: 2
 priority: 6
 layer: 2
 type: main
-status: ready
+status: done
 children:
   - SPEC-006-001
   - SPEC-006-002
