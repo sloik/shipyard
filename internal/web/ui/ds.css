@@ -800,6 +800,13 @@ textarea {
   --wails-draggable: no-drag;
 }
 
+/* SPEC-BUG-109: tabs were stacking vertically because #tab-nav had no display:flex */
+#tab-nav {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
 .tab {
   display: flex;
   align-items: center;
