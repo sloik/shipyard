@@ -1055,17 +1055,17 @@ textarea {
   height: 20px;
   color: var(--text-muted);
   cursor: pointer;
+  transform: rotate(-90deg);
   transition: transform 0.15s;
   flex-shrink: 0;
 }
 
 .row-chevron::before {
-  content: '\25B6'; /* right-pointing triangle */
-  font-size: var(--font-size-xs);
+  content: none;
 }
 
 .row-chevron.is-expanded {
-  transform: rotate(90deg);
+  transform: rotate(0deg);
 }
 
 .row-actions {
