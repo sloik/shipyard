@@ -975,9 +975,8 @@
     if (ms === null || ms === undefined) return '<span class="pill pill-timeout">\u2014</span>';
     var text = ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
     if (ms < 100) return '<span class="pill pill-fast">' + text + '</span>';
-    if (ms < 1000) return '<span class="pill pill-moderate">' + text + '</span>';
-    if (ms < 5000) return '<span class="pill pill-slow">' + text + '</span>';
-    return '<span class="pill pill-timeout">' + text + '</span>';
+    if (ms < 500) return '<span class="pill pill-moderate">' + text + '</span>';
+    return '<span class="pill pill-slow">' + text + '</span>';
   }
 
   /* ======================================================================
@@ -2415,7 +2414,7 @@
           toolResponseLatency.style.display = '';
           var text = latencyMs < 1000 ? latencyMs + 'ms' : (latencyMs / 1000).toFixed(1) + 's';
           toolResponseLatency.textContent = text;
-          toolResponseLatency.className = 'pill ' + (latencyMs < 100 ? 'pill-fast' : latencyMs < 1000 ? 'pill-moderate' : latencyMs < 5000 ? 'pill-slow' : 'pill-timeout');
+          toolResponseLatency.className = 'pill ' + (latencyMs < 100 ? 'pill-fast' : latencyMs < 500 ? 'pill-moderate' : 'pill-slow');
         } else {
           toolResponseLatency.style.display = 'none';
         }

@@ -902,31 +902,32 @@ textarea {
 .pill {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
-  border-radius: var(--radius-s);
+  padding: 2px 5px;
+  border-radius: 4px;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
   font-weight: 500;
 }
 
 .pill-fast {
-  background: var(--success-subtle);
+  background: #2ea04326;
   color: var(--success-fg);
 }
 
 .pill-moderate {
-  background: var(--warning-subtle);
+  background: #d2992226;
   color: var(--warning-fg);
 }
 
 .pill-slow {
-  background: var(--danger-subtle);
+  background: #f8514926;
   color: var(--danger-fg);
 }
 
 .pill-timeout {
-  background: transparent;
+  background: var(--bg-raised);
   color: var(--text-muted);
+  border: 1px solid var(--border-default);
 }
 
 .timestamp {
