@@ -997,7 +997,7 @@ textarea {
   padding: 8px 16px;
   font-size: var(--font-size-xs);
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   user-select: none;
