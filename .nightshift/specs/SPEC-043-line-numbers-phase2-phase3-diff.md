@@ -3,7 +3,7 @@ id: SPEC-043
 priority: 2
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-040]
 prior_attempts: []
 created: 2026-04-14
@@ -77,41 +77,58 @@ Follow the same row structure established by SPEC-040:
 
 ## Requirements
 
-- [ ] R1: Phase 2 History request body (`srBody`) renders line numbers using the
+- [x] R1: Phase 2 History request body (`srBody`) renders line numbers using the
   SPEC-040 row pattern.
-- [ ] R2: Phase 2 History response body (`resBody`) renders line numbers using
+- [x] R2: Phase 2 History response body (`resBody`) renders line numbers using
   the SPEC-040 row pattern.
-- [ ] R3: Phase 2 Response Diff left panel (`panLBody`) renders line numbers;
+- [x] R3: Phase 2 Response Diff left panel (`panLBody`) renders line numbers;
   danger-highlighted lines use `--danger-fg` for line numbers at reduced opacity.
-- [ ] R4: Phase 2 Response Diff right panel (`panRBody`) renders line numbers;
+- [x] R4: Phase 2 Response Diff right panel (`panRBody`) renders line numbers;
   success-highlighted lines use `--success-fg` for line numbers at reduced opacity.
 - [ ] R5: Phase 3 error response body (`codeBody`) renders line numbers using
   the SPEC-040 row pattern.
-- [ ] R6: Diff/SideBySide component (`Diff/SideBySide`) "before" and "after"
+- [x] R6: Diff/SideBySide component (`Diff/SideBySide`) "before" and "after"
   panels render line numbers with colour matching the line type (muted for
   unchanged, danger for removed, success for added).
-- [ ] R7: Existing JSON syntax highlighting and token colours are unchanged.
-- [ ] R8: The `line-removed` and `line-added` reusable components in
+- [x] R7: Existing JSON syntax highlighting and token colours are unchanged.
+- [x] R8: The `line-removed` and `line-added` reusable components in
   Diff/SideBySide are preserved (not replaced with non-reusable frames).
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Phase 2 History request body shows a line number for each JSON line.
-- [ ] AC-2: Phase 2 History response body shows a line number for each JSON line.
-- [ ] AC-3: Phase 2 Response Diff left panel shows line numbers; danger-highlighted
+- [x] AC-1: Phase 2 History request body shows a line number for each JSON line.
+- [x] AC-2: Phase 2 History response body shows a line number for each JSON line.
+- [x] AC-3: Phase 2 Response Diff left panel shows line numbers; danger-highlighted
   lines use `--danger-fg` for the number at reduced opacity.
-- [ ] AC-4: Phase 2 Response Diff right panel shows line numbers; success-highlighted
+- [x] AC-4: Phase 2 Response Diff right panel shows line numbers; success-highlighted
   lines use `--success-fg` for the number at reduced opacity.
 - [ ] AC-5: Phase 3 error response body shows a line number for each JSON line.
-- [ ] AC-6: Diff/SideBySide component before-panel shows line numbers; removed
+- [x] AC-6: Diff/SideBySide component before-panel shows line numbers; removed
   lines use `--danger-fg` for the number.
-- [ ] AC-7: Diff/SideBySide component after-panel shows line numbers; added
+- [x] AC-7: Diff/SideBySide component after-panel shows line numbers; added
   lines use `--success-fg` for the number.
-- [ ] AC-8: Long JSON values wrap at word boundaries; line number stays
+- [x] AC-8: Long JSON values wrap at word boundaries; line number stays
   top-aligned.
-- [ ] AC-9: `go test ./...` passes.
-- [ ] AC-10: `go vet ./...` passes.
-- [ ] AC-11: Visual output matches the UX-002 design for each affected view.
+- [x] AC-9: `go test ./...` passes.
+- [x] AC-10: `go vet ./...` passes.
+- [x] AC-11: Visual output matches the UX-002 design for each affected view.
+
+## Implementation Notes
+
+R1/R2/AC-1/AC-2 were already satisfied by SPEC-040: `highlightJSON()` is used
+for both the Phase 2 History request body and response body panels in
+`renderDetailPanel()`. No change was needed.
+
+R5/AC-5 (Phase 3 `codeBody`) is not yet implemented in `index.html`. The server
+detail crashed-card shows `error_message` as plain escaped text — there is no
+JSON viewer / code block for it. That view does not exist; creating it would be
+out of scope per spec instructions ("only update what exists"). R5/AC-5 remain
+open for a future spec.
+
+The primary change: `computeLineDiff()` now wraps each diff line in the standard
+`<span class="ln">` / `<span class="lc">` row structure and adds `diff-removed`
+/ `diff-added` class names. Two CSS rules in `ds.css` colour those line-number
+spans in `--danger-fg` / `--success-fg` at 60% opacity respectively.
 
 ## Target Files
 

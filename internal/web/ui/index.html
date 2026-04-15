@@ -3071,21 +3071,39 @@
     var removed = 0;
     var unchanged = 0;
 
+    var leftLineNum = 1;
+    var rightLineNum = 1;
     for (var i = 0; i < maxLen; i++) {
       var l = i < leftLines.length ? leftLines[i] : null;
       var r = i < rightLines.length ? rightLines[i] : null;
 
       if (l === r) {
-        leftHtml += '<div class="json-line">' + escapeHtml(l) + '</div>';
-        rightHtml += '<div class="json-line">' + escapeHtml(r) + '</div>';
+        leftHtml += '<div class="json-line">'
+                  + '<span class="ln">' + leftLineNum + '</span>'
+                  + '<span class="lc">' + escapeHtml(l) + '</span>'
+                  + '</div>';
+        rightHtml += '<div class="json-line">'
+                   + '<span class="ln">' + rightLineNum + '</span>'
+                   + '<span class="lc">' + escapeHtml(r) + '</span>'
+                   + '</div>';
+        leftLineNum++;
+        rightLineNum++;
         unchanged++;
       } else {
         if (l !== null) {
-          leftHtml += '<div class="json-line" style="background:var(--danger-subtle);">' + escapeHtml(l) + '</div>';
+          leftHtml += '<div class="json-line diff-removed" style="background:var(--danger-subtle);">'
+                    + '<span class="ln">' + leftLineNum + '</span>'
+                    + '<span class="lc">' + escapeHtml(l) + '</span>'
+                    + '</div>';
+          leftLineNum++;
           removed++;
         }
         if (r !== null) {
-          rightHtml += '<div class="json-line" style="background:var(--success-subtle);">' + escapeHtml(r) + '</div>';
+          rightHtml += '<div class="json-line diff-added" style="background:var(--success-subtle);">'
+                     + '<span class="ln">' + rightLineNum + '</span>'
+                     + '<span class="lc">' + escapeHtml(r) + '</span>'
+                     + '</div>';
+          rightLineNum++;
           added++;
         }
       }

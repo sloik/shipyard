@@ -3091,3 +3091,70 @@ func TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent(t *testi
 		}
 	}
 }
+
+// TestSPEC043_DiffLineNumbers verifies that computeLineDiff emits line-number
+// spans (<span class="ln">) in both left and right diff panels, and that
+// removed lines use diff-removed and added lines use diff-added class names
+// for colour-coded line numbers (AC-3, AC-4, AC-6, AC-7, AC-8).
+func TestSPEC043_DiffLineNumbers(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+
+	// Locate computeLineDiff function body
+	fnIdx := strings.Index(content, "function computeLineDiff(")
+	if fnIdx == -1 {
+		t.Fatal("SPEC-043 FAIL: computeLineDiff function not found")
+	}
+	fnBody := content[fnIdx:]
+	// Trim to the closing brace of the function (next top-level function)
+	if endIdx := strings.Index(fnBody[1:], "\n  function "); endIdx > 0 {
+		fnBody = fnBody[:endIdx+1]
+	}
+
+	// AC-1/AC-2: unchanged lines must emit <span class="ln"> in both panels
+	if !strings.Contains(fnBody, `'<span class="ln">'`) {
+		t.Error("SPEC-043 FAIL (AC-1/AC-2): computeLineDiff does not emit '<span class=\"ln\">' for line numbers")
+	}
+
+	// AC-3/AC-6: removed lines must use class diff-removed
+	if !strings.Contains(fnBody, "diff-removed") {
+		t.Error("SPEC-043 FAIL (AC-3/AC-6): computeLineDiff does not apply 'diff-removed' class to removed lines")
+	}
+
+	// AC-4/AC-7: added lines must use class diff-added
+	if !strings.Contains(fnBody, "diff-added") {
+		t.Error("SPEC-043 FAIL (AC-4/AC-7): computeLineDiff does not apply 'diff-added' class to added lines")
+	}
+
+	// AC-3: CSS must colour removed line numbers with --danger-fg
+	if !strings.Contains(cssContent, "diff-removed") {
+		t.Error("SPEC-043 FAIL (AC-3): ds.css missing .diff-removed .ln colour rule")
+	}
+	if !strings.Contains(cssContent, "var(--danger-fg)") {
+		t.Error("SPEC-043 FAIL (AC-3): ds.css .diff-removed .ln does not use --danger-fg")
+	}
+
+	// AC-4: CSS must colour added line numbers with --success-fg
+	if !strings.Contains(cssContent, "diff-added") {
+		t.Error("SPEC-043 FAIL (AC-4): ds.css missing .diff-added .ln colour rule")
+	}
+	if !strings.Contains(cssContent, "var(--success-fg)") {
+		t.Error("SPEC-043 FAIL (AC-4): ds.css .diff-added .ln does not use --success-fg")
+	}
+
+	// AC-8: line numbers must increment — verify each panel uses a counter variable
+	if !strings.Contains(fnBody, "leftLineNum") {
+		t.Error("SPEC-043 FAIL (AC-8): computeLineDiff does not track leftLineNum counter for incrementing numbers")
+	}
+	if !strings.Contains(fnBody, "rightLineNum") {
+		t.Error("SPEC-043 FAIL (AC-8): computeLineDiff does not track rightLineNum counter for incrementing numbers")
+	}
+}

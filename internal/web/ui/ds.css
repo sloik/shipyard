@@ -1236,6 +1236,10 @@ textarea {
 .json-line.jt-boolean { color: var(--json-boolean); }
 .json-line.jt-bracket { color: var(--json-bracket); }
 
+/* Diff line number colours (SPEC-043) */
+.json-line.diff-removed .ln { color: var(--danger-fg); opacity: 0.6; }
+.json-line.diff-added   .ln { color: var(--success-fg); opacity: 0.6; }
+
 /* ==========================================================================
    18. JSON Controls (3)
    ========================================================================== */
