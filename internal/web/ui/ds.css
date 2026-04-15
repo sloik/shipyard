@@ -1031,7 +1031,7 @@ textarea {
 [data-col="server"]  { width: 110px; flex-shrink: 0; }
 [data-col="method"]  { flex: 1; min-width: 0; }
 [data-col="status"]  { width: 90px;  flex-shrink: 0; }
-[data-col="latency"] { width: 70px;  flex-shrink: 0; text-align: right; }
+[data-col="latency"] { width: 70px;  flex-shrink: 0; text-align: right; display: flex; justify-content: flex-end; align-items: center; }
 [data-col="chevron"] { width: 24px;  flex-shrink: 0; padding: 0; display: flex; align-items: center; justify-content: center; }
 
 .table-row {
@@ -1582,7 +1582,7 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 12px;
   padding: 10px 16px;
   background: var(--bg-surface);
   border-top: 1px solid var(--border-default);
@@ -1592,6 +1592,11 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.pagination-nav .btn,
+.pagination > .btn {
+  color: var(--text-secondary);
 }
 
 .page-num {
