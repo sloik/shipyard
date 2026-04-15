@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -29,17 +29,17 @@ The left wrapper (icon + tool name + server badge) in the tool detail panel titl
 
 ## Root Cause
 
-(Agent fills in during run.)
+Inline style on the left wrapper div in the detail panel title row had `gap:10px` hardcoded instead of the `gap:8px` required by SPEC-028 R29. Likely a copy-paste or manual typo when authoring the HTML template.
 
 ## Requirements
 
-- [ ] R1: Detail title row left wrapper uses `gap: 8px`
+- [x] R1: Detail title row left wrapper uses `gap: 8px`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Left wrapper div in detail title row has gap 8px
-- [ ] AC 2: AC 18 from SPEC-028 passes
-- [ ] AC 3: No regressions — icon, name, and badge still properly spaced
+- [x] AC 1: Left wrapper div in detail title row has gap 8px
+- [x] AC 2: AC 18 from SPEC-028 passes
+- [x] AC 3: No regressions — icon, name, and badge still properly spaced
 
 ## Context
 
