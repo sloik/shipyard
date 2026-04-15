@@ -1057,7 +1057,7 @@ textarea {
 
 .table-header > * {
   padding: 8px 16px;
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--text-secondary);
   user-select: none;
