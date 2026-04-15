@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -28,19 +28,19 @@ Tool rows in the sidebar use the Unicode wrench emoji (&#128295; / 🔧) rendere
 
 ## Root Cause
 
-(Agent fills in during run.)
+SPEC-BUG-060 fixed the detail panel wrench icon (line ~188) from Unicode emoji to Lucide SVG but did not update the sidebar tool row template (line ~2154), which still used `&#128295;` in a styled `<span>`. The fix replaces the `<span>` with an inline Lucide `wrench` SVG at 14×14 using `stroke="currentColor"` and `class="tool-icon"` to inherit color from CSS.
 
 ## Requirements
 
-- [ ] R1: Sidebar tool rows use a Lucide `wrench` SVG icon at 14×14 instead of Unicode emoji
-- [ ] R2: Icon color matches design token: `$text-muted` for default rows, `$accent-fg` for active rows
+- [x] R1: Sidebar tool rows use a Lucide `wrench` SVG icon at 14×14 instead of Unicode emoji
+- [x] R2: Icon color matches design token: `$text-muted` for default rows, `$accent-fg` for active rows
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Sidebar tool icon is an SVG (not emoji), 14px × 14px
-- [ ] AC 2: Icon renders consistently across browsers (SVG vs emoji rendering varies)
-- [ ] AC 3: Icon uses `stroke="currentColor"` or similar to inherit color from parent/CSS
-- [ ] AC 4: No regressions — conflict rows still show warning icon &#9888;
+- [x] AC 1: Sidebar tool icon is an SVG (not emoji), 14px × 14px
+- [x] AC 2: Icon renders consistently across browsers (SVG vs emoji rendering varies)
+- [x] AC 3: Icon uses `stroke="currentColor"` or similar to inherit color from parent/CSS
+- [x] AC 4: No regressions — conflict rows still show warning icon &#9888;
 
 ## Context
 
