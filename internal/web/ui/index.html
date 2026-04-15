@@ -321,12 +321,10 @@
         <button class="seg-inactive" data-value="server%E2%86%92client">&#8592; RES</button>
       </div>
       <span id="history-count" class="badge badge-neutral"></span>
-      <button class="btn btn-default btn-sm" id="history-compare-btn" disabled>Compare (0/2)</button>
     </div>
 
     <!-- Table Header -->
     <div class="table-header">
-      <span data-col="checkbox" style="width:30px;"></span>
       <span data-col="time" style="width:90px;">Time</span>
       <span data-col="dir" style="width:55px;">Dir</span>
       <span data-col="server" style="width:110px;">Server</span>
@@ -2591,7 +2589,6 @@
   var historyTimeToggle  = document.getElementById('history-time-toggle');
   var historyDirToggle   = document.getElementById('history-dir-toggle');
   var historyCountEl     = document.getElementById('history-count');
-  var historyCompareBtn  = document.getElementById('history-compare-btn');
   var historyPrevBtn     = document.getElementById('history-prev-btn');
   var historyNextBtn     = document.getElementById('history-next-btn');
   var historyPageNums    = document.getElementById('history-page-nums');
@@ -2608,7 +2605,6 @@
   var historyLoaded   = false;
   var historyDirFilter = '';
   var historyTimeRange = '';
-  var historyChecked  = {}; // { id: TrafficEvent }
   var historyKnownServers = {};
   var historyKnownMethods = {};
   var historySearchTimer  = null;
@@ -2694,12 +2690,8 @@
      ====================================================================== */
   function historyRenderRow(evt, idx) {
     var altClass = idx % 2 === 1 ? ' row-alt' : '';
-    var isChecked = !!historyChecked[evt.id];
-    var checkboxHtml = '<input type="checkbox" class="history-check" data-id="' + evt.id + '"' +
-      (isChecked ? ' checked' : '') + '>';
 
     return '<div class="table-row' + altClass + '" data-id="' + evt.id + '" data-evt=\'' + escapeHtml(JSON.stringify(evt)) + '\'>' +
-      '<span data-col="checkbox" style="width:30px;">' + checkboxHtml + '</span>' +
       '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time" style="width:90px;">' + relativeTime(evt.timestamp) + '</span>' +
       '<span data-col="dir" style="width:55px;">' + dirBadge(evt.direction) + '</span>' +
       '<span data-col="server" style="width:110px;">' + escapeHtml(evt.server_name) + '</span>' +
@@ -2847,44 +2839,6 @@
     }
     historyPage = 1;
   }
-
-  /* ======================================================================
-     History — Checkbox & Compare (AC-6)
-     ====================================================================== */
-  historyBody.addEventListener('change', function(e) {
-    var cb = e.target.closest('.history-check');
-    if (!cb) return;
-    var id = parseInt(cb.dataset.id, 10);
-
-    if (cb.checked) {
-      if (Object.keys(historyChecked).length >= 2) {
-        cb.checked = false;
-        DS.toast('Maximum 2 entries can be selected for comparison', 'info');
-        return;
-      }
-      // Parse the event data from the row
-      var row = cb.closest('.table-row');
-      if (row) {
-        try {
-          historyChecked[id] = JSON.parse(row.getAttribute('data-evt'));
-        } catch(ex) {
-          historyChecked[id] = { id: id };
-        }
-      }
-    } else {
-      delete historyChecked[id];
-    }
-
-    var count = Object.keys(historyChecked).length;
-    historyCompareBtn.textContent = 'Compare (' + count + '/2)';
-    historyCompareBtn.disabled = count !== 2;
-  });
-
-  historyCompareBtn.addEventListener('click', function() {
-    var ids = Object.keys(historyChecked);
-    if (ids.length !== 2) return;
-    showDiffView(parseInt(ids[0], 10), parseInt(ids[1], 10));
-  });
 
   /* ======================================================================
      History — Replay (AC-1)

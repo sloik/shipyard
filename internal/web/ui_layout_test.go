@@ -787,10 +787,7 @@ func TestSPEC003_HistoryViewElements(t *testing.T) {
 		t.Error("AC-5 FAIL: expected history-goto-input for 'Go to page'")
 	}
 
-	// AC-6: Compare/diff elements
-	if !strings.Contains(content, `id="history-compare-btn"`) {
-		t.Error("AC-6 FAIL: expected history-compare-btn")
-	}
+	// AC-6: Diff elements (compare button removed per BUG-112 — checkboxes not in design)
 	if !strings.Contains(content, `id="history-diff"`) {
 		t.Error("AC-6 FAIL: expected history-diff container")
 	}
