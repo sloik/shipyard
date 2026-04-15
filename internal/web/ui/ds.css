@@ -592,8 +592,8 @@ body {
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
+  gap: 4px;
+  padding: 2px 8px;
   border-radius: var(--radius-full);
   font-size: var(--font-size-sm);
   font-weight: 500;
@@ -643,6 +643,7 @@ body {
   background: var(--bg-raised);
   color: var(--text-secondary);
   border: 1px solid var(--border-default);
+  padding: 4px 10px;
 }
 
 .badge-crashed {
