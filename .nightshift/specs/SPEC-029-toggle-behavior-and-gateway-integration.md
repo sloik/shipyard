@@ -4,9 +4,11 @@ template_version: 2
 priority: 2
 layer: 2
 type: feature
-status: done
+status: ready
 after: [SPEC-028]
-prior_attempts: []
+prior_attempts:
+  - date: 2026-04-15
+    outcome: "Agent claimed all implemented and tests pass, but toggles do not work in the running app. Code analysis shows the gateway policy store may not be wired into the web server correctly at startup, or the toggle API calls fail silently. Implementation appears complete on paper but feature is non-functional."
 created: 2026-04-15
 ---
 
