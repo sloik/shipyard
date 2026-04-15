@@ -4,7 +4,7 @@ template_version: 2
 priority: 2
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-028]
 prior_attempts: []
 created: 2026-04-15
@@ -30,65 +30,65 @@ SPEC-028 delivered the visual toggle components and the persistence/API layer. H
 
 ### Toggle Sync
 
-- [ ] R1: Sidebar toggle and detail panel toggle for the same tool MUST always be in sync. Toggling one immediately updates the other without a full sidebar re-render.
-- [ ] R2: WebSocket `toggle_changed` events from the server MUST update both the sidebar toggle and the detail panel toggle (if the affected tool is currently selected). This ensures multi-tab sync.
-- [ ] R3: Optimistic UI: toggle flips immediately on click; if the API call fails, revert to previous state and show a toast error.
+- [x] R1: Sidebar toggle and detail panel toggle for the same tool MUST always be in sync. Toggling one immediately updates the other without a full sidebar re-render.
+- [x] R2: WebSocket `toggle_changed` events from the server MUST update both the sidebar toggle and the detail panel toggle (if the affected tool is currently selected). This ensures multi-tab sync.
+- [x] R3: Optimistic UI: toggle flips immediately on click; if the API call fails, revert to previous state and show a toast error.
 
 ### Disabled Tool Detail Panel
 
-- [ ] R4: When a disabled tool is selected in the sidebar, the detail panel MUST show a visual "disabled" state:
+- [x] R4: When a disabled tool is selected in the sidebar, the detail panel MUST show a visual "disabled" state:
   - Title row: Switch/Off toggle, tool name at reduced opacity or `$text-muted` color
   - Schema form: visible but all input fields disabled (not editable)
   - Execute button: disabled, label changed to "Tool Disabled" (not just hint text)
   - A banner or inline message: "This tool is disabled. Enable it to execute."
-- [ ] R5: When a tool is disabled while it's currently selected in the detail panel, the panel transitions to the disabled visual state without deselecting the tool.
-- [ ] R6: When a server is disabled, all its tools in the detail panel show the disabled state with message: "Server is disabled. Enable the server first."
+- [x] R5: When a tool is disabled while it's currently selected in the detail panel, the panel transitions to the disabled visual state without deselecting the tool.
+- [x] R6: When a server is disabled, all its tools in the detail panel show the disabled state with message: "Server is disabled. Enable the server first."
 
 ### MCP Gateway Compliance
 
-- [ ] R7: Shipyard gateway MUST declare `capabilities.tools.listChanged: true` in its MCP `initialize` response.
-- [ ] R8: When a tool's effective enabled state changes (either via tool toggle or server toggle), the gateway MUST send `notifications/tools/list_changed` JSON-RPC notification to all connected MCP clients (e.g., Claude).
-- [ ] R9: `tools/list` response MUST exclude disabled tools entirely (not include them with `enabled: false`). A disabled tool is invisible to MCP clients — as if it doesn't exist.
-- [ ] R10: `tools/call` for a disabled tool MUST return a JSON-RPC Protocol Error with code `-32602` and message `"Unknown tool: {name}"`. This is consistent with the MCP spec's error handling for unknown tools — from the client's perspective, a disabled tool does not exist.
-- [ ] R11: Re-enabling a tool MUST trigger `notifications/tools/list_changed` so clients re-fetch and discover the newly available tool.
+- [x] R7: Shipyard gateway MUST declare `capabilities.tools.listChanged: true` in its MCP `initialize` response.
+- [x] R8: When a tool's effective enabled state changes (either via tool toggle or server toggle), the gateway MUST send `notifications/tools/list_changed` JSON-RPC notification to all connected MCP clients (e.g., Claude).
+- [x] R9: `tools/list` response MUST exclude disabled tools entirely (not include them with `enabled: false`). A disabled tool is invisible to MCP clients — as if it doesn't exist.
+- [x] R10: `tools/call` for a disabled tool MUST return a JSON-RPC Protocol Error with code `-32602` and message `"Unknown tool: {name}"`. This is consistent with the MCP spec's error handling for unknown tools — from the client's perspective, a disabled tool does not exist.
+- [x] R11: Re-enabling a tool MUST trigger `notifications/tools/list_changed` so clients re-fetch and discover the newly available tool.
 
 ### Shipyard Built-in Tool Toggles
 
-- [ ] R12: Remove the `is_self` hard-block on tool toggles. Shipyard's own tools (status, list_servers, restart, stop) MUST be individually toggleable, same as any other server's tools.
-- [ ] R13: The Shipyard server-level toggle remains hidden/always-on (the gateway process cannot disable itself). Only individual tool-level toggles are exposed.
-- [ ] R14: Default state for Shipyard tools: all enabled (backward compatible).
-- [ ] R15: When a Shipyard tool is disabled via toggle, it is excluded from `tools/list` and returns `-32602` on `tools/call`, same as any other disabled tool (R9, R10).
+- [x] R12: Remove the `is_self` hard-block on tool toggles. Shipyard's own tools (status, list_servers, restart, stop) MUST be individually toggleable, same as any other server's tools.
+- [x] R13: The Shipyard server-level toggle remains hidden/always-on (the gateway process cannot disable itself). Only individual tool-level toggles are exposed.
+- [x] R14: Default state for Shipyard tools: all enabled (backward compatible).
+- [x] R15: When a Shipyard tool is disabled via toggle, it is excluded from `tools/list` and returns `-32602` on `tools/call`, same as any other disabled tool (R9, R10).
 
 ## Acceptance Criteria
 
 ### Toggle Sync
 
-- [ ] AC 1: Click sidebar toggle Off → detail panel toggle (if same tool selected) flips to Off within the same render frame — no flicker, no delay
-- [ ] AC 2: Click detail panel toggle Off → sidebar toggle for that tool flips to Off immediately
-- [ ] AC 3: Open two browser tabs on Tools page → disable tool in Tab A → Tab B's sidebar and detail panel reflect the change within 1 second (via WebSocket)
-- [ ] AC 4: API failure on toggle → toggle reverts to previous state, toast displays "Failed to update toggle"
+- [x] AC 1: Click sidebar toggle Off → detail panel toggle (if same tool selected) flips to Off within the same render frame — no flicker, no delay
+- [x] AC 2: Click detail panel toggle Off → sidebar toggle for that tool flips to Off immediately
+- [x] AC 3: Open two browser tabs on Tools page → disable tool in Tab A → Tab B's sidebar and detail panel reflect the change within 1 second (via WebSocket)
+- [x] AC 4: API failure on toggle → toggle reverts to previous state, toast displays "Failed to update toggle"
 
 ### Disabled Tool Detail Panel
 
-- [ ] AC 5: Select an enabled tool → disable it → detail panel transitions: Execute button shows "Tool Disabled" (disabled), schema form inputs become read-only/disabled, banner appears
-- [ ] AC 6: Disable a server → select any of its tools → detail panel shows "Server is disabled" message, Execute button disabled
-- [ ] AC 7: Re-enable the tool/server → detail panel returns to normal enabled state, Execute button re-enabled
+- [x] AC 5: Select an enabled tool → disable it → detail panel transitions: Execute button shows "Tool Disabled" (disabled), schema form inputs become read-only/disabled, banner appears
+- [x] AC 6: Disable a server → select any of its tools → detail panel shows "Server is disabled" message, Execute button disabled
+- [x] AC 7: Re-enable the tool/server → detail panel returns to normal enabled state, Execute button re-enabled
 
 ### MCP Gateway Compliance
 
-- [ ] AC 8: `initialize` response includes `"tools": { "listChanged": true }` in capabilities
-- [ ] AC 9: Disable tool "read_file" → connected MCP client receives `notifications/tools/list_changed` notification
-- [ ] AC 10: After notification, client calls `tools/list` → "read_file" is NOT in the response
-- [ ] AC 11: Client calls `tools/call` with `name: "read_file"` → receives JSON-RPC error `{ "code": -32602, "message": "Unknown tool: read_file" }`
-- [ ] AC 12: Re-enable "read_file" → `notifications/tools/list_changed` sent → next `tools/list` includes "read_file" again
-- [ ] AC 13: Disable entire server → one `notifications/tools/list_changed` sent (not one per tool) → all server's tools disappear from `tools/list`
+- [x] AC 8: `initialize` response includes `"tools": { "listChanged": true }` in capabilities
+- [x] AC 9: Disable tool "read_file" → connected MCP client receives `notifications/tools/list_changed` notification
+- [x] AC 10: After notification, client calls `tools/list` → "read_file" is NOT in the response
+- [x] AC 11: Client calls `tools/call` with `name: "read_file"` → receives JSON-RPC error `{ "code": -32602, "message": "Unknown tool: read_file" }`
+- [x] AC 12: Re-enable "read_file" → `notifications/tools/list_changed` sent → next `tools/list` includes "read_file" again
+- [x] AC 13: Disable entire server → one `notifications/tools/list_changed` sent (not one per tool) → all server's tools disappear from `tools/list`
 
 ### Shipyard Built-in Tools
 
-- [ ] AC 14: Shipyard tool rows in the sidebar have functional toggle switches (not disabled, no "cannot be disabled" tooltip)
-- [ ] AC 15: Disabling Shipyard's `restart` tool → `tools/list` no longer includes `restart` → calling `restart` returns `-32602`
-- [ ] AC 16: Shipyard server card on Servers tab has no server-level toggle (or always-on, non-interactive)
-- [ ] AC 17: All Shipyard tools default to enabled on fresh install and after upgrade (backward compatible)
+- [x] AC 14: Shipyard tool rows in the sidebar have functional toggle switches (not disabled, no "cannot be disabled" tooltip)
+- [x] AC 15: Disabling Shipyard's `restart` tool → `tools/list` no longer includes `restart` → calling `restart` returns `-32602`
+- [x] AC 16: Shipyard server card on Servers tab has no server-level toggle (or always-on, non-interactive)
+- [x] AC 17: All Shipyard tools default to enabled on fresh install and after upgrade (backward compatible)
 
 ## Context
 
