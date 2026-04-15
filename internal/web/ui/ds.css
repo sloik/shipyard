@@ -1625,6 +1625,8 @@ textarea {
   padding: 10px 16px;
   background: var(--bg-surface);
   border-top: 1px solid var(--border-default);
+  position: sticky;
+  bottom: 0;
 }
 
 .pagination-nav {
