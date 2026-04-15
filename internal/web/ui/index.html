@@ -1092,7 +1092,7 @@
       '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time">' + relativeTime(evt.timestamp) + '</span>' +
       '<span data-col="dir">' + dirBadge(evt.direction) + '</span>' +
       '<span data-col="server">' + escapeHtml(evt.server_name) + '</span>' +
-      '<span class="code-inline" data-col="method">' + escapeHtml(evt.method || '\u2014') + '</span>' +
+      '<span class="method-cell" data-col="method">' + escapeHtml(evt.method || '\u2014') + '</span>' +
       '<span data-col="status">' + statusBadge(evt.status) + '</span>' +
       '<span data-col="latency">' + latencyPill(evt.latency_ms) + '</span>' +
       '<span class="row-chevron' + chevronClass + '" data-col="chevron"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>' +
@@ -2693,7 +2693,7 @@
       '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time" style="width:90px;">' + relativeTime(evt.timestamp) + '</span>' +
       '<span data-col="dir" style="width:55px;">' + dirBadge(evt.direction) + '</span>' +
       '<span data-col="server" style="width:110px;">' + escapeHtml(evt.server_name) + '</span>' +
-      '<span class="code-inline" data-col="method" style="flex:1;">' + escapeHtml(evt.method || '\u2014') + '</span>' +
+      '<span class="method-cell" data-col="method" style="flex:1;">' + escapeHtml(evt.method || '\u2014') + '</span>' +
       '<span data-col="status" style="width:90px;">' + statusBadge(evt.status) + '</span>' +
       '<span data-col="latency" style="width:70px;">' + latencyPill(evt.latency_ms) + '</span>' +
       '<span data-col="actions" style="width:180px;">' +

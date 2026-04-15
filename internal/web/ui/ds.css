@@ -1004,6 +1004,12 @@ textarea {
   color: var(--text-primary);
 }
 
+.method-cell {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
 .btn-show-more,
 .btn-show-less {
   background: transparent;
