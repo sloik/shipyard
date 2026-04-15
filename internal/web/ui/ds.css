@@ -1618,57 +1618,44 @@ textarea {
 }
 
 /* ==========================================================================
-   22. Pagination (3)
+   22. Infinite Scroll (3)
    ========================================================================== */
 
-.pagination {
+.scroll-sentinel {
+  height: 1px;
+  width: 100%;
+  visibility: hidden;
+}
+
+.load-more-spinner {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-default);
-  position: sticky;
-  bottom: 0;
-}
-
-.pagination-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.pagination-nav .btn,
-.pagination > .btn {
-  color: var(--text-secondary);
-}
-
-.page-num {
-  display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 6px;
+  gap: 8px;
+  padding: 12px 16px;
   font-size: var(--font-size-sm);
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-s);
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  color: var(--text-muted);
 }
 
-.page-num:hover {
-  background: var(--btn-default-hover);
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-fg);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
 }
 
-.page-num.is-active {
-  background: var(--accent-emphasis);
-  color: var(--text-on-emphasis);
-  border-color: var(--accent-emphasis);
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.scroll-count-info {
+  padding: 8px 16px;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  text-align: center;
+  border-top: 1px solid var(--border-muted);
 }
 
 /* ==========================================================================

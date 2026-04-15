@@ -340,6 +340,15 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		Search:    r.URL.Query().Get("search"),
 	}
 
+	// Support offset-based pagination for infinite scroll.
+	// If ?offset= is provided, it takes precedence over ?page=.
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if v, err := strconv.Atoi(offsetStr); err == nil && v >= 0 {
+			f.Offset = v
+			f.UseOffset = true
+		}
+	}
+
 	if fromStr := r.URL.Query().Get("from_ts"); fromStr != "" {
 		if v, err := strconv.ParseInt(fromStr, 10, 64); err == nil {
 			f.FromTs = &v

@@ -134,15 +134,13 @@
     <!-- Table Body (rows injected here) -->
     <div id="traffic-body"></div>
 
-    <!-- Pagination -->
-    <div id="pagination" class="pagination">
-      <span id="page-info" class="badge badge-neutral"></span>
-      <div class="pagination-nav">
-        <button class="btn btn-default btn-sm" id="prev-btn" disabled>&#8592; Prev</button>
-        <span id="page-nums"></span>
-        <button class="btn btn-default btn-sm" id="next-btn" disabled>Next &#8594;</button>
-      </div>
+    <!-- Infinite Scroll Sentinel -->
+    <div id="timeline-sentinel" class="scroll-sentinel"></div>
+    <div id="timeline-loading" class="load-more-spinner" style="display:none;">
+      <div class="spinner-sm"></div>
+      <span>Loading&hellip;</span>
     </div>
+    <div id="timeline-scroll-info" class="scroll-count-info" style="display:none;"></div>
 
   </div><!-- /timeline-content -->
 </main>
@@ -337,17 +335,13 @@
     <!-- Table Body -->
     <div id="history-body"></div>
 
-    <!-- Pagination -->
-    <div id="history-pagination" class="pagination">
-      <button class="btn btn-default btn-sm" id="history-prev-btn" disabled>&#8592; Prev</button>
-      <span id="history-page-nums"></span>
-      <button class="btn btn-default btn-sm" id="history-next-btn" disabled>Next &#8594;</button>
-      <div class="input-group" style="margin-left:8px;">
-        <input type="number" id="history-goto-input" class="input" style="width:60px;" min="1" placeholder="#">
-        <button class="btn btn-default btn-sm" id="history-goto-btn">Go</button>
-      </div>
-      <span id="history-page-info" class="badge badge-neutral"></span>
+    <!-- Infinite Scroll Sentinel -->
+    <div id="history-sentinel" class="scroll-sentinel"></div>
+    <div id="history-loading" class="load-more-spinner" style="display:none;">
+      <div class="spinner-sm"></div>
+      <span>Loading&hellip;</span>
     </div>
+    <div id="history-scroll-info" class="scroll-count-info" style="display:none;"></div>
 
   </div><!-- /history-content -->
 
@@ -769,10 +763,9 @@
   var dirToggle       = document.getElementById('dir-toggle');
   var clearFiltersBtn = document.getElementById('clear-filters-btn');
   var trafficCount    = document.getElementById('traffic-count');
-  var prevBtn         = document.getElementById('prev-btn');
-  var nextBtn         = document.getElementById('next-btn');
-  var pageNums        = document.getElementById('page-nums');
-  var pageInfo        = document.getElementById('page-info');
+  var timelineSentinel  = document.getElementById('timeline-sentinel');
+  var timelineLoadingEl = document.getElementById('timeline-loading');
+  var timelineScrollInfo = document.getElementById('timeline-scroll-info');
   var wsIndicator     = document.getElementById('ws-indicator');
   var wsBanner        = document.getElementById('ws-banner');
   var retryBtn        = document.getElementById('retry-btn');
@@ -781,9 +774,11 @@
   /* ======================================================================
      State
      ====================================================================== */
-  var currentPage   = 1;
-  var pageSize      = 25;
-  var totalCount    = 0;
+  var timelineOffset  = 0;
+  var timelinePageSize = 25;
+  var timelineTotal   = 0;
+  var timelineLoading = false;
+  var timelineAllLoaded = false;
   var expandedRowId = null;
   var nativeFetch   = window.fetch.bind(window);
   var ws            = null;
@@ -1594,17 +1589,17 @@
 
   dirToggle.addEventListener('change', function(e) {
     dirFilter = e.detail ? decodeURIComponent(e.detail.value || '') : '';
-    currentPage = 1;
+    timelineReset();
     loadPage();
   });
 
   filterServer.addEventListener('change', function() {
-    currentPage = 1;
+    timelineReset();
     loadPage();
   });
 
   filterMethod.addEventListener('change', function() {
-    currentPage = 1;
+    timelineReset();
     loadPage();
   });
 
@@ -1620,17 +1615,30 @@
     }
     segs[0].classList.remove('seg-inactive');
     segs[0].classList.add('seg-active');
-    currentPage = 1;
+    timelineReset();
     loadPage();
   });
 
   /* ======================================================================
-     API — Load Page
+     API — Infinite Scroll
      ====================================================================== */
+  function timelineReset() {
+    timelineOffset = 0;
+    timelineTotal = 0;
+    timelineLoading = false;
+    timelineAllLoaded = false;
+    trafficBody.innerHTML = '';
+    timelineScrollInfo.style.display = 'none';
+  }
+
   function loadPage() {
+    if (timelineLoading || timelineAllLoaded) return;
+    timelineLoading = true;
+    timelineLoadingEl.style.display = '';
+
     var params = new URLSearchParams();
-    params.set('page', currentPage);
-    params.set('page_size', pageSize);
+    params.set('offset', timelineOffset);
+    params.set('page_size', timelinePageSize);
 
     var sv = filterServer.value;
     var mt = filterMethod.value;
@@ -1641,9 +1649,11 @@
     fetch('/api/traffic?' + params)
       .then(function(resp) { return resp.json(); })
       .then(function(data) {
-        totalCount = data.total_count;
+        timelineLoading = false;
+        timelineLoadingEl.style.display = 'none';
+        timelineTotal = data.total_count;
 
-        if (totalCount === 0) {
+        if (timelineTotal === 0 && timelineOffset === 0) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
           return;
@@ -1663,67 +1673,40 @@
           });
         }
 
-        trafficCount.textContent = totalCount + ' entries';
+        trafficCount.textContent = timelineTotal + ' entries';
 
-        var html = '';
+        var existingCount = trafficBody.querySelectorAll('.table-row:not([data-detail-for])').length;
         for (var i = 0; i < items.length; i++) {
-          html += renderRow(items[i], i);
+          trafficBody.insertAdjacentHTML('beforeend', renderRow(items[i], existingCount + i));
         }
-        trafficBody.innerHTML = html;
 
-        renderPagination(data.total_count, data.page, data.page_size);
+        timelineOffset += items.length;
+
+        // Check if we've loaded everything
+        if (timelineOffset >= timelineTotal || items.length === 0) {
+          timelineAllLoaded = true;
+          if (timelineTotal > 0) {
+            timelineScrollInfo.textContent = 'Showing ' + timelineOffset + ' of ' + timelineTotal + ' entries';
+            timelineScrollInfo.style.display = '';
+          }
+        }
       })
       .catch(function(err) {
+        timelineLoading = false;
+        timelineLoadingEl.style.display = 'none';
         console.error('Failed to load traffic:', err);
       });
   }
 
-  /* ======================================================================
-     Pagination
-     ====================================================================== */
-  function renderPagination(total, page, size) {
-    var totalPages = Math.ceil(total / size);
-    if (totalPages <= 1) {
-      document.getElementById('pagination').style.display = 'none';
-      return;
-    }
-
-    document.getElementById('pagination').style.display = '';
-
-    prevBtn.disabled = page <= 1;
-    nextBtn.disabled = page >= totalPages;
-
-    var start = (page - 1) * size + 1;
-    var end = Math.min(page * size, total);
-    pageInfo.textContent = 'Showing ' + start + '\u2013' + end + ' of ' + total;
-
-    // Page numbers
-    var nums = '';
-    var startPage = Math.max(1, page - 2);
-    var endPage = Math.min(totalPages, page + 2);
-    for (var p = startPage; p <= endPage; p++) {
-      var activeClass = p === page ? ' is-active' : '';
-      nums += '<button class="page-num' + activeClass + '" data-page="' + p + '">' + p + '</button>';
-    }
-    pageNums.innerHTML = nums;
+  // IntersectionObserver for timeline infinite scroll
+  if ('IntersectionObserver' in window) {
+    var timelineObserver = new IntersectionObserver(function(entries) {
+      if (entries[0].isIntersecting) {
+        loadPage();
+      }
+    }, { rootMargin: '200px' });
+    timelineObserver.observe(timelineSentinel);
   }
-
-  prevBtn.addEventListener('click', function() {
-    if (currentPage > 1) { currentPage--; loadPage(); }
-  });
-
-  nextBtn.addEventListener('click', function() {
-    currentPage++;
-    loadPage();
-  });
-
-  pageNums.addEventListener('click', function(e) {
-    var btn = e.target.closest('.page-num');
-    if (btn && btn.dataset.page) {
-      currentPage = parseInt(btn.dataset.page, 10);
-      loadPage();
-    }
-  });
 
   /* ======================================================================
      WebSocket
@@ -1777,17 +1760,17 @@
         // Track filters
         trackFilters([evt]);
 
-        // If on page 1 with no filters active, prepend
-        if (currentPage === 1 && !filterServer.value && !filterMethod.value && !getDirectionFilter()) {
+        // Prepend new live entries when no filters are active
+        if (!filterServer.value && !filterMethod.value && !getDirectionFilter()) {
           timelineEmpty.style.display = 'none';
           timelineContent.style.display = '';
 
-          var existingRows = trafficBody.querySelectorAll('.table-row:not([data-detail-for])');
           var newIdx = 0; // new row is always first
           trafficBody.insertAdjacentHTML('afterbegin', renderRow(evt, newIdx));
 
-          totalCount++;
-          trafficCount.textContent = totalCount + ' entries';
+          timelineTotal++;
+          timelineOffset++;
+          trafficCount.textContent = timelineTotal + ' entries';
         }
       } catch(err) {
         console.error('WS parse error:', err);
@@ -2589,20 +2572,19 @@
   var historyTimeToggle  = document.getElementById('history-time-toggle');
   var historyDirToggle   = document.getElementById('history-dir-toggle');
   var historyCountEl     = document.getElementById('history-count');
-  var historyPrevBtn     = document.getElementById('history-prev-btn');
-  var historyNextBtn     = document.getElementById('history-next-btn');
-  var historyPageNums    = document.getElementById('history-page-nums');
-  var historyPageInfo    = document.getElementById('history-page-info');
-  var historyGotoInput   = document.getElementById('history-goto-input');
-  var historyGotoBtn     = document.getElementById('history-goto-btn');
   var historyClearSearchBtn = document.getElementById('history-clear-search-btn');
   var historyDiff        = document.getElementById('history-diff');
   var diffBackBtn        = document.getElementById('diff-back-btn');
+  var historySentinel    = document.getElementById('history-sentinel');
+  var historyLoadingEl   = document.getElementById('history-loading');
+  var historyScrollInfo  = document.getElementById('history-scroll-info');
 
-  var historyPage     = 1;
-  var historyPageSize = 100;
-  var historyTotal    = 0;
-  var historyLoaded   = false;
+  var historyOffset    = 0;
+  var historyPageSize  = 50;
+  var historyTotal     = 0;
+  var historyLoaded    = false;
+  var historyLoading   = false;
+  var historyAllLoaded = false;
   var historyDirFilter = '';
   var historyTimeRange = '';
   var historyKnownServers = {};
@@ -2610,17 +2592,30 @@
   var historySearchTimer  = null;
 
   /* ======================================================================
-     History — Load Page
+     History — Infinite Scroll
      ====================================================================== */
+  function historyReset() {
+    historyOffset = 0;
+    historyTotal = 0;
+    historyLoading = false;
+    historyAllLoaded = false;
+    historyBody.innerHTML = '';
+    historyScrollInfo.style.display = 'none';
+  }
+
   function historyLoadPage() {
-    var params = new URLSearchParams();
-    params.set('page', historyPage);
-    params.set('page_size', historyPageSize);
+    if (historyLoading || historyAllLoaded) return;
+    historyLoading = true;
+    historyLoadingEl.style.display = '';
 
     var sv = historyServerFilter.value;
     var mt = historyMethodFilter.value;
     var search = historySearchInput.value.trim();
     var dir = historyDirFilter;
+
+    var params = new URLSearchParams();
+    params.set('offset', historyOffset);
+    params.set('page_size', historyPageSize);
 
     if (sv) params.set('server', sv);
     if (mt) params.set('method', mt);
@@ -2635,6 +2630,8 @@
     fetch('/api/traffic?' + params)
       .then(function(resp) { return resp.json(); })
       .then(function(data) {
+        historyLoading = false;
+        historyLoadingEl.style.display = 'none';
         historyTotal = data.total_count;
         historyLoaded = true;
 
@@ -2643,7 +2640,7 @@
         // Track servers/methods for filter dropdowns
         historyTrackFilters(items);
 
-        if (historyTotal === 0 && !search && !sv && !mt && !dir && !historyTimeRange) {
+        if (historyTotal === 0 && historyOffset === 0 && !search && !sv && !mt && !dir && !historyTimeRange) {
           historyEmpty.style.display = '';
           historyNoResults.style.display = 'none';
           historyContent.style.display = 'none';
@@ -2652,7 +2649,7 @@
 
         historyEmpty.style.display = 'none';
 
-        if (historyTotal === 0) {
+        if (historyTotal === 0 && historyOffset === 0) {
           historyNoResults.style.display = '';
           historyContent.style.display = 'none';
           return;
@@ -2672,17 +2669,37 @@
           historySearchClear.style.display = 'none';
         }
 
-        var html = '';
+        var existingCount = historyBody.querySelectorAll('.table-row').length;
         for (var i = 0; i < items.length; i++) {
-          html += historyRenderRow(items[i], i);
+          historyBody.insertAdjacentHTML('beforeend', historyRenderRow(items[i], existingCount + i));
         }
-        historyBody.innerHTML = html;
 
-        historyRenderPagination(data.total_count, data.page, data.page_size);
+        historyOffset += items.length;
+
+        // Check if all loaded
+        if (historyOffset >= historyTotal || items.length === 0) {
+          historyAllLoaded = true;
+          if (historyTotal > 0) {
+            historyScrollInfo.textContent = 'Showing ' + historyOffset + ' of ' + historyTotal + ' entries';
+            historyScrollInfo.style.display = '';
+          }
+        }
       })
       .catch(function(err) {
+        historyLoading = false;
+        historyLoadingEl.style.display = 'none';
         console.error('Failed to load history:', err);
       });
+  }
+
+  // IntersectionObserver for history infinite scroll
+  if ('IntersectionObserver' in window) {
+    var historyObserver = new IntersectionObserver(function(entries) {
+      if (entries[0].isIntersecting) {
+        historyLoadPage();
+      }
+    }, { rootMargin: '200px' });
+    historyObserver.observe(historySentinel);
   }
 
   /* ======================================================================
@@ -2704,60 +2721,6 @@
       '</span>' +
     '</div>';
   }
-
-  /* ======================================================================
-     History — Pagination
-     ====================================================================== */
-  function historyRenderPagination(total, page, size) {
-    var totalPages = Math.ceil(total / size);
-    if (totalPages <= 1) {
-      document.getElementById('history-pagination').style.display = 'none';
-      return;
-    }
-
-    document.getElementById('history-pagination').style.display = '';
-
-    historyPrevBtn.disabled = page <= 1;
-    historyNextBtn.disabled = page >= totalPages;
-
-    var start = (page - 1) * size + 1;
-    var end = Math.min(page * size, total);
-    historyPageInfo.textContent = 'Showing ' + start + '\u2013' + end + ' of ' + total;
-
-    var nums = '';
-    var startPage = Math.max(1, page - 2);
-    var endPage = Math.min(totalPages, page + 2);
-    for (var p = startPage; p <= endPage; p++) {
-      var activeClass = p === page ? ' is-active' : '';
-      nums += '<button class="page-num' + activeClass + '" data-page="' + p + '">' + p + '</button>';
-    }
-    historyPageNums.innerHTML = nums;
-  }
-
-  historyPrevBtn.addEventListener('click', function() {
-    if (historyPage > 1) { historyPage--; historyLoadPage(); }
-  });
-
-  historyNextBtn.addEventListener('click', function() {
-    historyPage++;
-    historyLoadPage();
-  });
-
-  historyPageNums.addEventListener('click', function(e) {
-    var btn = e.target.closest('.page-num');
-    if (btn && btn.dataset.page) {
-      historyPage = parseInt(btn.dataset.page, 10);
-      historyLoadPage();
-    }
-  });
-
-  historyGotoBtn.addEventListener('click', function() {
-    var val = parseInt(historyGotoInput.value, 10);
-    if (val >= 1) {
-      historyPage = val;
-      historyLoadPage();
-    }
-  });
 
   /* ======================================================================
      History — Filters
@@ -2782,14 +2745,14 @@
   historySearchInput.addEventListener('input', function() {
     clearTimeout(historySearchTimer);
     historySearchTimer = setTimeout(function() {
-      historyPage = 1;
+      historyReset();
       historyLoadPage();
     }, 300);
   });
 
   historySearchClear.addEventListener('click', function() {
     historySearchInput.value = '';
-    historyPage = 1;
+    historyReset();
     historyLoadPage();
   });
 
@@ -2799,24 +2762,24 @@
   });
 
   historyServerFilter.addEventListener('change', function() {
-    historyPage = 1;
+    historyReset();
     historyLoadPage();
   });
 
   historyMethodFilter.addEventListener('change', function() {
-    historyPage = 1;
+    historyReset();
     historyLoadPage();
   });
 
   historyTimeToggle.addEventListener('change', function(e) {
     historyTimeRange = e.detail ? e.detail.value || '' : '';
-    historyPage = 1;
+    historyReset();
     historyLoadPage();
   });
 
   historyDirToggle.addEventListener('change', function(e) {
     historyDirFilter = e.detail ? decodeURIComponent(e.detail.value || '') : '';
-    historyPage = 1;
+    historyReset();
     historyLoadPage();
   });
 
@@ -2837,7 +2800,7 @@
       segs[0].classList.remove('seg-inactive');
       segs[0].classList.add('seg-active');
     }
-    historyPage = 1;
+    historyReset();
   }
 
   /* ======================================================================
@@ -2887,7 +2850,8 @@
           btn.disabled = false;
           btn.textContent = 'Replay';
         }
-        // Refresh history to show new entry
+        // Refresh history to show new entry (reset to load from beginning)
+        historyReset();
         historyLoadPage();
       });
   }

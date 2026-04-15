@@ -238,6 +238,7 @@ type TrafficPage struct {
 	TotalCount int            `json:"total_count"`
 	Page       int            `json:"page"`
 	PageSize   int            `json:"page_size"`
+	Offset     int            `json:"offset"`
 }
 
 // Store handles traffic persistence in SQLite and JSONL.
@@ -458,6 +459,8 @@ func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 type QueryFilter struct {
 	Page      int
 	PageSize  int
+	Offset    int  // if > 0 or UseOffset is true, overrides Page-based offset
+	UseOffset bool // set to true when caller provides an explicit offset
 	Server    string
 	Method    string
 	Direction string
@@ -510,7 +513,12 @@ func (s *Store) QueryFiltered(f QueryFilter) (*TrafficPage, error) {
 	// Fetch page
 	page := f.Page
 	pageSize := f.PageSize
-	offset := (page - 1) * pageSize
+	var offset int
+	if f.UseOffset {
+		offset = f.Offset
+	} else {
+		offset = (page - 1) * pageSize
+	}
 	queryArgs := append(args, pageSize, offset)
 	rows, err := queryTrafficRows(
 		s.db,
@@ -551,6 +559,7 @@ func (s *Store) QueryFiltered(f QueryFilter) (*TrafficPage, error) {
 		TotalCount: total,
 		Page:       page,
 		PageSize:   pageSize,
+		Offset:     offset,
 	}, nil
 }
 

@@ -779,12 +779,12 @@ func TestSPEC003_HistoryViewElements(t *testing.T) {
 		t.Error("AC-4 FAIL: expected history-method-filter")
 	}
 
-	// AC-5: Pagination elements
-	if !strings.Contains(content, `id="history-pagination"`) {
-		t.Error("AC-5 FAIL: expected history-pagination container")
+	// AC-5: Infinite scroll elements (pagination replaced by BUG-113)
+	if !strings.Contains(content, `id="history-sentinel"`) {
+		t.Error("AC-5 FAIL: expected history-sentinel for infinite scroll")
 	}
-	if !strings.Contains(content, `id="history-goto-input"`) {
-		t.Error("AC-5 FAIL: expected history-goto-input for 'Go to page'")
+	if !strings.Contains(content, `id="history-loading"`) {
+		t.Error("AC-5 FAIL: expected history-loading spinner element")
 	}
 
 	// AC-6: Diff elements (compare button removed per BUG-112 — checkboxes not in design)
