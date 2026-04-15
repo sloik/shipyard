@@ -7,7 +7,9 @@ type: bugfix
 status: done
 after: []
 violates: [UX-002]
-prior_attempts: []
+prior_attempts:
+  - date: 2026-04-15
+    outcome: "Nightshift marked done but no changes made — latency cells still render as plain Inter 12px text with no background, no border-radius, no color coding. Root cause and ACs left blank."
 created: 2026-04-15
 ---
 
