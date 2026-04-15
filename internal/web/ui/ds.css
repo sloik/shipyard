@@ -505,7 +505,12 @@ body {
 .input-label {
   font-size: var(--font-size-sm);
   font-weight: 500;
-  color: var(--text-secondary);
+  color: var(--text-muted);
+}
+
+#filter-server,
+#filter-method {
+  font-size: var(--font-size-base);
 }
 
 /* ==========================================================================
@@ -862,6 +867,16 @@ textarea {
 .seg-toggle .seg-inactive:hover {
   color: var(--text-secondary);
   background: var(--btn-default-bg);
+}
+
+.seg-toggle button:first-child,
+.seg-toggle [role="tab"]:first-child {
+  border-radius: var(--radius-s) 0 0 var(--radius-s);
+}
+
+.seg-toggle button:last-child,
+.seg-toggle [role="tab"]:last-child {
+  border-radius: 0 var(--radius-s) var(--radius-s) 0;
 }
 
 .switch {
@@ -1802,7 +1817,7 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 6px 12px 6px 24px;
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-base);
   color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.1s;
