@@ -657,7 +657,7 @@ body {
 .dir {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   padding: 1px 6px;
   border-radius: var(--radius-s);
   font-size: var(--font-size-sm);

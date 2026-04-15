@@ -953,10 +953,12 @@
   }
 
   function dirBadge(direction) {
+    var arrowRight = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+    var arrowLeft = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>';
     if (direction.indexOf('client') === 0) {
-      return '<span class="dir dir-req">REQ \u2192</span>';
+      return '<span class="dir dir-req">' + arrowRight + 'REQ</span>';
     }
-    return '<span class="dir dir-res">\u2190 RES</span>';
+    return '<span class="dir dir-res">' + arrowLeft + 'RES</span>';
   }
 
   function isRequest(direction) {
