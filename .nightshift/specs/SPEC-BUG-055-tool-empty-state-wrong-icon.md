@@ -7,7 +7,7 @@ type: bugfix
 status: done
 after: []
 violates: [UX-002]
-prior_attempts: []
+prior_attempts: [SPEC-BUG-055-attempt-1]
 created: 2026-04-14
 ---
 
@@ -29,22 +29,26 @@ The "No tool selected" empty state in the Tool Browser shows a Unicode wrench ch
 
 ## Root Cause
 
-(Agent fills in during run.)
+The empty state `<div id="tools-empty">` contained a Unicode wrench character instead of a Lucide SVG icon, and lacked a card container with border styling. Attempt 1 correctly replaced the icon with Lucide `mouse-pointer-click` SVG at 40px / `var(--text-muted)`, but did NOT add the bordered card wrapper (AC 4).
+
+## Prior Attempt Notes
+
+**SPEC-BUG-055-attempt-1:** R1 and R2 done (icon replaced with Lucide SVG). R3 NOT done — the empty state content still sits directly inside `#tools-empty` with no card container. AC 1–3 pass, AC 4 fails. The fix must wrap the icon + title + description in a `<div>` with `border: 1px solid var(--border-muted); border-radius: 8px; padding: 32px`.
 
 ## Requirements
 
-- [ ] R1: Empty state icon is a Lucide `mouse-pointer-click` icon, not a Unicode wrench
-- [ ] R2: Icon is 40px, colored `var(--text-muted)`
-- [ ] R3: Empty state content is wrapped in a bordered card (border-radius 8px, 1px solid `--border-muted`, padding 32px)
+- [x] R1: Empty state icon is a Lucide `mouse-pointer-click` icon, not a Unicode wrench
+- [x] R2: Icon is 40px, colored `var(--text-muted)`
+- [x] R3: Empty state content is wrapped in a bordered card (border-radius 8px, 1px solid `--border-muted`, padding 32px)
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Empty state displays Lucide `mouse-pointer-click` icon
-- [ ] AC 2: Icon is 40px in size
-- [ ] AC 3: Icon color is `var(--text-muted)` (no opacity override)
-- [ ] AC 4: Empty state content is inside a container with `border: 1px solid var(--border-muted); border-radius: 8px; padding: 32px`
-- [ ] AC 5: Title and description text remain unchanged
-- [ ] AC 6: `go build ./...` passes
+- [x] AC 1: Empty state displays Lucide `mouse-pointer-click` icon
+- [x] AC 2: Icon is 40px in size
+- [x] AC 3: Icon color is `var(--text-muted)` (no opacity override)
+- [x] AC 4: Empty state content is inside a container with `border: 1px solid var(--border-muted); border-radius: 8px; padding: 32px`
+- [x] AC 5: Title and description text remain unchanged
+- [x] AC 6: `go build ./...` passes
 
 ## Context
 

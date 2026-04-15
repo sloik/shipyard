@@ -388,13 +388,32 @@ func TestSPECBUG017_ToolBrowserEmptyStateMatchesPhase1CardTreatment(t *testing.T
 	}
 	tag := content[tagStart : idx+tagEnd+1]
 
-	for _, needle := range []string{"class=\"empty-state tool-browser-empty-state\"", "height:100%"} {
+	// AC: outer #tools-empty uses empty-state class for centering and preserves height:100%
+	for _, needle := range []string{"class=\"empty-state\"", "height:100%"} {
 		if !strings.Contains(tag, needle) {
 			t.Errorf("SPEC-BUG-017 FAIL: expected %q in tools-empty tag: %s", needle, tag)
 		}
 	}
 	if !strings.Contains(content, "fill in parameters, and execute it.") {
 		t.Error("SPEC-BUG-017 FAIL: tools empty-state copy should mention per-tool parameter controls")
+	}
+
+	// AC: inner card wrapper provides the bordered card treatment (SPEC-BUG-055)
+	// The card is an inner <div> with inline border/radius/padding, not on the outer #tools-empty tag.
+	toolsEmptyBlock := content[idx:]
+	closingIdx := strings.Index(toolsEmptyBlock, `</div>`)
+	if closingIdx != -1 {
+		// search within the tools-empty block for the inner card wrapper
+		block := toolsEmptyBlock[:closingIdx+6]
+		for _, needle := range []string{
+			"border: 1px solid var(--border-muted)",
+			"border-radius: 8px",
+			"padding: 32px",
+		} {
+			if !strings.Contains(block, needle) {
+				t.Errorf("SPEC-BUG-017/BUG-055 FAIL: expected inner card wrapper with %q inside #tools-empty", needle)
+			}
+		}
 	}
 
 	css, err := uiFS.ReadFile("ui/ds.css")
