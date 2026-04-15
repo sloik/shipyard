@@ -4063,7 +4063,7 @@
       var t = tools[i];
       html += '<div class="table-row" style="display:flex; align-items:center; padding:6px 16px; border-bottom:1px solid var(--border-muted);">';
       html += '<span style="flex:1; font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-primary);">' + escapeHtml(t.tool) + '</span>';
-      html += '<span style="width:110px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(t.server) + '</span>';
+      html += '<span style="width:110px; font-family:var(--font-mono); font-size:var(--font-size-sm); color:var(--text-secondary);">' + escapeHtml(t.server) + '</span>';
       html += '<span style="width:70px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + t.calls + '</span>';
       html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.min_ms) + ';">' + formatMs(t.min_ms) + '</span>';
       html += '<span style="width:70px; font-size:var(--font-size-sm); color:' + latencyColor(t.avg_ms) + ';">' + formatMs(t.avg_ms) + '</span>';
