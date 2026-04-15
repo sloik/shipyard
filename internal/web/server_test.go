@@ -3489,16 +3489,78 @@ func TestSPEC029_GatewayToolsListExcludesDisabled(t *testing.T) {
 	}
 }
 
-// TestSPEC029_GatewayInitListChangedCapability verifies AC 8:
-// handleMCPPassthrough does not directly handle initialize (routes to proxy),
-// but the auth MCPHandler's initialize response includes listChanged: true.
-// This test covers the passthrough path; auth path is covered in auth middleware tests.
-func TestSPEC029_GatewayInitListChangedCapability(t *testing.T) {
-	// The passthrough handler for "initialize" falls through to the proxy.
-	// The auth handler returns listChanged: true (tested in auth/middleware_test.go).
-	// Here we verify the shipyard-mcp bridge's initialize handler.
-	// Since this package tests the web server, test the auth middleware response via the hub.
-	// The key assertion is that listChanged=true appears in the auth path.
-	// See TestSPEC029_AuthInitializeListChanged in auth package.
-	t.Log("SPEC-029 AC 8: initialize listChanged=true is verified via auth middleware test (TestSPEC029_AuthInitializeListChanged)")
+// TestSPEC029_PassthroughInitializeListChanged verifies AC 8 (passthrough path):
+// handleMCPPassthrough returns an initialize response with listChanged: true.
+// Previously this fell through to the proxy, returning the child's capabilities.
+func TestSPEC029_PassthroughInitializeListChanged(t *testing.T) {
+	srv := newTestServer(t)
+	// No proxy needed — initialize is now handled internally.
+	rpcBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("SPEC-029 AC 8: expected HTTP 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	res, ok := result["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected result object, got: %v", result)
+	}
+	caps, ok := res["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected capabilities object, got: %v", res["capabilities"])
+	}
+	tools, ok := caps["tools"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SPEC-029 AC 8: expected tools capability object, got: %T", caps["tools"])
+	}
+	listChanged, _ := tools["listChanged"].(bool)
+	if !listChanged {
+		t.Errorf("SPEC-029 AC 8: expected listChanged=true, got: %v", tools["listChanged"])
+	}
+}
+
+// TestSPEC029_PassthroughToolsCallRoutesByPrefix verifies that tools/call with server__tool
+// format is routed to the correct child server with the bare tool name (no prefix).
+func TestSPEC029_PassthroughToolsCallRoutesByPrefix(t *testing.T) {
+	var gotServer, gotTool string
+	var gotParams json.RawMessage
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		servers: []ServerInfo{{Name: "myserver", Status: "online"}},
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			gotServer = server
+			gotTool = method
+			gotParams = params
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`), nil
+		},
+	})
+
+	rpcBody := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"myserver__my_tool","arguments":{"x":1}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(rpcBody))
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("SPEC-029: expected HTTP 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotServer != "myserver" {
+		t.Errorf("SPEC-029: expected route to 'myserver', got %q", gotServer)
+	}
+	if gotTool != "tools/call" {
+		t.Errorf("SPEC-029: expected method 'tools/call', got %q", gotTool)
+	}
+	// Verify the child params have the bare tool name (no server prefix).
+	var childParams map[string]interface{}
+	if err := json.Unmarshal(gotParams, &childParams); err != nil {
+		t.Fatalf("unmarshal child params: %v", err)
+	}
+	if childParams["name"] != "my_tool" {
+		t.Errorf("SPEC-029: expected child tool name 'my_tool', got %q", childParams["name"])
+	}
 }

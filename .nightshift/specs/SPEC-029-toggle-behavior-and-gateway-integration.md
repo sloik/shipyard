@@ -4,12 +4,34 @@ template_version: 2
 priority: 2
 layer: 2
 type: feature
-status: ready
+status: done
 after: [SPEC-028]
 prior_attempts:
   - date: 2026-04-15
     outcome: "Agent claimed all implemented and tests pass, but toggles do not work in the running app. Code analysis shows the gateway policy store may not be wired into the web server correctly at startup, or the toggle API calls fail silently. Implementation appears complete on paper but feature is non-functional."
 created: 2026-04-15
+completed: 2026-04-15
+root_cause: |
+  Three bugs found by second-attempt agent:
+
+  1. notifications/tools/list_changed was never sent (R8, R11 not implemented). The previous
+     agent wrote toggle handlers and gateway filtering correctly, but the shipyard-mcp bridge
+     had no mechanism to notify Claude when policy changed. Claude would cache the tool list
+     indefinitely. Fixed by adding watchPolicyAndNotify() goroutine in shipyard-mcp that polls
+     /api/gateway/policy every 2 seconds, detects changes via SHA-256 hash, and writes
+     {"jsonrpc":"2.0","method":"notifications/tools/list_changed"} to stdout.
+
+  2. handleMCPPassthrough had no initialize handler (R7). The switch fell through to the proxy
+     forwarding code for "initialize", returning a child server's capabilities instead of
+     Shipyard's gateway capabilities. This meant listChanged: true was never declared in the
+     auth-disabled (passthrough) path. Fixed by adding an "initialize" case that returns the
+     gateway-level response directly.
+
+  3. tools/call in handleMCPPassthrough fell through to broken routing after the gateway check.
+     After verifying a server__tool was not disabled, the code fell through to extractPassthroughServer()
+     which looks for a "server" field in params — absent in tools/call params — then forwarded the
+     full "server__tool" name to an arbitrary child server, which would reject it as unknown. Fixed
+     by routing directly to the correct child server with the bare tool name (prefix stripped).
 ---
 
 # Toggle Behavior, Gateway Integration & MCP Compliance

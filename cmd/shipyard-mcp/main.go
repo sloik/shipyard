@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -103,6 +104,9 @@ type toolCallResponse struct {
 }
 
 func (s *mcpServer) serve(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+	// SPEC-029 R8/R11: poll gateway policy and send notifications/tools/list_changed when it changes.
+	go s.watchPolicyAndNotify(ctx, stdout)
+
 	scanner := bufio.NewScanner(stdin)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 8*1024*1024)
@@ -141,6 +145,73 @@ func (s *mcpServer) serve(ctx context.Context, stdin io.Reader, stdout, stderr i
 		return fmt.Errorf("read stdin: %w", err)
 	}
 	return nil
+}
+
+// watchPolicyAndNotify polls the Shipyard gateway policy endpoint every 2 seconds.
+// When the policy changes, it sends a notifications/tools/list_changed JSON-RPC notification
+// to the MCP client (e.g. Claude) via stdout. SPEC-029 R8, R11.
+func (s *mcpServer) watchPolicyAndNotify(ctx context.Context, stdout io.Writer) {
+	const pollInterval = 2 * time.Second
+	var lastHash [32]byte
+	first := true
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		policy, err := s.fetchPolicyRaw(ctx)
+		if err != nil {
+			// Shipyard may not be up yet; silently retry.
+			continue
+		}
+
+		h := sha256.Sum256(policy)
+		if first {
+			lastHash = h
+			first = false
+			continue
+		}
+
+		if h != lastHash {
+			lastHash = h
+			// Send notifications/tools/list_changed to the MCP client.
+			s.writeNotification(stdout, "notifications/tools/list_changed")
+		}
+	}
+}
+
+// writeNotification writes a JSON-RPC notification (no id) to stdout.
+func (s *mcpServer) writeNotification(stdout io.Writer, method string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	enc := json.NewEncoder(stdout)
+	_ = enc.Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+	})
+}
+
+// fetchPolicyRaw returns the raw JSON body of GET /api/gateway/policy.
+func (s *mcpServer) fetchPolicyRaw(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiBase+"/api/gateway/policy", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway policy returned %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (s *mcpServer) handle(ctx context.Context, req rpcRequest, id interface{}) rpcResponse {

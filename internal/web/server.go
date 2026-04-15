@@ -1840,11 +1840,6 @@ func (s *Server) handleTokenStats(w http.ResponseWriter, r *http.Request) {
 // handleMCPPassthrough forwards MCP JSON-RPC to the appropriate child server without auth.
 // Used when auth.enabled is false. Expects tool names in "server__tool" format for tools/call.
 func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
-	if s.proxies == nil {
-		writeJSONRPCError(w, nil, -32603, "no proxy manager configured")
-		return
-	}
-
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeJSONRPCError(w, nil, -32700, "failed to read request body")
@@ -1862,6 +1857,26 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch rpcReq.Method {
+	case "initialize":
+		// SPEC-029 R7: declare listChanged: true in the gateway-level initialize response.
+		// Handled before the proxies nil check — initialize does not require child servers.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      json.RawMessage(rpcReq.ID),
+			"result": map[string]interface{}{
+				"protocolVersion": "2025-11-25",
+				"serverInfo": map[string]string{
+					"name":    "shipyard-relay",
+					"version": "0.1.0",
+				},
+				"capabilities": map[string]interface{}{
+					"tools": map[string]bool{"listChanged": true},
+				},
+			},
+		})
+		return
+
 	case "tools/list":
 		// Build a merged tools/list: Shipyard tools first, then child server tools.
 		var allTools []map[string]interface{}
@@ -1883,7 +1898,11 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		// Append tools from all child servers, filtering by gateway policy (SPEC-028).
-		for _, name := range s.proxies.ServersForAuth() {
+		var childServerNames []string
+		if s.proxies != nil {
+			childServerNames = s.proxies.ServersForAuth()
+		}
+		for _, name := range childServerNames {
 			// Skip entire server if gateway-disabled
 			if s.gateway != nil && !s.gateway.ServerEnabled(name) {
 				continue
@@ -1957,8 +1976,8 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(resp)
 				return
 			}
-			// For non-shipyard tools, check gateway policy before forwarding.
-			// Tool names in server__tool format.
+			// For non-shipyard tools in server__tool format: enforce gateway policy,
+			// then route directly to the correct child server (stripping the prefix).
 			if strings.Contains(callParams.Name, "__") {
 				parts := strings.SplitN(callParams.Name, "__", 2)
 				srvName, toolName := parts[0], parts[1]
@@ -1974,8 +1993,31 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
+				// Route to the correct child server with the bare tool name (no prefix).
+				childParams, err := json.Marshal(map[string]interface{}{
+					"name":      toolName,
+					"arguments": callParams.Arguments,
+				})
+				if err != nil {
+					writeJSONRPCError(w, rpcReq.ID, -32603, "failed to build child request")
+					return
+				}
+				result, err := s.proxies.SendRequest(r.Context(), srvName, "tools/call", childParams)
+				if err != nil {
+					writeJSONRPCError(w, rpcReq.ID, -32603, fmt.Sprintf("upstream error: %v", err))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(result)
+				return
 			}
 		}
+	}
+
+	// Methods below this point require a proxy manager.
+	if s.proxies == nil {
+		writeJSONRPCError(w, rpcReq.ID, -32603, "no proxy manager configured")
+		return
 	}
 
 	// For passthrough we forward to the server named in params, or "default".

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRun_InitializeAndToolsList(t *testing.T) {
@@ -298,5 +299,99 @@ func TestSPEC029_BridgeInitializeListChanged(t *testing.T) {
 	}
 	if !tools["listChanged"] {
 		t.Errorf("SPEC-029 AC 8: expected listChanged=true, got: %v", tools["listChanged"])
+	}
+}
+
+// TestSPEC029_PolicyWatcherSendsNotification verifies R8/R11:
+// When the gateway policy changes, the bridge sends notifications/tools/list_changed to stdout.
+func TestSPEC029_PolicyWatcherSendsNotification(t *testing.T) {
+	// policyBody starts with an empty policy and changes after the first poll.
+	var mu sync.Mutex
+	policyBody := `{"servers":{},"tools":{}}`
+	callCount := 0
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/gateway/policy" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		body := policyBody
+		callCount++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer api.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := newMCPServer(api.URL, &http.Client{Timeout: 2 * time.Second})
+	var out bytes.Buffer
+	notifReceived := make(chan struct{})
+
+	go func() {
+		srv.watchPolicyAndNotify(ctx, &out)
+	}()
+
+	// Wait for the first poll to establish the baseline (callCount ≥ 1).
+	for {
+		mu.Lock()
+		n := callCount
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Change the policy so the next poll detects a difference.
+	mu.Lock()
+	policyBody = `{"servers":{"myserver":false},"tools":{}}`
+	mu.Unlock()
+
+	// Wait for notification to appear in output (up to 2 seconds extra).
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			body := out.String()
+			mu.Unlock()
+			if strings.Contains(body, "notifications/tools/list_changed") {
+				close(notifReceived)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-notifReceived:
+		// success
+	case <-time.After(6 * time.Second):
+		t.Error("SPEC-029 R8: timed out waiting for notifications/tools/list_changed")
+	}
+
+	mu.Lock()
+	body := out.String()
+	mu.Unlock()
+	var notif map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		if strings.Contains(line, "notifications/tools/list_changed") {
+			if err := json.Unmarshal([]byte(line), &notif); err != nil {
+				t.Fatalf("SPEC-029 R8: unmarshal notification: %v", err)
+			}
+			break
+		}
+	}
+	if notif["jsonrpc"] != "2.0" {
+		t.Errorf("SPEC-029 R8: expected jsonrpc=2.0, got: %v", notif["jsonrpc"])
+	}
+	if notif["method"] != "notifications/tools/list_changed" {
+		t.Errorf("SPEC-029 R8: expected method=notifications/tools/list_changed, got: %v", notif["method"])
+	}
+	if _, hasID := notif["id"]; hasID {
+		t.Error("SPEC-029 R8: notification must not have an id field")
 	}
 }
