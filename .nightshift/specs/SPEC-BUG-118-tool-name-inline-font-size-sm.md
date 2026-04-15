@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -28,17 +28,17 @@ The tool name `<span>` in each sidebar tool row has an inline `font-size:var(--f
 
 ## Root Cause
 
-(Agent fills in during run.)
+The JS sidebar render function (line ~2156 in `index.html`) hardcoded `font-size:var(--font-size-sm)` as an inline style on the tool name `<span>`. This overrode the `font-size: var(--font-size-base)` set by the `.tool-item` CSS class. BUG-092 had already corrected the CSS class but missed this inline override in the JS template string.
 
 ## Requirements
 
-- [ ] R1: Sidebar tool name span uses `font-size: var(--font-size-base)` (12px)
+- [x] R1: Sidebar tool name span uses `font-size: var(--font-size-base)` (12px)
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Tool name text in sidebar renders at 12px
-- [ ] AC 2: AC 16 from SPEC-028 passes (tool row layout matches design)
-- [ ] AC 3: No regressions — tool names still readable, not clipped
+- [x] AC 1: Tool name text in sidebar renders at 12px
+- [x] AC 2: AC 16 from SPEC-028 passes (tool row layout matches design)
+- [x] AC 3: No regressions — tool names still readable, not clipped
 
 ## Context
 
