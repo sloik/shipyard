@@ -770,6 +770,11 @@ body {
   --wails-draggable: no-drag;
 }
 
+/* SPEC-BUG-084: filter bar gap is 12px per UX-002 design */
+#filter-bar {
+  gap: 12px;
+}
+
 #tab-nav,
 #tab-nav .tab,
 button,
