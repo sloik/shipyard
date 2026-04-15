@@ -503,7 +503,7 @@ body {
 }
 
 .input-label {
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-base);
   font-weight: 500;
   color: var(--text-muted);
 }
