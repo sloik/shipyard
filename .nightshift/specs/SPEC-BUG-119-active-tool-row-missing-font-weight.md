@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -29,18 +29,18 @@ When a tool is selected (active) in the sidebar, the tool name renders at font-w
 
 ## Root Cause
 
-(Agent fills in during run.)
+The `.tool-item.is-active` rule in `ds.css` set `background` and `color` but omitted `font-weight: 500`, so selected tool names rendered at the inherited weight of 400.
 
 ## Requirements
 
-- [ ] R1: Active/selected tool row name text uses font-weight 500
+- [x] R1: Active/selected tool row name text uses font-weight 500
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Selected tool name text renders at font-weight 500
-- [ ] AC 2: Non-selected tool names remain at font-weight 400 (normal)
-- [ ] AC 3: AC 21 from SPEC-028 passes
-- [ ] AC 4: No regressions — layout doesn't shift when selecting tools
+- [x] AC 1: Selected tool name text renders at font-weight 500
+- [x] AC 2: Non-selected tool names remain at font-weight 400 (normal)
+- [x] AC 3: AC 21 from SPEC-028 passes
+- [x] AC 4: No regressions — layout doesn't shift when selecting tools
 
 ## Context
 

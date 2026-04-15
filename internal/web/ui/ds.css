@@ -1821,6 +1821,7 @@ textarea {
 .tool-item.is-active {
   background: var(--accent-subtle);
   color: var(--text-primary);
+  font-weight: 500;
 }
 
 .tool-item.has-conflict {
