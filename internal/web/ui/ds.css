@@ -593,7 +593,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 1px 8px;
+  padding: 4px 10px;
   border-radius: var(--radius-full);
   font-size: var(--font-size-sm);
   font-weight: 500;
@@ -640,7 +640,7 @@ body {
 }
 
 .badge-neutral {
-  background: transparent;
+  background: var(--bg-raised);
   color: var(--text-secondary);
   border: 1px solid var(--border-default);
 }
