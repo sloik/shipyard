@@ -1819,7 +1819,7 @@ textarea {
 }
 
 .tool-item.is-active {
-  background: var(--accent-subtle);
+  background: var(--row-selected);
   color: var(--text-primary);
   font-weight: 500;
 }

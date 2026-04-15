@@ -4,7 +4,7 @@ template_version: 2
 priority: 3
 layer: 2
 type: bugfix
-status: ready
+status: done
 after: []
 violates: [SPEC-028]
 prior_attempts: []
@@ -29,17 +29,17 @@ The active/selected tool row in the sidebar uses `var(--accent-subtle)` (#388bfd
 
 ## Root Cause
 
-(Agent fills in during run.)
+The `.tool-item.is-active` rule in `internal/web/ui/ds.css` used `var(--accent-subtle)` (#388bfd26) instead of the design-token `var(--row-selected)` (#58a6ff1a) specified by SPEC-028 R18/AC 21. A single wrong token was set when the rule was originally authored.
 
 ## Requirements
 
-- [ ] R1: Active/selected tool row uses `background: var(--row-selected)` instead of `var(--accent-subtle)`
+- [x] R1: Active/selected tool row uses `background: var(--row-selected)` instead of `var(--accent-subtle)`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Selected tool row background is `var(--row-selected)` (#58a6ff1a)
-- [ ] AC 2: AC 21 from SPEC-028 passes
-- [ ] AC 3: No regressions — hover state still uses `var(--row-hover)`
+- [x] AC 1: Selected tool row background is `var(--row-selected)` (#58a6ff1a)
+- [x] AC 2: AC 21 from SPEC-028 passes
+- [x] AC 3: No regressions — hover state still uses `var(--row-hover)`
 
 ## Context
 
