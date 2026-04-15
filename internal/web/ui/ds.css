@@ -751,11 +751,11 @@ body {
 .app-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-default);
   padding: 0 16px;
   height: 48px;
-  gap: 16px;
   flex-shrink: 0;
   --wails-draggable: no-drag;
 }
