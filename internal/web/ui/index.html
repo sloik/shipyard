@@ -3131,9 +3131,9 @@
     fetch('/api/servers')
       .then(function(resp) { return resp.json(); })
       .then(function(servers) {
-        // Count only child servers (exclude the Shipyard self-entry) for the tab label.
+        // Count all servers (including the built-in Shipyard entry) for the tab label.
         var childServers = (servers || []).filter(function(s) { return !s.is_self; });
-        var serverCount = childServers.length;
+        var serverCount = (servers || []).length;
         serverCountEl.textContent = serverCount > 0 ? ' (' + serverCount + ')' : '';
 
         // Always show the grid (Shipyard card is always visible).
@@ -3155,10 +3155,15 @@
           serversActionBar.style.display = 'none';
         }
 
-        // Build summary from child servers only (exclude Shipyard self-entry).
+        // Build summary including the built-in Shipyard server.
+        // The self-entry is always online, so include it in online and tools counts.
         var online = 0, crashed = 0, totalTools = 0, conflicts = 0;
         for (var i = 0; i < servers.length; i++) {
-          if (servers[i].is_self) continue;
+          if (servers[i].is_self) {
+            online++; // built-in Shipyard server is always online
+            totalTools += servers[i].tool_count || 0;
+            continue;
+          }
           if (servers[i].status === 'online') online++;
           if (servers[i].status === 'crashed') crashed++;
           totalTools += servers[i].tool_count || 0;
@@ -4163,7 +4168,7 @@
                 .then(function(resp) { return resp.json(); })
                 .then(function(servers) {
                   if (servers) {
-                    var n = servers.filter(function(s) { return !s.is_self; }).length;
+                    var n = servers.length;
                     serverCountEl.textContent = n > 0 ? ' (' + n + ')' : '';
                   }
                 });

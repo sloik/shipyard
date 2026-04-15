@@ -3158,3 +3158,59 @@ func TestSPEC043_DiffLineNumbers(t *testing.T) {
 		t.Error("SPEC-043 FAIL (AC-8): computeLineDiff does not track rightLineNum counter for incrementing numbers")
 	}
 }
+
+// TestSPECBUG111_ServerCountIncludesBuiltIn verifies that the server count shown
+// in the tab label uses the full servers array length (including the built-in
+// Shipyard self-entry), not just the child servers.
+func TestSPECBUG111_ServerCountIncludesBuiltIn(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// Locate loadServers function body
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("BUG-111 FAIL: loadServers() function not found")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+
+	// AC-1/AC-2: serverCount must be derived from the full servers array, not just child servers.
+	// The old (buggy) pattern excluded is_self entries: childServers.length
+	// The fix uses the total: (servers || []).length
+	if strings.Contains(loadBody, "var serverCount = childServers.length") {
+		t.Error("BUG-111 FAIL (AC-1): serverCount is still set to childServers.length — built-in Shipyard server excluded from count")
+	}
+	if !strings.Contains(loadBody, "var serverCount = (servers || []).length") {
+		t.Error("BUG-111 FAIL (AC-1): serverCount must be derived from full servers array length, not filtered child list")
+	}
+
+	// AC-2/AC-3: the online counter must not skip is_self entries — verify the self-entry
+	// contributes to the online count by checking there's no bare 'if (servers[i].is_self) continue'
+	// inside the stats loop without an online++ before the continue.
+	// We verify by checking that the loop increments online++ before the continue for self entries.
+	onlineBeforeContinue := strings.Contains(loadBody, "online++; // built-in Shipyard server is always online")
+	if !onlineBeforeContinue {
+		t.Error("BUG-111 FAIL (AC-2): self-entry (is_self) must increment online count before continue")
+	}
+
+	// AC-4: SSE server_status update path must also use full array length, not filtered.
+	sseIdx := strings.Index(content, "data.type === 'server_status'")
+	if sseIdx == -1 {
+		t.Fatal("BUG-111 FAIL: server_status SSE handler not found")
+	}
+	sseBody := content[sseIdx:]
+	if endIdx := strings.Index(sseBody[1:], "return;"); endIdx > 0 {
+		sseBody = sseBody[:endIdx+2]
+	}
+	if strings.Contains(sseBody, "servers.filter(function(s) { return !s.is_self; }).length") {
+		t.Error("BUG-111 FAIL (AC-1): SSE handler still filters out is_self before computing server count")
+	}
+	if !strings.Contains(sseBody, "var n = servers.length") {
+		t.Error("BUG-111 FAIL (AC-1): SSE handler must use servers.length (all servers) for tab label count")
+	}
+}
