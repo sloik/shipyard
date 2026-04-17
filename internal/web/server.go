@@ -691,14 +691,13 @@ func (s *Server) handleToolConflicts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
-	if s.proxies == nil {
-		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
-		return
-	}
-
 	serverName := r.URL.Query().Get("server")
 	if serverName == "" {
 		http.Error(w, "server parameter required", http.StatusBadRequest)
+		return
+	}
+	if serverName != "shipyard" && s.proxies == nil {
+		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -1255,9 +1254,37 @@ func (s *Server) gatewayCatalog(_ context.Context, includeDisabled bool) ([]gate
 }
 
 func (s *Server) fetchToolsResult(ctx context.Context, serverName string) (json.RawMessage, error) {
+	if serverName == "shipyard" {
+		return s.selfToolsResult()
+	}
 	return s.proxies.SendRequest(ctx, serverName, "tools/list", json.RawMessage("{}"))
 }
 
+func (s *Server) selfToolsResult() (json.RawMessage, error) {
+	type toolInfo struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+	}
+	type toolsResult struct {
+		Tools []toolInfo `json:"tools"`
+	}
+
+	result := toolsResult{Tools: make([]toolInfo, len(shipyardTools))}
+	for i, tool := range shipyardTools {
+		result.Tools[i] = toolInfo{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.InputSchema,
+		}
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      "shipyard-self-tools",
+		"result":  result,
+	})
+}
 
 // --- Session Recording Handlers (SPEC-007) ---
 

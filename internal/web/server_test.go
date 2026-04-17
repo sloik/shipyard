@@ -881,6 +881,115 @@ func TestHandleTools_Success(t *testing.T) {
 	}
 }
 
+func TestHandleTools_ShipyardSelfServerSuccess(t *testing.T) {
+	srv := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	calledProxy := false
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			calledProxy = true
+			return nil, fmt.Errorf("unexpected proxy call for %s %s", server, method)
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=shipyard", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if calledProxy {
+		t.Fatal("expected shipyard self-server tools to bypass proxy manager")
+	}
+
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Tools) != len(shipyardTools) {
+		t.Fatalf("expected %d shipyard tools, got %d", len(shipyardTools), len(result.Tools))
+	}
+	for i, expected := range []string{"status", "list_servers", "restart", "stop"} {
+		if result.Tools[i].Name != expected {
+			t.Fatalf("expected tool[%d] = %q, got %q", i, expected, result.Tools[i].Name)
+		}
+		if !result.Tools[i].Enabled {
+			t.Fatalf("expected %q enabled by default", expected)
+		}
+		if !result.Tools[i].ServerEnabled {
+			t.Fatalf("expected %q server_enabled=true for shipyard self-server", expected)
+		}
+	}
+}
+
+func TestHandleTools_ShipyardSelfServerReflectsToolPolicy(t *testing.T) {
+	srv := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetToolEnabled("shipyard", "status", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=shipyard", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	var statusTool struct {
+		Name          string `json:"name"`
+		Enabled       bool   `json:"enabled"`
+		ServerEnabled bool   `json:"server_enabled"`
+	}
+	found := false
+	for _, tool := range result.Tools {
+		if tool.Name == "status" {
+			statusTool = tool
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected bare shipyard tool name \"status\" in /api/tools response")
+	}
+	if statusTool.Enabled {
+		t.Fatal("expected disabled shipyard tool to report enabled=false")
+	}
+	if !statusTool.ServerEnabled {
+		t.Fatal("expected shipyard self-server to remain server_enabled=true")
+	}
+}
+
 func TestHandleTools_SendRequestError(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
