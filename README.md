@@ -85,6 +85,44 @@ Example registration shape:
 }
 ```
 
+### Codex note
+
+Codex `exec` currently needs explicit per-tool approval entries for Shipyard-exposed
+tools in `~/.codex/config.toml`. A server-wide setting such as
+`mcp_servers.shipyard.approval_mode = "approve"` is not sufficient.
+
+Minimal example:
+
+```toml
+[mcp_servers.shipyard]
+command = "/Users/ed/Dropbox/Developer/Repos/shipyard/.shipyard-dev/bin/ShipyardBridge"
+args = ["--api-base", "http://127.0.0.1:9417"]
+
+[mcp_servers.shipyard.tools.shipyard__status]
+approval_mode = "approve"
+
+[mcp_servers.shipyard.tools.lmstudio__lms_status]
+approval_mode = "approve"
+```
+
+To refresh the approval list for the currently exposed Shipyard tools:
+
+```bash
+curl -s http://127.0.0.1:9417/api/gateway/tools | jq -r '.tools[].name'
+```
+
+If you use the compiled bridge binary, rebuild it after bridge changes:
+
+```bash
+make build-mcp
+```
+
+To verify the documented Codex path end-to-end:
+
+```bash
+.shipyard-dev/verify-spec-125.sh
+```
+
 ## Installation
 
 ### Desktop App (macOS)
