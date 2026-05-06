@@ -6,6 +6,7 @@ credentials.json
 
 # Go build output
 /shipyard
+/shipyard-mcp
 /shipyard-v2
 *.exe
 dist/
@@ -14,13 +15,12 @@ dist/
 cmd/shipyard/build/
 internal/web/ui/wailsjs/
 
-# Nightshift (only specs and templates are public)
+# Nightshift (only project specs are public)
 .nightshift/**
-!.nightshift/config.yaml
-!.nightshift/hooks/
-!.nightshift/hooks/pre-commit
 !.nightshift/specs/
-!.nightshift/specs/**
+!.nightshift/specs/SPEC-*.md
+!.nightshift/specs/UX-*.md
+!.nightshift/specs/UX-*.pen
 
 # Development runtime
 .shipyard-dev/

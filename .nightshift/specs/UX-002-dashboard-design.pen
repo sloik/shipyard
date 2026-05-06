@@ -21632,8 +21632,13 @@
                           "type": "frame",
                           "id": "dyi46",
                           "name": "g1t2",
+                          "opacity": 0.5,
                           "width": "fill_container",
-                          "fill": "$row-selected",
+                          "fill": {
+                            "type": "color",
+                            "color": "#00000000",
+                            "enabled": false
+                          },
                           "gap": 8,
                           "padding": [
                             6,
@@ -21660,26 +21665,24 @@
                                   "height": 14,
                                   "iconFontName": "wrench",
                                   "iconFontFamily": "lucide",
-                                  "fill": "$accent-fg"
+                                  "fill": "$text-muted"
                                 },
                                 {
                                   "type": "text",
                                   "id": "QvmyX",
                                   "name": "g1t2n",
-                                  "fill": "$text-primary",
+                                  "fill": "$text-secondary",
                                   "content": "write_file",
                                   "fontFamily": "$font-mono",
                                   "fontSize": "$font-size-base",
-                                  "fontWeight": "500"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
                             {
-                              "id": "IQcVI",
+                              "id": "SlNF1",
                               "type": "ref",
-                              "ref": "TvVwX",
-                              "x": 212,
-                              "y": 6
+                              "ref": "dc1dB"
                             }
                           ]
                         },
