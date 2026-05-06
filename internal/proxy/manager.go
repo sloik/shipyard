@@ -335,6 +335,10 @@ func (m *Manager) sendRequestRaw(ctx context.Context, serverName string, mp *man
 	ch := mp.responses.register(idStr)
 	defer mp.responses.cancel(idStr)
 
+	// Capture the outgoing request before waiting for the response so callers
+	// that inspect traffic after SendRequest returns see a correlated pair.
+	mp.proxy.captureMessage(reqBytes, capture.DirectionClientToServer, time.Now())
+
 	// Write to child stdin
 	if mp.inputWriter == nil {
 		return nil, fmt.Errorf("server %q has no input writer attached", serverName)
@@ -342,9 +346,6 @@ func (m *Manager) sendRequestRaw(ctx context.Context, serverName string, mp *man
 	if err := mp.inputWriter.writeLine(ctx, reqBytes); err != nil {
 		return nil, fmt.Errorf("write to child: %w", err)
 	}
-
-	// Capture the outgoing request in the traffic timeline (AC-5)
-	go mp.proxy.captureMessage(reqBytes, capture.DirectionClientToServer, time.Now())
 
 	// Wait for response with timeout
 	timeout := requestTimeout
