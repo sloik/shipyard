@@ -12,6 +12,23 @@ import (
 	"time"
 )
 
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestRun_InitializeAndToolsList(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -328,7 +345,7 @@ func TestSPEC029_PolicyWatcherSendsNotification(t *testing.T) {
 	defer cancel()
 
 	srv := newMCPServer(api.URL, &http.Client{Timeout: 2 * time.Second})
-	var out bytes.Buffer
+	var out lockedBuffer
 	notifReceived := make(chan struct{})
 
 	go func() {

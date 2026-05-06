@@ -288,11 +288,9 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 		// a response to a manager-initiated request. If so, route it to the
 		// response tracker instead of the parent client's stdout.
 		if p.managed != nil && direction == capture.DirectionServerToClient {
+			ts := time.Now()
+			p.captureMessage(raw, direction, ts)
 			if p.managed.HandleChildOutput(raw) {
-				// Response was claimed by the manager; still capture it but
-				// don't forward to the parent client.
-				ts := time.Now()
-				go p.captureMessage(raw, direction, ts)
 				continue
 			}
 		}
@@ -314,9 +312,12 @@ func (p *Proxy) pipeAndTap(ctx context.Context, src io.Reader, dst io.Writer, di
 			f.Sync()
 		}
 
-		// Capture the message
-		ts := time.Now()
-		go p.captureMessage(raw, direction, ts)
+		// Capture the message. Managed server→client messages were captured
+		// before the response tracker observed them.
+		if p.managed == nil || direction != capture.DirectionServerToClient {
+			ts := time.Now()
+			go p.captureMessage(raw, direction, ts)
+		}
 	}
 
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
