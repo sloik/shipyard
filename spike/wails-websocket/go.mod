@@ -1,9 +1,9 @@
 module shipyard-ws-spike
 
-go 1.22.0
+go 1.23
 
 require (
-	github.com/coder/websocket v1.8.12
+	github.com/coder/websocket v1.8.14
 	github.com/wailsapp/wails/v2 v2.12.0
 )
 

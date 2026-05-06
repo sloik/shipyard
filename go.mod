@@ -1,9 +1,9 @@
 module github.com/sloik/shipyard
 
-go 1.22.0
+go 1.23
 
 require (
-	github.com/coder/websocket v1.8.12
+	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
 	github.com/ncruces/go-sqlite3 v0.22.0
 	github.com/wailsapp/wails/v2 v2.12.0
