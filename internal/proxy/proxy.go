@@ -216,10 +216,10 @@ func (p *Proxy) Run(ctx context.Context) error {
 	for {
 		runErr := p.runChildWithSeams(ctx, inputWriter)
 		if runErr == nil {
-			return p.waitForClientInput(clientDone)
+			return p.waitForClientInput(clientDone, 50*time.Millisecond)
 		}
 		if ctx.Err() != nil {
-			return p.waitForClientInput(clientDone)
+			return p.waitForClientInput(clientDone, 0)
 		}
 
 		exitCode := exitCodeFromError(runErr)
@@ -237,7 +237,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 		backoff := restartBackoff(len(crashTimes))
 		slog.Info("restarting child process after crash", "name", p.name, "exit_code", exitCode, "backoff", backoff)
 		if err := p.waitForBackoffWithSeams(ctx, backoff); err != nil {
-			return p.waitForClientInput(clientDone)
+			return p.waitForClientInput(clientDone, 0)
 		}
 	}
 }
@@ -430,16 +430,31 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 	return merged
 }
 
-func (p *Proxy) waitForClientInput(clientDone <-chan error) error {
-	select {
-	case err := <-clientDone:
-		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+func (p *Proxy) waitForClientInput(clientDone <-chan error, wait time.Duration) error {
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case err := <-clientDone:
+			return normalizeClientInputError(err)
+		case <-timer.C:
 			return nil
 		}
-		return err
+	}
+
+	select {
+	case err := <-clientDone:
+		return normalizeClientInputError(err)
 	default:
 		return nil
 	}
+}
+
+func normalizeClientInputError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func exitCodeFromError(err error) int {

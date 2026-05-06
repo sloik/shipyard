@@ -197,7 +197,7 @@ func TestRestartBackoff(t *testing.T) {
 func TestWaitForClientInput(t *testing.T) {
 	p, _ := newTestProxy(t)
 
-	if err := p.waitForClientInput(make(chan error)); err != nil {
+	if err := p.waitForClientInput(make(chan error), 0); err != nil {
 		t.Fatalf("expected nil when client channel is not ready, got %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestWaitForClientInput(t *testing.T) {
 			done := make(chan error, 1)
 			done <- tc.err
 
-			err := p.waitForClientInput(done)
+			err := p.waitForClientInput(done, 0)
 			if tc.want == nil {
 				if err != nil {
 					t.Fatalf("expected nil, got %v", err)
