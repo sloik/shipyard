@@ -3306,6 +3306,16 @@ func TestSPEC028_UIDetailPanelHasSwitch(t *testing.T) {
 	if !strings.Contains(content, "function toggleDetailPanelTool()") {
 		t.Error("AC 18 FAIL: expected toggleDetailPanelTool function in index.html")
 	}
+
+	if !strings.Contains(content, "function findSidebarToolButton(server, tool)") {
+		t.Error("SPEC-029 sync FAIL: expected helper that resolves the actual sidebar toggle button")
+	}
+	if !strings.Contains(content, "function applyToolEnabledState(server, tool, toolEnabled)") {
+		t.Error("SPEC-029 sync FAIL: expected shared helper for sidebar/detail toggle state")
+	}
+	if strings.Contains(content, `id="tool-detail-toggle" class="switch switch-on" title="Toggle tool enabled/disabled" onclick="toggleDetailPanelTool()"`) {
+		t.Error("SPEC-029 sync FAIL: detail toggle should not rely on inline onclick")
+	}
 }
 
 func TestSPEC028_UIToggleChangedWSHandlerExists(t *testing.T) {
@@ -3381,6 +3391,12 @@ func TestSPEC029_UIShipyardToolHasToggle(t *testing.T) {
 	}
 	if !strings.Contains(content, "canToggleTool") {
 		t.Error("SPEC-029 R12 FAIL: expected 'canToggleTool' variable in index.html — is_self tools should be toggleable")
+	}
+	if strings.Contains(content, `onclick="event.stopPropagation(); toggleTool(this)"`) {
+		t.Error("SPEC-029 toggle FAIL: sidebar toggle should not depend on inline event.stopPropagation()")
+	}
+	if !strings.Contains(content, "var toggleBtn = e.target.closest('button.switch[data-server][data-tool]');") {
+		t.Error("SPEC-029 toggle FAIL: expected delegated sidebar toggle click handling in toolGroups listener")
 	}
 }
 
