@@ -36,7 +36,7 @@ jobs:
           zip -r shipyard-macos.zip shipyard.app
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: shipyard-macos-${{ github.sha }}
           path: cmd/shipyard/build/bin/shipyard-macos.zip
