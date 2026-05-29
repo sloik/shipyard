@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-029, SPEC-044]
 violates: [SPEC-028, SPEC-029, SPEC-044]
 nfrs: [SPEC-NFR-001]
@@ -100,29 +100,29 @@ hiding the broken API path underneath.
 
 ## Requirements
 
-- [ ] R1: `GET /api/tools?server=shipyard` must return `200 OK` and a JSON tool list for the
+- [x] R1: `GET /api/tools?server=shipyard` must return `200 OK` and a JSON tool list for the
   Shipyard self-server instead of forwarding to `proxies.SendRequest`
-- [ ] R2: The returned Shipyard tool list must use the same shape as child server tool lists:
+- [x] R2: The returned Shipyard tool list must use the same shape as child server tool lists:
   `{ "tools": [...] }` with bare tool names (`status`, `list_servers`, `restart`, `stop`)
-- [ ] R3: Each Shipyard tool entry returned from `/api/tools?server=shipyard` must include
+- [x] R3: Each Shipyard tool entry returned from `/api/tools?server=shipyard` must include
   `enabled` and `server_enabled` fields consistent with gateway policy
-- [ ] R4: Shipyard must remain server-level enabled only; `server_enabled` is always `true`
+- [x] R4: Shipyard must remain server-level enabled only; `server_enabled` is always `true`
   for the self-server, but individual tool-level toggles must still be reflected
-- [ ] R5: The fix must not break existing child-server behavior for `/api/tools?server=<child>`
+- [x] R5: The fix must not break existing child-server behavior for `/api/tools?server=<child>`
 
 ## Acceptance Criteria
 
-- [ ] AC 1: `curl -i 'http://127.0.0.1:9417/api/tools?server=shipyard'` returns `200 OK`
-- [ ] AC 2: The response body includes a `tools` array with at least `status`,
+- [x] AC 1: `curl -i 'http://127.0.0.1:9417/api/tools?server=shipyard'` returns `200 OK`
+- [x] AC 2: The response body includes a `tools` array with at least `status`,
   `list_servers`, `restart`, and `stop`
-- [ ] AC 3: Each returned Shipyard tool includes `enabled` and `server_enabled` fields
-- [ ] AC 4: Disabling `shipyard__status` via `PUT /api/tools/shipyard/status/enabled` makes
+- [x] AC 3: Each returned Shipyard tool includes `enabled` and `server_enabled` fields
+- [x] AC 4: Disabling `shipyard__status` via `PUT /api/tools/shipyard/status/enabled` makes
   `/api/tools?server=shipyard` return that bare tool with `enabled: false`
-- [ ] AC 5: `GET /api/gateway/tools` and `GET /api/tools?server=shipyard` stay consistent:
+- [x] AC 5: `GET /api/gateway/tools` and `GET /api/tools?server=shipyard` stay consistent:
   gateway view uses namespaced names, direct per-server view uses bare names
-- [ ] AC 6: `GET /api/tools?server=<real-child>` still works unchanged after the fix
-- [ ] AC 7: Regression coverage is added in Go tests for the self-server `/api/tools` path
-- [ ] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass
+- [x] AC 6: `GET /api/tools?server=<real-child>` still works unchanged after the fix
+- [x] AC 7: Regression coverage is added in Go tests for the self-server `/api/tools` path
+- [x] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass
 
 ## Context
 

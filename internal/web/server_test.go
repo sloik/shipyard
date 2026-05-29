@@ -990,6 +990,78 @@ func TestHandleTools_ShipyardSelfServerReflectsToolPolicy(t *testing.T) {
 	}
 }
 
+func TestHandleTools_ShipyardSelfServerMatchesGatewayCatalogNaming(t *testing.T) {
+	srv := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetToolEnabled("shipyard", "status", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	gatewayReq := httptest.NewRequest(http.MethodGet, "/api/gateway/tools?include_disabled=1", nil)
+	gatewayW := httptest.NewRecorder()
+	srv.handleGatewayTools(gatewayW, gatewayReq)
+	if gatewayW.Code != http.StatusOK {
+		t.Fatalf("gateway tools: expected 200, got %d: %s", gatewayW.Code, gatewayW.Body.String())
+	}
+	var gatewayResp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(gatewayW.Body.Bytes(), &gatewayResp); err != nil {
+		t.Fatalf("unmarshal gateway tools: %v", err)
+	}
+
+	directReq := httptest.NewRequest(http.MethodGet, "/api/tools?server=shipyard", nil)
+	directW := httptest.NewRecorder()
+	srv.handleTools(directW, directReq)
+	if directW.Code != http.StatusOK {
+		t.Fatalf("direct tools: expected 200, got %d: %s", directW.Code, directW.Body.String())
+	}
+	var directResp struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(directW.Body.Bytes(), &directResp); err != nil {
+		t.Fatalf("unmarshal direct tools: %v", err)
+	}
+
+	gatewayByTool := make(map[string]gatewayToolInfo, len(gatewayResp.Tools))
+	for _, tool := range gatewayResp.Tools {
+		if tool.Server == "shipyard" {
+			gatewayByTool[tool.Tool] = tool
+		}
+	}
+	if len(gatewayByTool) != len(shipyardTools) {
+		t.Fatalf("expected %d shipyard gateway tools, got %d", len(shipyardTools), len(gatewayByTool))
+	}
+	if len(directResp.Tools) != len(shipyardTools) {
+		t.Fatalf("expected %d direct shipyard tools, got %d", len(shipyardTools), len(directResp.Tools))
+	}
+	for _, directTool := range directResp.Tools {
+		gatewayTool, ok := gatewayByTool[directTool.Name]
+		if !ok {
+			t.Fatalf("direct bare tool %q missing from gateway catalog", directTool.Name)
+		}
+		if gatewayTool.Name != "shipyard__"+directTool.Name {
+			t.Fatalf("gateway tool for %q used name %q", directTool.Name, gatewayTool.Name)
+		}
+		if gatewayTool.Enabled != directTool.Enabled {
+			t.Fatalf("enabled mismatch for %q: gateway=%v direct=%v", directTool.Name, gatewayTool.Enabled, directTool.Enabled)
+		}
+		if gatewayTool.ServerEnabled != directTool.ServerEnabled {
+			t.Fatalf("server_enabled mismatch for %q: gateway=%v direct=%v", directTool.Name, gatewayTool.ServerEnabled, directTool.ServerEnabled)
+		}
+	}
+}
+
 func TestHandleTools_SendRequestError(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
