@@ -2897,18 +2897,58 @@ func TestHandleTokenList_NoPlaintertext(t *testing.T) {
 	}
 }
 
+func TestHandleTokenList_RejectsScopedTokenForTokenAdmin(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	scopedPlaintext, _, err := authStore.GenerateToken("scoped", 0, []string{"filesystem:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken scoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+scopedPlaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenList(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for scoped token on token-admin route, got %d", w.Code)
+	}
+}
+
+func TestHandleTokenList_AllowsWildcardAdminToken(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin token, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // AC-12: DELETE /api/tokens/{id} revokes token.
 func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 	srv, authStore := newTestServerWithAuth(t)
 
-	plaintext, id, err := authStore.GenerateToken("to-delete", 0, nil)
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
 	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+	victimPlaintext, id, err := authStore.GenerateToken("to-delete", 0, nil)
+	if err != nil {
+		t.Fatalf("GenerateToken victim: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/tokens/%d", id), nil)
 	req.SetPathValue("id", fmt.Sprintf("%d", id))
-	req.Header.Set("Authorization", "Bearer "+plaintext) // use own token to delete itself
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
 	w := httptest.NewRecorder()
 	srv.handleTokenDelete(w, req)
 
@@ -2917,7 +2957,7 @@ func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 	}
 
 	// Token must no longer authenticate
-	_, err = authStore.Authenticate(plaintext)
+	_, err = authStore.Authenticate(victimPlaintext)
 	if err == nil {
 		t.Fatal("deleted token should no longer authenticate (AC-12)")
 	}
@@ -2927,15 +2967,19 @@ func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 func TestHandleTokenUpdateScopes(t *testing.T) {
 	srv, authStore := newTestServerWithAuth(t)
 
-	plaintext, id, err := authStore.GenerateToken("scoped", 0, []string{"old:*"})
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
 	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+	victimPlaintext, id, err := authStore.GenerateToken("scoped", 0, []string{"old:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken victim: %v", err)
 	}
 
 	body := `{"scopes":["new:read","new:write"]}`
 	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/tokens/%d/scopes", id), strings.NewReader(body))
 	req.SetPathValue("id", fmt.Sprintf("%d", id))
-	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleTokenUpdateScopes(w, req)
@@ -2945,7 +2989,7 @@ func TestHandleTokenUpdateScopes(t *testing.T) {
 	}
 
 	// Verify scopes were updated (AC-18)
-	rec, err := authStore.Authenticate(plaintext)
+	rec, err := authStore.Authenticate(victimPlaintext)
 	if err != nil {
 		t.Fatalf("Authenticate after scope update: %v", err)
 	}
@@ -3018,6 +3062,36 @@ func TestHandleMCPPassthrough_NoAuth(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleMCPPassthrough_PrefixedToolWithoutProxyManagerReturnsJSONRPCError(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetAuthStore(nil, nil, false)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected JSON-RPC error with HTTP 200, got %d", w.Code)
+	}
+	var resp struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Error.Code != -32603 {
+		t.Fatalf("expected JSON-RPC error code -32603, got %d: %s", resp.Error.Code, w.Body.String())
+	}
+	if resp.Error.Message != "no proxy manager configured" {
+		t.Fatalf("expected no proxy manager message, got %q", resp.Error.Message)
 	}
 }
 

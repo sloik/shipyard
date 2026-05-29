@@ -1677,9 +1677,9 @@ func (s *Server) requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.authStore.AuthenticateBootstrap(tok) {
 		return true
 	}
-	// Then check admin token (any valid stored token can manage tokens)
-	_, err := s.authStore.Authenticate(tok)
-	if err != nil {
+	// Then check admin token. Token administration requires unrestricted scope.
+	rec, err := s.authStore.Authenticate(tok)
+	if err != nil || !auth.MatchScope(rec.Scopes, "*", "*") {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return false
 	}
@@ -2019,6 +2019,10 @@ func (s *Server) handleMCPPassthrough(w http.ResponseWriter, r *http.Request) {
 						writeJSONRPCError(w, rpcReq.ID, -32602, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 						return
 					}
+				}
+				if s.proxies == nil {
+					writeJSONRPCError(w, rpcReq.ID, -32603, "no proxy manager configured")
+					return
 				}
 				// Route to the correct child server with the bare tool name (no prefix).
 				childParams, err := json.Marshal(map[string]interface{}{
