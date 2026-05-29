@@ -4,7 +4,7 @@ template_version: 2
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: in_progress
 after: [SPEC-029, SPEC-044]
 violates: [SPEC-028, SPEC-029, SPEC-044]
 prior_attempts: []
