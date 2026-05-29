@@ -7,6 +7,7 @@ type: bugfix
 status: ready
 after: [SPEC-029, SPEC-044]
 violates: [SPEC-028, SPEC-029, SPEC-044]
+nfrs: [SPEC-NFR-001]
 prior_attempts: []
 created: 2026-04-17
 ---
