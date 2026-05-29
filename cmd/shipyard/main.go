@@ -223,7 +223,7 @@ func main() {
 	configPath := global.String("config", "", "path to JSON config file")
 	schemaPoll := global.Duration("schema-poll", 60*time.Second, "schema change polling interval")
 	showVersion := global.Bool("version", false, "print version and exit")
-	headless := global.Bool("headless", false, "run without desktop window (CLI/server mode)")
+	headless := global.Bool("headless", defaultHeadless(), "run without desktop window (CLI/server mode)")
 
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")

@@ -166,6 +166,60 @@ func TestSPECBUG016_DesktopBridgeConfigBootstrap(t *testing.T) {
 	}
 }
 
+func TestSPEC018_PanelTabsExposeNativeDetachMenu(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredSnippets := []string{
+		`id="panel-context-menu"`,
+		`id="panel-context-open"`,
+		`Open in New Window`,
+		`function isDetachablePanel(route)`,
+		`return route === 'timeline' || route === 'tools' || route === 'history' || route === 'servers';`,
+		`tabNav.addEventListener('contextmenu'`,
+		`function openPanelInNewWindow(route)`,
+		`if (!config.native_windows) return null;`,
+		`nativeFetch('/_shipyard/windows/open?panel=' + encodeURIComponent(route), { method: 'POST' })`,
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-018 FAIL: expected %q in native detach UI", needle)
+		}
+	}
+}
+
+func TestSPEC018_DesktopBridgeFetchBypassesAllNativeEndpoints(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "input.indexOf('/_shipyard/') === 0") {
+		t.Fatal("SPEC-018 FAIL: appFetch should bypass all /_shipyard/ native bridge endpoints")
+	}
+	if strings.Contains(content, "input.indexOf('/_shipyard/desktop-config') === 0") {
+		t.Fatal("SPEC-018 FAIL: appFetch must not special-case only desktop-config")
+	}
+}
+
+func TestSPEC018_ContextMenuCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	for _, needle := range []string{".context-menu {", "position: fixed;", ".context-menu.is-active {", ".context-menu button:hover"} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-018 FAIL: expected context menu CSS %q", needle)
+		}
+	}
+}
+
 func TestSPECBUG016_ConnectWSUsesResolvedDesktopURL(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {

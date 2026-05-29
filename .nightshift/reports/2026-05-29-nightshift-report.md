@@ -1,96 +1,122 @@
-# Nightshift Report — 2026-05-29 — SPEC-BUG-126
+# Nightshift Report - 2026-05-29 - SPEC-018
 
 ## Summary Stats
 
 - Specs run: 1
-- Completed: 1
-- Blocked: 0
-- Files changed in this run:
-  - `internal/web/server_test.go`
-  - `.nightshift/specs/SPEC-BUG-126-api-tools-shipyard-returns-502.md`
-- Required validation commands passed: 3/3
-- Live API checks passed: 6/6
+- Spec status changed by this run: no; `SPEC-018` remains `in_progress` for parent review
+- Implementation result: completed with GUI-manual-test caveat
+- Files changed: 12 tracked source/config files plus this report
+- Required validation commands passed: 8/8
+- Wails-specific build commands passed: 2/2
+- Server smoke checks passed: 2/2
+- macOS arm64 binary sizes:
+  - `bin/shipyard`: 18,693,986 bytes
+  - `bin/shipyard-server`: 18,214,610 bytes
 
 ## Per-Spec Changes
 
-### SPEC-BUG-126 — `GET /api/tools?server=shipyard` Returns 502 Instead of Shipyard Tool List
+### SPEC-018 - Wails v3 Native Desktop Features
 
-Status: done
+Status: implemented in branch; parent should resolve final spec status.
 
-The current branch/base already contained the implementation for the self-server path:
+- Migrated Shipyard desktop integration from Wails v2 imports/config to Wails v3 `application.New`, `AssetOptions`, `WebviewWindowOptions`, window hooks, and system tray APIs.
+- Preserved the existing localhost HTTP server architecture: Wails serves the bundled UI and the desktop bridge proxies `/api/*` and `/ws` to the local server.
+- Added a Wails v3 system tray with a generated template icon, left-click dashboard toggle, right-click menu, `Show Dashboard`, and `Quit`.
+- Changed main-window close behavior to hide the window and keep Shipyard running; quit paths save layout, cancel server/proxy context, and exit.
+- Added native multi-window detach support for Timeline, Tools, History, and Servers through `/_shipyard/windows/open?panel=...`.
+- Added top-tab right-click menu: `Open in New Window`.
+- Added window layout persistence at `dataDir/window-layout.json`, including main bounds, detached panel state, and panel bounds.
+- Added `Taskfile.yml` with `build` and `build:server`; `build:server` compiles with `-tags server`.
+- Added `server` build-tag seam so `wails3 task build:server` defaults to headless mode without requiring `--headless`.
+- Removed stale Wails v2 app config from `cmd/shipyard/wails.json` and updated Makefile Wails targets.
+- Added regression coverage for native bridge config, panel detach endpoint validation, layout save/load, UI context menu wiring, native endpoint fetch bypass, and context menu CSS.
 
-- `fetchToolsResult` returns `selfToolsResult()` for `serverName == "shipyard"` instead of forwarding to child proxies.
-- `selfToolsResult()` returns the built-in Shipyard tools with bare names.
-- `handleTools` applies gateway policy fields (`enabled`, `server_enabled`) to the direct per-server response.
+## Wails Research Notes
 
-This run added missing regression coverage for AC5:
-
-- `TestHandleTools_ShipyardSelfServerMatchesGatewayCatalogNaming`
-- Verifies `/api/gateway/tools?include_disabled=1` uses namespaced `shipyard__*` names.
-- Verifies `/api/tools?server=shipyard` uses bare names.
-- Verifies both views agree on `enabled` and `server_enabled`, including disabled `shipyard/status`.
-
-The spec file was marked `done` and its requirement/acceptance checkboxes were checked after validation passed.
+- Official migration guide checked: https://v3.wails.io/migration/v2-to-v3/
+- Installed and used Wails CLI/module: `v3.0.0-alpha.96`.
+- `go list -m -versions github.com/wailsapp/wails/v3` showed `v3.0.0-alpha.96` as the latest listed module version.
+- `wails3 releasenotes -v v3.0.0-alpha.96 -n` completed and identified the release as pre-release alpha software.
+- `wails3 doctor` is available but did not complete: it printed the Wails Doctor heading, completed "Scanning system", printed `# System`, then timed out after 20 seconds in this run. Earlier manual attempt showed the same hang pattern after the `# System` heading.
 
 ## Test Results
 
-All required commands from `.nightshift/config.yaml` passed:
-
 ```text
-go test ./internal/web
-ok  	github.com/sloik/shipyard/internal/web	3.026s
+go build ./...
+PASS
+note: macOS linker warnings from Wails native objects built for macOS 26.0 while linking target 11.0
 
 go test ./...
-ok  	github.com/sloik/shipyard/cmd/shipyard	(cached)
-ok  	github.com/sloik/shipyard/cmd/shipyard-mcp	(cached)
-ok  	github.com/sloik/shipyard/internal/auth	(cached)
-ok  	github.com/sloik/shipyard/internal/capture	(cached)
-ok  	github.com/sloik/shipyard/internal/gateway	(cached)
-ok  	github.com/sloik/shipyard/internal/proxy	(cached)
-ok  	github.com/sloik/shipyard/internal/secrets	(cached)
-ok  	github.com/sloik/shipyard/internal/secrets/env	(cached)
-ok  	github.com/sloik/shipyard/internal/secrets/keychain	(cached)
-ok  	github.com/sloik/shipyard/internal/secrets/op	(cached)
-?   	github.com/sloik/shipyard/internal/teststubchild	[no test files]
-ok  	github.com/sloik/shipyard/internal/web	(cached)
+PASS
+ok   github.com/sloik/shipyard/cmd/shipyard         7.034s
+ok   github.com/sloik/shipyard/cmd/shipyard-mcp     cached
+ok   github.com/sloik/shipyard/internal/auth        cached
+ok   github.com/sloik/shipyard/internal/capture     cached
+ok   github.com/sloik/shipyard/internal/gateway     cached
+ok   github.com/sloik/shipyard/internal/proxy       cached
+ok   github.com/sloik/shipyard/internal/secrets     cached
+ok   github.com/sloik/shipyard/internal/web         cached
 
 go vet ./...
-passed
+PASS
 
-go build ./...
-passed
+go build -tags server ./...
+PASS
+note: same macOS linker warnings from Wails native objects
+
+wails3 task build
+PASS
+produced bin/shipyard, 18,693,986 bytes
+
+wails3 task build:server
+PASS
+produced bin/shipyard-server, 18,214,610 bytes
+
+./bin/shipyard-server --config /tmp/shipyard-spec018-server-config.json
+PASS: started without --headless, logged dashboard URL http://localhost:19419
+
+curl -fsS http://127.0.0.1:19419/api/servers
+PASS: returned self server plus alpha test server
+
+curl -fsSI http://127.0.0.1:19419/
+PASS: returned HTTP/1.1 200 OK and text/html
+
+go test -race -count=1 -timeout 5m ./...
+PASS
+ok   github.com/sloik/shipyard/cmd/shipyard         34.591s
+ok   github.com/sloik/shipyard/cmd/shipyard-mcp     6.267s
+ok   github.com/sloik/shipyard/internal/auth        11.434s
+ok   github.com/sloik/shipyard/internal/capture     13.188s
+ok   github.com/sloik/shipyard/internal/gateway     3.063s
+ok   github.com/sloik/shipyard/internal/proxy       12.878s
+ok   github.com/sloik/shipyard/internal/secrets     1.893s
+ok   github.com/sloik/shipyard/internal/web         13.519s
+
+python3 .nightshift/validate_specs.py .nightshift/specs/SPEC-018-wails-v3-native-features.md
+PASS: [nightshift validate-specs] OK - 1 spec(s) valid
 ```
-
-## Live API Evidence
-
-The running local Shipyard instance was already listening on `127.0.0.1:9417`, so it was not stopped or replaced.
-
-- `GET /api/servers` returned `shipyard` plus real child servers including `lmac-run`, `lmstudio`, `markitdown`, and `xcode`.
-- `curl -i 'http://127.0.0.1:9417/api/tools?server=shipyard'` returned `HTTP/1.1 200 OK`.
-- Direct self-server body contained bare tools: `status`, `list_servers`, `restart`, `stop`.
-- Each direct self-server tool included `enabled` and `server_enabled`.
-- `PUT /api/tools/shipyard/status/enabled {"enabled":false}` returned 200, and the direct self-server response returned bare `status` with `enabled:false` and `server_enabled:true`.
-- `GET /api/gateway/tools?include_disabled=1` returned namespaced `shipyard__status` with `tool_enabled:false`, `enabled:false`, and `server_enabled:true` during the disabled check.
-- The toggle was restored with `PUT /api/tools/shipyard/status/enabled {"enabled":true}` and verified restored through `/api/tools?server=shipyard`.
-- `curl -i 'http://127.0.0.1:9417/api/tools?server=lmac-run'` returned `HTTP/1.1 200 OK` with the real child server's bare tools.
 
 ## Acceptance Checklist
 
-- [x] AC 1: `GET /api/tools?server=shipyard` returns 200 OK.
-- [x] AC 2: Response includes a `tools` array with at least `status`, `list_servers`, `restart`, and `stop`.
-- [x] AC 3: Each returned Shipyard tool includes `enabled` and `server_enabled`.
-- [x] AC 4: Disabling `shipyard__status` makes direct `/api/tools?server=shipyard` return bare `status` with `enabled:false`.
-- [x] AC 5: Gateway view and direct per-server view stay consistent; gateway uses namespaced names, direct view uses bare names.
-- [x] AC 6: `GET /api/tools?server=<real-child>` still works unchanged; verified with `lmac-run`.
-- [x] AC 7: Go regression coverage exists for the self-server `/api/tools` path, including the newly added AC5 consistency test.
-- [x] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+- AC1: PASS - `go build ./...`, `go test ./...`, `go vet ./...`, and race validation passed after the v3 migration.
+- AC2: IMPLEMENTED - macOS tray icon is created with Wails v3 `SystemTray.New()` and `SetTemplateIcon`; click toggles the main window. Manual visual tray inspection was not performed in this run.
+- AC3: PASS BY IMPLEMENTATION - tray menu contains `Show Dashboard`, separator, and `Quit`.
+- AC4: PASS BY IMPLEMENTATION - main window close hook hides the window and cancels the close; Quit sets the quitting state, saves layout, cancels context, and calls `app.Quit()`.
+- AC5: PASS - top-tab context menu posts to the native bridge; backend opens detachable native panel windows for Timeline, Tools, History, and Servers. Covered by Go/UI source tests.
+- AC6: PASS BY ARCHITECTURE - detached windows load the same SPA route and connect to the same existing `/ws` hub, so Timeline and History receive the same real-time event stream. Existing websocket behavior was preserved by full test/race validation.
+- AC7: PASS - `wails3 task build:server` produced `bin/shipyard-server`; the binary starts without `--headless` and serves both `/` and `/api/servers`.
+- AC8: PASS - layout JSON save/load is implemented and covered by tests; runtime hooks update main and panel bounds/detached state.
+- AC9: PASS - both built macOS arm64 binaries are under 30 MB.
 
 ## Blockers / Discoveries
 
-- No blockers remain.
-- Discovery: the implementation and two self-server tests were already present in the current branch/base before this run; the remaining useful work was closing the AC5 regression gap and completing the Nightshift evidence/reporting path.
-- Discovery: the manual isolated worktree contains tracked spec/config files but does not contain local-only Nightshift protocol files or `.argo/README.md`; those were read from the main checkout as a read-only fallback. Main checkout edits were limited to the shared heartbeat file.
+- No implementation blocker remains.
+- `wails3 doctor` is not reliable in this environment. It hangs after the `# System` heading; report evidence captured `DOCTOR_TIMEOUT_AFTER_20S`.
+- Wails v3 alpha.96 raises non-fatal macOS linker warnings about native objects built for macOS 26.0 while linking target 11.0. The warnings did not block build, test, server-tag build, Wails task builds, or runtime server smoke.
+- Adding Wails v3 required raising `go.mod` from `go 1.22.0` to `go 1.25.0`. The local toolchain is Go 1.26.2, and Shipyard CI is already pinned to Go 1.26 per repo context.
+- GUI-native AC2-AC4 were implemented against current Wails v3 APIs and compiled, but this run did not perform an interactive macOS menu-bar click/right-click inspection.
 
 ## Suggested Follow-up Specs
 
-None.
+1. Add an automated or semi-automated macOS GUI smoke for Wails tray/menu/window detach behavior, using accessibility or a small manual-evidence checklist if menu-bar automation is brittle.
+2. Add Wails v3 app packaging/signing/notarization work once the project wants distributable `.app` artifacts beyond raw task-built binaries.

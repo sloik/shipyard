@@ -1,4 +1,4 @@
-.PHONY: build test snapshot release wails-dev wails-build build-mcp install-mcp
+.PHONY: build test snapshot release wails-dev wails-build wails-build-server build-mcp install-mcp
 
 build:
 	go build ./cmd/shipyard/
@@ -20,9 +20,12 @@ snapshot:
 release:
 	goreleaser release --clean
 
-# Desktop app targets (requires: go install github.com/wailsapp/wails/v2/cmd/wails@latest)
+# Desktop app targets (requires: go install github.com/wailsapp/wails/v3/cmd/wails3@latest)
 wails-dev:
-	cd cmd/shipyard && wails dev -skipbindings
+	wails3 dev
 
 wails-build:
-	cd cmd/shipyard && wails build -skipbindings
+	wails3 task build
+
+wails-build-server:
+	wails3 task build:server
