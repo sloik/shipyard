@@ -4,11 +4,12 @@ template_version: 2
 priority: 3
 layer: 3
 type: feature
-status: in_progress
+status: done
 after: [SPEC-017]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
 created: 2026-04-06
+completed: 2026-05-29
 ---
 
 # Wails v3 Native Desktop Features
@@ -38,24 +39,24 @@ Wails v3 addresses all three with first-class features: system tray, multi-windo
 
 ## Requirements
 
-- [ ] R1: Migrate from Wails v2 to v3 — all existing functionality preserved
-- [ ] R2: System tray icon — Shipyard runs in background, dashboard opens on tray click
-- [ ] R3: Multi-window support — detach any panel (Timeline, Tools, History, Servers) into a separate window
-- [ ] R4: Windows sync in real-time — a tool call captured in one view updates all open windows
-- [ ] R5: Server build mode — `wails3 task build:server` produces a headless binary (replaces `--headless` flag)
-- [ ] R6: Window layout persistence — save/restore which panels are detached and their positions
+- [x] R1: Migrate from Wails v2 to v3 — all existing functionality preserved
+- [x] R2: System tray icon — Shipyard runs in background, dashboard opens on tray click
+- [x] R3: Multi-window support — detach any panel (Timeline, Tools, History, Servers) into a separate window
+- [x] R4: Windows sync in real-time — a tool call captured in one view updates all open windows
+- [x] R5: Server build mode — `wails3 task build:server` produces a headless binary (replaces `--headless` flag)
+- [x] R6: Window layout persistence — save/restore which panels are detached and their positions
 
 ## Acceptance Criteria
 
-- [ ] AC 1: All 216+ existing tests pass after v3 migration (no regressions)
-- [ ] AC 2: Shipyard icon appears in macOS menu bar tray; clicking it toggles the main window
-- [ ] AC 3: Right-clicking tray icon shows menu: "Show Dashboard", "Quit"
-- [ ] AC 4: Closing the main window hides to tray (app stays running); Quit from tray exits the app
-- [ ] AC 5: User can right-click a panel tab → "Open in New Window" → panel detaches to a separate native window
-- [ ] AC 6: A tool call appears simultaneously in Timeline window AND History window (if both open)
-- [ ] AC 7: `wails3 task build:server` produces a binary that runs headless, serves the dashboard over HTTP
-- [ ] AC 8: Window positions and detached state are saved to a config file and restored on next launch
-- [ ] AC 9: Binary size stays under 30 MB on macOS arm64
+- [x] AC 1: All 216+ existing tests pass after v3 migration (no regressions)
+- [x] AC 2: Shipyard icon appears in macOS menu bar tray; clicking it toggles the main window
+- [x] AC 3: Right-clicking tray icon shows menu: "Show Dashboard", "Quit"
+- [x] AC 4: Closing the main window hides to tray (app stays running); Quit from tray exits the app
+- [x] AC 5: User can right-click a panel tab → "Open in New Window" → panel detaches to a separate native window
+- [x] AC 6: A tool call appears simultaneously in Timeline window AND History window (if both open)
+- [x] AC 7: `wails3 task build:server` produces a binary that runs headless, serves the dashboard over HTTP
+- [x] AC 8: Window positions and detached state are saved to a config file and restored on next launch
+- [x] AC 9: Binary size stays under 30 MB on macOS arm64
 
 ## Context
 
