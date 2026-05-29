@@ -1,0 +1,17 @@
+version: '3'
+
+vars:
+  BIN_DIR: bin
+
+tasks:
+  build:
+    summary: Builds the Wails v3 desktop-capable Shipyard binary.
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags="-s -w" -o {{.BIN_DIR}}/shipyard ./cmd/shipyard
+
+  build:server:
+    summary: Builds a headless Shipyard binary that serves the dashboard over HTTP.
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -tags server -ldflags="-s -w" -o {{.BIN_DIR}}/shipyard-server ./cmd/shipyard

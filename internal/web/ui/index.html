@@ -43,6 +43,9 @@
 
 <!-- Toast container (SPEC-029: R3) -->
 <div id="toast-container" class="toast-container"></div>
+<div id="panel-context-menu" class="context-menu" role="menu" aria-hidden="true">
+  <button type="button" id="panel-context-open" role="menuitem">Open in New Window</button>
+</div>
 
 <div id="app-chrome">
   <div id="global-banners">
@@ -781,6 +784,8 @@
   var wsBanner        = document.getElementById('ws-banner');
   var retryBtn        = document.getElementById('retry-btn');
   var serverCountEl   = document.getElementById('server-count-label');
+  var panelContextMenu = document.getElementById('panel-context-menu');
+  var panelContextOpen = document.getElementById('panel-context-open');
 
   /* ======================================================================
      State
@@ -803,6 +808,7 @@
   var filterTimer   = null;
   var desktopBridgeConfig = null;
   var desktopBridgeConfigPromise = null;
+  var panelContextRoute = null;
 
   /* ======================================================================
      Routing
@@ -869,6 +875,38 @@
 
   window.addEventListener('hashchange', function() { navigateRoute(getRoute()); });
 
+  function isDetachablePanel(route) {
+    return route === 'timeline' || route === 'tools' || route === 'history' || route === 'servers';
+  }
+
+  function showPanelContextMenu(route, x, y) {
+    panelContextRoute = route;
+    panelContextMenu.style.left = x + 'px';
+    panelContextMenu.style.top = y + 'px';
+    panelContextMenu.classList.add('is-active');
+    panelContextMenu.setAttribute('aria-hidden', 'false');
+    panelContextOpen.focus();
+  }
+
+  function hidePanelContextMenu() {
+    panelContextRoute = null;
+    panelContextMenu.classList.remove('is-active');
+    panelContextMenu.setAttribute('aria-hidden', 'true');
+  }
+
+  function openPanelInNewWindow(route) {
+    return loadDesktopBridgeConfig().then(function(config) {
+      if (!config.native_windows) return null;
+      return nativeFetch('/_shipyard/windows/open?panel=' + encodeURIComponent(route), { method: 'POST' })
+        .then(function(resp) {
+          if (!resp.ok) throw new Error('open panel window ' + resp.status);
+          return null;
+        });
+    }).catch(function(err) {
+      console.error('Failed to open panel window:', err);
+    });
+  }
+
   // Wails/webview nuance: clicking the already-active Servers tab may not
   // produce a new hashchange, so same-route activation still needs to re-sync
   // from the live /api/servers response.
@@ -878,6 +916,32 @@
     if (getRoute() === 'servers') {
       loadServers();
     }
+  });
+
+  tabNav.addEventListener('contextmenu', function(e) {
+    var tab = e.target.closest('.tab');
+    if (!tab) return;
+    var route = tab.getAttribute('data-route');
+    if (!isDetachablePanel(route)) return;
+    e.preventDefault();
+    showPanelContextMenu(route, e.clientX, e.clientY);
+  });
+
+  panelContextOpen.addEventListener('click', function() {
+    var route = panelContextRoute;
+    hidePanelContextMenu();
+    if (route) openPanelInNewWindow(route);
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!panelContextMenu.contains(e.target)) {
+      hidePanelContextMenu();
+    }
+  });
+
+  window.addEventListener('blur', hidePanelContextMenu);
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hidePanelContextMenu();
   });
 
   // Settings gear icon — navigate to settings view (BUG-052)
@@ -948,7 +1012,7 @@
   }
 
   function appFetch(input, init) {
-    if (!usesDesktopAssetOrigin() || typeof input !== 'string' || input.charAt(0) !== '/' || input.indexOf('/_shipyard/desktop-config') === 0) {
+    if (!usesDesktopAssetOrigin() || typeof input !== 'string' || input.charAt(0) !== '/' || input.indexOf('/_shipyard/') === 0) {
       return nativeFetch(input, init);
     }
     return loadDesktopBridgeConfig().then(function() {
