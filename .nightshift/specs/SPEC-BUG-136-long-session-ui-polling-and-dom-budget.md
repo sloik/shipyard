@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-BUG-134, SPEC-BUG-113]
 violates: [SPEC-BUG-113, UX-002]
 nfrs: [SPEC-NFR-001]
@@ -54,35 +54,35 @@ Leave blank for the implementation pass.
 
 ## Requirements
 
-- [ ] R1: Server status polling must only run while the Servers view is active,
+- [x] R1: Server status polling must only run while the Servers view is active,
   unless another visible surface explicitly needs it.
-- [ ] R2: Polling timers must pause when the document is hidden and resume
+- [x] R2: Polling timers must pause when the document is hidden and resume
   cleanly when visible.
-- [ ] R3: Timeline live WebSocket inserts must enforce a bounded active DOM row
+- [x] R3: Timeline live WebSocket inserts must enforce a bounded active DOM row
   budget.
-- [ ] R4: Timestamp refresh must operate only on visible or bounded rows, not an
+- [x] R4: Timestamp refresh must operate only on visible or bounded rows, not an
   ever-growing unbounded selector set.
-- [ ] R5: Servers card rendering must skip full `innerHTML` replacement when the
+- [x] R5: Servers card rendering must skip full `innerHTML` replacement when the
   server list and status payload are unchanged.
-- [ ] R6: Tools sidebar rendering must preserve selection and avoid full rerender
+- [x] R6: Tools sidebar rendering must preserve selection and avoid full rerender
   on unrelated server/toggle events.
-- [ ] R7: Frontend telemetry from SPEC-BUG-134 must report active row counts,
+- [x] R7: Frontend telemetry from SPEC-BUG-134 must report active row counts,
   render durations, and skipped-render counts.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Tests or source-level regression checks prove `startServerStatePolling`
+- [x] AC 1: Tests or source-level regression checks prove `startServerStatePolling`
   is started/stopped based on active route and page visibility.
-- [ ] AC 2: A timeline row budget exists and prevents active `.table-row`
+- [x] AC 2: A timeline row budget exists and prevents active `.table-row`
   elements from growing without bound during live WebSocket traffic.
-- [ ] AC 3: Timestamp refresh scans no more than the active row budget.
-- [ ] AC 4: Servers render has a change-detection guard and tests covering the
+- [x] AC 3: Timestamp refresh scans no more than the active row budget.
+- [x] AC 4: Servers render has a change-detection guard and tests covering the
   unchanged-payload no-rerender path.
-- [ ] AC 5: Tools sidebar render has targeted update or skip behavior for
+- [x] AC 5: Tools sidebar render has targeted update or skip behavior for
   unrelated toggle/server events.
-- [ ] AC 6: Frontend telemetry exposes row counts and render durations for
+- [x] AC 6: Frontend telemetry exposes row counts and render durations for
   Timeline, Servers, and Tools.
-- [ ] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
   `go test -race -count=1 -timeout 5m ./...` pass.
 
 ## Context

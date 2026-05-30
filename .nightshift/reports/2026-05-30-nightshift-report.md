@@ -267,3 +267,59 @@ linking target 11.0.
 ### Suggested Follow-up Specs
 
 None.
+
+---
+
+## SPEC-BUG-136 — Long-Session UI Polling and DOM Budget
+
+**Outcome:** done
+
+## Summary
+- Specs completed: 1 of 1
+- Tests passed: all required gates passed
+- Build: pass
+- Lint: pass
+- Review cycles: 1
+
+## Completed Specs
+- SPEC-BUG-136: Long-Session UI Polling and DOM Budget — done
+
+## Per-Spec Changes
+- Added route and document-visibility aware server polling so `startServerStatePolling()` is synchronized through `syncServerStatePolling()` instead of being started globally at bootstrap.
+- Added a `timelineActiveRowBudget` and live DOM pruning for Timeline load and WebSocket insert paths without changing stored traffic data.
+- Bounded relative timestamp refresh to the active Timeline row budget.
+- Added Servers card render signatures that skip full `serversGrid.innerHTML` replacement when server status/list render inputs are unchanged.
+- Added Tools sidebar render signatures and skip telemetry while preserving existing targeted tool toggle updates.
+- Extended SPEC-BUG-134 frontend telemetry with Timeline active row counts, timestamp refresh counts, render durations, and skipped-render counts.
+- Staged a cross-project DevKB update proposal at `.nightshift/knowledge/devkb-updates/frontend-SPEC-BUG-136.md`.
+
+## Test Results
+- Focused UI source checks: `go test ./internal/web -run 'TestSPECBUG136|TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths|TestSPECBUG014_ServerStatePollingStartsAtBootstrap' -count=1` — PASS
+- Full test suite before rebase: `go test ./...` — PASS
+- Lint before rebase: `go vet ./...` — PASS
+- Build before rebase: `go build ./...` — PASS
+- Race before rebase: `go test -race -count=1 -timeout 5m ./...` — PASS
+- Rebased onto current `main` after SPEC-BUG-129 merged.
+- Rebased full gates: `go test ./... && go vet ./... && go build ./...` — PASS
+- Rebased race gate: `go test -race -count=1 -timeout 5m ./...` — PASS
+
+Note: Go build/test commands emitted the existing macOS linker warning about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## Acceptance Criteria
+- [x] AC 1: Tests or source-level regression checks prove `startServerStatePolling` is started/stopped based on active route and page visibility.
+- [x] AC 2: A timeline row budget exists and prevents active `.table-row` elements from growing without bound during live WebSocket traffic.
+- [x] AC 3: Timestamp refresh scans no more than the active row budget.
+- [x] AC 4: Servers render has a change-detection guard and tests covering the unchanged-payload no-rerender path.
+- [x] AC 5: Tools sidebar render has targeted update or skip behavior for unrelated toggle/server events.
+- [x] AC 6: Frontend telemetry exposes row counts and render durations for Timeline, Servers, and Tools.
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and `go test -race -count=1 -timeout 5m ./...` pass.
+
+## Blockers / Discoveries
+- Blockers: none.
+- Discovery: `main` advanced during this run due to the SPEC-BUG-129 merge. The branch was rebased onto current `main` and all required gates were rerun.
+
+## Metrics Fidelity
+- Metrics were not emitted through `record_metrics.py` in this inline Codex run because the loop start timestamp was not shell-captured at Step 1 before work began. I did not fabricate timestamps.
+
+## Suggested Follow-up Specs
+(none)

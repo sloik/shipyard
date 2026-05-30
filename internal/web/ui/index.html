@@ -822,6 +822,7 @@
      ====================================================================== */
   var timelineOffset  = 0;
   var timelinePageSize = 25;
+  var timelineActiveRowBudget = 500;
   var timelineTotal   = 0;
   var timelineLoading = false;
   var timelineAllLoaded = false;
@@ -839,6 +840,8 @@
   var desktopBridgeConfig = null;
   var desktopBridgeConfigPromise = null;
   var panelContextRoute = null;
+  var lastServerCardsSignature = '';
+  var lastToolSidebarSignature = '';
   var clientTelemetryMaxSamples = 256;
   var clientTelemetrySamples = [];
   window.shipyardClientTelemetry = clientTelemetrySamples;
@@ -884,6 +887,7 @@
     if (baseRoute === 'servers') {
       loadServers();
     }
+    syncServerStatePolling();
     if (baseRoute === 'sessions') {
       loadSessions();
     }
@@ -926,6 +930,7 @@
   };
 
   window.addEventListener('hashchange', function() { navigateRoute(getRoute()); });
+  document.addEventListener('visibilitychange', function() { syncServerStatePolling(); });
 
   function isDetachablePanel(route) {
     return route === 'timeline' || route === 'tools' || route === 'history' || route === 'servers';
@@ -1828,6 +1833,39 @@
     timelineScrollInfo.style.display = 'none';
   }
 
+  function activeTimelineRowCount() {
+    return trafficBody.querySelectorAll('.table-row').length;
+  }
+
+  function enforceTimelineRowBudget(trigger) {
+    var telemetryStart = performance.now();
+    var removed = 0;
+    var mainRows = trafficBody.querySelectorAll('.table-row:not([data-detail-for])');
+    for (var i = mainRows.length - 1; i >= timelineActiveRowBudget; i--) {
+      var row = mainRows[i];
+      var rowID = row.getAttribute('data-id');
+      if (rowID) {
+        var detail = trafficBody.querySelector('.table-row[data-detail-for="' + rowID + '"]');
+        if (detail && detail.parentNode) {
+          detail.parentNode.removeChild(detail);
+          removed++;
+        }
+      }
+      if (row.parentNode) {
+        row.parentNode.removeChild(row);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      recordClientTelemetry('timeline.dom.prune', telemetryStart, {
+        trigger: trigger,
+        rows: activeTimelineRowCount(),
+        removed: removed,
+        budget: timelineActiveRowBudget
+      });
+    }
+  }
+
   function loadPage() {
     if (timelineLoading || timelineAllLoaded) return;
     var telemetryStart = performance.now();
@@ -1854,7 +1892,7 @@
         if (timelineTotal === 0 && timelineOffset === 0) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
-          recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0 });
+          recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0, active_rows: 0, budget: timelineActiveRowBudget });
           return;
         }
 
@@ -1878,6 +1916,7 @@
         for (var i = 0; i < items.length; i++) {
           trafficBody.insertAdjacentHTML('beforeend', renderRow(items[i], existingCount + i));
         }
+        enforceTimelineRowBudget('load');
 
         timelineOffset += items.length;
 
@@ -1889,7 +1928,7 @@
             timelineScrollInfo.style.display = '';
           }
         }
-        recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal });
+        recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal, active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
       })
       .catch(function(err) {
         timelineLoading = false;
@@ -1956,6 +1995,7 @@
 
     ws.onmessage = function(e) {
       try {
+        var telemetryStart = performance.now();
         var evt = JSON.parse(e.data);
 
         // Track filters
@@ -1968,10 +2008,12 @@
 
           var newIdx = 0; // new row is always first
           trafficBody.insertAdjacentHTML('afterbegin', renderRow(evt, newIdx));
+          enforceTimelineRowBudget('live');
 
           timelineTotal++;
           timelineOffset++;
           trafficCount.textContent = timelineTotal + ' entries';
+          recordClientTelemetry('timeline.live.insert', telemetryStart, { active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
         }
       } catch(err) {
         console.error('WS parse error:', err);
@@ -2267,8 +2309,45 @@
   /* ======================================================================
      Tool Browser — Render Sidebar
      ====================================================================== */
+  function toolSidebarSignature(searchVal) {
+    var serverNames = Object.keys(allTools);
+    var groups = [];
+    for (var i = 0; i < serverNames.length; i++) {
+      var srvName = serverNames[i];
+      var srvData = allTools[srvName] || {};
+      var tools = srvData.tools || [];
+      groups.push({
+        name: srvName,
+        status: srvData.status || '',
+        enabled: srvData.enabled !== false,
+        isSelf: !!srvData.isSelf,
+        tools: tools.map(function(t) {
+          return {
+            name: t.name || '',
+            description: t.description || '',
+            enabled: t.enabled !== false,
+            conflict: !!(toolConflicts[t.name] && toolConflicts[t.name].length > 1)
+          };
+        })
+      });
+    }
+    return JSON.stringify({
+      search: searchVal,
+      selected: selectedTool ? selectedTool.server + '\n' + selectedTool.name : '',
+      conflicts: toolConflicts,
+      groups: groups
+    });
+  }
+
   function renderToolSidebar() {
+    var telemetryStart = performance.now();
     var searchVal = toolSearch ? toolSearch.value.trim().toLowerCase() : '';
+    var signature = toolSidebarSignature(searchVal);
+    if (signature === lastToolSidebarSignature) {
+      recordClientTelemetry('tools.sidebar.render.skip', telemetryStart, { groups: Object.keys(allTools).length, skipped: 1 });
+      return;
+    }
+    lastToolSidebarSignature = signature;
     var html = '';
 
     // Show conflict warning banner
@@ -2405,6 +2484,7 @@
     }
 
     toolGroups.innerHTML = html;
+    recordClientTelemetry('tools.sidebar.render', telemetryStart, { groups: Object.keys(allTools).length, skipped: 0 });
   }
 
   /* ======================================================================
@@ -3420,6 +3500,24 @@
     }, 2000);
   }
 
+  function stopServerStatePolling() {
+    if (!serverStateTimer) return;
+    clearInterval(serverStateTimer);
+    serverStateTimer = null;
+  }
+
+  function shouldServerStatePoll() {
+    return getRoute() === 'servers' && document.visibilityState !== 'hidden';
+  }
+
+  function syncServerStatePolling() {
+    if (shouldServerStatePoll()) {
+      startServerStatePolling();
+    } else {
+      stopServerStatePolling();
+    }
+  }
+
   /* ======================================================================
      Settings — Secrets Backend
      ====================================================================== */
@@ -3461,8 +3559,31 @@
     });
   }
 
+  function serverCardsSignature(servers) {
+    return JSON.stringify((servers || []).map(function(s) {
+      return {
+        name: s.name || '',
+        status: s.status || '',
+        tool_count: s.tool_count || 0,
+        restart_count: s.restart_count || 0,
+        error_message: s.error_message || '',
+        command: s.command || '',
+        gateway_disabled: !!s.gateway_disabled,
+        enabled: s.enabled !== false,
+        is_self: !!s.is_self,
+        has_plain_text_secrets: !!s.has_plain_text_secrets
+      };
+    }));
+  }
+
   function renderServerCards(servers) {
     var telemetryStart = performance.now();
+    var signature = serverCardsSignature(servers);
+    if (signature === lastServerCardsSignature) {
+      recordClientTelemetry('servers.render.skip', telemetryStart, { cards: servers ? servers.length : 0, skipped: 1 });
+      return;
+    }
+    lastServerCardsSignature = signature;
     // SPEC-BUG-045: Lucide inline SVG icon helpers (R1, R2)
     // Each returns an <svg> element string at the requested size and stroke color.
     var iconWrench = function(size, color) {
@@ -3727,7 +3848,7 @@
       html += '</div>';
     }
     serversGrid.innerHTML = html;
-    recordClientTelemetry('servers.render', telemetryStart, { cards: servers ? servers.length : 0 });
+    recordClientTelemetry('servers.render', telemetryStart, { cards: servers ? servers.length : 0, skipped: 0 });
   }
 
   function openAddServerModal() {
@@ -5347,7 +5468,7 @@
 
   // Load initial data
   loadPage();
-  startServerStatePolling();
+  syncServerStatePolling();
 
   // Check schema alert banner on load
   checkSchemaAlertBanner();
@@ -5360,7 +5481,9 @@
   // Periodically refresh relative timestamps (every 30s)
   setInterval(function() {
     var timestamps = trafficBody.querySelectorAll('.timestamp[title]');
-    for (var i = 0; i < timestamps.length; i++) {
+    var limit = Math.min(timestamps.length, timelineActiveRowBudget);
+    var telemetryStart = performance.now();
+    for (var i = 0; i < limit; i++) {
       var title = timestamps[i].getAttribute('title');
       if (title) {
         var ms = new Date(title).getTime();
@@ -5369,6 +5492,7 @@
         }
       }
     }
+    recordClientTelemetry('timeline.timestamps.refresh', telemetryStart, { scanned: limit, total: timestamps.length, budget: timelineActiveRowBudget });
   }, 30000);
 
 })();

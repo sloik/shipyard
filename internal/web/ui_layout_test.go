@@ -3249,6 +3249,151 @@ func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) 
 	}
 }
 
+func TestSPECBUG136_ServerPollingRouteAndVisibilityAware(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"function startServerStatePolling()",
+		"function stopServerStatePolling()",
+		"function shouldServerStatePoll()",
+		"function syncServerStatePolling()",
+		"return getRoute() === 'servers' && document.visibilityState !== 'hidden';",
+		"document.addEventListener('visibilitychange', function() { syncServerStatePolling(); });",
+		"clearInterval(serverStateTimer);",
+		"serverStateTimer = null;",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-136 AC1/R1/R2 FAIL: expected %q", needle)
+		}
+	}
+
+	initIdx := strings.Index(content, "// Load initial data")
+	if initIdx == -1 {
+		t.Fatal("SPEC-BUG-136 FAIL: expected init section")
+	}
+	initBody := content[initIdx:]
+	if endIdx := strings.Index(initBody, "// Check schema alert banner"); endIdx > 0 {
+		initBody = initBody[:endIdx]
+	}
+	if !strings.Contains(initBody, "syncServerStatePolling();") {
+		t.Error("SPEC-BUG-136 AC1 FAIL: bootstrap should sync polling state through route/visibility guard")
+	}
+	if strings.Contains(initBody, "startServerStatePolling();") {
+		t.Error("SPEC-BUG-136 AC1 FAIL: bootstrap should not unconditionally start server polling")
+	}
+}
+
+func TestSPECBUG136_TimelineDOMAndTimestampBudgets(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"var timelineActiveRowBudget = 500;",
+		"function enforceTimelineRowBudget(trigger)",
+		"trafficBody.querySelectorAll('.table-row:not([data-detail-for])')",
+		"i >= timelineActiveRowBudget",
+		"data-detail-for",
+		"recordClientTelemetry('timeline.dom.prune'",
+		"enforceTimelineRowBudget('load');",
+		"enforceTimelineRowBudget('live');",
+		"recordClientTelemetry('timeline.live.insert'",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-136 AC2/R3 FAIL: expected %q", needle)
+		}
+	}
+
+	timestampIdx := strings.Index(content, "// Periodically refresh relative timestamps")
+	if timestampIdx == -1 {
+		t.Fatal("SPEC-BUG-136 AC3 FAIL: timestamp refresh block not found")
+	}
+	timestampBody := content[timestampIdx:]
+	for _, needle := range []string{
+		"var limit = Math.min(timestamps.length, timelineActiveRowBudget);",
+		"for (var i = 0; i < limit; i++)",
+		"recordClientTelemetry('timeline.timestamps.refresh'",
+		"scanned: limit",
+		"budget: timelineActiveRowBudget",
+	} {
+		if !strings.Contains(timestampBody, needle) {
+			t.Errorf("SPEC-BUG-136 AC3/R4 FAIL: expected %q in timestamp refresh block", needle)
+		}
+	}
+}
+
+func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	body := renderServerCardsJS(t)
+
+	for _, needle := range []string{
+		"var lastServerCardsSignature = '';",
+		"function serverCardsSignature(servers)",
+		"JSON.stringify((servers || []).map(function(s)",
+		"if (signature === lastServerCardsSignature)",
+		"recordClientTelemetry('servers.render.skip'",
+		"lastServerCardsSignature = signature;",
+		"recordClientTelemetry('servers.render'",
+		"skipped: 0",
+	} {
+		if !strings.Contains(content, needle) && !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-136 AC4/AC6 FAIL: expected %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG136_ToolsSidebarRenderSkipAndTelemetry(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderIdx := strings.Index(content, "function renderToolSidebar()")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-BUG-136 AC5 FAIL: renderToolSidebar not found")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  /* ======================================================================\n     Tool Browser — Select Tool"); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+
+	required := []string{
+		"var lastToolSidebarSignature = '';",
+		"function toolSidebarSignature(searchVal)",
+		"selectedTool ? selectedTool.server + '\\n' + selectedTool.name : ''",
+		"if (signature === lastToolSidebarSignature)",
+		"recordClientTelemetry('tools.sidebar.render.skip'",
+		"toolGroups.innerHTML = html;",
+		"recordClientTelemetry('tools.sidebar.render'",
+		"skipped: 0",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) && !strings.Contains(renderBody, needle) {
+			t.Errorf("SPEC-BUG-136 AC5/AC6 FAIL: expected %q", needle)
+		}
+	}
+
+	if !strings.Contains(content, "applyToolEnabledState(data.server, data.tool, data.enabled);") {
+		t.Error("SPEC-BUG-136 AC5 FAIL: websocket tool toggles should use targeted sidebar state updates")
+	}
+	if !strings.Contains(content, "if (getRoute() === 'tools' && toolsLoaded && !findSidebarToolButton(data.server, data.tool))") {
+		t.Error("SPEC-BUG-136 AC5 FAIL: websocket tool toggles should only rerender when the targeted row is missing")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).
