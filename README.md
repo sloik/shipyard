@@ -294,6 +294,24 @@ go test ./...
 go vet ./...
 ```
 
+### macOS Wails GUI Smoke
+
+After native desktop changes, run the repeatable macOS Wails v3 smoke:
+
+```bash
+scripts/macos-wails-gui-smoke.sh
+```
+
+The script builds Shipyard with `wails3 task build`, launches the native app,
+checks the local HTTP server, records process/window evidence, and writes a
+Markdown artifact under `reports/gui-smoke/`. The menu-bar tray steps are a
+structured manual checklist because macOS menu-bar extras are brittle to inspect
+without Accessibility permissions.
+
+The checklist covers tray visibility, tray click show/toggle behavior, the
+right-click menu items `Show Dashboard` and `Quit`, close-to-tray behavior, and
+detaching a panel tab with `Open in New Window`.
+
 ### UI
 
 The web dashboard is a single HTML file with vanilla JS, embedded into the binary at compile time via `go:embed`. To edit the UI:

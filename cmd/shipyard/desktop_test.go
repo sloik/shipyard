@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,6 +242,46 @@ func TestDesktopBridge_OpenPanelWindowRequiresNativeController(t *testing.T) {
 
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501 without native controller, got %d", w.Code)
+	}
+}
+
+func TestMacOSWailsGUISmokeProcedureDocumentsNativeCoverage(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+
+	scriptPath := filepath.Join(repoRoot, "scripts", "macos-wails-gui-smoke.sh")
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read smoke script: %v", err)
+	}
+	readme, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		source string
+		needle string
+	}{
+		{"script evidence path", string(script), "reports/gui-smoke"},
+		{"script tray visibility", string(script), "tray icon visibility"},
+		{"script tray toggle", string(script), "Tray click show/toggle behavior"},
+		{"script menu show", string(script), "Show Dashboard"},
+		{"script menu quit", string(script), "Quit"},
+		{"script close to tray", string(script), "close-to-tray"},
+		{"script panel detach", string(script), "Panel detach opens a separate native window"},
+		{"readme command", string(readme), "scripts/macos-wails-gui-smoke.sh"},
+		{"readme evidence path", string(readme), "reports/gui-smoke/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.source, tc.needle) {
+				t.Fatalf("expected %s to contain %q", tc.name, tc.needle)
+			}
+		})
 	}
 }
 
