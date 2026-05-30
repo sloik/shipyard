@@ -371,6 +371,7 @@ Note: Go build/test commands emitted the existing macOS linker warning about obj
 
 ## Blockers / Discoveries
 - Blockers: none.
+- Unblock correction: restored unrelated `.nightshift/specs/SPEC-BUG-130-wails-v3-packaging-signing-notarization.md` exactly to `main` after the parent evidence gate found branch drift. No SPEC-BUG-137 implementation files were changed in this correction.
 - Discovery: frontend telemetry was previously browser-local only, so persistent history now depends on the new lightweight `/api/performance/frontend` POST plus HTTP-side rollup capture.
 - Discovery: child RPC latency is exposed through the existing bounded runtime recorder; the history endpoint folds the latest RPC sample into the persistent rollup when the app-health view or debug bundle is queried.
 
