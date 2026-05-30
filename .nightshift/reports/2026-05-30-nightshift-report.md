@@ -115,6 +115,9 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 ### SPEC-BUG-133
 
 - No blockers remain.
+- Unblock correction: restored `SPEC-BUG-134`, `SPEC-BUG-135`,
+  `SPEC-BUG-136`, and `SPEC-BUG-137` exactly from `main` after parent evidence
+  found they appeared as unrelated deletions in the branch diff.
 - Root cause was route ownership drift: the feature surfaces existed, but the app-shell route registry and top-level tab model still represented the older dashboard route set.
 - Keeping nested hashes as aliases was less disruptive than redirecting because existing links can render the correct promoted view without changing the hash.
 - The top app bar needed an explicit `flex-wrap: nowrap` guard after expanding from four to seven designed tabs.
