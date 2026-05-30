@@ -3761,6 +3761,122 @@ func TestSPECBUG140_TrafficPanelFiltersUseUX002StripCSS(t *testing.T) {
 	}
 }
 
+func TestSPECBUG142_TrafficSplitCopyControlsAreIconOnly(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-142 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if !strings.Contains(content, "function iconCopy(size, color)") {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: expected Lucide copy icon helper")
+	}
+	if got := strings.Count(detailBody, `aria-label="Copy request payload"`); got != 1 {
+		t.Fatalf("SPEC-BUG-142 AC1/AC3 FAIL: expected one accessible request copy action, got %d", got)
+	}
+	if got := strings.Count(detailBody, `aria-label="Copy response payload"`); got != 2 {
+		t.Fatalf("SPEC-BUG-142 AC2/AC3 FAIL: expected response copy action in success and error branches, got %d", got)
+	}
+	if strings.Contains(detailBody, `>Copy</button>`) {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: traffic panel copy actions must not render visible Copy text")
+	}
+	for _, needle := range []string{
+		`class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy request payload" title="Copy request payload">`,
+		`class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">`,
+		`iconCopy(12, 'var(--text-muted)')`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-142 AC1/AC2/AC3 FAIL: expected traffic copy markup %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG142_TrafficSplitCopyCSSMatchesUX002Icon(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	copyBlock := regexp.MustCompile(`(?s)\.traffic-panel-copy\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(copyBlock) != 2 {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: .traffic-panel-copy CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 12px;",
+		"height: 12px;",
+		"min-width: 12px;",
+		"padding: 0;",
+		"gap: 0;",
+		"background: transparent;",
+		"border-color: transparent;",
+		"color: var(--text-muted);",
+	} {
+		if !strings.Contains(copyBlock[1], needle) {
+			t.Errorf("SPEC-BUG-142 AC1/AC2 FAIL: traffic copy CSS missing %q", needle)
+		}
+	}
+	if !strings.Contains(content, ".traffic-panel-copy.btn-copied") {
+		t.Error("SPEC-BUG-142 AC4 FAIL: icon-only copy action should retain copied feedback styling")
+	}
+}
+
+func TestSPECBUG142_CopyWiringStaysScopedToEachPanelPayload(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	wireIdx := strings.Index(content, "function wireCopyButtons(panelEl)")
+	if wireIdx == -1 {
+		t.Fatal("SPEC-BUG-142 AC4 FAIL: wireCopyButtons not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     JSON Filter Logic"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"panelEl.querySelectorAll('.btn-copy')",
+		"btn.closest('.code-block')",
+		"viewer.querySelector('.json-viewer')",
+		"btn.setAttribute('data-copy', jv.textContent)",
+	} {
+		if !strings.Contains(wireBody, needle) {
+			t.Errorf("SPEC-BUG-142 AC4 FAIL: copy wiring missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG142_GenericCopyButtonsKeepVisibleLabels(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		`id="tool-response-copy"><svg width="12" height="12"`,
+		`</svg>Copy</button>`,
+		`<button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerCommand) + '">Copy</button>`,
+		`<button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerConfig) + '">Copy</button>`,
+		`<button class="btn btn-copy btn-sm" id="tok-copy-btn">Copy</button>`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-142 AC5 FAIL: generic copy button label behavior missing %q", needle)
+		}
+	}
+}
+
 func TestFARTSCR001_SharedFilterMatchCountLiveWiring(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {

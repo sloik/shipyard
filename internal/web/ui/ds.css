@@ -476,6 +476,26 @@ body {
   color: var(--text-primary);
 }
 
+.traffic-panel-copy {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  padding: 0;
+  gap: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.traffic-panel-copy:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+.traffic-panel-copy.btn-copied {
+  background: transparent;
+  border-color: transparent;
+  color: var(--success-fg);
+}
+
 .btn-copied {
   background: var(--success-subtle);
   color: var(--success-fg);

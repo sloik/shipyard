@@ -1073,6 +1073,10 @@
     return iconSvg(size, color, '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>');
   }
 
+  function iconCopy(size, color) {
+    return iconSvg(size, color, '<rect width="14" height="14" x="8" y="2" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>');
+  }
+
   function iconChartLine(size, color) {
     return iconSvg(size, color, '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>');
   }
@@ -1388,7 +1392,7 @@
     html += '<div class="code-block">';
     html += '<div class="code-header" data-req-header>' +
       '<span>REQUEST</span>' +
-      '<button class="btn btn-copy">Copy</button>' +
+      '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy request payload" title="Copy request payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
     '</div>';
     if (reqEntry) {
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
@@ -1410,13 +1414,13 @@
     if (resEntry && resEntry.status === 'error') {
       html += '<div class="code-header" data-res-header>' +
         '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
-        '<button class="btn btn-copy">Copy</button>' +
+        '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
       html += '<div class="code-header" data-res-header>' +
         '<span>RESPONSE</span>' +
-        '<button class="btn btn-copy">Copy</button>' +
+        '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
