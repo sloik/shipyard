@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 3
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-BUG-139]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -39,26 +39,26 @@ UX-002 reference:
 
 ## Requirements
 
-- [ ] R1: Request and response filters must render as full-width panel filter
+- [x] R1: Request and response filters must render as full-width panel filter
   strips, not standalone rounded input capsules.
-- [ ] R2: Each panel filter strip must include an 11px search icon before the
+- [x] R2: Each panel filter strip must include an 11px search icon before the
   placeholder/input.
-- [ ] R3: Each strip must use the UX-002 fill, bottom divider, padding, gap, and
+- [x] R3: Each strip must use the UX-002 fill, bottom divider, padding, gap, and
   compact placeholder typography.
-- [ ] R4: Each strip must keep its own independent Text/JQ toggle on the right.
-- [ ] R5: Keyboard input and mode switching must remain independent per panel.
+- [x] R4: Each strip must keep its own independent Text/JQ toggle on the right.
+- [x] R5: Keyboard input and mode switching must remain independent per panel.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Request panel filter starts with a search icon followed by
+- [x] AC 1: Request panel filter starts with a search icon followed by
   `Filter request...` input text.
-- [ ] AC 2: Response panel filter starts with a search icon followed by
+- [x] AC 2: Response panel filter starts with a search icon followed by
   `Filter response...` input text.
-- [ ] AC 3: The per-panel filters are full-width strips with bottom-only
+- [x] AC 3: The per-panel filters are full-width strips with bottom-only
   divider styling, not rounded bordered boxes.
-- [ ] AC 4: Toggling Text/JQ in the request panel does not change the response
+- [x] AC 4: Toggling Text/JQ in the request panel does not change the response
   panel mode, and vice versa.
-- [ ] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`,
+- [x] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`,
   `go vet ./...`, and `go build ./...` pass.
 
 ## Context

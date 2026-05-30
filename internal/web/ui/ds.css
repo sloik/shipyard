@@ -1360,8 +1360,30 @@ textarea {
 }
 
 .json-filter.panel-filter {
-  border-radius: var(--radius-s);
-  padding: 2px 8px;
+  width: 100%;
+  gap: 6px;
+  background: #161b22;
+  border: 0;
+  border-bottom: 1px solid #21262d;
+  border-radius: 0;
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+  box-sizing: border-box;
+}
+
+.panel-filter-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.panel-filter-input svg {
+  flex-shrink: 0;
+}
+
+.json-filter.panel-filter input {
   font-size: var(--font-size-xs);
 }
 

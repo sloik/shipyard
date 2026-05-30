@@ -1375,7 +1375,8 @@
 
     // REQUEST panel
     html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter request...">';
+    html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter request..."></label>';
+    html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
@@ -1395,7 +1396,8 @@
 
     // RESPONSE panel
     html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter response...">';
+    html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter response..."></label>';
+    html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
