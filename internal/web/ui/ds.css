@@ -1327,6 +1327,58 @@ textarea {
   max-height: 60vh;
 }
 
+.traffic-detail-panel .split-view {
+  min-height: 160px;
+}
+
+.traffic-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: #010409;
+}
+
+.split-view > .traffic-panel {
+  overflow: hidden;
+}
+
+.traffic-panel-body {
+  background: #010409;
+  border: 0;
+  border-radius: 0;
+  padding: 4px 10px 4px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  color: var(--text-primary);
+}
+
+.traffic-panel-body .json-line {
+  gap: 6px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.traffic-panel-body .json-line .ln {
+  width: 20px;
+  min-width: 20px;
+  max-width: 20px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #8b949e;
+}
+
+.traffic-panel-body .json-line .lc {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .json-line {
   display: flex;
   align-items: flex-start;

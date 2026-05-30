@@ -4,7 +4,7 @@ template_version: 3
 priority: 6
 layer: 3
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-BUG-141]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -43,28 +43,28 @@ UX-002 reference:
 
 ## Requirements
 
-- [ ] R1: Traffic split-view request/response panel bodies must not be nested
+- [x] R1: Traffic split-view request/response panel bodies must not be nested
   in generic `.code-block` cards.
-- [ ] R2: Panel bodies must use the UX-002 dark inset body fill, compact
+- [x] R2: Panel bodies must use the UX-002 dark inset body fill, compact
   padding, row gap, and scroll behavior.
-- [ ] R3: Traffic panel JSON line numbers must use the UX-002 width and compact
+- [x] R3: Traffic panel JSON line numbers must use the UX-002 width and compact
   typography within split-view bodies.
-- [ ] R4: Traffic panel JSON content must keep existing syntax highlighting,
+- [x] R4: Traffic panel JSON content must keep existing syntax highlighting,
   recursive string expansion, key sorting, text filter, and jq filter behavior.
-- [ ] R5: Tests must assert that Traffic split-view bodies use dedicated panel
+- [x] R5: Tests must assert that Traffic split-view bodies use dedicated panel
   body classes and do not emit nested `.code-block` wrappers.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Request and response JSON bodies are direct descendants of their
+- [x] AC 1: Request and response JSON bodies are direct descendants of their
   panel structure after the panel header, without an intermediate `.code-block`.
-- [ ] AC 2: Split-view body styling uses compact 11px monospace JSON rows and
+- [x] AC 2: Split-view body styling uses compact 11px monospace JSON rows and
   20px line-number columns for Traffic detail panels.
-- [ ] AC 3: The split-view itself remains the only outer bordered/radius
+- [x] AC 3: The split-view itself remains the only outer bordered/radius
   container around request and response bodies.
-- [ ] AC 4: Text filtering and jq filtering continue to update the same JSON
+- [x] AC 4: Text filtering and jq filtering continue to update the same JSON
   body content.
-- [ ] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`,
+- [x] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`,
   `go vet ./...`, and `go build ./...` pass.
 
 ## Context

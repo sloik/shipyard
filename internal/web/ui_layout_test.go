@@ -3614,7 +3614,7 @@ func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
 		"container.querySelector('.json-filter:not(.panel-filter)')",
 		"container.querySelectorAll('.split-view .json-viewer')",
 		"container.querySelectorAll('.json-filter.panel-filter')",
-		"pf.nextElementSibling",
+		"pf.closest('.traffic-panel')",
 	} {
 		if !strings.Contains(wireBody, needle) && !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: filter wiring missing %q", needle)
@@ -3633,6 +3633,7 @@ func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
 		"modeBtn.closest('.json-filter')",
 		"filterEl.classList.contains('panel-filter')",
 		"container.querySelectorAll('.split-view .json-viewer')",
+		"filterEl.closest('.traffic-panel')",
 	} {
 		if !strings.Contains(modeBody, needle) && !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: mode toggle behavior missing %q", needle)
@@ -3847,8 +3848,8 @@ func TestSPECBUG142_CopyWiringStaysScopedToEachPanelPayload(t *testing.T) {
 	}
 	for _, needle := range []string{
 		"panelEl.querySelectorAll('.btn-copy')",
-		"btn.closest('.code-block')",
-		"viewer.querySelector('.json-viewer')",
+		"btn.closest('.traffic-panel')",
+		"panel.querySelector('.json-viewer')",
 		"btn.setAttribute('data-copy', jv.textContent)",
 	} {
 		if !strings.Contains(wireBody, needle) {
@@ -3950,6 +3951,159 @@ func TestFARTSCR001_SharedFilterModeSwitchAndInvalidJQCountState(t *testing.T) {
 	} {
 		if !strings.Contains(modeBody, needle) {
 			t.Errorf("FART-SCR-001 AC2 FAIL: mode switch should recompute shared count without panel-state changes, missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG143_TrafficJSONBodiesAreDedicatedPanelBodies(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-143 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if strings.Contains(detailBody, `class="code-block"`) {
+		t.Fatal("SPEC-BUG-143 AC1/AC3 FAIL: traffic split-view panels must not render nested generic .code-block wrappers")
+	}
+	if strings.Contains(detailBody, `code-body`) {
+		t.Fatal("SPEC-BUG-143 AC1 FAIL: traffic JSON bodies must not use generic .code-body typography")
+	}
+	for _, needle := range []string{
+		`class="traffic-panel traffic-panel-request"`,
+		`class="traffic-panel traffic-panel-response"`,
+		`class="json-viewer traffic-panel-body" data-raw-json="`,
+		`class="json-viewer traffic-panel-body"><span class="spinner">No request data</span></div>`,
+		`class="json-viewer traffic-panel-body"><span class="spinner">Awaiting response\u2026</span></div>`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-143 AC1/AC4 FAIL: traffic detail body markup missing %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-viewer traffic-panel-body"`) != 5 {
+		t.Fatal("SPEC-BUG-143 AC1 FAIL: request/response success, empty, error, and pending branches should all use traffic-panel-body")
+	}
+}
+
+func TestSPECBUG143_TrafficPanelBodyCSSMatchesUX002Metrics(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-panel\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC1/AC3 FAIL: .traffic-panel CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "flex-direction: column;", "overflow: hidden;"} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC3 FAIL: traffic panel CSS missing %q", needle)
+		}
+	}
+
+	bodyBlock := regexp.MustCompile(`(?s)\.traffic-panel-body\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(bodyBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC2 FAIL: .traffic-panel-body CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: #010409;",
+		"border: 0;",
+		"border-radius: 0;",
+		"padding: 4px 10px 4px 6px;",
+		"font-size: 11px;",
+		"line-height: 1.45;",
+		"overflow: auto;",
+		"flex: 1;",
+		"min-height: 0;",
+		"max-height: none;",
+	} {
+		if !strings.Contains(bodyBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC2 FAIL: traffic body CSS missing %q", needle)
+		}
+	}
+
+	lnBlock := regexp.MustCompile(`(?s)\.traffic-panel-body \.json-line \.ln\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(lnBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC2 FAIL: traffic line-number CSS block not found")
+	}
+	for _, needle := range []string{"width: 20px;", "min-width: 20px;", "max-width: 20px;", "font-size: 11px;"} {
+		if !strings.Contains(lnBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC2 FAIL: traffic line-number metrics missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG143_FilterAndCopyWiringTargetsTrafficPanelBody(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, section := range []struct {
+		name  string
+		start string
+		end   string
+		want  []string
+		ban   []string
+	}{
+		{
+			name:  "copy",
+			start: "function wireCopyButtons(panelEl)",
+			end:   "/* ======================================================================\n     JSON Filter Logic",
+			want: []string{
+				"btn.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"btn.closest('.code-block')"},
+		},
+		{
+			name:  "filters",
+			start: "function wireFilterInputs(container)",
+			end:   "/* ======================================================================\n     Traffic Detail Resize",
+			want: []string{
+				"pf.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"pf.nextElementSibling"},
+		},
+		{
+			name:  "mode toggles",
+			start: "trafficBody.addEventListener('click', function(e) {",
+			end:   "/* ======================================================================\n     Row Click",
+			want: []string{
+				"filterEl.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"var codeBlock = filterEl.nextElementSibling"},
+		},
+	} {
+		idx := strings.Index(content, section.start)
+		if idx == -1 {
+			t.Fatalf("SPEC-BUG-143 %s wiring FAIL: section %q not found", section.name, section.start)
+		}
+		body := content[idx:]
+		if endIdx := strings.Index(body, section.end); endIdx > 0 {
+			body = body[:endIdx]
+		}
+		for _, needle := range section.want {
+			if !strings.Contains(body, needle) {
+				t.Errorf("SPEC-BUG-143 %s wiring FAIL: missing %q", section.name, needle)
+			}
+		}
+		for _, forbidden := range section.ban {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("SPEC-BUG-143 %s wiring FAIL: must not retain generic code-block targeting %q", section.name, forbidden)
+			}
 		}
 	}
 }
