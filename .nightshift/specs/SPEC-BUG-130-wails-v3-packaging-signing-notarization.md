@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 3
 type: feature
-status: in_progress
+status: done
 after: [SPEC-018]
 nfrs: [SPEC-013, SPEC-014, SPEC-015, SPEC-NFR-001]
 prior_attempts: []
@@ -26,30 +26,30 @@ shared with users outside the local development machine.
 
 ## Requirements
 
-- [ ] R1: Define the Wails v3 packaging path for a distributable macOS `.app`
+- [x] R1: Define the Wails v3 packaging path for a distributable macOS `.app`
   artifact.
-- [ ] R2: Add or document the signing flow, including required local
+- [x] R2: Add or document the signing flow, including required local
   environment variables or keychain identities.
-- [ ] R3: Add or document the notarization flow, including required Apple
+- [x] R3: Add or document the notarization flow, including required Apple
   credentials and expected commands.
-- [ ] R4: Integrate packaging outputs with the existing release/build scripts
+- [x] R4: Integrate packaging outputs with the existing release/build scripts
   without breaking raw development builds.
-- [ ] R5: Document how unsigned local builds differ from signed/notarized
+- [x] R5: Document how unsigned local builds differ from signed/notarized
   release artifacts.
-- [ ] R6: Existing CI/build/test gates must remain green.
+- [x] R6: Existing CI/build/test gates must remain green.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A maintainer can run a documented command to create a macOS `.app`
+- [x] AC 1: A maintainer can run a documented command to create a macOS `.app`
   artifact from the Wails v3 project.
-- [ ] AC 2: The repo documents all signing and notarization prerequisites.
-- [ ] AC 3: The release/package command fails clearly when signing credentials
+- [x] AC 2: The repo documents all signing and notarization prerequisites.
+- [x] AC 3: The release/package command fails clearly when signing credentials
   are absent, without breaking ordinary local `wails3 task build`.
-- [ ] AC 4: The package artifact path is documented in README or developer
+- [x] AC 4: The package artifact path is documented in README or developer
   release docs.
-- [ ] AC 5: `go test ./...`, `go vet ./...`, `go build ./...`, and relevant
+- [x] AC 5: `go test ./...`, `go vet ./...`, `go build ./...`, and relevant
   Wails build commands pass.
-- [ ] AC 6: The packaging path remains compatible with SPEC-014/SPEC-015
+- [x] AC 6: The packaging path remains compatible with SPEC-014/SPEC-015
   cross-platform release expectations.
 
 ## Context

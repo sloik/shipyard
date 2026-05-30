@@ -129,7 +129,19 @@ To verify the documented Codex path end-to-end:
 
 Download `shipyard-macos.zip` from [Releases](https://github.com/sloik/shipyard/releases). Unzip and move `Shipyard.app` to your Applications folder.
 
-**First launch on macOS:** Apple will block the app because it is not code-signed with an Apple Developer ID. To allow it:
+Release artifacts are built as Wails v3 `.app` bundles. A local unsigned app can
+be created from source with:
+
+```bash
+make package-macos
+```
+
+The package command runs the Wails v3 raw desktop build first and writes
+`bin/Shipyard.app`. This is useful for local testing, but it is not a
+Gatekeeper-ready distribution artifact.
+
+**First launch for unsigned local builds:** Apple will block the app because it
+is not code-signed with an Apple Developer ID. To allow it:
 
 1. Try to open `Shipyard.app` -- macOS will block it
 2. Open **System Settings → Privacy & Security**
@@ -139,6 +151,34 @@ Download `shipyard-macos.zip` from [Releases](https://github.com/sloik/shipyard/
 macOS remembers your choice -- subsequent launches work normally. Alternatively, remove the quarantine attribute from the terminal:
 ```bash
 xattr -d com.apple.quarantine /Applications/Shipyard.app
+```
+
+Maintainer release builds should be signed and notarized:
+
+```bash
+export SHIPYARD_MACOS_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)"
+make sign-macos
+```
+
+For notarization, first store Apple credentials in the keychain:
+
+```bash
+xcrun notarytool store-credentials "shipyard-notary" \
+  --apple-id "apple-id@example.com" \
+  --team-id "TEAMID" \
+  --password "app-specific-password"
+export SHIPYARD_MACOS_NOTARY_PROFILE="shipyard-notary"
+make notarize-macos
+```
+
+`SHIPYARD_MACOS_SIGN_IDENTITY` is required for signing. `SHIPYARD_MACOS_NOTARY_PROFILE`
+is required for notarization. The commands fail before signing or submitting if
+those values are missing. `SIGN_IDENTITY` and `KEYCHAIN_PROFILE` are also
+accepted for compatibility with Wails v3 Taskfile variable names. The ordinary
+raw development build remains unchanged:
+
+```bash
+make wails-build
 ```
 
 ### CLI Binaries
@@ -311,6 +351,30 @@ without Accessibility permissions.
 The checklist covers tray visibility, tray click show/toggle behavior, the
 right-click menu items `Show Dashboard` and `Quit`, close-to-tray behavior, and
 detaching a panel tab with `Open in New Window`.
+
+### macOS Packaging and Release
+
+Shipyard uses Wails v3 packaging tasks for the desktop `.app` and GoReleaser for
+the cross-platform headless CLI binaries.
+
+| Command | Output | Credential behavior |
+|---------|--------|---------------------|
+| `make wails-build` | raw desktop-capable binary at `bin/shipyard` | no signing credentials required |
+| `make package-macos` | unsigned `.app` bundle at `bin/Shipyard.app` | no signing credentials required |
+| `make sign-macos` | signed `bin/Shipyard.app` | requires `SHIPYARD_MACOS_SIGN_IDENTITY` or `SIGN_IDENTITY` |
+| `make notarize-macos` | signed, notarized, stapled `bin/Shipyard.app` | requires signing identity and `SHIPYARD_MACOS_NOTARY_PROFILE` or `KEYCHAIN_PROFILE` |
+| `make snapshot` / `make release` | cross-platform CLI archives from GoReleaser | independent of macOS `.app` signing |
+
+To inspect local signing prerequisites:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+The macOS app package is produced by `wails3 package GOOS=darwin`, which runs
+the repo's `darwin:package` task. Signing uses `wails3 sign GOOS=darwin`, which
+runs `darwin:sign`. Notarization is explicit through
+`wails3 task darwin:sign:notarize`.
 
 ### UI
 

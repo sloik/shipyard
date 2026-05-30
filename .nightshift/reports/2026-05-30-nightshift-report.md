@@ -377,3 +377,71 @@ Note: Go build/test commands emitted the existing macOS linker warning about obj
 
 ## Suggested Follow-up Specs
 (none)
+
+---
+
+## SPEC-BUG-130 — Wails v3 Packaging, Signing, and Notarization
+
+**Outcome:** done
+
+## Summary
+- Specs completed: 1 of 1
+- Tests passed: all required gates passed
+- Build: pass
+- Lint: pass
+- Review cycles: 1
+- Branch: `nightshift/SPEC-BUG-130`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-SPEC-BUG-130`
+
+## Per-Spec Changes
+- Added Wails v3 macOS packaging tasks:
+  - `darwin:package` via `wails3 package GOOS=darwin`
+  - `darwin:sign` via `wails3 sign GOOS=darwin`
+  - `darwin:sign:notarize` via `wails3 task darwin:sign:notarize`
+- Added `scripts/package-macos-app.sh` to package the raw Wails desktop binary as `bin/Shipyard.app`.
+- Added `scripts/sign-macos-app.sh` with explicit preflight failures for missing signing identity or notarization keychain profile.
+- Added `build/darwin/entitlements.plist` for Developer ID hardened-runtime signing.
+- Added Makefile targets `package-macos`, `sign-macos`, and `notarize-macos` while preserving `make wails-build`.
+- Updated the macOS desktop workflow from Wails v2 commands to Wails v3 build/package commands and the new `bin/Shipyard.app` artifact path.
+- Updated README release documentation for unsigned local app bundles, signing prerequisites, notarization prerequisites, artifact paths, and GoReleaser's separate cross-platform CLI role.
+- Added source-level regression coverage in `internal/release/packaging_test.go`.
+- Staged a DevKB update proposal at `.nightshift/knowledge/devkb-updates/shell-SPEC-BUG-130.md`.
+- Marked `SPEC-BUG-130` Requirements and Acceptance Criteria checked.
+
+## Research Notes
+- Official Wails v3 macOS packaging docs describe `wails3 package GOOS=darwin` producing a `.app` under `bin/`, signing through `wails3 sign GOOS=darwin` or `wails3 task darwin:sign`, and notarization through `wails3 task darwin:sign:notarize`: https://v3.wails.io/guides/build/macos/
+- Official Wails v3 signing docs state macOS signing/notarization require macOS tooling and use `SIGN_IDENTITY` plus `KEYCHAIN_PROFILE` style task variables: https://v3.wails.io/zh-cn/guides/build/signing/
+
+## Test Results
+- `zsh -n scripts/package-macos-app.sh && zsh -n scripts/sign-macos-app.sh && bash scripts/macos-wails-gui-smoke.test` — PASS
+- `wails3 task -list-all` — PASS; listed `build`, `build:server`, `darwin:package`, `darwin:sign`, and `darwin:sign:notarize`
+- `go test ./internal/release -run SPECBUG130 -count=1` — PASS
+- `wails3 package GOOS=darwin` — PASS; created `bin/Shipyard.app`
+- `env -u SHIPYARD_MACOS_SIGN_IDENTITY -u SIGN_IDENTITY wails3 sign GOOS=darwin` — EXPECTED FAILURE with clear missing signing identity message; raw build/package path still succeeded before the sign preflight
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+- `wails3 task build` — PASS
+- `wails3 task build:server` — PASS
+- `python3 .nightshift/validate_specs.py .nightshift/specs/SPEC-BUG-130-wails-v3-packaging-signing-notarization.md` — PASS
+- `go test -race -count=1 -timeout 5m ./...` — PASS
+
+Note: Go build/test commands and Wails builds emitted the existing non-fatal
+macOS linker warning about object files built for macOS 26.0 while linking for
+11.0. All validation commands listed as PASS exited 0.
+
+## Acceptance Criteria
+- [x] AC 1: README documents `make package-macos`; `wails3 package GOOS=darwin` creates `bin/Shipyard.app`.
+- [x] AC 2: README documents signing identity, notary keychain profile, Apple notary credential storage, and identity inspection.
+- [x] AC 3: `wails3 sign GOOS=darwin` fails before signing with a clear missing-identity message when signing variables are absent, while `wails3 task build` and `wails3 package GOOS=darwin` still pass.
+- [x] AC 4: README documents the package artifact path `bin/Shipyard.app`.
+- [x] AC 5: `go test ./...`, `go vet ./...`, `go build ./...`, `wails3 task build`, `wails3 task build:server`, and `wails3 package GOOS=darwin` passed.
+- [x] AC 6: GoReleaser remains scoped to cross-platform headless CLI archives, and the desktop workflow owns the macOS Wails `.app` packaging path.
+
+## Blockers / Discoveries
+- Blockers: none.
+- Discovery: the pre-existing desktop workflow still used Wails v2 (`wails build`) even though Shipyard now builds through Wails v3 (`wails3 task build`).
+- Discovery: Wails v3 wrapper commands require project Taskfile tasks; before this spec, `wails3 package GOOS=darwin` failed with `Task "darwin:package" does not exist`.
+
+## Suggested Follow-up Specs
+None.
