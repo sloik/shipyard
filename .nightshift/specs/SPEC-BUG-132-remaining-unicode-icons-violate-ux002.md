@@ -54,43 +54,46 @@ glyphs.
 
 ## Root Cause
 
-Leave blank for the implementation pass.
+Dashboard icon cleanup happened in focused UX-002 passes, but several later or
+less-central surfaces still used inline entity text in static markup and dynamic
+HTML strings. The design-system toast helper also kept prefixing messages with
+Unicode status glyphs instead of leaving notification state to styling.
 
 ## Requirements
 
-- [ ] R1: Replace remaining visible Unicode/HTML entity icons in dashboard UI
+- [x] R1: Replace remaining visible Unicode/HTML entity icons in dashboard UI
   surfaces with Lucide SVG icons or existing design-system icon helpers.
-- [ ] R2: Icon size, color, and gap must match nearby UX-002-backed component
+- [x] R2: Icon size, color, and gap must match nearby UX-002-backed component
   patterns.
-- [ ] R3: Buttons with icons must keep stable text/icon alignment and must not
+- [x] R3: Buttons with icons must keep stable text/icon alignment and must not
   rely on emoji/entity text for meaning.
-- [ ] R4: Empty states must use Lucide icons, not emoji code points.
-- [ ] R5: Warning/alert banners must use Lucide warning/alert icons, not
+- [x] R4: Empty states must use Lucide icons, not emoji code points.
+- [x] R5: Warning/alert banners must use Lucide warning/alert icons, not
   `&#9888;`.
-- [ ] R6: Sort indicators and direction arrows must use SVG icons where the
+- [x] R6: Sort indicators and direction arrows must use SVG icons where the
   current design requires icons, not raw arrow entities.
-- [ ] R7: Existing behavior of all affected buttons, filters, modals, and
+- [x] R7: Existing behavior of all affected buttons, filters, modals, and
   toasts must remain unchanged.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: No visible dashboard icon uses emoji or HTML entity code points for
+- [x] AC 1: No visible dashboard icon uses emoji or HTML entity code points for
   warning, plus/add, import/download, close, play/execute, red-dot record,
   chart/performance, shield/schema, lock/key/token, or sort direction.
-- [ ] AC 2: Global schema alert and all warning banners use Lucide warning/alert
+- [x] AC 2: Global schema alert and all warning banners use Lucide warning/alert
   icons.
-- [ ] AC 3: Add/Create/Import/Close/Execute/Record buttons use SVG icons with
+- [x] AC 3: Add/Create/Import/Close/Execute/Record buttons use SVG icons with
   stable icon+text spacing.
-- [ ] AC 4: History no-results, Sessions empty, Performance empty, Schema empty,
+- [x] AC 4: History no-results, Sessions empty, Performance empty, Schema empty,
   and Tokens empty states use Lucide icons.
-- [ ] AC 5: `DS.toast()` no longer prefixes toast text with Unicode icons.
-- [ ] AC 6: Structural tests fail if new visible `&#...;` icon entities are
+- [x] AC 5: `DS.toast()` no longer prefixes toast text with Unicode icons.
+- [x] AC 6: Structural tests fail if new visible `&#...;` icon entities are
   added to `internal/web/ui/index.html` or `internal/web/ui/ds.js` outside
   text/content examples where an entity is semantically required.
-- [ ] AC 7: Existing UX-002 icon specs remain passing: SPEC-BUG-049,
+- [x] AC 7: Existing UX-002 icon specs remain passing: SPEC-BUG-049,
   SPEC-BUG-058, SPEC-BUG-059, SPEC-BUG-079, SPEC-BUG-080, SPEC-BUG-081, and
   SPEC-BUG-122.
-- [ ] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+- [x] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
 
 ## Context
 

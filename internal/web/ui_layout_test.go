@@ -1,6 +1,7 @@
 package web
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -2889,6 +2890,90 @@ func TestSPECBUG045_IconsAsSeparateDOMElements(t *testing.T) {
 	// Each helper call is followed by a separate <span> text element
 	if !strings.Contains(body, `html += '<span>'`) && !strings.Contains(body, `html += '<span>`) {
 		t.Error("SPEC-BUG-045 AC7 FAIL: expected separate <span> text elements alongside icon calls")
+	}
+}
+
+func TestSPECBUG132_NoVisibleDashboardIconEntities(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+
+	content := string(html)
+	banned := []string{
+		"&#43;", "&#8595;", "&#8681;", "&#9632;", "&#9654;", "&#9660;",
+		"&#9881;", "&#9888;", "&#10005;", "&#128202;", "&#128269;",
+		"&#128273;", "&#128274;", "&#128308;", "&#128737;",
+	}
+	for _, entity := range banned {
+		if strings.Contains(content, entity) {
+			t.Errorf("SPEC-BUG-132 AC1/AC6 FAIL: visible icon entity %s still appears in index.html", entity)
+		}
+	}
+
+	allowedTextEntities := map[string]bool{
+		"&#10;":   true, // textarea newline placeholder
+		"&#123;":  true, // literal ${VAR} documentation
+		"&#125;":  true, // literal ${VAR} documentation
+		"&#8592;": true, // request/response direction text
+		"&#8594;": true, // request/response direction text and prose link arrow
+	}
+	entityPattern := regexp.MustCompile(`&#[0-9]+;`)
+	for _, entity := range entityPattern.FindAllString(content, -1) {
+		if !allowedTextEntities[entity] {
+			t.Errorf("SPEC-BUG-132 AC6 FAIL: unapproved HTML entity %s in index.html", entity)
+		}
+	}
+
+	dsContent := string(js)
+	for _, token := range []string{`'\u2713'`, `'\u2716'`, `'\u24D8'`} {
+		if strings.Contains(dsContent, token) {
+			t.Errorf("SPEC-BUG-132 AC5 FAIL: DS.toast() still uses Unicode icon token %s", token)
+		}
+	}
+	if strings.Contains(dsContent, "icons[type]") {
+		t.Error("SPEC-BUG-132 AC5 FAIL: DS.toast() should not prefix toast text with icon lookup output")
+	}
+}
+
+func TestSPECBUG132_LucideIconReplacementsPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"function iconAlertTriangle",
+		"function iconPlus",
+		"function iconDownload",
+		"function iconSearch",
+		"function iconChartLine",
+		"function iconShield",
+		"function iconLock",
+		"function iconKey",
+		"function iconCircle",
+		"function iconChevronDown",
+		"function iconArrowDown",
+		"function iconArrowUp",
+		"setButtonIconLabel(toolExecuteBtn, iconPlay(12",
+		"sessionRecordIcon.innerHTML = iconCircle(12",
+		"sessionRecordIcon.innerHTML = iconSquare(12",
+		"renderSortHeaderLabel(h,",
+		`id="history-no-results"`,
+		`id="sessions-empty"`,
+		`id="perf-empty"`,
+		`id="schema-empty"`,
+		`id="tokens-empty"`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-132 FAIL: expected Lucide icon replacement marker %q", needle)
+		}
 	}
 }
 
