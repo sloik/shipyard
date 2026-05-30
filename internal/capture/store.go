@@ -13,7 +13,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 var openSQLiteDB = func(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
@@ -91,6 +91,12 @@ func (s *Store) migrate() error {
 	if version < 2 {
 		if err := s.migrateToV2(); err != nil {
 			return fmt.Errorf("migrate to v2: %w", err)
+		}
+	}
+
+	if version < 3 {
+		if err := s.migrateToV3(); err != nil {
+			return fmt.Errorf("migrate to v3: %w", err)
 		}
 	}
 
@@ -197,6 +203,39 @@ func (s *Store) migrateToV2() error {
 		return fmt.Errorf("create access_log table: %w", err)
 	}
 	return nil
+}
+
+// migrateToV3 adds bounded application performance rollups.
+func (s *Store) migrateToV3() error {
+	return s.createPerformanceRollupSchema()
+}
+
+func (s *Store) createPerformanceRollupSchema() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS performance_rollups (
+			bucket_start          TEXT PRIMARY KEY,
+			bucket_seconds        INTEGER NOT NULL,
+			http_count            INTEGER NOT NULL DEFAULT 0,
+			http_total_ms         INTEGER NOT NULL DEFAULT 0,
+			http_max_ms           INTEGER NOT NULL DEFAULT 0,
+			rpc_count             INTEGER NOT NULL DEFAULT 0,
+			rpc_total_ms          INTEGER NOT NULL DEFAULT 0,
+			rpc_max_ms            INTEGER NOT NULL DEFAULT 0,
+			frontend_count        INTEGER NOT NULL DEFAULT 0,
+			frontend_total_ms     INTEGER NOT NULL DEFAULT 0,
+			frontend_max_ms       INTEGER NOT NULL DEFAULT 0,
+			active_dom_rows       INTEGER NOT NULL DEFAULT 0,
+			goroutines            INTEGER NOT NULL DEFAULT 0,
+			heap_alloc_bytes      INTEGER NOT NULL DEFAULT 0,
+			db_file_size_bytes    INTEGER NOT NULL DEFAULT 0,
+			traffic_rows          INTEGER NOT NULL DEFAULT 0,
+			schema_snapshot_rows  INTEGER NOT NULL DEFAULT 0,
+			access_log_rows       INTEGER NOT NULL DEFAULT 0,
+			updated_at            TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_performance_rollups_updated ON performance_rollups(updated_at);
+	`)
+	return err
 }
 
 // Direction constants
@@ -356,6 +395,10 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	if err := tempStore.createPerformanceRollupSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create performance rollup schema: %w", err)
 	}
 
 	// Ensure user_version is set for fresh databases

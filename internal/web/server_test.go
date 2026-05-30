@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -231,6 +232,139 @@ func TestHandlePerformanceRPC_ReturnsRedactedSamples(t *testing.T) {
 	}
 	if strings.Contains(body, "params") || strings.Contains(body, "result\":{") || strings.Contains(body, "secret") {
 		t.Fatalf("rpc telemetry leaked payload-like fields: %s", body)
+	}
+}
+
+func TestHandlePerformanceHistory_ReturnsPersistentAppHealthRollups(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Timestamp:  time.Now().UTC(),
+			Server:     "alpha",
+			Method:     "tools/call",
+			Result:     "ok",
+			DurationMs: 44,
+		}},
+	})
+
+	body := []byte(`{"name":"servers.render","duration_ms":18,"active_dom_rows":42,"meta":{"payload":"must-not-persist"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/performance/frontend", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handlePerformanceFrontend(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("frontend status = %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/performance/history?window=24h", nil)
+	w = httptest.NewRecorder()
+	srv.handlePerformanceHistory(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("history status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var got performanceHistoryResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Rollups) == 0 {
+		t.Fatal("expected at least one performance rollup")
+	}
+	last := got.Rollups[len(got.Rollups)-1]
+	if last.FrontendCount == 0 || last.FrontendMaxMs != 18 || last.ActiveDOMRows != 42 {
+		t.Fatalf("frontend rollup missing: %+v", last)
+	}
+	if last.RPCCount == 0 || last.RPCMaxMs != 44 {
+		t.Fatalf("rpc rollup missing: %+v", last)
+	}
+	if got.Current.Goroutines < 1 || got.Current.Store.DBFileSizeBytes == 0 {
+		t.Fatalf("current runtime missing process/store stats: %+v", got.Current)
+	}
+}
+
+func TestHandlePerformanceDebugBundle_RedactsSecretsAndIncludesBuildRuntimeMetadata(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetDiagnostics(
+		DiagnosticBuildInfo{Version: "test-version", GitRevision: "abc123", GitModified: true},
+		"/tmp/servers.json",
+		DiagnosticConfigShape{
+			HasConfig:      true,
+			AuthEnabled:    true,
+			SecretsBackend: "keychain",
+			ServerCount:    1,
+			Servers: map[string]DiagnosticServerShape{
+				"alpha": {CommandPresent: true, ArgsCount: 2, EnvKeyCount: 3, CwdPresent: true, ToolCount: 1},
+			},
+		},
+	)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Timestamp:  time.Now().UTC(),
+			Server:     "alpha",
+			Method:     "tools/call",
+			Result:     "ok",
+			Reason:     "redacted",
+			DurationMs: 7,
+		}},
+	})
+	srv.SetRawServerEnvs(map[string]map[string]string{
+		"alpha": {
+			"API_TOKEN": "super-secret-env-value",
+			"PLAIN":     "also-secret-shape-only",
+		},
+	})
+	srv.store.RecordAccess(capture.AccessLogEntry{
+		Timestamp:  time.Now(),
+		TokenName:  "nightly-token",
+		ServerName: "alpha",
+		ToolName:   "danger",
+		Status:     "ok",
+		ArgsJSON:   `{"token":"secret-tool-argument","request_body":"secret-request"}`,
+		LogLevel:   "full",
+	})
+	srv.recordPerformanceRollup(capture.PerformanceRollupSample{
+		Timestamp:          time.Now().UTC(),
+		HTTPDurationMs:     9,
+		FrontendDurationMs: 11,
+		ActiveDOMRows:      4,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/debug-bundle", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceDebugBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, forbidden := range []string{
+		"super-secret-env-value",
+		"also-secret-shape-only",
+		"secret-tool-argument",
+		"secret-request",
+		"args_json",
+		"request_body",
+		"API_TOKEN",
+		"nightly-token",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("debug bundle leaked %q: %s", forbidden, body)
+		}
+	}
+
+	var got performanceDebugBundle
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Build.Version != "test-version" || got.Build.GitRevision != "abc123" || !got.Build.GitModified {
+		t.Fatalf("build metadata missing: %+v", got.Build)
+	}
+	if got.Build.BinaryPath == "" || got.Build.UptimeMs < 0 || got.Config.Path != "/tmp/servers.json" {
+		t.Fatalf("runtime/config metadata missing: build=%+v config=%+v", got.Build, got.Config)
+	}
+	if !got.Config.Shape.HasConfig || got.Config.Shape.Servers["alpha"].EnvKeyCount != 3 {
+		t.Fatalf("config shape missing: %+v", got.Config.Shape)
+	}
+	if len(got.History) == 0 || got.TableCounts.AccessLogRows != 1 {
+		t.Fatalf("bundle missing history/table counts: history=%d counts=%+v", len(got.History), got.TableCounts)
 	}
 }
 

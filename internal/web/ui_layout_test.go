@@ -3249,6 +3249,32 @@ func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) 
 	}
 }
 
+func TestSPECBUG137_AppHealthPerformanceDashboardAndDebugBundleUI(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="perf-app-health"`,
+		`id="perf-health-grid"`,
+		`id="perf-health-table-body"`,
+		`id="perf-debug-bundle-btn"`,
+		`/api/performance/history?window=`,
+		`/api/performance/debug-bundle`,
+		`function loadAppHealthPerformance(rangeVal)`,
+		`function renderAppHealthPerformance(data)`,
+		`active_dom_rows`,
+		`/api/performance/frontend`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-137 app health UI missing %q", needle)
+		}
+	}
+}
+
 func TestSPECBUG136_ServerPollingRouteAndVisibilityAware(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
