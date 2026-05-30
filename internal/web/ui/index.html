@@ -852,6 +852,11 @@
   var timelineLoading = false;
   var timelineAllLoaded = false;
   var expandedRowId = null;
+  var trafficResizeDragging = false;
+  var trafficResizeTarget = null;
+  var trafficResizePanel = null;
+  var trafficResizeStartY = 0;
+  var trafficResizeStartHeight = 0;
   var nativeFetch   = window.fetch.bind(window);
   var ws            = null;
   var wsBackoff     = 1000;
@@ -1331,9 +1336,10 @@
   function renderRow(evt, idx) {
     var altClass = idx % 2 === 1 ? ' row-alt' : '';
     var expandedClass = expandedRowId === evt.id ? ' row-expanded' : '';
+    var errorClass = expandedRowId === evt.id && evt.status === 'error' ? ' row-error' : '';
     var chevronClass = expandedRowId === evt.id ? ' is-expanded' : '';
 
-    return '<div class="table-row' + altClass + expandedClass + '" data-id="' + evt.id + '">' +
+    return '<div class="table-row' + altClass + expandedClass + errorClass + '" data-id="' + evt.id + '">' +
       '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time">' + relativeTime(evt.timestamp) + '</span>' +
       '<span data-col="dir">' + dirBadge(evt.direction) + '</span>' +
       '<span data-col="server">' + escapeHtml(evt.server_name) + '</span>' +
@@ -1356,7 +1362,10 @@
       reqEntry = matched || null;
     }
 
-    var html = '<div class="detail-panel traffic-detail-panel is-visible" data-detail-for="' + entry.id + '">';
+    var isErrorDetail = resEntry && resEntry.status === 'error';
+    var html = isErrorDetail
+      ? '<div class="detail-panel traffic-detail-panel is-visible traffic-detail-panel-error" data-detail-for="' + entry.id + '">'
+      : '<div class="detail-panel traffic-detail-panel is-visible" data-detail-for="' + entry.id + '">';
 
     // Metadata bar
     html += '<div class="traffic-detail-meta">';
@@ -1424,7 +1433,9 @@
       '</div>';
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
-      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span></div>';
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span>' +
+        '<button class="btn traffic-panel-copy traffic-panel-copy-disabled" type="button" disabled aria-disabled="true" aria-label="Response payload unavailable" title="Response payload unavailable">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
+      '</div>';
       html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
     }
     html += '</div>';
@@ -1715,6 +1726,37 @@
       })(panelFilters[p]);
     }
   }
+
+  /* ======================================================================
+     Traffic Detail Resize
+     ====================================================================== */
+  trafficBody.addEventListener('mousedown', function(e) {
+    var handle = e.target.closest('.traffic-detail-panel .resize-handle');
+    if (!handle) return;
+    e.preventDefault();
+    trafficResizePanel = handle.closest('.traffic-detail-panel');
+    if (!trafficResizePanel) return;
+    trafficResizeTarget = trafficResizePanel.querySelector('.split-view');
+    if (!trafficResizeTarget) return;
+    trafficResizeDragging = true;
+    trafficResizeStartY = e.clientY;
+    trafficResizeStartHeight = trafficResizeTarget.offsetHeight;
+    trafficResizeTarget.style.height = trafficResizeStartHeight + 'px';
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!trafficResizeDragging || !trafficResizeTarget) return;
+    var delta = e.clientY - trafficResizeStartY;
+    var newH = Math.min(Math.max(trafficResizeStartHeight + delta, 160), 720);
+    trafficResizeTarget.style.height = newH + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!trafficResizeDragging) return;
+    trafficResizeDragging = false;
+    trafficResizeTarget = null;
+    trafficResizePanel = null;
+  });
 
   /* ======================================================================
      Mode Toggle in Detail Panels

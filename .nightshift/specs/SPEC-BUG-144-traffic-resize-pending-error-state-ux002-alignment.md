@@ -41,30 +41,30 @@ UX-002 reference:
 
 ## Requirements
 
-- [ ] R1: Traffic detail resize handle must match UX-002 dimensions: 8px handle
+- [x] R1: Traffic detail resize handle must match UX-002 dimensions: 8px handle
   height, centered 40x3 grip, border-default fill, and no visual drift from the
   selected detail shell.
-- [ ] R2: Pending response details must use the same split-view panel chrome as
+- [x] R2: Pending response details must use the same split-view panel chrome as
   completed details, with request populated and response clearly awaiting.
-- [ ] R3: Error response details must use danger accent on row/detail shell
+- [x] R3: Error response details must use danger accent on row/detail shell
   while preserving request/response split-view layout and response panel chrome.
-- [ ] R4: State-specific visual changes must not alter row matching, expand,
+- [x] R4: State-specific visual changes must not alter row matching, expand,
   collapse, copy, filter, or resize behavior.
-- [ ] R5: Tests must cover completed, pending, and error detail markup.
+- [x] R5: Tests must cover completed, pending, and error detail markup.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Traffic detail resize handle renders an 8px-tall hit area with a
+- [x] AC 1: Traffic detail resize handle renders an 8px-tall hit area with a
   centered 40x3 grip.
-- [ ] AC 2: Pending detail state keeps request and response panels visible;
+- [x] AC 2: Pending detail state keeps request and response panels visible;
   response panel shows an awaiting state without losing the response header.
-- [ ] AC 3: Error detail state uses danger accent for row/detail shell and keeps
+- [x] AC 3: Error detail state uses danger accent for row/detail shell and keeps
   the request/response panel structure intact.
-- [ ] AC 4: Copy and filter controls are present or intentionally disabled per
+- [x] AC 4: Copy and filter controls are present or intentionally disabled per
   panel state, and tests pin the intended behavior.
-- [ ] AC 5: Dragging the resize handle still changes detail height after the
+- [x] AC 5: Dragging the resize handle still changes detail height after the
   visual adjustment.
-- [ ] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
+- [x] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
   `go vet ./...`, and `go build ./...` pass.
 
 ## Context

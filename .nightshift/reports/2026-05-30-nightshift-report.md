@@ -305,6 +305,7 @@ Note: `go test ./...` and `go build ./...` emitted existing non-fatal macOS link
 - `go test ./...` — PASS
 - `go vet ./...` — PASS
 - `go build ./...` — PASS
+- `python3 .nightshift/validate_specs.py .nightshift/specs/SPEC-BUG-144-traffic-resize-pending-error-state-ux002-alignment.md` — PASS
 - `go test -race -count=1 -timeout 5m ./...` — PASS
 
 Note: `go test`, `go build`, and the race gate emitted existing macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
@@ -325,6 +326,62 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 - The direct Tool Browser path and conflict endpoint were the only remaining live fan-out paths; the gateway catalog was already snapshot-backed.
 - The explicit refresh path must surface live RPC errors. Existing live-error tests were moved to `force_refresh=1` so the cached default does not hide refresh failures.
 - Missing snapshots now return a clear API state instead of letting the UI display an ordinary empty tool group.
+
+## Suggested Follow-up Specs
+
+None.
+
+---
+
+## SPEC-BUG-144 — Traffic Resize, Pending, and Error Detail States UX-002 Alignment
+
+**Outcome:** implemented for parent review
+
+## Summary Stats
+
+- Specs run: 1
+- Branch: `nightshift/SPEC-BUG-144`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-144`
+- Domain: code
+- Files changed: 3 UI source/test files, SPEC-BUG-144 checklist, metrics, and this report
+- Validation gates: 4/4 required gates passed
+- Review cycles: 1
+- Blockers: none
+
+## Per-Spec Changes
+
+- Updated the shared resize handle to UX-002 dimensions: 8px hit area with centered 40x3 grip using `var(--border-default)`.
+- Added Traffic detail resize wiring so dragging the expanded detail handle changes the split-view height without touching row expand/collapse behavior.
+- Kept pending details in the same request/response split chrome as completed details, with request populated, response header visible, awaiting body text, and an intentionally disabled response copy control.
+- Added danger accent classes for expanded error rows and error detail shells while preserving the request/response split structure and response panel chrome.
+- Added source-level UI regression tests for completed, pending, and error detail markup, resize CSS, disabled copy intent, danger accents, and resize behavior wiring.
+- Staged a DevKB update proposal at `.nightshift/knowledge/devkb-updates/frontend-SPEC-BUG-144.md`.
+
+## Test Results
+
+- `go test ./internal/web -run SPECBUG144 -count=1` — PASS
+- `go test ./internal/web -run 'SPECBUG138|SPECBUG141|SPECBUG142|SPECBUG144' -count=1` — PASS
+- `go test ./internal/web -run UI -count=1` — PASS
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+
+Note: `go test ./...` and `go build ./...` emitted the existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All validation commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Traffic detail resize handle renders an 8px-tall hit area with a centered 40x3 grip.
+- [x] AC 2: Pending detail state keeps request and response panels visible; response panel keeps the response header and shows an awaiting state.
+- [x] AC 3: Error detail state uses danger accent for row/detail shell and keeps the request/response panel structure intact.
+- [x] AC 4: Active copy controls remain on completed/error payload panels, the pending response copy control is intentionally disabled, and filters remain visible.
+- [x] AC 5: Traffic detail resize handle has mousedown/mousemove/mouseup wiring that changes split-view height after the visual adjustment.
+- [x] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, and `go build ./...` passed.
+
+## Blockers / Discoveries
+
+- Blockers: none.
+- Discovery: SPEC-BUG-138 pins the exact normal detail shell string, so the error-state shell needed a separate literal branch instead of dynamic class concatenation.
+- Discovery: pending response copy behavior is clearer as a disabled icon-only response action, while active request/completed/error payload copy buttons keep the existing `.btn-copy` wiring.
 
 ## Suggested Follow-up Specs
 
