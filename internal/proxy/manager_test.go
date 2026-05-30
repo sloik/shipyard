@@ -56,6 +56,30 @@ func TestNewResponseTracker(t *testing.T) {
 	}
 }
 
+func TestManager_RPCPerformanceSnapshotRedactsPayloadsAndClassifiesErrors(t *testing.T) {
+	m := NewManager()
+	m.recordRPCSample("alpha", "tools/list", time.Now(), json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"token":"secret"}}`), nil)
+	m.recordRPCSample("alpha", "tools/call", time.Now(), json.RawMessage(`{"jsonrpc":"2.0","id":2,"error":{"message":"boom","params":{"token":"secret"}}}`), nil)
+	m.recordRPCSample("beta", "tools/list", time.Now(), nil, context.DeadlineExceeded)
+
+	got := m.RPCPerformanceSnapshot()
+	if len(got) != 3 {
+		t.Fatalf("got %d samples, want 3", len(got))
+	}
+	if got[0].Result != "ok" || got[1].Result != "error" || got[2].Reason != "timeout" {
+		t.Fatalf("unexpected rpc classifications: %+v", got)
+	}
+	for _, sample := range got {
+		if sample.Server == "" || sample.Method == "" {
+			t.Fatalf("missing server/method in sample: %+v", sample)
+		}
+		encoded, _ := json.Marshal(sample)
+		if strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "params") {
+			t.Fatalf("rpc sample leaked payload data: %s", encoded)
+		}
+	}
+}
+
 func TestResponseTracker_Register(t *testing.T) {
 	rt := newResponseTracker()
 	ch := rt.register("req-1")

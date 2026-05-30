@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
+	"github.com/sloik/shipyard/internal/performance"
 )
 
 //go:embed ui
@@ -106,6 +108,10 @@ type ProxyManager interface {
 	ServersForAuth() []string
 }
 
+type rpcPerformanceProvider interface {
+	RPCPerformanceSnapshot() []performance.RPCSample
+}
+
 // ServerInfo describes a running server for the API.
 type ServerInfo struct {
 	Name         string `json:"name"`
@@ -152,22 +158,30 @@ var shipyardTools = []shipyardManagementTool{
 
 // Server is the HTTP + WebSocket server for the web dashboard.
 type Server struct {
-	port           int
-	store          *capture.Store
-	hub            *Hub
-	proxies        ProxyManager
-	gateway        *gateway.Store
-	authStore      *auth.Store
-	authLimiter    *auth.RateLimiter
-	authEnabled    bool
-	toolLogLevels  map[string]map[string]string // server → tool → log_level
-	settingsStore  *SettingsStore
-	rawServerEnvs  map[string]map[string]string // server name → original (unresolved) env
+	port          int
+	store         *capture.Store
+	hub           *Hub
+	proxies       ProxyManager
+	gateway       *gateway.Store
+	authStore     *auth.Store
+	authLimiter   *auth.RateLimiter
+	authEnabled   bool
+	toolLogLevels map[string]map[string]string // server → tool → log_level
+	settingsStore *SettingsStore
+	rawServerEnvs map[string]map[string]string // server name → original (unresolved) env
+	startedAt     time.Time
+	perf          *performance.Recorder
 }
 
 // NewServer creates a new web server.
 func NewServer(port int, store *capture.Store, hub *Hub) *Server {
-	return &Server{port: port, store: store, hub: hub}
+	return &Server{
+		port:      port,
+		store:     store,
+		hub:       hub,
+		startedAt: time.Now(),
+		perf:      performance.NewRecorder(performance.DefaultMaxSamples),
+	}
 }
 
 // SetProxyManager sets the proxy manager for tool invocation APIs.
@@ -247,6 +261,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/schema/unacknowledged-count", s.handleSchemaUnackCount)
 	mux.HandleFunc("GET /api/profiling/summary", s.handleProfilingSummary)
 	mux.HandleFunc("GET /api/profiling/tools", s.handleProfilingTools)
+	mux.HandleFunc("GET /api/performance/runtime", s.handlePerformanceRuntime)
+	mux.HandleFunc("GET /api/performance/http", s.handlePerformanceHTTP)
+	mux.HandleFunc("GET /api/performance/rpc", s.handlePerformanceRPC)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 
 	// Token admin API (auth required via bootstrap or admin token)
@@ -285,7 +302,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: withCORS(mux),
+		Handler: withCORS(s.instrumentHTTP(mux)),
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
@@ -302,6 +319,26 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) instrumentHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := performance.NewResponseRecorder(w)
+		next.ServeHTTP(rw, r)
+		route := r.Pattern
+		if route == "" {
+			route = r.URL.Path
+		}
+		s.perf.RecordHTTP(performance.HTTPSample{
+			Timestamp:    time.Now().UTC(),
+			Method:       r.Method,
+			Route:        route,
+			StatusCode:   rw.StatusCode,
+			DurationMs:   time.Since(start).Milliseconds(),
+			ResponseSize: rw.Size,
+		})
+	})
 }
 
 func noCache(next http.Handler) http.Handler {
@@ -325,6 +362,77 @@ func withCORS(next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+type runtimePerformanceResponse struct {
+	UptimeMs       int64                    `json:"uptime_ms"`
+	Goroutines     int                      `json:"goroutines"`
+	Memory         runtimeMemoryStats       `json:"memory"`
+	Store          capture.PerformanceStats `json:"store"`
+	TelemetryLimit int                      `json:"telemetry_limit"`
+}
+
+type runtimeMemoryStats struct {
+	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
+	HeapSysBytes   uint64 `json:"heap_sys_bytes"`
+	HeapObjects    uint64 `json:"heap_objects"`
+	AllocBytes     uint64 `json:"alloc_bytes"`
+	SysBytes       uint64 `json:"sys_bytes"`
+	NumGC          uint32 `json:"num_gc"`
+}
+
+func (s *Server) handlePerformanceRuntime(w http.ResponseWriter, r *http.Request) {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	storeStats := capture.PerformanceStats{}
+	if s.store != nil {
+		stats, err := s.store.PerformanceStats()
+		if err != nil {
+			http.Error(w, "runtime stats unavailable", http.StatusInternalServerError)
+			return
+		}
+		storeStats = stats
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(runtimePerformanceResponse{
+		UptimeMs:   time.Since(s.startedAt).Milliseconds(),
+		Goroutines: runtime.NumGoroutine(),
+		Memory: runtimeMemoryStats{
+			HeapAllocBytes: mem.HeapAlloc,
+			HeapSysBytes:   mem.HeapSys,
+			HeapObjects:    mem.HeapObjects,
+			AllocBytes:     mem.Alloc,
+			SysBytes:       mem.Sys,
+			NumGC:          mem.NumGC,
+		},
+		Store:          storeStats,
+		TelemetryLimit: performance.DefaultMaxSamples,
+	})
+}
+
+func (s *Server) handlePerformanceHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"samples": s.perf.HTTP(),
+		"limit":   performance.DefaultMaxSamples,
+	})
+}
+
+func (s *Server) handlePerformanceRPC(w http.ResponseWriter, r *http.Request) {
+	samples := []performance.RPCSample{}
+	if provider, ok := s.proxies.(rpcPerformanceProvider); ok {
+		samples = provider.RPCPerformanceSnapshot()
+	}
+	if samples == nil {
+		samples = []performance.RPCSample{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"samples": samples,
+		"limit":   performance.DefaultMaxSamples,
 	})
 }
 
@@ -493,9 +601,9 @@ func (s *Server) handleTrafficDetail(w http.ResponseWriter, r *http.Request) {
 // Env is explicitly suppressed (json:"-") to prevent accidental credential leakage.
 type serverInfoResponse struct {
 	ServerInfo
-	GatewayDisabled    bool              `json:"gateway_disabled"`
-	HasPlainTextSecrets bool             `json:"has_plain_text_secrets"`
-	Env                map[string]string `json:"-"` // never expose env values in API responses
+	GatewayDisabled     bool              `json:"gateway_disabled"`
+	HasPlainTextSecrets bool              `json:"has_plain_text_secrets"`
+	Env                 map[string]string `json:"-"` // never expose env values in API responses
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
@@ -1702,9 +1810,9 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name           string   `json:"name"`
-		Scopes         []string `json:"scopes"`
-		RateLimitPerMin int     `json:"rate_limit_per_minute"`
+		Name            string   `json:"name"`
+		Scopes          []string `json:"scopes"`
+		RateLimitPerMin int      `json:"rate_limit_per_minute"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)

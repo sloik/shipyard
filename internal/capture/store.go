@@ -244,9 +244,17 @@ type TrafficPage struct {
 // Store handles traffic persistence in SQLite and JSONL.
 type Store struct {
 	db      *sql.DB
+	dbPath  string
 	jsonlF  *os.File
 	mu      sync.Mutex
 	pending map[string]pendingRequest // keyed by message_id
+}
+
+type PerformanceStats struct {
+	DBFileSizeBytes    int64 `json:"db_file_size_bytes"`
+	TrafficRows        int64 `json:"traffic_rows"`
+	SchemaSnapshotRows int64 `json:"schema_snapshot_rows"`
+	AccessLogRows      int64 `json:"access_log_rows"`
 }
 
 type pendingRequest struct {
@@ -364,9 +372,36 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 
 	return &Store{
 		db:      db,
+		dbPath:  dbPath,
 		jsonlF:  jsonlF,
 		pending: make(map[string]pendingRequest),
 	}, nil
+}
+
+func (s *Store) PerformanceStats() (PerformanceStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats := PerformanceStats{}
+	if s.dbPath != "" {
+		if info, err := os.Stat(s.dbPath); err == nil {
+			stats.DBFileSizeBytes = info.Size()
+		}
+	}
+	counts := []struct {
+		table string
+		dest  *int64
+	}{
+		{"traffic", &stats.TrafficRows},
+		{"schema_snapshots", &stats.SchemaSnapshotRows},
+		{"access_log", &stats.AccessLogRows},
+	}
+	for _, c := range counts {
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM " + c.table).Scan(c.dest); err != nil {
+			return stats, fmt.Errorf("count %s: %w", c.table, err)
+		}
+	}
+	return stats, nil
 }
 
 // Insert stores a traffic entry and returns the row ID and optional latency.
@@ -464,9 +499,9 @@ type QueryFilter struct {
 	Server    string
 	Method    string
 	Direction string
-	Search    string  // free-text search in payload (SQL LIKE)
-	FromTs    *int64  // unix milliseconds, inclusive
-	ToTs      *int64  // unix milliseconds, inclusive
+	Search    string // free-text search in payload (SQL LIKE)
+	FromTs    *int64 // unix milliseconds, inclusive
+	ToTs      *int64 // unix milliseconds, inclusive
 }
 
 // QueryFiltered retrieves paginated traffic entries with extended filters.
@@ -690,12 +725,12 @@ type Session struct {
 
 // SessionCassette is the export format for a recorded session.
 type SessionCassette struct {
-	Version    int              `json:"version"`
-	Name       string           `json:"name"`
-	Server     string           `json:"server"`
-	RecordedAt string           `json:"recorded_at"`
-	DurationMs *int64           `json:"duration_ms,omitempty"`
-	Requests   []CassetteEntry  `json:"requests"`
+	Version    int             `json:"version"`
+	Name       string          `json:"name"`
+	Server     string          `json:"server"`
+	RecordedAt string          `json:"recorded_at"`
+	DurationMs *int64          `json:"duration_ms,omitempty"`
+	Requests   []CassetteEntry `json:"requests"`
 }
 
 // CassetteEntry is a single request/response pair in a cassette.

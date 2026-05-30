@@ -199,6 +199,10 @@ linking target 11.0.
 ### Blockers / Discoveries
 
 - No implementation blocker remains.
+- Unblock correction: restored unrelated `SPEC-BUG-134`/performance/proxy/web/UI
+  files exactly from `main` after the parent evidence gate found they were
+  present in the branch diff. The branch now keeps only SPEC-BUG-129-relevant
+  source, script, spec, README, and report changes.
 - Full automation for macOS menu-bar tray contents is not treated as reliable because the Wails tray Accessibility item can be unnamed and permission-dependent. The selected approach is the spec-allowed semi-automated script plus structured manual evidence checklist.
 - Existing Wails macOS linker warnings remain non-fatal and match the SPEC-018 run behavior.
 

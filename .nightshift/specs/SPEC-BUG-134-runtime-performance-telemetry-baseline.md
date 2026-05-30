@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 1
 type: feature
-status: in_progress
+status: done
 after: [SPEC-018]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -41,40 +41,40 @@ from subjective UI symptoms after the fact.
 
 ## Requirements
 
-- [ ] R1: Add low-overhead backend timing telemetry for HTTP API handlers,
+- [x] R1: Add low-overhead backend timing telemetry for HTTP API handlers,
   including route, method, status code, duration, and response size where
   practical.
-- [ ] R2: Add child RPC timing telemetry for manager-mediated requests,
+- [x] R2: Add child RPC timing telemetry for manager-mediated requests,
   including server, JSON-RPC method, duration, result/error, and timeout/cancel
   reason.
-- [ ] R3: Add runtime process telemetry: uptime, goroutine count, heap allocation,
+- [x] R3: Add runtime process telemetry: uptime, goroutine count, heap allocation,
   database file size, traffic row count, schema snapshot count, and access-log
   row count.
-- [ ] R4: Add a read-only API endpoint for current performance telemetry that is
+- [x] R4: Add a read-only API endpoint for current performance telemetry that is
   safe to call from the dashboard and MCP clients.
-- [ ] R5: Add frontend telemetry for major UI load/render paths, at minimum:
+- [x] R5: Add frontend telemetry for major UI load/render paths, at minimum:
   Tools load, Servers render, Timeline page load/render, and History/Sessions
   load/render.
-- [ ] R6: Telemetry must have bounded memory use and must not log secrets,
+- [x] R6: Telemetry must have bounded memory use and must not log secrets,
   request bodies, tool arguments, environment variables, or token values.
-- [ ] R7: Telemetry must be testable without relying on wall-clock sleeps longer
+- [x] R7: Telemetry must be testable without relying on wall-clock sleeps longer
   than a few milliseconds.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: `GET /api/performance/runtime` returns process uptime, Go memory
+- [x] AC 1: `GET /api/performance/runtime` returns process uptime, Go memory
   stats, goroutine count, DB file size, and core table row counts.
-- [ ] AC 2: `GET /api/performance/http` returns recent or aggregated handler
+- [x] AC 2: `GET /api/performance/http` returns recent or aggregated handler
   latency samples by route without exposing sensitive payloads.
-- [ ] AC 3: `GET /api/performance/rpc` returns recent or aggregated child
+- [x] AC 3: `GET /api/performance/rpc` returns recent or aggregated child
   JSON-RPC timings by server and method without exposing params/results.
-- [ ] AC 4: The dashboard can record client-side load/render durations for Tools,
+- [x] AC 4: The dashboard can record client-side load/render durations for Tools,
   Servers, Timeline, and History/Sessions paths.
-- [ ] AC 5: Telemetry storage is bounded by count, duration, or both; tests prove
+- [x] AC 5: Telemetry storage is bounded by count, duration, or both; tests prove
   old samples are evicted or compacted.
-- [ ] AC 6: Unit tests verify status-code capture, timing capture, redaction, and
+- [x] AC 6: Unit tests verify status-code capture, timing capture, redaction, and
   bounded retention.
-- [ ] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
   `go test -race -count=1 -timeout 5m ./...` pass.
 
 ## Context
