@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 1
 type: feature
-status: ready
+status: in_progress
 after: [SPEC-018]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
