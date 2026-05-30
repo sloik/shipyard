@@ -3382,6 +3382,102 @@ func TestSPECBUG136_TimelineDOMAndTimestampBudgets(t *testing.T) {
 	}
 }
 
+func TestSPECBUG138_TrafficExpandedRowShellStructure(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-138 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if !strings.Contains(detailBody, `class="detail-panel traffic-detail-panel is-visible"`) {
+		t.Fatal("SPEC-BUG-138 AC2 FAIL: traffic details should use the dedicated expanded-row shell class")
+	}
+	if !strings.Contains(detailBody, `class="traffic-detail-meta"`) {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: traffic metadata should use a dedicated metadata element")
+	}
+	if strings.Contains(detailBody, `html += '<div class="table-row">'`) {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: traffic metadata must not render as a nested table-row")
+	}
+}
+
+func TestSPECBUG138_TrafficExpandedRowShellCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	rowBlock := regexp.MustCompile(`(?s)\.table-row\.row-expanded\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(rowBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC1 FAIL: .table-row.row-expanded CSS block not found")
+	}
+	if !strings.Contains(rowBlock[1], "background: var(--row-selected);") {
+		t.Error("SPEC-BUG-138 AC1/AC2 FAIL: expanded row should use the selected row surface")
+	}
+	if !strings.Contains(rowBlock[1], "border-left: 3px solid var(--accent-fg);") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row should use a 3px left accent")
+	}
+	if strings.Contains(rowBlock[1], "border-left: 2px") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row must not keep the 2px fallback left border")
+	}
+	if !strings.Contains(rowBlock[1], "border-bottom-color: var(--accent-fg);") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row should expose the accent bottom stroke")
+	}
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-detail-panel\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC2/AC4 FAIL: .traffic-detail-panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--row-selected);",
+		"border-top: 0;",
+		"border-left: 3px solid var(--accent-fg);",
+		"padding: 0 16px 12px 16px;",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-138 AC2/AC4 FAIL: traffic detail panel missing %q", needle)
+		}
+	}
+	visiblePanelBlock := regexp.MustCompile(`(?s)\.row-expanded \+ \.traffic-detail-panel,\s*\.traffic-detail-panel\.is-visible\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(visiblePanelBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC2 FAIL: visible traffic detail panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"flex-direction: column;",
+		"gap: 6px;",
+	} {
+		if !strings.Contains(visiblePanelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-138 AC2 FAIL: visible traffic detail panel missing %q", needle)
+		}
+	}
+	if strings.Contains(panelBlock[1], "padding: 12px") {
+		t.Error("SPEC-BUG-138 AC4 FAIL: traffic detail panel must not use generic 12px padding")
+	}
+	if strings.Contains(panelBlock[1], "border-top: 1px") {
+		t.Error("SPEC-BUG-138 AC4 FAIL: traffic detail panel must not use the generic top border")
+	}
+
+	metaBlock := regexp.MustCompile(`(?s)\.traffic-detail-meta\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(metaBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: .traffic-detail-meta CSS block not found")
+	}
+	for _, forbidden := range []string{"cursor:", "border-bottom:", "[data-col]"} {
+		if strings.Contains(metaBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-138 AC3 FAIL: traffic metadata should not inherit table-row behavior %q", forbidden)
+		}
+	}
+}
+
 func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
