@@ -3224,6 +3224,31 @@ func TestSPECBUG131_RenderServerCardsUsesAPIOrderWithoutSorting(t *testing.T) {
 	}
 }
 
+func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"var clientTelemetrySamples = [];",
+		"function recordClientTelemetry(name, start, meta)",
+		"window.shipyardClientTelemetry = clientTelemetrySamples;",
+		"recordClientTelemetry('tools.load'",
+		"recordClientTelemetry('servers.load'",
+		"recordClientTelemetry('servers.render'",
+		"recordClientTelemetry('timeline.load'",
+		"recordClientTelemetry('history.load'",
+		"clientTelemetryMaxSamples",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-134 frontend telemetry missing %q", needle)
+		}
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).

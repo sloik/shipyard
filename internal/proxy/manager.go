@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
+	"github.com/sloik/shipyard/internal/performance"
 	"github.com/sloik/shipyard/internal/web"
 )
 
@@ -22,6 +23,7 @@ type Manager struct {
 	order          []string
 	hub            *web.Hub         // for broadcasting status changes
 	activeSessions map[string]int64 // server name → session ID
+	perf           *performance.Recorder
 }
 
 type managedProxy struct {
@@ -84,7 +86,15 @@ func NewManager() *Manager {
 	return &Manager{
 		proxies:        make(map[string]*managedProxy),
 		activeSessions: make(map[string]int64),
+		perf:           performance.NewRecorder(performance.DefaultMaxSamples),
 	}
+}
+
+func (m *Manager) RPCPerformanceSnapshot() []performance.RPCSample {
+	if m == nil || m.perf == nil {
+		return nil
+	}
+	return m.perf.RPC()
 }
 
 // SetHub sets the WebSocket hub for broadcasting status updates.
@@ -302,7 +312,12 @@ var marshalRequest = json.Marshal
 const managedChildProtocolVersion = "2025-03-26"
 
 // SendRequest sends a JSON-RPC request to a child server and waits for the response.
-func (m *Manager) SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (json.RawMessage, error) {
+func (m *Manager) SendRequest(ctx context.Context, serverName, method string, params json.RawMessage) (result json.RawMessage, err error) {
+	start := time.Now()
+	defer func() {
+		m.recordRPCSample(serverName, method, start, result, err)
+	}()
+
 	m.mu.RLock()
 	mp, ok := m.proxies[serverName]
 	m.mu.RUnlock()
@@ -318,6 +333,51 @@ func (m *Manager) SendRequest(ctx context.Context, serverName, method string, pa
 	}
 
 	return m.sendRequestRaw(ctx, serverName, mp, method, params)
+}
+
+func (m *Manager) recordRPCSample(serverName, method string, start time.Time, raw json.RawMessage, err error) {
+	if m == nil {
+		return
+	}
+	if m.perf == nil {
+		m.perf = performance.NewRecorder(performance.DefaultMaxSamples)
+	}
+	result := "ok"
+	reason := ""
+	if err != nil {
+		result = "error"
+		reason = rpcFailureReason(err)
+	} else {
+		result = performance.RPCResultFromResponse(raw)
+	}
+	m.perf.RecordRPC(performance.RPCSample{
+		Timestamp:  time.Now().UTC(),
+		Server:     serverName,
+		Method:     method,
+		Result:     result,
+		Reason:     reason,
+		DurationMs: time.Since(start).Milliseconds(),
+	})
+}
+
+func rpcFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if err == context.Canceled {
+		return "canceled"
+	}
+	if err == context.DeadlineExceeded {
+		return "timeout"
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "timeout waiting") {
+		return "timeout"
+	}
+	if strings.Contains(msg, "context canceled") {
+		return "canceled"
+	}
+	return "error"
 }
 
 func (m *Manager) sendRequestRaw(ctx context.Context, serverName string, mp *managedProxy, method string, params json.RawMessage) (json.RawMessage, error) {
