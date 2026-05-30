@@ -3112,6 +3112,33 @@ func TestSPECBUG103_RenderServerCardsShowsNameStatusTools(t *testing.T) {
 	}
 }
 
+func TestSPECBUG131_RenderServerCardsUsesAPIOrderWithoutSorting(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-BUG-131 FAIL: expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+	if !strings.Contains(loadBody, "renderServerCards(servers)") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: loadServers() must pass API response order directly to renderServerCards")
+	}
+
+	body := renderServerCardsJS(t)
+	if strings.Contains(body, ".sort(") || strings.Contains(body, "sort(function") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: renderServerCards() must not apply a second client-side sort")
+	}
+	if !strings.Contains(body, "for (var i = 0; i < servers.length; i++)") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: renderServerCards() must render by iterating the API array order")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).

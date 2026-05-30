@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-004, SPEC-BUG-045]
 violates: [SPEC-004, UX-002]
 nfrs: [SPEC-NFR-001]
@@ -49,34 +49,39 @@ different visual position.
 
 ## Root Cause
 
-Leave blank for the implementation pass.
+`internal/proxy.Manager` stored child proxies in a map and `Manager.Servers()`
+iterated that map directly. Go map iteration order is deliberately unstable, so
+repeated `/api/servers` refreshes could return the same child server set in a
+different sequence. The web handler correctly prepended the built-in `shipyard`
+entry and the UI rendered the API array order, so the unstable ordering source
+was the manager snapshot path.
 
 ## Requirements
 
-- [ ] R1: `GET /api/servers` returns servers in a deterministic order across
+- [x] R1: `GET /api/servers` returns servers in a deterministic order across
   repeated calls while the server set is unchanged.
-- [ ] R2: The built-in `shipyard` server keeps a stable, documented position.
-- [ ] R3: Child servers keep a stable order that does not depend on Go map
+- [x] R2: The built-in `shipyard` server keeps a stable, documented position.
+- [x] R3: Child servers keep a stable order that does not depend on Go map
   iteration.
-- [ ] R4: Status changes, restart count changes, uptime changes, and tool count
+- [x] R4: Status changes, restart count changes, uptime changes, and tool count
   changes must not reorder cards.
-- [ ] R5: If a server is added or removed, the remaining existing servers keep
+- [x] R5: If a server is added or removed, the remaining existing servers keep
   their relative order.
-- [ ] R6: Existing config-order preservation behavior must not regress.
+- [x] R6: Existing config-order preservation behavior must not regress.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Repeated calls to `GET /api/servers` return the same server-name
+- [x] AC 1: Repeated calls to `GET /api/servers` return the same server-name
   sequence when the server set is unchanged.
-- [ ] AC 2: A server status transition such as `online -> restarting -> online`
+- [x] AC 2: A server status transition such as `online -> restarting -> online`
   does not change that server's index in the returned list.
-- [ ] AC 3: The Servers tab renders cards in the API order and does not apply a
+- [x] AC 3: The Servers tab renders cards in the API order and does not apply a
   second unstable client-side ordering.
-- [ ] AC 4: The built-in `shipyard` card order is explicitly covered by tests.
-- [ ] AC 5: Existing tests proving `Config.ServerOrder` preservation still pass.
-- [ ] AC 6: Regression tests cover manager/API ordering with at least three
+- [x] AC 4: The built-in `shipyard` card order is explicitly covered by tests.
+- [x] AC 5: Existing tests proving `Config.ServerOrder` preservation still pass.
+- [x] AC 6: Regression tests cover manager/API ordering with at least three
   child servers.
-- [ ] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
   `go test -race -count=1 -timeout 5m ./...` pass.
 
 ## Context

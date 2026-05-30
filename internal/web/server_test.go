@@ -154,6 +154,28 @@ func TestHandleServers_WithServers(t *testing.T) {
 	}
 }
 
+func TestHandleServers_PreservesProxyOrderWithSelfFirst(t *testing.T) {
+	srv := newTestServer(t)
+	pm := &mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "zeta", Status: "online"},
+			{Name: "alpha", Status: "restarting", RestartCount: 1},
+			{Name: "mcp", Status: "online", ToolCount: 4},
+		},
+	}
+	srv.SetProxyManager(pm)
+
+	first := serverNamesFromHandleServers(t, srv)
+	want := []string{"shipyard", "zeta", "alpha", "mcp"}
+	assertNames(t, first, want)
+
+	pm.servers[1].Status = "online"
+	pm.servers[1].RestartCount = 2
+	pm.servers[2].ToolCount = 9
+	second := serverNamesFromHandleServers(t, srv)
+	assertNames(t, second, want)
+}
+
 func TestHandleServers_Empty(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
@@ -178,6 +200,37 @@ func TestHandleServers_Empty(t *testing.T) {
 	}
 	if result[0].Name != "shipyard" || !result[0].IsSelf {
 		t.Fatalf("expected Shipyard self-entry, got %+v", result[0])
+	}
+}
+
+func serverNamesFromHandleServers(t *testing.T, srv *Server) []string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result []ServerInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	names := make([]string, 0, len(result))
+	for _, server := range result {
+		names = append(names, server.Name)
+	}
+	return names
+}
+
+func assertNames(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d names, got %d: %v", len(want), len(got), got)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Fatalf("name[%d]: expected %q, got %q in %v", i, name, got[i], got)
+		}
 	}
 }
 

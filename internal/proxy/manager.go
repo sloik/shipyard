@@ -19,6 +19,7 @@ import (
 type Manager struct {
 	mu             sync.RWMutex
 	proxies        map[string]*managedProxy
+	order          []string
 	hub            *web.Hub         // for broadcasting status changes
 	activeSessions map[string]int64 // server name → session ID
 }
@@ -110,6 +111,9 @@ func (m *Manager) Register(name string, p *Proxy) *managedProxy {
 		command:   cmd,
 		startedAt: time.Now(),
 	}
+	if _, exists := m.proxies[name]; !exists {
+		m.order = append(m.order, name)
+	}
 	m.proxies[name] = mp
 
 	// Wire up session ID lookup so the proxy can tag captured traffic with the
@@ -128,7 +132,11 @@ func (m *Manager) Servers() []web.ServerInfo {
 	defer m.mu.RUnlock()
 
 	result := make([]web.ServerInfo, 0, len(m.proxies))
-	for name, mp := range m.proxies {
+	for _, name := range m.order {
+		mp, ok := m.proxies[name]
+		if !ok {
+			continue
+		}
 		uptime := int64(0)
 		if mp.status == "online" && !mp.startedAt.IsZero() {
 			uptime = time.Since(mp.startedAt).Milliseconds()
@@ -248,8 +256,10 @@ func (m *Manager) ServersForAuth() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	names := make([]string, 0, len(m.proxies))
-	for name := range m.proxies {
-		names = append(names, name)
+	for _, name := range m.order {
+		if _, ok := m.proxies[name]; ok {
+			names = append(names, name)
+		}
 	}
 	return names
 }
