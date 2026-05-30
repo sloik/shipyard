@@ -1,0 +1,78 @@
+task_id: FART-SCR-001
+spec_file: .nightshift/specs/FART-SCR-001-live-shared-json-filter-match-counts.md
+started_at: '2026-05-30T09:23:32Z'
+completed_at: '2026-05-30T09:35:09Z'
+status: completed
+outcome: done
+domain: code
+loop_version: unknown
+model: gpt-5-codex
+harness: unknown
+review_mode: self
+phases:
+  execution_mode: sequential
+  preflight:
+    clean_tree: true
+    initial_tests_pass: true
+    duration_s: 0
+  context_load:
+    files_read: 13
+    knowledge_entries_used: 7
+    duration_s: 0
+  test_planning:
+    duration_s: 0
+  test_writing:
+    tests_written: 5
+    tests_failing: 0
+    duration_s: 0
+  implementation:
+    files_created: 0
+    files_modified: 1
+    lines_added: 1
+    lines_removed: 1
+    duration_s: 0
+  review:
+    cycles: 1
+    issues_found: []
+  validation:
+    build_pass: true
+    build_errors: 0
+    test_pass_rate: 1.0
+    tests_total: 5
+    tests_passed: 5
+    lint_errors: 0
+    type_errors: 0
+    duration_s: 0
+  completion_verification:
+    acceptance_criteria_met: true
+    no_regression: true
+satisfaction:
+  overall_score: 1.0
+  classification: high
+  dimensions:
+    tests:
+      score: 1.0
+      weight: 3
+    lint:
+      score: 1.0
+      weight: 1
+    type_check:
+      score: 1.0
+      weight: 1
+    build:
+      score: 1.0
+      weight: 2
+    completion_verification:
+      score: 1.0
+      weight: 3
+    review:
+      score: 1.0
+      weight: 2
+commit:
+  hash: cf1d8b1bf4a15904fa477151267fec6364212b09
+  message: 'chore: mark FART-SCR-001 in_progress'
+knowledge:
+  pattern_written: 0
+  patterns_injected: 0
+  patterns_cited: 0
+  citation_rate: 0

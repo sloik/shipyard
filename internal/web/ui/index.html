@@ -1048,6 +1048,10 @@
     return div.innerHTML;
   }
 
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/"/g, '&quot;');
+  }
+
   function iconSvg(size, color, body, fill) {
     var fillValue = fill || 'none';
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="' + fillValue + '" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' + body + '</svg>';
@@ -1387,7 +1391,7 @@
       '<button class="btn btn-copy">Copy</button>' +
     '</div>';
     if (reqEntry) {
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
     } else {
       html += '<div class="json-viewer code-body"><span class="spinner">No request data</span></div>';
     }
@@ -1408,13 +1412,13 @@
         '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
       html += '<div class="code-header" data-res-header>' +
         '<span>RESPONSE</span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
       html += '<div class="code-header" data-res-header><span>RESPONSE</span></div>';
       html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
@@ -1469,15 +1473,18 @@
       for (var j = 0; j < lines.length; j++) {
         lines[j].style.display = '';
       }
-      return;
+      return 0;
     }
 
     // Phase 1: determine which lines match content
     var matched = [];
+    var matchCount = 0;
     for (var i = 0; i < lines.length; i++) {
       var lc = lines[i].querySelector('.lc');
       var text = lc ? lc.textContent : '';
-      matched.push(text.toLowerCase().indexOf(lowerQuery) !== -1);
+      var isMatch = text.toLowerCase().indexOf(lowerQuery) !== -1;
+      if (isMatch) matchCount++;
+      matched.push(isMatch);
     }
 
     // Phase 2: mark ancestor structural lines of each match as visible
@@ -1501,6 +1508,23 @@
     for (var i = 0; i < lines.length; i++) {
       lines[i].style.display = visible[i] ? '' : 'none';
     }
+    return matchCount;
+  }
+
+  function countRenderedJsonLines(viewer) {
+    if (!viewer) return 0;
+    return viewer.querySelectorAll('.json-line').length;
+  }
+
+  function updateSharedFilterMatchCount(matchCount, active, count) {
+    if (!matchCount) return;
+    if (!active) {
+      matchCount.textContent = '';
+      matchCount.hidden = true;
+      return;
+    }
+    matchCount.textContent = count + (count === 1 ? ' match' : ' matches');
+    matchCount.hidden = false;
   }
 
   /* ======================================================================
@@ -1601,22 +1625,23 @@
   // the result (or an inline error) into the viewer.
   function applyJqToViewer(viewer, expr) {
     var rawJson = viewer.getAttribute('data-raw-json');
-    if (!rawJson) return;
+    if (!rawJson) return { ok: true, count: 0 };
     if (!expr) {
       viewer.innerHTML = highlightJSON(rawJson);
-      return;
+      return { ok: true, count: 0 };
     }
     var parsed;
     try { parsed = JSON.parse(rawJson); } catch(e) {
       viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">Invalid JSON in viewer</div>';
-      return;
+      return { ok: false, count: 0 };
     }
     var result = jqEval(expr, parsed);
     if (!result.ok) {
       viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">jq error: ' + escapeHtml(result.error) + '</div>';
-      return;
+      return { ok: false, count: 0 };
     }
     viewer.innerHTML = highlightJSON(JSON.stringify(result.value, null, 2));
+    return { ok: true, count: countRenderedJsonLines(viewer) };
   }
 
   // getActiveMode returns 'text' or 'jq' for the mode toggle associated with
@@ -1627,6 +1652,29 @@
     return activeBtn.getAttribute('data-mode') || 'text';
   }
 
+  function applyCombinedFilter(combinedFilter, container) {
+    var input = combinedFilter.querySelector('input');
+    if (!input || !container) return;
+    var mode = getActiveMode(combinedFilter);
+    var val = input.value.trim();
+    var viewers = container.querySelectorAll('.split-view .json-viewer');
+    var matchCount = combinedFilter.querySelector('[data-match-count]');
+    var totalMatches = 0;
+    var allOk = true;
+    for (var i = 0; i < viewers.length; i++) {
+      if (mode === 'jq') {
+        var result = applyJqToViewer(viewers[i], val);
+        if (result && result.ok === false) allOk = false;
+        totalMatches += result && result.count ? result.count : 0;
+      } else {
+        var rawJson = viewers[i].getAttribute('data-raw-json');
+        if (rawJson) viewers[i].innerHTML = highlightJSON(rawJson);
+        totalMatches += filterJsonLines(viewers[i], val);
+      }
+    }
+    updateSharedFilterMatchCount(matchCount, val && allOk, totalMatches);
+  }
+
   function wireFilterInputs(container) {
     // Combined filter — filters all json-viewers in the container
     var combinedFilter = container.querySelector('.json-filter:not(.panel-filter)');
@@ -1634,16 +1682,7 @@
       var combinedInput = combinedFilter.querySelector('input');
       if (combinedInput) {
         var debouncedCombined = debounce(function() {
-          var mode = getActiveMode(combinedFilter);
-          var val = combinedInput.value.trim();
-          var viewers = container.querySelectorAll('.split-view .json-viewer');
-          for (var i = 0; i < viewers.length; i++) {
-            if (mode === 'jq') {
-              applyJqToViewer(viewers[i], val);
-            } else {
-              filterJsonLines(viewers[i], val);
-            }
-          }
+          applyCombinedFilter(combinedFilter, container);
         }, 200);
         combinedInput.addEventListener('input', debouncedCombined);
       }
@@ -1700,24 +1739,15 @@
       if (input) {
         input.placeholder = mode === 'jq' ? 'jq expression...' : 'Filter JSON...';
         var val = input.value.trim();
-        if (mode === 'jq') {
+        if (!filterEl.classList.contains('panel-filter')) {
+          applyCombinedFilter(filterEl, container);
+        } else if (mode === 'jq') {
           if (viewer) applyJqToViewer(viewer, val);
-          else if (container) {
-            var viewers = container.querySelectorAll('.split-view .json-viewer');
-            for (var j = 0; j < viewers.length; j++) { applyJqToViewer(viewers[j], val); }
-          }
         } else {
           if (viewer) {
             var rawJson = viewer.getAttribute('data-raw-json');
             if (rawJson) viewer.innerHTML = highlightJSON(rawJson);
             filterJsonLines(viewer, val);
-          } else if (container) {
-            var viewers = container.querySelectorAll('.split-view .json-viewer');
-            for (var j = 0; j < viewers.length; j++) {
-              var rj = viewers[j].getAttribute('data-raw-json');
-              if (rj) viewers[j].innerHTML = highlightJSON(rj);
-              filterJsonLines(viewers[j], val);
-            }
           }
         }
       }
