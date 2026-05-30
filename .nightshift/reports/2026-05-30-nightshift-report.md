@@ -1,5 +1,61 @@
 # Nightshift Report — 2026-05-30
 
+## SPEC-BUG-141 — Traffic Request and Response Headers Use Generic Code Headers
+
+**Outcome:** done
+
+## Summary Stats
+
+- Spec: `SPEC-BUG-141`
+- Branch: `nightshift/SPEC-BUG-141`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-SPEC-BUG-141`
+- Domain: code
+- Files changed: 5 tracked files plus this report and metrics
+- Validation gates: 4/4 passing (`go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, `go build ./...`)
+- Blockers: none
+
+## Per-Spec Changes
+
+- Replaced request panel `.code-header` markup with `traffic-panel-header traffic-panel-header-request`.
+- Replaced successful, error, and pending response panel `.code-header` markup with `traffic-panel-header traffic-panel-header-response`.
+- Added blue request and green response CSS strips backed by the existing UX-002 traffic tokens.
+- Preserved response panel structure for error responses while surfacing an `ERROR` badge inside the response-specific header.
+- Preserved the response header for pending responses and kept the existing `Awaiting response...` body state.
+- Added source-level UI regression tests that fail if `renderDetailPanel` emits generic `.code-header` for traffic request/response headers.
+- Added a DevKB writeback note for keeping visual panel grammar separate from generic code-block headers.
+
+## Test Results
+
+- `go test ./internal/web -run UI -count=1` — PASS.
+- `go test ./internal/web -run 'SPECBUG141|UI' -count=1` — PASS.
+- `go test ./internal/web -count=1` — PASS.
+- `go test ./...` — PASS.
+- `go vet ./...` — PASS.
+- `go build ./...` — PASS.
+
+Note: `go test ./...` and `go build ./...` emitted existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Request panel header has a request-specific class and blue request-tinted background.
+- [x] AC 2: Response panel header has a response-specific class and green response-tinted background for successful responses.
+- [x] AC 3: Error response detail shows error state without replacing the response panel header with a generic `.code-header`.
+- [x] AC 4: Pending response detail shows the response header even when there is no matched response payload yet.
+- [x] AC 5: Source tests fail if `renderDetailPanel` emits `.code-header` for Traffic request/response panel headers.
+- [x] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+
+## Blockers / Discoveries
+
+- No blocker remains.
+- The existing `.code-block` wrapper and `.code-body` payload behavior could stay intact; only the traffic panel header strip needed feature-specific classes.
+- Error and pending branches both already had the right response-body behavior. The drift was that their headers used the generic code component grammar.
+
+## Suggested Follow-up Specs
+
+(none)
+
+---
+
 ## SPEC-BUG-140 — Traffic Request and Response Panel Filters UX-002 Alignment
 
 **Outcome:** done

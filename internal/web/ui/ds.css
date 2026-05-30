@@ -1054,6 +1054,42 @@ textarea {
   color: var(--text-muted);
 }
 
+.traffic-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.traffic-panel-header-request {
+  background: var(--traffic-req-bg);
+  color: var(--traffic-req-fg);
+}
+
+.traffic-panel-header-response {
+  background: var(--traffic-res-bg);
+  color: var(--traffic-res-fg);
+}
+
+.traffic-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.traffic-panel-label {
+  color: inherit;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
 .code-block .code-body {
   padding: 12px;
   font-family: var(--font-mono);
