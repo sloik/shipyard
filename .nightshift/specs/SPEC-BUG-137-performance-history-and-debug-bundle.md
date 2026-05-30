@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 2
 type: feature
-status: in_progress
+status: done
 after: [SPEC-BUG-134]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -27,38 +27,38 @@ hard to compare across builds.
 
 ## Requirements
 
-- [ ] R1: Persist compact performance rollups over time, using bounded storage.
-- [ ] R2: Track at minimum API handler latency, child RPC latency, frontend
+- [x] R1: Persist compact performance rollups over time, using bounded storage.
+- [x] R2: Track at minimum API handler latency, child RPC latency, frontend
   render/load duration, active DOM row counts, process memory/goroutine count,
   DB file size, traffic row count, and schema snapshot count.
-- [ ] R3: Add a dashboard surface that shows recent performance trend lines or
+- [x] R3: Add a dashboard surface that shows recent performance trend lines or
   tables for app health, not only tool-call latency.
-- [ ] R4: Add a one-click or one-command debug bundle export that includes
+- [x] R4: Add a one-click or one-command debug bundle export that includes
   performance rollups, current runtime telemetry, app version/build info, config
   shape without secrets, and table counts.
-- [ ] R5: The debug bundle must redact secrets, token plaintext/hashes, request
+- [x] R5: The debug bundle must redact secrets, token plaintext/hashes, request
   bodies, tool arguments, environment variables, and large payloads.
-- [ ] R6: The history format must survive app restarts and support comparing
+- [x] R6: The history format must survive app restarts and support comparing
   before/after a performance fix.
-- [ ] R7: Retention limits must prevent the telemetry history from becoming a
+- [x] R7: Retention limits must prevent the telemetry history from becoming a
   new source of long-session lag.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Performance rollups persist across restart and can be queried by
+- [x] AC 1: Performance rollups persist across restart and can be queried by
   recent time window.
-- [ ] AC 2: Retention or compaction tests prove telemetry history remains
+- [x] AC 2: Retention or compaction tests prove telemetry history remains
   bounded.
-- [ ] AC 3: A dashboard view shows app health metrics separately from existing
+- [x] AC 3: A dashboard view shows app health metrics separately from existing
   tool-call profiling.
-- [ ] AC 4: A debug bundle endpoint or command exports redacted JSON suitable for
+- [x] AC 4: A debug bundle endpoint or command exports redacted JSON suitable for
   attaching to a Nightshift report.
-- [ ] AC 5: Redaction tests prove secrets, tokens, env values, tool arguments,
+- [x] AC 5: Redaction tests prove secrets, tokens, env values, tool arguments,
   request payloads, and large response payloads are absent from the bundle.
-- [ ] AC 6: The bundle includes enough build/runtime metadata to detect stale
+- [x] AC 6: The bundle includes enough build/runtime metadata to detect stale
   binary problems, including git revision, modified flag if available, binary
   path, uptime, and config path.
-- [ ] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and
   `go test -race -count=1 -timeout 5m ./...` pass.
 
 ## Context

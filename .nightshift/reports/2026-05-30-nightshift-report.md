@@ -323,3 +323,57 @@ Note: Go build/test commands emitted the existing macOS linker warning about obj
 
 ## Suggested Follow-up Specs
 (none)
+
+---
+
+## SPEC-BUG-137 — Performance History and Debug Bundle
+
+**Outcome:** done
+
+## Summary
+- Specs completed: 1 of 1
+- Tests passed: all required gates passed
+- Build: pass
+- Lint: pass
+- Review cycles: 1
+
+## Completed Specs
+- SPEC-BUG-137: Performance History and Debug Bundle — done
+
+## Per-Spec Changes
+- Added a persistent `performance_rollups` SQLite table with one-minute buckets, bounded retention, restart-safe reads, and compaction coverage.
+- Added app-health performance endpoints:
+  - `GET /api/performance/history`
+  - `POST /api/performance/frontend`
+  - `GET /api/performance/debug-bundle`
+- Extended runtime collection to roll up HTTP handler latency, latest child RPC latency, frontend render/load duration, active DOM row counts, goroutines, heap allocation, DB file size, traffic rows, schema snapshots, and access-log rows.
+- Added a Profiling view App Health section with compact current metrics, recent rollup rows, and a one-click Debug Bundle export.
+- Added diagnostics plumbing for version/git revision/git modified flag, binary path, uptime, config path, and redacted config shape.
+- Added redaction tests proving the debug bundle omits env values, env key names, token names, tool arguments, request payload fields, and access-log payload details.
+
+## Test Results
+- Focused package test: `go test ./internal/capture ./internal/web ./cmd/shipyard` — PASS
+- Full test suite: `go test ./...` — PASS
+- Lint: `go vet ./...` — PASS
+- Build: `go build ./...` — PASS
+- Race: `go test -race -count=1 -timeout 5m ./...` — PASS
+
+Note: Go build/test commands emitted the existing macOS linker warning about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## Acceptance Criteria
+- [x] AC 1: `TestPerformanceRollups_PersistAcrossRestartAndQueryWindow` proves rollups persist across restart and can be queried by recent window.
+- [x] AC 2: `TestPerformanceRollups_RetentionBounded` proves retention keeps rollup history bounded.
+- [x] AC 3: `TestSPECBUG137_AppHealthPerformanceDashboardAndDebugBundleUI` verifies an App Health dashboard surface separate from tool-call profiling.
+- [x] AC 4: `GET /api/performance/debug-bundle` exports redacted JSON suitable for attaching to reports.
+- [x] AC 5: `TestHandlePerformanceDebugBundle_RedactsSecretsAndIncludesBuildRuntimeMetadata` proves secrets, tokens, env values, tool arguments, request payloads, and access-log payload details are absent.
+- [x] AC 6: The bundle includes version, git revision, modified flag, binary path, uptime, config path, Go runtime metadata, config shape, runtime telemetry, and table counts.
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and `go test -race -count=1 -timeout 5m ./...` passed.
+
+## Blockers / Discoveries
+- Blockers: none.
+- Unblock correction: restored unrelated `.nightshift/specs/SPEC-BUG-130-wails-v3-packaging-signing-notarization.md` exactly to `main` after the parent evidence gate found branch drift. No SPEC-BUG-137 implementation files were changed in this correction.
+- Discovery: frontend telemetry was previously browser-local only, so persistent history now depends on the new lightweight `/api/performance/frontend` POST plus HTTP-side rollup capture.
+- Discovery: child RPC latency is exposed through the existing bounded runtime recorder; the history endpoint folds the latest RPC sample into the persistent rollup when the app-health view or debug bundle is queried.
+
+## Suggested Follow-up Specs
+(none)

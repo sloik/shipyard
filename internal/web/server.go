@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +173,9 @@ type Server struct {
 	rawServerEnvs map[string]map[string]string // server name → original (unresolved) env
 	startedAt     time.Time
 	perf          *performance.Recorder
+	buildInfo     DiagnosticBuildInfo
+	configPath    string
+	configShape   DiagnosticConfigShape
 }
 
 // NewServer creates a new web server.
@@ -214,6 +219,34 @@ func (s *Server) SetSettingsStore(ss *SettingsStore) {
 // used by the plain-text secrets detection logic.
 func (s *Server) SetRawServerEnvs(envs map[string]map[string]string) {
 	s.rawServerEnvs = envs
+}
+
+type DiagnosticBuildInfo struct {
+	Version     string `json:"version"`
+	GitRevision string `json:"git_revision"`
+	GitModified bool   `json:"git_modified"`
+}
+
+type DiagnosticConfigShape struct {
+	HasConfig      bool                             `json:"has_config"`
+	AuthEnabled    bool                             `json:"auth_enabled"`
+	SecretsBackend string                           `json:"secrets_backend,omitempty"`
+	ServerCount    int                              `json:"server_count"`
+	Servers        map[string]DiagnosticServerShape `json:"servers,omitempty"`
+}
+
+type DiagnosticServerShape struct {
+	CommandPresent bool `json:"command_present"`
+	ArgsCount      int  `json:"args_count"`
+	EnvKeyCount    int  `json:"env_key_count"`
+	CwdPresent     bool `json:"cwd_present"`
+	ToolCount      int  `json:"tool_count"`
+}
+
+func (s *Server) SetDiagnostics(build DiagnosticBuildInfo, configPath string, configShape DiagnosticConfigShape) {
+	s.buildInfo = build
+	s.configPath = configPath
+	s.configShape = configShape
 }
 
 // Start runs the HTTP server. It blocks until the context is cancelled.
@@ -264,6 +297,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/performance/runtime", s.handlePerformanceRuntime)
 	mux.HandleFunc("GET /api/performance/http", s.handlePerformanceHTTP)
 	mux.HandleFunc("GET /api/performance/rpc", s.handlePerformanceRPC)
+	mux.HandleFunc("GET /api/performance/history", s.handlePerformanceHistory)
+	mux.HandleFunc("POST /api/performance/frontend", s.handlePerformanceFrontend)
+	mux.HandleFunc("GET /api/performance/debug-bundle", s.handlePerformanceDebugBundle)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 
 	// Token admin API (auth required via bootstrap or admin token)
@@ -338,6 +374,10 @@ func (s *Server) instrumentHTTP(next http.Handler) http.Handler {
 			DurationMs:   time.Since(start).Milliseconds(),
 			ResponseSize: rw.Size,
 		})
+		s.recordPerformanceRollup(capture.PerformanceRollupSample{
+			Timestamp:      time.Now().UTC(),
+			HTTPDurationMs: time.Since(start).Milliseconds(),
+		})
 	})
 }
 
@@ -382,22 +422,71 @@ type runtimeMemoryStats struct {
 	NumGC          uint32 `json:"num_gc"`
 }
 
+type frontendPerformanceRequest struct {
+	Name          string                 `json:"name"`
+	DurationMs    int64                  `json:"duration_ms"`
+	ActiveDOMRows int64                  `json:"active_dom_rows"`
+	Meta          map[string]interface{} `json:"meta,omitempty"`
+}
+
+type performanceHistoryResponse struct {
+	Window  string                      `json:"window"`
+	Limit   int                         `json:"limit"`
+	Rollups []capture.PerformanceRollup `json:"rollups"`
+	Current runtimePerformanceResponse  `json:"current"`
+}
+
+type performanceDebugBundle struct {
+	GeneratedAt time.Time                   `json:"generated_at"`
+	Build       performanceDebugBuild       `json:"build"`
+	Runtime     runtimePerformanceResponse  `json:"runtime"`
+	Config      performanceDebugConfig      `json:"config"`
+	TableCounts capture.PerformanceStats    `json:"table_counts"`
+	History     []capture.PerformanceRollup `json:"performance_rollups"`
+	HTTP        []performance.HTTPSample    `json:"http_samples"`
+	RPC         []performance.RPCSample     `json:"rpc_samples"`
+	Redaction   []string                    `json:"redaction"`
+}
+
+type performanceDebugBuild struct {
+	Version     string `json:"version"`
+	GitRevision string `json:"git_revision"`
+	GitModified bool   `json:"git_modified"`
+	BinaryPath  string `json:"binary_path"`
+	UptimeMs    int64  `json:"uptime_ms"`
+	GoVersion   string `json:"go_version"`
+	GOOS        string `json:"goos"`
+	GOARCH      string `json:"goarch"`
+}
+
+type performanceDebugConfig struct {
+	Path  string                `json:"path"`
+	Shape DiagnosticConfigShape `json:"shape"`
+}
+
 func (s *Server) handlePerformanceRuntime(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.currentRuntimePerformance()
+	if err != nil {
+		http.Error(w, "runtime stats unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) currentRuntimePerformance() (runtimePerformanceResponse, error) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
-
 	storeStats := capture.PerformanceStats{}
 	if s.store != nil {
 		stats, err := s.store.PerformanceStats()
 		if err != nil {
-			http.Error(w, "runtime stats unavailable", http.StatusInternalServerError)
-			return
+			return runtimePerformanceResponse{}, err
 		}
 		storeStats = stats
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runtimePerformanceResponse{
+	return runtimePerformanceResponse{
 		UptimeMs:   time.Since(s.startedAt).Milliseconds(),
 		Goroutines: runtime.NumGoroutine(),
 		Memory: runtimeMemoryStats{
@@ -410,7 +499,26 @@ func (s *Server) handlePerformanceRuntime(w http.ResponseWriter, r *http.Request
 		},
 		Store:          storeStats,
 		TelemetryLimit: performance.DefaultMaxSamples,
-	})
+	}, nil
+}
+
+func (s *Server) recordPerformanceRollup(sample capture.PerformanceRollupSample) {
+	if s.store == nil {
+		return
+	}
+	current, err := s.currentRuntimePerformance()
+	if err != nil {
+		return
+	}
+	sample.Goroutines = int64(current.Goroutines)
+	sample.HeapAllocBytes = int64(current.Memory.HeapAllocBytes)
+	sample.DBFileSizeBytes = current.Store.DBFileSizeBytes
+	sample.TrafficRows = current.Store.TrafficRows
+	sample.SchemaSnapshotRows = current.Store.SchemaSnapshotRows
+	sample.AccessLogRows = current.Store.AccessLogRows
+	if err := s.store.UpsertPerformanceRollup(sample); err != nil {
+		slog.Debug("performance rollup skipped", "error", err)
+	}
 }
 
 func (s *Server) handlePerformanceHTTP(w http.ResponseWriter, r *http.Request) {
@@ -434,6 +542,168 @@ func (s *Server) handlePerformanceRPC(w http.ResponseWriter, r *http.Request) {
 		"samples": samples,
 		"limit":   performance.DefaultMaxSamples,
 	})
+}
+
+func (s *Server) handlePerformanceFrontend(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "no store configured", http.StatusServiceUnavailable)
+		return
+	}
+	defer r.Body.Close()
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+	var req frontendPerformanceRequest
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid frontend telemetry", http.StatusBadRequest)
+		return
+	}
+	if req.DurationMs < 0 {
+		req.DurationMs = 0
+	}
+	s.recordPerformanceRollup(capture.PerformanceRollupSample{
+		Timestamp:          time.Now().UTC(),
+		FrontendDurationMs: req.DurationMs,
+		ActiveDOMRows:      req.ActiveDOMRows,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handlePerformanceHistory(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "no store configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.recordLatestRPCRollup()
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = r.URL.Query().Get("range")
+	}
+	since := time.Now().UTC().Add(-parsePerformanceWindow(window))
+	rollups, err := s.store.ListPerformanceRollups(since, capture.PerformanceRollupRetentionMax)
+	if err != nil {
+		http.Error(w, "performance history unavailable", http.StatusInternalServerError)
+		return
+	}
+	current, err := s.currentRuntimePerformance()
+	if err != nil {
+		http.Error(w, "runtime stats unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(performanceHistoryResponse{
+		Window:  windowOrDefault(window),
+		Limit:   capture.PerformanceRollupRetentionMax,
+		Rollups: rollups,
+		Current: current,
+	})
+}
+
+func (s *Server) recordLatestRPCRollup() {
+	samples := s.rpcSamples()
+	if len(samples) == 0 {
+		return
+	}
+	latest := samples[len(samples)-1]
+	s.recordPerformanceRollup(capture.PerformanceRollupSample{
+		Timestamp:     latest.Timestamp,
+		RPCDurationMs: latest.DurationMs,
+	})
+}
+
+func (s *Server) rpcSamples() []performance.RPCSample {
+	if provider, ok := s.proxies.(rpcPerformanceProvider); ok {
+		if samples := provider.RPCPerformanceSnapshot(); samples != nil {
+			return samples
+		}
+	}
+	return []performance.RPCSample{}
+}
+
+func parsePerformanceWindow(raw string) time.Duration {
+	switch raw {
+	case "1h":
+		return time.Hour
+	case "7d":
+		return 7 * 24 * time.Hour
+	case "30d":
+		return 30 * 24 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+func windowOrDefault(raw string) string {
+	if raw == "" {
+		return "24h"
+	}
+	return raw
+}
+
+func (s *Server) handlePerformanceDebugBundle(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "no store configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.recordLatestRPCRollup()
+	current, err := s.currentRuntimePerformance()
+	if err != nil {
+		http.Error(w, "runtime stats unavailable", http.StatusInternalServerError)
+		return
+	}
+	rollups, err := s.store.ListPerformanceRollups(time.Now().UTC().Add(-30*24*time.Hour), capture.PerformanceRollupRetentionMax)
+	if err != nil {
+		http.Error(w, "performance history unavailable", http.StatusInternalServerError)
+		return
+	}
+	binaryPath, _ := os.Executable()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="shipyard-debug-bundle.json"`)
+	json.NewEncoder(w).Encode(performanceDebugBundle{
+		GeneratedAt: time.Now().UTC(),
+		Build: performanceDebugBuild{
+			Version:     s.diagnosticBuild().Version,
+			GitRevision: s.diagnosticBuild().GitRevision,
+			GitModified: s.diagnosticBuild().GitModified,
+			BinaryPath:  binaryPath,
+			UptimeMs:    current.UptimeMs,
+			GoVersion:   runtime.Version(),
+			GOOS:        runtime.GOOS,
+			GOARCH:      runtime.GOARCH,
+		},
+		Runtime:     current,
+		Config:      performanceDebugConfig{Path: s.configPath, Shape: s.configShape},
+		TableCounts: current.Store,
+		History:     rollups,
+		HTTP:        s.perf.HTTP(),
+		RPC:         s.rpcSamples(),
+		Redaction: []string{
+			"config includes shape only; env names and values are omitted",
+			"tokens, token hashes, request bodies, tool arguments, and payloads are omitted",
+			"runtime environment variables are omitted",
+		},
+	})
+}
+
+func (s *Server) diagnosticBuild() DiagnosticBuildInfo {
+	info := s.buildInfo
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range bi.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if info.GitRevision == "" || info.GitRevision == "none" {
+					info.GitRevision = setting.Value
+				}
+			case "vcs.modified":
+				info.GitModified = setting.Value == "true"
+			}
+		}
+	}
+	if info.Version == "" {
+		info.Version = "dev"
+	}
+	if info.GitRevision == "" {
+		info.GitRevision = "unknown"
+	}
+	return info
 }
 
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {

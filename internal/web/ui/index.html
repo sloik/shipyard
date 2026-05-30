@@ -483,6 +483,30 @@
         </select>
       </div>
       <div style="flex:1;"></div>
+      <button class="btn btn-primary btn-sm" id="perf-debug-bundle-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>Debug Bundle</button>
+    </div>
+
+    <!-- App Health Trend (SPEC-BUG-137) -->
+    <div id="perf-app-health" style="padding:12px 16px 0 16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
+        <div style="font-size:var(--font-size-sm); font-weight:600; color:var(--text-primary);">App Health</div>
+        <div id="perf-health-updated" style="font-size:var(--font-size-xs); color:var(--text-muted);"></div>
+      </div>
+      <div id="perf-health-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:8px;"></div>
+      <div id="perf-health-table" style="margin-top:10px; border:1px solid var(--border-muted); border-radius:6px; overflow:hidden;">
+        <div class="table-header">
+          <span style="width:120px;">Bucket</span>
+          <span style="width:90px;">HTTP Avg</span>
+          <span style="width:90px;">RPC Avg</span>
+          <span style="width:110px;">Render Avg</span>
+          <span style="width:90px;">DOM Rows</span>
+          <span style="width:90px;">Heap</span>
+          <span style="width:90px;">DB</span>
+          <span style="width:80px;">Traffic</span>
+          <span style="width:80px;">Schemas</span>
+        </div>
+        <div id="perf-health-table-body"></div>
+      </div>
     </div>
 
     <!-- Stats Cards -->
@@ -848,15 +872,22 @@
 
   function recordClientTelemetry(name, start, meta) {
     var duration = Math.max(0, Math.round(performance.now() - start));
+    var activeRows = document.querySelectorAll('.table-row').length;
     clientTelemetrySamples.push({
       name: name,
       duration_ms: duration,
       timestamp: new Date().toISOString(),
+      active_dom_rows: activeRows,
       meta: meta || {}
     });
     if (clientTelemetrySamples.length > clientTelemetryMaxSamples) {
       clientTelemetrySamples.splice(0, clientTelemetrySamples.length - clientTelemetryMaxSamples);
     }
+    nativeFetch('/api/performance/frontend', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, duration_ms: duration, active_dom_rows: activeRows})
+    }).catch(function() {});
   }
 
   /* ======================================================================
@@ -4197,6 +4228,10 @@
   var perfTableHeader    = document.getElementById('perf-table-header');
   var perfTableBody      = document.getElementById('perf-table-body');
   var perfEmpty          = document.getElementById('perf-empty');
+  var perfDebugBundleBtn = document.getElementById('perf-debug-bundle-btn');
+  var perfHealthGrid     = document.getElementById('perf-health-grid');
+  var perfHealthTableBody = document.getElementById('perf-health-table-body');
+  var perfHealthUpdated  = document.getElementById('perf-health-updated');
   var perfTotalCalls     = document.getElementById('perf-total-calls');
   var perfTotalCallsDelta = document.getElementById('perf-total-calls-delta');
   var perfAvgLatency     = document.getElementById('perf-avg-latency');
@@ -4510,6 +4545,13 @@
     return (ms / 1000).toFixed(1) + 's';
   }
 
+  function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
   function deltaHtml(current, prev, unit, lowerIsBetter) {
     if (prev === null || prev === undefined) return '';
     var diff = current - prev;
@@ -4530,6 +4572,7 @@
   function loadPerformance() {
     var rangeVal = perfRange.value;
     var serverVal = perfServer.value;
+    loadAppHealthPerformance(rangeVal);
 
     // Populate server filter from known servers
     var opts = perfServer.querySelectorAll('option');
@@ -4605,6 +4648,61 @@
     });
   }
 
+  function loadAppHealthPerformance(rangeVal) {
+    fetch('/api/performance/history?window=' + encodeURIComponent(rangeVal))
+      .then(function(r) {
+        if (!r.ok) throw new Error('performance history ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        renderAppHealthPerformance(data || {});
+      })
+      .catch(function(err) {
+        if (perfHealthUpdated) perfHealthUpdated.textContent = 'Unavailable';
+        console.error('Failed to load app health performance:', err);
+      });
+  }
+
+  function renderAppHealthPerformance(data) {
+    var rollups = data.rollups || [];
+    var current = data.current || {};
+    var latest = rollups.length ? rollups[rollups.length - 1] : {};
+    if (perfHealthUpdated) {
+      perfHealthUpdated.textContent = rollups.length ? ('Updated ' + new Date(latest.updated_at).toLocaleTimeString()) : 'No rollups yet';
+    }
+    if (perfHealthGrid) {
+      var cards = [
+        ['Goroutines', current.goroutines || latest.goroutines || 0],
+        ['Heap', formatBytes((current.memory && current.memory.heap_alloc_bytes) || latest.heap_alloc_bytes || 0)],
+        ['DB Size', formatBytes((current.store && current.store.db_file_size_bytes) || latest.db_file_size_bytes || 0)],
+        ['Traffic Rows', (current.store && current.store.traffic_rows) || latest.traffic_rows || 0],
+        ['Schema Snapshots', (current.store && current.store.schema_snapshot_rows) || latest.schema_snapshot_rows || 0],
+        ['DOM Rows', latest.active_dom_rows || 0]
+      ];
+      perfHealthGrid.innerHTML = cards.map(function(c) {
+        return '<div class="detail-panel" style="padding:10px;">'
+          + '<div style="font-size:var(--font-size-xs); color:var(--text-muted);">' + escapeHtml(c[0]) + '</div>'
+          + '<div style="font-size:var(--font-size-lg); font-weight:700; color:var(--text-primary);">' + escapeHtml(String(c[1])) + '</div>'
+          + '</div>';
+      }).join('');
+    }
+    if (perfHealthTableBody) {
+      perfHealthTableBody.innerHTML = rollups.slice(-12).map(function(r) {
+        return '<div class="table-row" style="display:flex; align-items:center; padding:6px 12px; border-bottom:1px solid var(--border-muted);">'
+          + '<span style="width:120px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + new Date(r.bucket_start).toLocaleTimeString() + '</span>'
+          + '<span style="width:90px;">' + formatMs(r.http_avg_ms || 0) + '</span>'
+          + '<span style="width:90px;">' + formatMs(r.rpc_avg_ms || 0) + '</span>'
+          + '<span style="width:110px;">' + formatMs(r.frontend_avg_ms || 0) + '</span>'
+          + '<span style="width:90px;">' + (r.active_dom_rows || 0) + '</span>'
+          + '<span style="width:90px;">' + formatBytes(r.heap_alloc_bytes || 0) + '</span>'
+          + '<span style="width:90px;">' + formatBytes(r.db_file_size_bytes || 0) + '</span>'
+          + '<span style="width:80px;">' + (r.traffic_rows || 0) + '</span>'
+          + '<span style="width:80px;">' + (r.schema_snapshot_rows || 0) + '</span>'
+          + '</div>';
+      }).join('');
+    }
+  }
+
   function renderPerfTable(tools) {
     if (!tools || tools.length === 0) {
       perfTableBody.innerHTML = '';
@@ -4663,6 +4761,11 @@
   // Filter change handlers
   perfRange.addEventListener('change', function() { loadPerformance(); });
   perfServer.addEventListener('change', function() { loadPerformance(); });
+  if (perfDebugBundleBtn) {
+    perfDebugBundleBtn.addEventListener('click', function() {
+      window.location.href = '/api/performance/debug-bundle';
+    });
+  }
 
   /* ======================================================================
      WebSocket — Handle server_status events (SPEC-004 AC-3)
