@@ -503,3 +503,54 @@ macOS linker warning about object files built for macOS 26.0 while linking for
 
 ## Suggested Follow-up Specs
 None.
+
+---
+
+## SPEC-BUG-138 — Traffic Expanded Row Shell UX-002 Alignment
+
+**Outcome:** implemented for parent review
+
+## Summary Stats
+
+- Specs run: 1
+- Branch: `nightshift/SPEC-BUG-138`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-138`
+- Domain: code
+- Files changed: 3 UI source/test files plus this report
+- Validation gates: 4/4 required gates passed
+- Blockers: none
+
+## Per-Spec Changes
+
+- Updated the expanded traffic row shell to use UX-002's selected-row surface with a 3px left accent and accent bottom stroke.
+- Added a dedicated `.traffic-detail-panel` shell for expanded traffic details, preserving the existing `.detail-panel` visibility behavior while overriding the generic inset panel styling.
+- Set traffic detail panel styling to continue the selected row: `var(--row-selected)` background, 3px accent left border, no generic top border, `0 16px 12px 16px` padding, and 6px vertical gap.
+- Replaced the nested metadata `.table-row` inside `renderDetailPanel()` with a dedicated `.traffic-detail-meta` element so metadata no longer inherits table-row cursor, hover, column padding, or row border behavior.
+- Added source-level UI assertions for the expanded row CSS, traffic detail panel CSS, and detail metadata structure.
+
+## Test Results
+
+- `go test ./internal/web -run UI -count=1` — PASS
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+
+Note: `go test ./...` and `go build ./...` emitted the existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All validation commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Expanded traffic rows now use `border-left: 3px solid var(--accent-fg)` and an accent bottom stroke, with no 2px left-border fallback in the expanded-row block.
+- [x] AC 2: Traffic detail panels use the same selected-row surface, `var(--row-selected)`, instead of the plain inset background.
+- [x] AC 3: The metadata bar is rendered as `.traffic-detail-meta`, not `.table-row`.
+- [x] AC 4: UI source tests assert the traffic detail panel uses `padding: 0 16px 12px 16px` and no generic top border.
+- [x] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, and `go build ./...` passed.
+
+## Blockers / Discoveries
+
+- Blockers: none.
+- Discovery: the traffic detail panel could preserve expand/collapse wiring by keeping `.detail-panel` and adding a more specific traffic shell class, avoiding changes to click handling, copy wiring, filter wiring, pending-response rendering, and error-response rendering.
+- Discovery: the metadata drift was structural, not just visual; removing the nested `.table-row` also prevents future table-row hover/cursor/border changes from leaking into the expanded detail content.
+
+## Suggested Follow-up Specs
+
+None.

@@ -1348,10 +1348,10 @@
       reqEntry = matched || null;
     }
 
-    var html = '<div class="detail-panel is-visible" data-detail-for="' + entry.id + '">';
+    var html = '<div class="detail-panel traffic-detail-panel is-visible" data-detail-for="' + entry.id + '">';
 
     // Metadata bar
-    html += '<div class="table-row">';
+    html += '<div class="traffic-detail-meta">';
     html += '<span class="badge badge-neutral">ID: ' + entry.id + '</span>';
     html += '<span class="timestamp">' + absoluteTime(entry.timestamp) + '</span>';
     if (entry.latency_ms != null) {

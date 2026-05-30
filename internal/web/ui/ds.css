@@ -1149,7 +1149,8 @@ textarea {
 
 .table-row.row-expanded {
   background: var(--row-selected);
-  border-left: 2px solid var(--accent-fg);
+  border-left: 3px solid var(--accent-fg);
+  border-bottom-color: var(--accent-fg);
 }
 
 .table-row.row-ui {
@@ -2063,9 +2064,32 @@ textarea {
   padding: 12px;
 }
 
+.traffic-detail-panel {
+  background: var(--row-selected);
+  border-top: 0;
+  border-left: 3px solid var(--accent-fg);
+  padding: 0 16px 12px 16px;
+}
+
+.traffic-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: var(--font-size-base);
+}
+
 .row-expanded + .detail-panel,
 .detail-panel.is-visible {
   display: block;
+}
+
+.row-expanded + .traffic-detail-panel,
+.traffic-detail-panel.is-visible {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 /* ==========================================================================
