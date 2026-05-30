@@ -3585,3 +3585,131 @@ func TestSPEC029_UIToastFunctionPresent(t *testing.T) {
 		t.Error("SPEC-029 R3 FAIL: expected 'Failed to update toggle' toast message in index.html")
 	}
 }
+
+// --- SPEC-BUG-133: Phase 4 views must be top-level dashboard routes ---
+
+func TestSPECBUG133_Phase4TabsAreTopLevelAndTokensExcluded(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	navStart := strings.Index(content, `<nav id="tab-nav">`)
+	navEnd := strings.Index(content, `</nav>`)
+	if navStart == -1 || navEnd == -1 || navEnd <= navStart {
+		t.Fatal("SPEC-BUG-133 FAIL: expected top-level tab-nav")
+	}
+	nav := content[navStart:navEnd]
+
+	for _, tab := range []struct {
+		route string
+		label string
+	}{
+		{`data-route="sessions"`, "Sessions"},
+		{`data-route="profiling"`, "Profiling"},
+		{`data-route="schema"`, "Schema"},
+	} {
+		if !strings.Contains(nav, tab.route) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 1): expected top-level nav route %s", tab.route)
+		}
+		if !strings.Contains(nav, tab.label) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 1): expected top-level nav label %q", tab.label)
+		}
+	}
+	if strings.Contains(nav, `data-route="tokens"`) || strings.Contains(nav, `>Tokens<`) {
+		t.Error("SPEC-BUG-133 FAIL (AC 6): Tokens must not return to the top-level nav")
+	}
+}
+
+func TestSPECBUG133_Phase4RoutesRenderExistingViews(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="sessions" class="route-target"`,
+		`id="profiling" class="route-target"`,
+		`id="schema" class="route-target"`,
+		`id="view-sessions" class="route-view"`,
+		`id="view-profiling" class="route-view"`,
+		`id="view-schema" class="route-view"`,
+		`id="history-sessions-view"`,
+		`id="history-performance-view"`,
+		`id="servers-schema-view"`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 2): missing %q", needle)
+		}
+	}
+
+	if strings.Index(content, `<main id="view-history"`) > strings.Index(content, `<main id="view-sessions"`) {
+		t.Error("SPEC-BUG-133 FAIL (AC 7): Sessions route should not be nested before History view declaration")
+	}
+	historyClose := strings.Index(content, `</main>`+"\n\n"+`<!-- ================================================================`+"\n"+`     View: Sessions (#/sessions)`)
+	if historyClose == -1 {
+		t.Error("SPEC-BUG-133 FAIL (AC 7): expected History main to close before Sessions top-level view")
+	}
+}
+
+func TestSPECBUG133_OldNestedRouteAliasesResolveCleanly(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	aliases := []string{
+		`if (hash === 'history/sessions') return 'sessions';`,
+		`if (hash === 'history/performance' || hash === 'performance') return 'profiling';`,
+		`if (hash === 'servers/schema') return 'schema';`,
+	}
+	for _, alias := range aliases {
+		if !strings.Contains(content, alias) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 3): missing route alias %q", alias)
+		}
+	}
+	for _, loader := range []string{
+		`if (baseRoute === 'sessions')`,
+		`loadSessions();`,
+		`if (baseRoute === 'profiling')`,
+		`loadPerformance();`,
+		`if (baseRoute === 'schema')`,
+		`showSchemaView();`,
+	} {
+		if !strings.Contains(content, loader) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 7): missing route activation snippet %q", loader)
+		}
+	}
+}
+
+func TestSPECBUG133_AppBarDoesNotWrapPhase4Tabs(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	tabNavIdx := strings.Index(content, "#tab-nav {")
+	if tabNavIdx == -1 {
+		t.Fatal("SPEC-BUG-133 FAIL (AC 4): expected #tab-nav CSS block")
+	}
+	tabNavBlock := content[tabNavIdx:]
+	if endIdx := strings.Index(tabNavBlock, "\n}"); endIdx > 0 {
+		tabNavBlock = tabNavBlock[:endIdx+2]
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"align-items: center;",
+		"gap: 0;",
+		"flex-wrap: nowrap;",
+		"min-width: 0;",
+	} {
+		if !strings.Contains(tabNavBlock, needle) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 4/5): #tab-nav block missing %q", needle)
+		}
+	}
+}
