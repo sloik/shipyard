@@ -1308,6 +1308,28 @@ textarea {
   padding: 4px 10px;
 }
 
+.json-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.json-filter-input {
+  width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 5px 10px;
+  box-sizing: border-box;
+}
+
 .json-filter input {
   background: transparent;
   border: none;
@@ -1320,6 +1342,21 @@ textarea {
 
 .json-filter input::placeholder {
   color: var(--text-muted);
+}
+
+.json-filter-spacer {
+  flex: 1;
+}
+
+.json-filter-match-count {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.json-filter-match-count[hidden] {
+  display: none;
 }
 
 .json-filter.panel-filter {
@@ -2074,9 +2111,9 @@ textarea {
 .traffic-detail-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0;
-  margin-bottom: 6px;
+  gap: 16px;
+  padding: 8px 0;
+  margin-bottom: 0;
   font-size: var(--font-size-base);
 }
 

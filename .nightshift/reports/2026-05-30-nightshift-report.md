@@ -1,5 +1,57 @@
 # Nightshift Report — 2026-05-30
 
+## SPEC-BUG-139 — Traffic Detail Metadata and Shared Filter Bar UX-002 Alignment
+
+## Summary Stats
+
+- Spec: `SPEC-BUG-139`
+- Branch: `nightshift/SPEC-BUG-139`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-139`
+- Domain: code
+- Files changed: 5 tracked files plus this report and metrics
+- Validation gates: 4/4 passing (`go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, `go build ./...`)
+- Blockers: none
+
+## Per-Spec Changes
+
+- Kept traffic detail metadata on the dedicated `traffic-detail-meta` element and adjusted its UX-002 spacing to `gap: 16px` and `padding: 8px 0`.
+- Replaced the monolithic shared JSON filter row with a composed `json-filter-bar`: 280px input capsule, Lucide search icon, separate Text/JQ segmented toggle, flex spacer, and hidden match-count slot.
+- Preserved the existing shared filter wiring by keeping the outer shared bar as `.json-filter:not(.panel-filter)`.
+- Left request and response per-panel filters independent as `.json-filter.panel-filter`.
+- Added source-level regression tests for metadata/table-row separation, shared-bar structure/CSS, and shared-vs-panel filter wiring.
+- Added a DevKB writeback note for future vanilla dashboard composed-control work.
+
+## Test Results
+
+- `go test ./internal/web -run 'SPECBUG139|UI' -count=1` — PASS after red/green implementation cycle.
+- `go test ./internal/web -run UI -count=1` — PASS.
+- `go test ./...` — PASS.
+- `go vet ./...` — PASS.
+- `go build ./...` — PASS.
+
+Note: `go test ./...` and `go build ./...` emitted existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Expanded traffic details contain a metadata bar element with no `.table-row` class.
+- [x] AC 2: The shared filter bar contains a search icon, a 280px filter input, a separate Text/JQ toggle, a flex spacer, and a hidden match-count slot.
+- [x] AC 3: Shared Text/JQ filtering still applies to both request and response viewers.
+- [x] AC 4: Per-panel filters still apply independently after using the shared filter.
+- [x] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+
+## Blockers / Discoveries
+
+- No blockers remain.
+- The metadata row had already been moved off `.table-row` by SPEC-BUG-138; SPEC-BUG-139 closed the remaining UX-002 spacing and shared-filter composition drift.
+- `.nightshift/config.yaml` and `.nightshift/GIT.md` are absent in the Shipyard checkout, so validation followed the kickoff command contract directly.
+- The least disruptive wiring path was to keep the shared bar's outer `.json-filter` class and add `json-filter-bar` as a visual composition class.
+
+## Suggested Follow-up Specs
+
+- Consider implementing live shared match counts in the existing hidden `json-filter-match-count` slot if UX-002 later requires visible count feedback.
+
+---
+
 ## SPEC-BUG-135 — Tool Browser Avoids Repeated Live tools/list Fan-Out
 
 ## Summary Stats
