@@ -300,7 +300,10 @@ body {
 }
 #timeline:target ~ #app-chrome #view-tools,
 #timeline:target ~ #app-chrome #view-history,
-#timeline:target ~ #app-chrome #view-servers {
+#timeline:target ~ #app-chrome #view-servers,
+#timeline:target ~ #app-chrome #view-sessions,
+#timeline:target ~ #app-chrome #view-profiling,
+#timeline:target ~ #app-chrome #view-schema {
   display: none !important;
 }
 
@@ -310,7 +313,10 @@ body {
 }
 #tools:target ~ #app-chrome #view-timeline,
 #tools:target ~ #app-chrome #view-history,
-#tools:target ~ #app-chrome #view-servers {
+#tools:target ~ #app-chrome #view-servers,
+#tools:target ~ #app-chrome #view-sessions,
+#tools:target ~ #app-chrome #view-profiling,
+#tools:target ~ #app-chrome #view-schema {
   display: none !important;
 }
 
@@ -319,7 +325,10 @@ body {
 }
 #history:target ~ #app-chrome #view-timeline,
 #history:target ~ #app-chrome #view-tools,
-#history:target ~ #app-chrome #view-servers {
+#history:target ~ #app-chrome #view-servers,
+#history:target ~ #app-chrome #view-sessions,
+#history:target ~ #app-chrome #view-profiling,
+#history:target ~ #app-chrome #view-schema {
   display: none !important;
 }
 
@@ -328,7 +337,46 @@ body {
 }
 #servers:target ~ #app-chrome #view-timeline,
 #servers:target ~ #app-chrome #view-tools,
-#servers:target ~ #app-chrome #view-history {
+#servers:target ~ #app-chrome #view-history,
+#servers:target ~ #app-chrome #view-sessions,
+#servers:target ~ #app-chrome #view-profiling,
+#servers:target ~ #app-chrome #view-schema {
+  display: none !important;
+}
+
+#sessions:target ~ #app-chrome #view-sessions {
+  display: block !important;
+}
+#sessions:target ~ #app-chrome #view-timeline,
+#sessions:target ~ #app-chrome #view-tools,
+#sessions:target ~ #app-chrome #view-history,
+#sessions:target ~ #app-chrome #view-servers,
+#sessions:target ~ #app-chrome #view-profiling,
+#sessions:target ~ #app-chrome #view-schema {
+  display: none !important;
+}
+
+#profiling:target ~ #app-chrome #view-profiling {
+  display: block !important;
+}
+#profiling:target ~ #app-chrome #view-timeline,
+#profiling:target ~ #app-chrome #view-tools,
+#profiling:target ~ #app-chrome #view-history,
+#profiling:target ~ #app-chrome #view-servers,
+#profiling:target ~ #app-chrome #view-sessions,
+#profiling:target ~ #app-chrome #view-schema {
+  display: none !important;
+}
+
+#schema:target ~ #app-chrome #view-schema {
+  display: block !important;
+}
+#schema:target ~ #app-chrome #view-timeline,
+#schema:target ~ #app-chrome #view-tools,
+#schema:target ~ #app-chrome #view-history,
+#schema:target ~ #app-chrome #view-servers,
+#schema:target ~ #app-chrome #view-sessions,
+#schema:target ~ #app-chrome #view-profiling {
   display: none !important;
 }
 
@@ -805,13 +853,15 @@ textarea {
   display: flex;
   align-items: center;
   gap: 0;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .tab {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 10px;
   height: 48px;
   font-size: var(--font-size-base);
   font-weight: 500;

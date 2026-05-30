@@ -2,15 +2,25 @@
 
 ## Summary Stats
 
-- Spec: `SPEC-BUG-131`, `SPEC-BUG-132`
-- Current branch: `nightshift/SPEC-BUG-132`
-- Current worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-132`
+- Spec: `SPEC-BUG-131`, `SPEC-BUG-132`, `SPEC-BUG-133`
+- Current branch: `nightshift/SPEC-BUG-133`
+- Current worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-133`
 - Domain: code
-- Specs completed: 2
-- Current run files changed: 4
+- Specs completed: 3
+- Current run files changed: 5
 - Blockers: none
 
 ## Per-Spec Changes
+
+### SPEC-BUG-133 — Phase 4 Sessions, Profiling, and Schema Views Hidden Behind Subnavigation
+
+- Added top-level dashboard nav tabs for Sessions, Profiling, and Schema while keeping Tokens out of the top-level tab set.
+- Promoted the existing Sessions, Profiling, and Schema DOM blocks into their own `route-view` owners without redesigning the feature surfaces.
+- Added top-level route targets for `#sessions`, `#profiling`, and `#schema`.
+- Kept old nested hashes working by mapping `#/history/sessions`, `#/history/performance`, `#/performance`, and `#/servers/schema` to the promoted views.
+- Updated non-JS/hash fallback CSS so the promoted views participate in route isolation.
+- Added regression tests for Phase 4 top-level tab presence, route activation, old alias handling, route isolation, Tokens exclusion, and tab-nav no-wrap behavior.
+- Documented the root cause and checked completed requirements/acceptance criteria in the spec.
 
 ### SPEC-BUG-132 — Remaining Unicode and HTML Entity Icons Violate UX-002 Lucide Icon Contract
 
@@ -32,6 +42,17 @@
 - Documented the root cause and checked completed requirements/acceptance criteria in the spec.
 
 ## Test Results
+
+### SPEC-BUG-133
+
+- `go test ./internal/web -run 'SPECBUG133|SPECBUG109|SPECBUG099|SPECBUG012|SPEC00600'` — PASS
+- `node --check /tmp/shipyard-spec-bug-133-inline.js` — PASS
+- `python3 .nightshift/validate_specs.py .nightshift/specs/SPEC-BUG-133-phase4-views-hidden-behind-subnav.md` — PASS
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+
+Note: `go test` and `go build` emitted existing macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
 
 ### SPEC-BUG-132
 
@@ -57,6 +78,17 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 
 ## AC Checklist
 
+### SPEC-BUG-133
+
+- [x] AC 1: Main app navigation exposes Phase 4 surfaces according to UX-002: Sessions, Profiling, and Schema are not hidden only behind History/Servers subnavigation.
+- [x] AC 2: `#/sessions`, `#/profiling`, and `#/schema` equivalent top-level routes render the existing feature views.
+- [x] AC 3: Existing nested links such as `#/servers/schema` continue to work without a blank page.
+- [x] AC 4: The app bar does not wrap vertically at the dashboard's supported desktop width.
+- [x] AC 5: SPEC-BUG-109 tab-nav anti-regression coverage remains passing.
+- [x] AC 6: SPEC-BUG-099's "Tokens is not a top-level design tab" contract remains passing.
+- [x] AC 7: Regression tests cover tab presence, route activation, and route isolation for the Phase 4 views.
+- [x] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+
 ### SPEC-BUG-132
 
 - [x] AC 1: No visible dashboard icon uses emoji or HTML entity code points for warning, plus/add, import/download, close, play/execute, red-dot record, chart/performance, shield/schema, lock/key/token, or sort direction.
@@ -79,6 +111,16 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 - [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and `go test -race -count=1 -timeout 5m ./...` pass.
 
 ## Blockers / Discoveries
+
+### SPEC-BUG-133
+
+- No blockers remain.
+- Unblock correction: restored `SPEC-BUG-134`, `SPEC-BUG-135`,
+  `SPEC-BUG-136`, and `SPEC-BUG-137` exactly from `main` after parent evidence
+  found they appeared as unrelated deletions in the branch diff.
+- Root cause was route ownership drift: the feature surfaces existed, but the app-shell route registry and top-level tab model still represented the older dashboard route set.
+- Keeping nested hashes as aliases was less disruptive than redirecting because existing links can render the correct promoted view without changing the hash.
+- The top app bar needed an explicit `flex-wrap: nowrap` guard after expanding from four to seven designed tabs.
 
 ### SPEC-BUG-132
 

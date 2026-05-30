@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after: [UX-002, SPEC-006-001, SPEC-006-002, SPEC-006-003]
 violates: [UX-002, SPEC-006-001, SPEC-006-002, SPEC-006-003]
 nfrs: [SPEC-NFR-001]
@@ -57,42 +57,47 @@ than buried under a different feature's subnav.
 
 ## Root Cause
 
-Leave blank for the implementation pass.
+The Phase 4 feature surfaces were implemented as secondary view blocks inside
+older feature routes: Sessions and Performance lived under the History route,
+and Schema lived under the Servers route. The top-level route registry and
+navigation were never updated when those Phase 4 surfaces landed, so the app
+continued to expose only the Phase 0-3 dashboard tabs even though the UX-002
+tab model already included Sessions, Profiling, and Schema.
 
 ## Requirements
 
-- [ ] R1: Align the top-level dashboard navigation with the UX-002 tab model for
+- [x] R1: Align the top-level dashboard navigation with the UX-002 tab model for
   Phase 4 surfaces.
-- [ ] R2: Sessions must be directly discoverable from the main dashboard
+- [x] R2: Sessions must be directly discoverable from the main dashboard
   navigation.
-- [ ] R3: Profiling must be directly discoverable from the main dashboard
+- [x] R3: Profiling must be directly discoverable from the main dashboard
   navigation.
-- [ ] R4: Schema changes must be directly discoverable from the main dashboard
+- [x] R4: Schema changes must be directly discoverable from the main dashboard
   navigation.
-- [ ] R5: Existing deep links and route aliases for the old nested locations
+- [x] R5: Existing deep links and route aliases for the old nested locations
   must continue to work or redirect cleanly.
-- [ ] R6: The top app bar must remain responsive and must not reintroduce tab
+- [x] R6: The top app bar must remain responsive and must not reintroduce tab
   wrapping or overflow regressions.
-- [ ] R7: Tokens remains out of the top-level nav unless UX-002 is explicitly
+- [x] R7: Tokens remains out of the top-level nav unless UX-002 is explicitly
   updated to include it.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Main app navigation exposes Phase 4 surfaces according to UX-002:
+- [x] AC 1: Main app navigation exposes Phase 4 surfaces according to UX-002:
   Sessions, Profiling, and Schema are not hidden only behind History/Servers
   subnavigation.
-- [ ] AC 2: `#/sessions`, `#/profiling`, and `#/schema` or equivalent designed
+- [x] AC 2: `#/sessions`, `#/profiling`, and `#/schema` or equivalent designed
   top-level routes render the existing feature views.
-- [ ] AC 3: Existing nested links such as `#/servers/schema`, if still present
+- [x] AC 3: Existing nested links such as `#/servers/schema`, if still present
   externally, continue to work or redirect without a blank page.
-- [ ] AC 4: The app bar does not wrap vertically at the dashboard's supported
+- [x] AC 4: The app bar does not wrap vertically at the dashboard's supported
   desktop width.
-- [ ] AC 5: SPEC-BUG-109 tab-nav anti-regression coverage remains passing.
-- [ ] AC 6: SPEC-BUG-099's "Tokens is not a top-level design tab" contract
+- [x] AC 5: SPEC-BUG-109 tab-nav anti-regression coverage remains passing.
+- [x] AC 6: SPEC-BUG-099's "Tokens is not a top-level design tab" contract
   remains passing.
-- [ ] AC 7: Regression tests cover tab presence, route activation, and route
+- [x] AC 7: Regression tests cover tab presence, route activation, and route
   isolation for the Phase 4 views.
-- [ ] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+- [x] AC 8: `go test ./...`, `go vet ./...`, and `go build ./...` pass.
 
 ## Context
 
