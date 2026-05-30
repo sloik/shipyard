@@ -1386,8 +1386,8 @@
     html += '<button data-mode="jq">JQ</button>';
     html += '</div></div>';
     html += '<div class="code-block">';
-    html += '<div class="code-header" data-req-header>' +
-      '<span>REQUEST</span>' +
+    html += '<div class="traffic-panel-header traffic-panel-header-request" data-req-header>' +
+      '<span class="traffic-panel-label">REQUEST</span>' +
       '<button class="btn btn-copy">Copy</button>' +
     '</div>';
     if (reqEntry) {
@@ -1408,19 +1408,19 @@
     html += '</div></div>';
     html += '<div class="code-block">';
     if (resEntry && resEntry.status === 'error') {
-      html += '<div class="code-header" data-res-header>' +
-        '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
+        '<span class="traffic-panel-title"><span class="traffic-panel-label">RESPONSE</span><span class="badge badge-error">ERROR</span></span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
-      html += '<div class="code-header" data-res-header>' +
-        '<span>RESPONSE</span>' +
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
+        '<span class="traffic-panel-label">RESPONSE</span>' +
         '<button class="btn btn-copy">Copy</button>' +
       '</div>';
       html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
-      html += '<div class="code-header" data-res-header><span>RESPONSE</span></div>';
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span></div>';
       html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
     }
     html += '</div>';

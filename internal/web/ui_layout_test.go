@@ -3838,6 +3838,97 @@ func TestFARTSCR001_SharedFilterModeSwitchAndInvalidJQCountState(t *testing.T) {
 	}
 }
 
+func TestSPECBUG141_UITrafficHeadersUseDirectionalPanelClasses(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-141 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	for _, pattern := range []string{
+		`class="[^"]*\bcode-header\b[^"]*"\s+data-req-header`,
+		`class="[^"]*\bcode-header\b[^"]*"\s+data-res-header`,
+	} {
+		if regexp.MustCompile(pattern).MatchString(detailBody) {
+			t.Fatalf("SPEC-BUG-141 AC5 FAIL: traffic request/response headers must not use generic .code-header, matched %q", pattern)
+		}
+	}
+
+	if !strings.Contains(detailBody, `class="traffic-panel-header traffic-panel-header-request" data-req-header`) {
+		t.Fatal("SPEC-BUG-141 AC1 FAIL: request header should use request-specific traffic panel classes")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-label">REQUEST</span>`) {
+		t.Fatal("SPEC-BUG-141 AC1/R1 FAIL: request header should render uppercase REQUEST label with directional label class")
+	}
+	if strings.Count(detailBody, `class="traffic-panel-header traffic-panel-header-response" data-res-header`) != 3 {
+		t.Fatal("SPEC-BUG-141 AC2/AC3/AC4 FAIL: response, error, and pending branches should all keep the response header strip")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-label">RESPONSE</span>`) {
+		t.Fatal("SPEC-BUG-141 AC2/R2 FAIL: response header should render uppercase RESPONSE label with directional label class")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-title"><span class="traffic-panel-label">RESPONSE</span><span class="badge badge-error">ERROR</span></span>`) {
+		t.Fatal("SPEC-BUG-141 AC3/R3 FAIL: error response should preserve response panel header and surface error status")
+	}
+	if !strings.Contains(detailBody, `Awaiting response\u2026`) {
+		t.Fatal("SPEC-BUG-141 AC4/R4 FAIL: pending response should keep awaiting-state body text")
+	}
+}
+
+func TestSPECBUG141_UITrafficHeaderDirectionalCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	baseBlock := regexp.MustCompile(`(?s)\.traffic-panel-header\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(baseBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC1/AC2 FAIL: .traffic-panel-header CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"justify-content: space-between;",
+		"padding: 6px 10px;",
+		"font-family: var(--font-mono);",
+		"font-size: var(--font-size-xs);",
+		"font-weight: 700;",
+		"text-transform: uppercase;",
+	} {
+		if !strings.Contains(baseBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC1/AC2 FAIL: directional header base CSS missing %q", needle)
+		}
+	}
+
+	reqBlock := regexp.MustCompile(`(?s)\.traffic-panel-header-request\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(reqBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC1 FAIL: .traffic-panel-header-request CSS block not found")
+	}
+	for _, needle := range []string{"background: var(--traffic-req-bg);", "color: var(--traffic-req-fg);"} {
+		if !strings.Contains(reqBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC1/R1 FAIL: request header CSS missing %q", needle)
+		}
+	}
+
+	resBlock := regexp.MustCompile(`(?s)\.traffic-panel-header-response\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(resBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC2 FAIL: .traffic-panel-header-response CSS block not found")
+	}
+	for _, needle := range []string{"background: var(--traffic-res-bg);", "color: var(--traffic-res-fg);"} {
+		if !strings.Contains(resBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC2/R2 FAIL: response header CSS missing %q", needle)
+		}
+	}
+}
+
 func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
