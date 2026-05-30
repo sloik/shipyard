@@ -14,6 +14,7 @@ import (
 	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
+	"github.com/sloik/shipyard/internal/performance"
 )
 
 // mockProxyManager implements ProxyManager for testing.
@@ -23,6 +24,7 @@ type mockProxyManager struct {
 	restartFunc    func(name string) error
 	stopFunc       func(name string) error
 	activeSessions map[string]int64
+	rpcSamples     []performance.RPCSample
 }
 
 func (m *mockProxyManager) Servers() []ServerInfo {
@@ -78,6 +80,10 @@ func (m *mockProxyManager) ServersForAuth() []string {
 	return names
 }
 
+func (m *mockProxyManager) RPCPerformanceSnapshot() []performance.RPCSample {
+	return m.rpcSamples
+}
+
 // newTestServer creates a Server with a real Store for testing HTTP handlers.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -121,6 +127,110 @@ func TestHandleServers_NoProxyManager(t *testing.T) {
 	}
 	if result[0].Name != "shipyard" || !result[0].IsSelf {
 		t.Fatalf("expected Shipyard self-entry first, got %+v", result[0])
+	}
+}
+
+func TestHandlePerformanceRuntime_ReturnsProcessAndStoreStats(t *testing.T) {
+	srv := newTestServer(t)
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  capture.DirectionClientToServer,
+		ServerName: "alpha",
+		Method:     "tools/list",
+		MessageID:  "1",
+		Payload:    `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		Status:     "pending",
+	})
+	srv.store.RecordAccess(capture.AccessLogEntry{
+		Timestamp:  time.Now(),
+		ServerName: "alpha",
+		ToolName:   "tool",
+		Status:     "ok",
+	})
+	if _, err := srv.store.SaveSnapshot("alpha", []capture.ToolSchema{{Name: "tool"}}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/runtime", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceRuntime(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var got runtimePerformanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Goroutines < 1 {
+		t.Fatalf("goroutines = %d, want at least 1", got.Goroutines)
+	}
+	if got.Memory.HeapAllocBytes == 0 {
+		t.Fatal("expected non-zero heap allocation")
+	}
+	if got.Store.DBFileSizeBytes == 0 {
+		t.Fatal("expected non-zero db file size")
+	}
+	if got.Store.TrafficRows != 1 || got.Store.AccessLogRows != 1 || got.Store.SchemaSnapshotRows != 1 {
+		t.Fatalf("unexpected store stats: %+v", got.Store)
+	}
+}
+
+func TestInstrumentHTTP_CapturesRouteStatusAndResponseSize(t *testing.T) {
+	srv := newTestServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/performance-test/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("payload"))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance-test/123?token=secret", nil)
+	w := httptest.NewRecorder()
+	srv.instrumentHTTP(mux).ServeHTTP(w, req)
+
+	samples := srv.perf.HTTP()
+	if len(samples) != 1 {
+		t.Fatalf("got %d samples, want 1", len(samples))
+	}
+	got := samples[0]
+	if got.Route != "GET /api/performance-test/{id}" {
+		t.Fatalf("route = %q, want route pattern", got.Route)
+	}
+	if got.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", got.StatusCode, http.StatusAccepted)
+	}
+	if got.ResponseSize != int64(len("payload")) {
+		t.Fatalf("response size = %d, want %d", got.ResponseSize, len("payload"))
+	}
+	if strings.Contains(got.Route, "secret") {
+		t.Fatalf("route leaked query secret: %+v", got)
+	}
+}
+
+func TestHandlePerformanceRPC_ReturnsRedactedSamples(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Server:     "alpha",
+			Method:     "tools/list",
+			Result:     "ok",
+			DurationMs: 3,
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/rpc", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceRPC(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"method":"tools/list"`) {
+		t.Fatalf("expected rpc method in response: %s", body)
+	}
+	if strings.Contains(body, "params") || strings.Contains(body, "result\":{") || strings.Contains(body, "secret") {
+		t.Fatalf("rpc telemetry leaked payload-like fields: %s", body)
 	}
 }
 

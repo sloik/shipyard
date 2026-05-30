@@ -138,3 +138,61 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 ## Suggested Follow-up Specs
 
 None.
+
+---
+
+## SPEC-BUG-134 — Runtime Performance Telemetry Baseline
+
+## Summary Stats
+
+- Spec: `SPEC-BUG-134`
+- Branch: `nightshift/SPEC-BUG-134`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-SPEC-BUG-134`
+- Files changed: 9
+- New package: `internal/performance`
+- Validation gates: 5/5 passing
+- Blockers: none
+
+## Per-Spec Changes
+
+- Added a bounded in-memory telemetry recorder for redacted HTTP and child JSON-RPC timing samples.
+- Instrumented the web server to capture route, method, status code, response size, and duration without storing payloads or query strings.
+- Added read-only performance endpoints:
+  - `GET /api/performance/runtime`
+  - `GET /api/performance/http`
+  - `GET /api/performance/rpc`
+- Added runtime/store stats for uptime, goroutines, Go memory, database file size, traffic rows, schema snapshot rows, and access-log rows.
+- Added manager-mediated child RPC telemetry for server, method, duration, result classification, and timeout/cancel/error reason.
+- Added bounded frontend telemetry samples exposed at `window.shipyardClientTelemetry` for Tools load, Servers load/render, Timeline load, and History load paths.
+- Added regression tests for bounded retention, status/size timing capture, runtime endpoint stats, RPC redaction/classification, and frontend hook coverage.
+
+## Test Results
+
+- `go test ./internal/performance ./internal/capture ./internal/proxy ./internal/web -run 'TestRecorder_BoundedRetention|TestResponseRecorder_CapturesStatusAndSizeWithoutPayload|TestRPCResultFromResponse_DetectsJSONRPCErrorWithoutPayload|TestManager_RPCPerformanceSnapshotRedactsPayloadsAndClassifiesErrors|TestHandlePerformanceRuntime_ReturnsProcessAndStoreStats|TestInstrumentHTTP_CapturesRouteStatusAndResponseSize|TestHandlePerformanceRPC_ReturnsRedactedSamples|TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths' -count=1` — PASS
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+- `go test -race -count=1 -timeout 5m ./...` — PASS
+
+Note: `go test`, `go build`, and the race gate emitted existing macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: `GET /api/performance/runtime` returns process uptime, Go memory stats, goroutine count, DB file size, and core table row counts.
+- [x] AC 2: `GET /api/performance/http` returns recent handler latency samples by route without exposing sensitive payloads.
+- [x] AC 3: `GET /api/performance/rpc` returns recent child JSON-RPC timings by server and method without exposing params/results.
+- [x] AC 4: The dashboard records client-side load/render durations for Tools, Servers, Timeline, and History/Sessions paths.
+- [x] AC 5: Telemetry storage is bounded by count; tests prove old samples are evicted.
+- [x] AC 6: Unit tests verify status-code capture, timing capture, redaction, and bounded retention.
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and `go test -race -count=1 -timeout 5m ./...` pass.
+
+## Blockers / Discoveries
+
+- No blockers remain.
+- `.nightshift/GIT.md` was absent in this repo's copied kit, so workflow semantics came from `.nightshift/config.yaml`, the run brief, and `/Users/ed/Dropbox/Argo/DevKB/git.md`.
+- The HTTP timing wrapper uses `Unwrap()` so Go's optional response-writer capabilities remain reachable by WebSocket/streaming helpers.
+- Telemetry intentionally records identifiers and aggregate metadata only; request bodies, params, tool arguments, query strings, environment values, tokens, and response payloads are not stored.
+
+## Suggested Follow-up Specs
+
+None.

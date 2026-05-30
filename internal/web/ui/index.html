@@ -839,6 +839,22 @@
   var desktopBridgeConfig = null;
   var desktopBridgeConfigPromise = null;
   var panelContextRoute = null;
+  var clientTelemetryMaxSamples = 256;
+  var clientTelemetrySamples = [];
+  window.shipyardClientTelemetry = clientTelemetrySamples;
+
+  function recordClientTelemetry(name, start, meta) {
+    var duration = Math.max(0, Math.round(performance.now() - start));
+    clientTelemetrySamples.push({
+      name: name,
+      duration_ms: duration,
+      timestamp: new Date().toISOString(),
+      meta: meta || {}
+    });
+    if (clientTelemetrySamples.length > clientTelemetryMaxSamples) {
+      clientTelemetrySamples.splice(0, clientTelemetrySamples.length - clientTelemetryMaxSamples);
+    }
+  }
 
   /* ======================================================================
      Routing
@@ -1814,6 +1830,7 @@
 
   function loadPage() {
     if (timelineLoading || timelineAllLoaded) return;
+    var telemetryStart = performance.now();
     timelineLoading = true;
     timelineLoadingEl.style.display = '';
 
@@ -1837,6 +1854,7 @@
         if (timelineTotal === 0 && timelineOffset === 0) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
+          recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0 });
           return;
         }
 
@@ -1871,11 +1889,13 @@
             timelineScrollInfo.style.display = '';
           }
         }
+        recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal });
       })
       .catch(function(err) {
         timelineLoading = false;
         timelineLoadingEl.style.display = 'none';
         console.error('Failed to load traffic:', err);
+        recordClientTelemetry('timeline.load', telemetryStart, { error: true });
       });
   }
 
@@ -2157,6 +2177,7 @@
      Tool Browser — Load Tools
      ====================================================================== */
   function loadTools() {
+    var telemetryStart = performance.now();
     // Load Shipyard's built-in tools via gateway catalog first, then child server tools.
     fetch('/api/gateway/tools?include_disabled=1')
       .then(function(resp) { return resp.json(); })
@@ -2190,6 +2211,7 @@
             if (childServers.length === 0) {
               toolsLoaded = true;
               renderToolSidebar();
+              recordClientTelemetry('tools.load', telemetryStart, { servers: 0, tools: shipyardToolList.length });
               return;
             }
 
@@ -2224,9 +2246,11 @@
                           }
                         }
                         renderToolSidebar();
+                        recordClientTelemetry('tools.load', telemetryStart, { servers: childServers.length, groups: Object.keys(allTools).length });
                       })
                       .catch(function() {
                         renderToolSidebar();
+                        recordClientTelemetry('tools.load', telemetryStart, { servers: childServers.length, conflicts_error: true });
                       });
                   }
                 });
@@ -2236,6 +2260,7 @@
       .catch(function(err) {
         console.error('Failed to load tools:', err);
         toolGroups.innerHTML = '<div style="padding:16px; color:var(--danger-fg); font-size:var(--font-size-sm); text-align:center;">Failed to load servers</div>';
+        recordClientTelemetry('tools.load', telemetryStart, { error: true });
       });
   }
 
@@ -2851,6 +2876,7 @@
 
   function historyLoadPage() {
     if (historyLoading || historyAllLoaded) return;
+    var telemetryStart = performance.now();
     historyLoading = true;
     historyLoadingEl.style.display = '';
 
@@ -2890,6 +2916,7 @@
           historyEmpty.style.display = '';
           historyNoResults.style.display = 'none';
           historyContent.style.display = 'none';
+          recordClientTelemetry('history.load', telemetryStart, { rows: 0, total: 0 });
           return;
         }
 
@@ -2898,6 +2925,7 @@
         if (historyTotal === 0 && historyOffset === 0) {
           historyNoResults.style.display = '';
           historyContent.style.display = 'none';
+          recordClientTelemetry('history.load', telemetryStart, { rows: 0, total: 0, filtered: true });
           return;
         }
 
@@ -2930,11 +2958,13 @@
             historyScrollInfo.style.display = '';
           }
         }
+        recordClientTelemetry('history.load', telemetryStart, { rows: items.length, total: historyTotal });
       })
       .catch(function(err) {
         historyLoading = false;
         historyLoadingEl.style.display = 'none';
         console.error('Failed to load history:', err);
+        recordClientTelemetry('history.load', telemetryStart, { error: true });
       });
   }
 
@@ -3292,6 +3322,7 @@
   var autoImportConfirm = document.getElementById('auto-import-confirm');
 
   function loadServers() {
+    var telemetryStart = performance.now();
     fetch('/api/servers')
       .then(function(resp) { return resp.json(); })
       .then(function(servers) {
@@ -3306,6 +3337,7 @@
           serversEmpty.style.display = '';
           serversGrid.style.display = 'none';
           serversActionBar.style.display = 'none';
+          recordClientTelemetry('servers.load', telemetryStart, { servers: 0 });
           return;
         }
 
@@ -3368,6 +3400,7 @@
             warningBanner.style.display = 'flex';
           }
         }
+        recordClientTelemetry('servers.load', telemetryStart, { servers: servers.length, child_servers: childServers.length });
       })
       .catch(function(err) {
         console.error('Failed to load servers:', err);
@@ -3376,6 +3409,7 @@
           var errMsg = serversEmpty.querySelector('.empty-desc');
           if (errMsg) errMsg.textContent = 'Failed to load servers: ' + (err && err.message ? err.message : String(err));
         }
+        recordClientTelemetry('servers.load', telemetryStart, { error: true });
       });
   }
 
@@ -3428,6 +3462,7 @@
   }
 
   function renderServerCards(servers) {
+    var telemetryStart = performance.now();
     // SPEC-BUG-045: Lucide inline SVG icon helpers (R1, R2)
     // Each returns an <svg> element string at the requested size and stroke color.
     var iconWrench = function(size, color) {
@@ -3692,6 +3727,7 @@
       html += '</div>';
     }
     serversGrid.innerHTML = html;
+    recordClientTelemetry('servers.render', telemetryStart, { cards: servers ? servers.length : 0 });
   }
 
   function openAddServerModal() {
