@@ -4045,6 +4045,166 @@ func TestSPECBUG141_UITrafficHeaderDirectionalCSS(t *testing.T) {
 	}
 }
 
+func TestSPECBUG144_TrafficResizeHandleMatchesUX002(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	handleBlock := regexp.MustCompile(`(?s)\.resize-handle\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(handleBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: .resize-handle CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"align-items: center;",
+		"justify-content: center;",
+		"height: 8px;",
+		"cursor: row-resize;",
+	} {
+		if !strings.Contains(handleBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC1 FAIL: resize handle missing %q", needle)
+		}
+	}
+
+	gripBlock := regexp.MustCompile(`(?s)\.resize-handle::after\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(gripBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: .resize-handle::after CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 40px;",
+		"height: 3px;",
+		"background: var(--border-default);",
+		"border-radius: 2px;",
+	} {
+		if !strings.Contains(gripBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC1 FAIL: resize grip missing %q", needle)
+		}
+	}
+	if strings.Contains(gripBlock[1], "width: 32px") || strings.Contains(gripBlock[1], "height: 2px") {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: resize grip must not keep old 32x2 dimensions")
+	}
+}
+
+func TestSPECBUG144_TrafficPendingAndErrorDetailMarkup(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-144 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	for _, needle := range []string{
+		"var isErrorDetail = resEntry && resEntry.status === 'error';",
+		`traffic-detail-panel-error`,
+		`class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span>`,
+		`class="btn traffic-panel-copy traffic-panel-copy-disabled" type="button" disabled aria-disabled="true" aria-label="Response payload unavailable" title="Response payload unavailable">`,
+		`Awaiting response\u2026`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-144 AC2/AC3/AC4 FAIL: detail markup missing %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-filter panel-filter"`) != 2 {
+		t.Fatal("SPEC-BUG-144 AC2/AC3 FAIL: request and response panel filters must remain visible in every detail state")
+	}
+	if strings.Count(detailBody, `aria-label="Copy response payload"`) != 2 {
+		t.Fatal("SPEC-BUG-144 AC4 FAIL: completed and error response payloads should keep active copy controls")
+	}
+	if strings.Count(detailBody, `aria-label="Response payload unavailable"`) != 1 {
+		t.Fatal("SPEC-BUG-144 AC4 FAIL: pending response should expose one intentionally disabled copy control")
+	}
+}
+
+func TestSPECBUG144_TrafficErrorAccentCSS(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderRowIdx := strings.Index(content, "function renderRow(evt, idx)")
+	if renderRowIdx == -1 {
+		t.Fatal("SPEC-BUG-144 FAIL: renderRow not found")
+	}
+	renderRowBody := content[renderRowIdx:]
+	if endIdx := strings.Index(renderRowBody, "function renderDetailPanel(entry, matched)"); endIdx > 0 {
+		renderRowBody = renderRowBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"var errorClass = expandedRowId === evt.id && evt.status === 'error' ? ' row-error' : '';",
+		`altClass + expandedClass + errorClass`,
+	} {
+		if !strings.Contains(renderRowBody, needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error row accent markup missing %q", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	rowBlock := regexp.MustCompile(`(?s)\.table-row\.row-expanded\.row-error\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+	if len(rowBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC3 FAIL: expanded error row CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--danger-subtle);",
+		"border-left-color: var(--danger-fg);",
+		"border-bottom-color: var(--danger-fg);",
+	} {
+		if !strings.Contains(rowBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error row CSS missing %q", needle)
+		}
+	}
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-detail-panel\.traffic-detail-panel-error\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC3 FAIL: error detail panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--danger-subtle);",
+		"border-left-color: var(--danger-fg);",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error detail panel CSS missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG144_TrafficDetailResizeBehaviorWired(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"var trafficResizeDragging = false;",
+		"trafficBody.addEventListener('mousedown', function(e) {",
+		"e.target.closest('.traffic-detail-panel .resize-handle')",
+		"trafficResizePanel = handle.closest('.traffic-detail-panel')",
+		"trafficResizeTarget = trafficResizePanel.querySelector('.split-view')",
+		"trafficResizeStartHeight = trafficResizeTarget.offsetHeight",
+		"if (!trafficResizeDragging || !trafficResizeTarget) return;",
+		"trafficResizeTarget.style.height = newH + 'px'",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-144 AC5 FAIL: traffic detail resize behavior missing %q", needle)
+		}
+	}
+}
+
 func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
