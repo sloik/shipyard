@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: in_progress
 after: [SPEC-BUG-134, SPEC-009]
 violates: [SPEC-004]
 nfrs: [SPEC-NFR-001]
