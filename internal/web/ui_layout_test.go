@@ -3640,6 +3640,127 @@ func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
 	}
 }
 
+func TestSPECBUG140_TrafficPanelFiltersUseUX002StripMarkup(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-140 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	reqIdx := strings.Index(detailBody, `placeholder="Filter request..."`)
+	if reqIdx == -1 {
+		t.Fatal("SPEC-BUG-140 AC1 FAIL: request filter placeholder not found")
+	}
+	resIdx := strings.Index(detailBody, `placeholder="Filter response..."`)
+	if resIdx == -1 {
+		t.Fatal("SPEC-BUG-140 AC2 FAIL: response filter placeholder not found")
+	}
+	if reqIdx >= resIdx {
+		t.Fatal("SPEC-BUG-140 FAIL: request filter should appear before response filter")
+	}
+	reqStart := strings.LastIndex(detailBody[:reqIdx], `class="json-filter panel-filter"`)
+	if reqStart == -1 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: request panel filter strip class not found")
+	}
+	resStart := strings.LastIndex(detailBody[:resIdx], `class="json-filter panel-filter"`)
+	if resStart == -1 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: response panel filter strip class not found")
+	}
+	reqSlice := detailBody[reqStart:resStart]
+	resSlice := detailBody[resStart:]
+
+	for name, slice := range map[string]string{
+		"request":  reqSlice,
+		"response": resSlice,
+	} {
+		for _, needle := range []string{
+			`class="json-filter panel-filter"><label class="panel-filter-input">`,
+			`iconSearch(11, 'var(--text-muted)')`,
+			`class="json-filter-spacer"`,
+			`class="mode-toggle mode-toggle-sm"`,
+			`data-mode="text">Text</button>`,
+			`data-mode="jq">JQ</button>`,
+		} {
+			if !strings.Contains(slice, needle) {
+				t.Errorf("SPEC-BUG-140 %s filter FAIL: expected strip markup %q", name, needle)
+			}
+		}
+
+		iconIdx := strings.Index(slice, `iconSearch(11, 'var(--text-muted)')`)
+		inputIdx := strings.Index(slice, `placeholder="Filter `+name+`..."`)
+		spacerIdx := strings.Index(slice, `class="json-filter-spacer"`)
+		toggleIdx := strings.Index(slice, `class="mode-toggle mode-toggle-sm"`)
+		if !(iconIdx >= 0 && inputIdx > iconIdx && spacerIdx > inputIdx && toggleIdx > spacerIdx) {
+			t.Errorf("SPEC-BUG-140 %s filter FAIL: expected icon, input, spacer, toggle order; got icon=%d input=%d spacer=%d toggle=%d", name, iconIdx, inputIdx, spacerIdx, toggleIdx)
+		}
+	}
+	if strings.Count(detailBody, `iconSearch(11, 'var(--text-muted)')`) != 2 {
+		t.Fatal("SPEC-BUG-140 AC1/AC2 FAIL: expected exactly two 11px panel search icons")
+	}
+	if strings.Count(detailBody, `class="mode-toggle mode-toggle-sm"`) != 2 {
+		t.Fatal("SPEC-BUG-140 AC4 FAIL: expected one compact Text/JQ toggle per panel")
+	}
+}
+
+func TestSPECBUG140_TrafficPanelFiltersUseUX002StripCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	panelBlock := regexp.MustCompile(`(?s)\.json-filter\.panel-filter\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: .json-filter.panel-filter CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 100%;",
+		"gap: 6px;",
+		"background: #161b22;",
+		"border: 0;",
+		"border-bottom: 1px solid #21262d;",
+		"border-radius: 0;",
+		"padding: 4px 8px;",
+		"font-size: var(--font-size-xs);",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-140 AC3 FAIL: panel strip CSS missing %q", needle)
+		}
+	}
+	for _, forbidden := range []string{"border: 1px", "border-radius: var(--radius-s)", "border-radius: var(--radius-m)"} {
+		if strings.Contains(panelBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-140 AC3 FAIL: panel strip should not be a rounded bordered box: %q", forbidden)
+		}
+	}
+
+	inputBlock := regexp.MustCompile(`(?s)\.panel-filter-input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(inputBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC1/AC2 FAIL: .panel-filter-input CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "align-items: center;", "gap: 6px;", "flex: 1;", "min-width: 0;"} {
+		if !strings.Contains(inputBlock[1], needle) {
+			t.Errorf("SPEC-BUG-140 AC1/AC2 FAIL: panel input CSS missing %q", needle)
+		}
+	}
+
+	panelInputBlock := regexp.MustCompile(`(?s)\.json-filter\.panel-filter input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelInputBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: panel filter input typography block not found")
+	}
+	if !strings.Contains(panelInputBlock[1], "font-size: var(--font-size-xs);") {
+		t.Error("SPEC-BUG-140 AC3 FAIL: panel placeholder/input typography should be compact")
+	}
+}
+
 func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {
