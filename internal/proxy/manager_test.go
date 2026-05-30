@@ -225,6 +225,56 @@ func TestManager_Servers(t *testing.T) {
 	}
 }
 
+func TestManager_Servers_RegistrationOrderStable(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"zeta", "alpha", "mcp"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	for i := 0; i < 20; i++ {
+		assertServerNames(t, m.Servers(), []string{"zeta", "alpha", "mcp"})
+	}
+}
+
+func TestManager_Servers_StatusChangesKeepServerIndex(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	assertServerNames(t, m.Servers(), []string{"alpha", "beta", "gamma"})
+
+	m.SetStatus("beta", "restarting", "")
+	m.SetToolCount("gamma", 9)
+	servers := m.Servers()
+	assertServerNames(t, servers, []string{"alpha", "beta", "gamma"})
+	if servers[1].Name != "beta" || servers[1].Status != "restarting" {
+		t.Fatalf("expected beta to remain at index 1 while restarting, got %+v", servers)
+	}
+
+	m.SetStatus("beta", "online", "")
+	servers = m.Servers()
+	assertServerNames(t, servers, []string{"alpha", "beta", "gamma"})
+	if servers[2].Name != "gamma" || servers[2].ToolCount != 9 {
+		t.Fatalf("expected gamma to remain at index 2 with tool count 9, got %+v", servers)
+	}
+}
+
+func TestManager_RegisterExistingServerKeepsOriginalIndex(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	restarted, _ := newTestProxy(t)
+	m.Register("beta", restarted)
+
+	assertServerNames(t, m.Servers(), []string{"alpha", "beta", "gamma"})
+}
+
 func TestManager_Servers_Empty(t *testing.T) {
 	m := NewManager()
 	servers := m.Servers()
@@ -233,6 +283,18 @@ func TestManager_Servers_Empty(t *testing.T) {
 	}
 	if len(servers) != 0 {
 		t.Fatalf("expected 0 servers, got %d", len(servers))
+	}
+}
+
+func assertServerNames(t *testing.T, servers []web.ServerInfo, want []string) {
+	t.Helper()
+	if len(servers) != len(want) {
+		t.Fatalf("expected %d servers, got %d: %+v", len(want), len(servers), servers)
+	}
+	for i, name := range want {
+		if servers[i].Name != name {
+			t.Fatalf("server[%d]: expected %q, got %q in %+v", i, name, servers[i].Name, servers)
+		}
 	}
 }
 
