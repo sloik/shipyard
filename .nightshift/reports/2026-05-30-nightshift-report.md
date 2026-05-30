@@ -1,5 +1,62 @@
 # Nightshift Report — 2026-05-30
 
+**Outcome:** done
+
+## FART-SCR-001 — Live Shared JSON Filter Match Counts
+
+## Summary Stats
+
+- Spec: `FART-SCR-001`
+- Branch: `nightshift/FART-SCR-001`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-FART-SCR-001`
+- Domain: code
+- Files changed: 4 tracked files plus report, metrics, verification, and DevKB update artifacts
+- Validation gates: 5/5 passing
+- Review cycles: 1 self-review
+- Blockers: none
+
+## Per-Spec Changes
+
+- Populated the existing shared `json-filter-match-count` slot for Traffic detail request/response JSON panes.
+- Added shared count behavior for active Text filters using actual matching JSON lines across both panes.
+- Added shared count behavior for valid JQ filters using the rendered result line counts across both panes.
+- Hid and cleared the shared count when the shared filter is empty or when any shared JQ evaluation fails.
+- Preserved existing per-panel filter independence and existing inline `jq error:` rendering.
+- Fixed detail-pane `data-raw-json` attribute escaping so quoted JSON remains readable by JQ mode after live DOM rendering.
+- Added focused source-level UI tests plus a `jsdom` inline-script execution check for active, clear, mode-switch, and invalid-JQ states.
+
+## Test Results
+
+- `go test ./internal/web -run FARTSCR001 -count=1` — PASS after red/green cycle.
+- `go test ./internal/web -run 'FARTSCR001|SPECBUG132|UI' -count=1` — PASS.
+- `NODE_PATH=/tmp/shipyard-jsdom-3icD1g/node_modules node <inline jsdom harness>` — PASS: `text=2 matches; jq=5 matches; invalid-hidden=true`.
+- `go test ./...` — PASS.
+- `go vet ./...` — PASS.
+- `go build ./...` — PASS.
+- `python3 .nightshift/validate_specs.py .nightshift/specs/FART-SCR-001-live-shared-json-filter-match-counts.md` — PASS.
+
+Note: `go test ./...` and `go build ./...` emitted existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Typing a shared text filter updates the shared match-count slot with a non-empty count derived from request and response panes.
+- [x] AC 2: Switching the shared filter between Text and JQ mode recomputes the count without changing per-panel filter state.
+- [x] AC 3: Clearing the shared filter hides and empties the match-count slot.
+- [x] AC 4: Invalid JQ clears the count and preserves inline `jq error:` feedback.
+- [x] AC 5: Required UI test, full test, vet, and build gates pass.
+
+## Blockers / Discoveries
+
+- No blockers remain.
+- Live DOM execution exposed that detail-pane raw JSON attributes needed quote-safe attribute escaping for JQ mode to work reliably with ordinary JSON payloads.
+- The shared count intentionally aggregates request and response panes into one count string, matching the spec's allowed wording/aggregation gap.
+
+## Suggested Follow-up Specs
+
+(none)
+
+---
+
 ## SPEC-BUG-139 — Traffic Detail Metadata and Shared Filter Bar UX-002 Alignment
 
 ## Summary Stats

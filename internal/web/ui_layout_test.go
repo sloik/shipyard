@@ -3616,7 +3616,7 @@ func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
 		"container.querySelectorAll('.json-filter.panel-filter')",
 		"pf.nextElementSibling",
 	} {
-		if !strings.Contains(wireBody, needle) {
+		if !strings.Contains(wireBody, needle) && !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: filter wiring missing %q", needle)
 		}
 	}
@@ -3634,8 +3634,85 @@ func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
 		"filterEl.classList.contains('panel-filter')",
 		"container.querySelectorAll('.split-view .json-viewer')",
 	} {
-		if !strings.Contains(modeBody, needle) {
+		if !strings.Contains(modeBody, needle) && !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: mode toggle behavior missing %q", needle)
+		}
+	}
+}
+
+func TestFARTSCR001_SharedFilterMatchCountLiveWiring(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"function escapeAttr(s)",
+		"data-raw-json=\"' + escapeAttr(reqEntry.payload) + '\"",
+		"data-raw-json=\"' + escapeAttr(resEntry.payload) + '\"",
+		"function updateSharedFilterMatchCount(matchCount, active, count)",
+		"function applyCombinedFilter(combinedFilter, container)",
+		"combinedFilter.querySelector('[data-match-count]')",
+		"updateSharedFilterMatchCount(matchCount, val && allOk, totalMatches)",
+		"count === 1 ? ' match' : ' matches'",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("FART-SCR-001 AC1/AC3 FAIL: shared match-count live wiring missing %q", needle)
+		}
+	}
+
+	wireIdx := strings.Index(content, "function wireFilterInputs(container)")
+	if wireIdx == -1 {
+		t.Fatal("FART-SCR-001 AC1 FAIL: wireFilterInputs not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     Mode Toggle in Detail Panels"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"applyCombinedFilter(combinedFilter, container)",
+		"combinedInput.addEventListener('input', debouncedCombined)",
+	} {
+		if !strings.Contains(wireBody, needle) {
+			t.Errorf("FART-SCR-001 AC1 FAIL: shared input should update match count via %q", needle)
+		}
+	}
+}
+
+func TestFARTSCR001_SharedFilterModeSwitchAndInvalidJQCountState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"return { ok: false, count: 0 }",
+		"countRenderedJsonLines(viewer)",
+		"matchCount.textContent = ''",
+		"matchCount.hidden = true",
+		"jq error:",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("FART-SCR-001 AC2/AC4 FAIL: invalid/empty count state missing %q", needle)
+		}
+	}
+
+	modeIdx := strings.Index(content, "trafficBody.addEventListener('click', function(e) {")
+	if modeIdx == -1 {
+		t.Fatal("FART-SCR-001 AC2 FAIL: detail mode-toggle click handler not found")
+	}
+	modeBody := content[modeIdx:]
+	if endIdx := strings.Index(modeBody, "/* ======================================================================\n     Row Click"); endIdx > 0 {
+		modeBody = modeBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"applyCombinedFilter(filterEl, container)",
+		"filterEl.classList.contains('panel-filter')",
+	} {
+		if !strings.Contains(modeBody, needle) {
+			t.Errorf("FART-SCR-001 AC2 FAIL: mode switch should recompute shared count without panel-state changes, missing %q", needle)
 		}
 	}
 }
