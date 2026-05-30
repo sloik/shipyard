@@ -4,7 +4,7 @@ template_version: 4
 priority: 4
 layer: 3
 type: feature
-status: ready
+status: in_progress
 after: [SPEC-BUG-139]
 nfrs: [SPEC-NFR-001]
 devkb_required: [frontend.md, testing.md, go.md]
