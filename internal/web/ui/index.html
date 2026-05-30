@@ -1391,54 +1391,50 @@
     html += '<div class="split-view" id="split-' + entry.id + '">';
 
     // REQUEST panel
-    html += '<div>';
+    html += '<div class="traffic-panel traffic-panel-request">';
     html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter request..."></label>';
     html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div></div>';
-    html += '<div class="code-block">';
     html += '<div class="traffic-panel-header traffic-panel-header-request" data-req-header>' +
       '<span class="traffic-panel-label">REQUEST</span>' +
       '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy request payload" title="Copy request payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
     '</div>';
     if (reqEntry) {
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
     } else {
-      html += '<div class="json-viewer code-body"><span class="spinner">No request data</span></div>';
+      html += '<div class="json-viewer traffic-panel-body"><span class="spinner">No request data</span></div>';
     }
-    html += '</div>';
     html += '</div>';
 
     // RESPONSE panel
-    html += '<div>';
+    html += '<div class="traffic-panel traffic-panel-response">';
     html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter response..."></label>';
     html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div></div>';
-    html += '<div class="code-block">';
     if (resEntry && resEntry.status === 'error') {
       html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
         '<span class="traffic-panel-title"><span class="traffic-panel-label">RESPONSE</span><span class="badge badge-error">ERROR</span></span>' +
         '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
       html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
         '<span class="traffic-panel-label">RESPONSE</span>' +
         '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
       html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span>' +
         '<button class="btn traffic-panel-copy traffic-panel-copy-disabled" type="button" disabled aria-disabled="true" aria-label="Response payload unavailable" title="Response payload unavailable">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
+      html += '<div class="json-viewer traffic-panel-body"><span class="spinner">Awaiting response\u2026</span></div>';
     }
-    html += '</div>';
     html += '</div>';
 
     html += '</div>'; // /split-view
@@ -1457,9 +1453,9 @@
     var copyBtns = panelEl.querySelectorAll('.btn-copy');
     for (var i = 0; i < copyBtns.length; i++) {
       (function(btn) {
-        var viewer = btn.closest('.code-block');
-        if (!viewer) return;
-        var jv = viewer.querySelector('.json-viewer');
+        var panel = btn.closest('.traffic-panel');
+        if (!panel) return;
+        var jv = panel.querySelector('.json-viewer');
         if (jv) {
           btn.setAttribute('data-copy', jv.textContent);
         }
@@ -1709,9 +1705,9 @@
       (function(pf) {
         var input = pf.querySelector('input');
         if (!input) return;
-        var codeBlock = pf.nextElementSibling;
-        if (!codeBlock) return;
-        var viewer = codeBlock.querySelector('.json-viewer');
+        var panel = pf.closest('.traffic-panel');
+        if (!panel) return;
+        var viewer = panel.querySelector('.json-viewer');
         if (!viewer) return;
         var debouncedPanel = debounce(function() {
           var mode = getActiveMode(pf);
@@ -1778,9 +1774,9 @@
       // Combined filter targets all split-view viewers in the container
       var container = filterEl.closest('.detail-panel');
       if (filterEl.classList.contains('panel-filter')) {
-        // Per-panel filter: viewer is in the next sibling code-block
-        var codeBlock = filterEl.nextElementSibling;
-        if (codeBlock) viewer = codeBlock.querySelector('.json-viewer');
+        // Per-panel filter: viewer lives in the same traffic panel.
+        var panel = filterEl.closest('.traffic-panel');
+        if (panel) viewer = panel.querySelector('.json-viewer');
       }
       if (input) {
         input.placeholder = mode === 'jq' ? 'jq expression...' : 'Filter JSON...';

@@ -1,5 +1,61 @@
 # Nightshift Report — 2026-05-30
 
+## SPEC-BUG-143 — Traffic JSON Bodies Use Generic Code-Block Nesting Instead of UX-002 Split-View Body
+
+**Outcome:** done
+
+## Summary Stats
+
+- Spec: `SPEC-BUG-143`
+- Branch: `nightshift/SPEC-BUG-143`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-143`
+- Domain: code
+- Files changed: 6 tracked files plus DevKB writeback
+- Validation gates: 4/4 passing (`go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, `go build ./...`)
+- Review cycles: 1 self-review
+- Blockers: none
+
+## Per-Spec Changes
+
+- Replaced Traffic detail request/response `.code-block` wrappers with feature-owned `.traffic-panel traffic-panel-request/response` split-view children.
+- Changed Traffic request, response, error-response, empty-request, and pending-response JSON bodies to `.json-viewer traffic-panel-body` direct siblings after the directional panel headers.
+- Added scoped `.traffic-panel-body` CSS for UX-002 dark body fill `#010409`, compact `4px 10px 4px 6px` padding, 11px monospace rows, and 20px line-number columns.
+- Preserved generic `.json-viewer` rendering so syntax highlighting, recursive string expansion, key sorting, shared text filtering, and jq filtering continue to operate on the same body nodes.
+- Retargeted copy, per-panel filter, and mode-toggle wiring from generic `.code-block` lookup to the owning `.traffic-panel`.
+- Added source-level UI tests that reject nested `.code-block` / `.code-body` wrappers in Traffic split-view bodies and assert the dedicated panel body classes and wiring.
+- Marked SPEC-BUG-143 requirements and AC checkboxes complete.
+- Added a DevKB frontend lesson for integrated split-view payload bodies.
+
+## Test Results
+
+- `go test ./internal/web -run 'SPECBUG143|SPECBUG139_SharedAndPanelFilterWiring|SPECBUG142_CopyWiring|SPECBUG141|SPECBUG144_TrafficPending' -count=1` — PASS after red/green implementation cycle.
+- `go test ./internal/web -run UI -count=1` — PASS.
+- `go test ./...` — PASS.
+- `go vet ./...` — PASS.
+- `go build ./...` — PASS.
+
+Note: `go test ./...` and `go build ./...` emitted existing non-fatal macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: Request and response JSON bodies are direct descendants of their panel structure after the panel header, without an intermediate `.code-block`.
+- [x] AC 2: Split-view body styling uses compact 11px monospace JSON rows and 20px line-number columns for Traffic detail panels.
+- [x] AC 3: The split-view itself remains the only outer bordered/radius container around request and response bodies.
+- [x] AC 4: Text filtering and jq filtering continue to update the same JSON body content.
+- [x] AC 5: `go test ./internal/web -run UI -count=1`, `go test ./...`, `go vet ./...`, and `go build ./...` pass.
+
+## Blockers / Discoveries
+
+- No blockers remain.
+- The key coupling was behavioral rather than visual: copy and filter lookup still depended on `.code-block`, so removing the wrapper required selector rewiring to `.traffic-panel`.
+- The generic `.json-viewer` class remains on Traffic bodies to preserve existing highlighting/filter behavior; the new `.traffic-panel-body` modifier owns only Traffic split-view body metrics.
+
+## Suggested Follow-up Specs
+
+(none)
+
+---
+
 ## SPEC-BUG-142 — Traffic Split-View Copy Controls Use Icon-Only Actions
 
 **Outcome:** done
