@@ -75,8 +75,7 @@
     var el = document.createElement('div');
     el.className = 'toast toast-' + type;
 
-    var icons = { success: '\u2713', error: '\u2716', info: '\u24D8' };
-    el.textContent = (icons[type] || '') + ' ' + message;
+    el.textContent = message;
 
     el.addEventListener('click', function() { dismiss(el); });
 

@@ -61,7 +61,7 @@
          Schema Change Alert Banner (global, SPEC-009)
          ================================================================ -->
     <div id="schema-alert-banner" style="display:none; background:var(--bg-warning, #4a3600); border-bottom:1px solid var(--border-default); padding:8px 16px; align-items:center; gap:8px;">
-      <span style="font-size:16px;">&#9888;</span>
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
       <span id="schema-alert-text" style="color:var(--text-primary); font-size:var(--font-size-sm);">Schema changes detected</span>
       <a href="#/servers/schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
     </div>
@@ -161,7 +161,7 @@
     <div class="search-bar search-bar-strip" id="tool-search-bar">
       <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <input type="text" id="tool-search" placeholder="Search tools...">
-      <button class="search-clear">&#10005;</button>
+      <button class="search-clear"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     </div>
     <div id="tool-groups" style="flex:1; overflow-y:auto; padding:0 4px 8px 4px;"></div>
   </div>
@@ -203,7 +203,7 @@
 
         <div id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);">
           <div style="display:flex; align-items:flex-start; gap:10px;">
-            <span style="font-size:18px; line-height:1; color:var(--warning-fg);">&#9888;</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
             <div style="flex:1; min-width:0;">
               <div id="tool-conflict-title" style="font-size:var(--font-size-md); font-weight:600; color:var(--text-primary); margin-bottom:2px;"></div>
               <div id="tool-conflict-message" style="font-size:var(--font-size-sm); color:var(--text-secondary);"></div>
@@ -229,7 +229,7 @@
         <!-- Execute Button Row -->
         <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
           <button class="btn btn-primary" id="tool-execute-btn" style="display:inline-flex; align-items:center; gap:6px;">
-            <span>&#9654;</span> Execute
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="6 3 20 12 6 21 6 3"/></svg> <span>Execute</span>
           </button>
           <span id="tool-execute-hint" style="font-size:var(--font-size-sm); color:var(--text-muted);">Sends tools/call to the child server</span>
         </div>
@@ -293,7 +293,7 @@
 
   <!-- No Search Results -->
   <div id="history-no-results" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128269;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
     <div class="empty-title">No results found</div>
     <div class="empty-desc">Try adjusting your search filters.</div>
     <button class="btn btn-default" id="history-clear-search-btn">Clear search</button>
@@ -308,7 +308,7 @@
         <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <input type="text" id="history-search" placeholder="Search payload...">
         <span id="history-search-count" class="badge badge-neutral" style="display:none;"></span>
-        <button class="search-clear" id="history-search-clear" style="display:none;">&#10005;</button>
+        <button class="search-clear" id="history-search-clear" style="display:none;"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>
       <div class="seg-toggle" id="history-time-toggle">
         <button class="seg-active" data-value="">All</button>
@@ -393,7 +393,7 @@
 
     <!-- Sessions Empty State -->
     <div id="sessions-empty" class="empty-state">
-      <div class="empty-icon">&#128308;</div>
+      <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="var(--danger-fg)" stroke="var(--danger-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg></div>
       <div class="empty-title">No sessions recorded</div>
       <div class="empty-desc">Record a session to capture a sequence of MCP requests for replay and export.</div>
       <button class="btn btn-primary" id="sessions-empty-record-btn">Record Session</button>
@@ -405,7 +405,7 @@
       <!-- Action Bar -->
       <div class="app-bar" style="gap:8px; flex-wrap:wrap;">
         <button class="btn btn-primary btn-sm" id="session-record-btn" style="display:inline-flex; align-items:center; gap:4px;">
-          <span id="session-record-icon">&#128308;</span> <span id="session-record-label">Record</span>
+          <span id="session-record-icon"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="var(--danger-fg)" stroke="var(--danger-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="9"/></svg></span> <span id="session-record-label">Record</span>
         </button>
         <div class="input-group" id="session-name-group">
           <input type="text" id="session-name-input" class="input" placeholder="Session name..." style="width:180px;">
@@ -512,7 +512,7 @@
         <span data-col="min" style="width:70px;" data-sort="min">Min</span>
         <span data-col="avg" style="width:70px;" data-sort="avg">Avg</span>
         <span data-col="p50" style="width:70px;" data-sort="p50">P50</span>
-        <span data-col="p95" style="width:70px; color:var(--accent-fg);" data-sort="p95">P95 &#8595;</span>
+        <span data-col="p95" style="width:70px; color:var(--accent-fg); display:inline-flex; align-items:center; gap:4px;" data-sort="p95">P95 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></span>
         <span data-col="max" style="width:70px;" data-sort="max">Max</span>
         <span data-col="errpct" style="width:70px;" data-sort="error_rate">Err%</span>
       </div>
@@ -521,7 +521,7 @@
 
     <!-- Empty State -->
     <div id="perf-empty" class="empty-state">
-      <div class="empty-icon">&#128202;</div>
+      <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
       <div class="empty-title">No traffic data yet</div>
       <div class="empty-desc">Latency profiling will appear here once MCP traffic flows through Shipyard.</div>
     </div>
@@ -546,20 +546,20 @@
       <span id="servers-stat-crashed-lbl" style="color:var(--danger-fg); font-weight:500;"></span>
     </span>
     <span id="servers-stat-tools" style="display:none; align-items:center; gap:6px; font-size:var(--font-size-sm);">
-      <span style="font-size:12px; color:var(--text-muted);">&#9881;</span>
+      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
       <span id="servers-stat-tools-lbl" style="color:var(--text-secondary);"></span>
     </span>
     <div style="flex:1;"></div>
     <button class="btn btn-default btn-sm" id="servers-auto-import-btn">Auto-Import</button>
-    <button class="btn btn-primary btn-sm" id="servers-add-btn">&#43; Add Server</button>
+    <button class="btn btn-primary btn-sm" id="servers-add-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Server</button>
   </div>
 
   <!-- Plain-text secrets warning banner (SPEC-038-003) -->
   <div id="servers-plain-text-warning" style="display:none; align-items:center; gap:12px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-s); padding:10px 16px; margin:0 24px 12px 24px; font-size:var(--font-size-sm);">
-    <span style="color:var(--warning-fg);">&#9888;</span>
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
     <span style="flex:1; color:var(--text-secondary);">One or more servers have plain-text secrets in their config. Consider using a secret manager.</span>
     <button class="btn btn-default btn-sm" onclick="showView('settings'); document.getElementById('servers-plain-text-warning').style.display='none';">Go to Settings</button>
-    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('servers-plain-text-warning').style.display='none';">&#10005;</button>
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('servers-plain-text-warning').style.display='none';"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
   </div>
 
   <!-- Empty State (matches design: UX-002 → "Desktop — First Run (0 servers)") -->
@@ -568,8 +568,8 @@
     <div class="empty-title">No servers configured</div>
     <div class="empty-desc">Add your first MCP server or auto-import from Claude Desktop, Claude Code, or Cursor configurations.</div>
     <div style="display:flex; gap:12px; margin-top:4px;">
-      <button class="btn btn-default btn-sm" id="servers-empty-import-btn">&#8681; Auto-Import</button>
-      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" type="button">&#43; Add Server</button>
+      <button class="btn btn-default btn-sm" id="servers-empty-import-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg> Auto-Import</button>
+      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" type="button"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Server</button>
     </div>
     <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">Or run: <code style="background:var(--bg-tertiary, #161b22); padding:2px 6px; border-radius:4px;">shipyard --config servers.json</code></div>
   </div>
@@ -598,7 +598,7 @@
       <div id="schema-detail" style="flex:1; overflow-y:auto; padding:24px;">
         <!-- Empty State -->
         <div id="schema-empty" class="empty-state" style="height:100%;">
-          <div class="empty-icon">&#128737;</div>
+          <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></div>
           <div class="empty-title">No schema changes detected</div>
           <div class="empty-desc">All schemas stable</div>
         </div>
@@ -615,7 +615,7 @@
       <div style="padding:16px; border-bottom:1px solid var(--border-muted); display:flex; align-items:center;">
         <strong style="color:var(--text-primary);">Auto-Import MCP Servers</strong>
         <div style="flex:1;"></div>
-        <button class="btn btn-ghost btn-sm" id="auto-import-close">&#10005;</button>
+        <button class="btn btn-ghost btn-sm" id="auto-import-close"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>
       <div id="auto-import-body" style="padding:16px; overflow-y:auto; flex:1;">
         <div style="text-align:center; color:var(--text-muted); padding:24px;">Scanning...</div>
@@ -637,22 +637,22 @@
   <div class="app-bar" style="padding:8px 16px;">
     <span style="font-size:var(--font-size-sm); color:var(--text-secondary);">Bearer tokens for MCP API access</span>
     <div style="flex:1;"></div>
-    <button class="btn btn-primary btn-sm" id="tokens-create-btn">&#43; Create Token</button>
+    <button class="btn btn-primary btn-sm" id="tokens-create-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Create Token</button>
   </div>
 
   <!-- Auth-not-configured state -->
   <div id="tokens-auth-disabled" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128274;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
     <div class="empty-title">Auth not configured</div>
     <div class="empty-desc">Bearer token authentication is not enabled. Start Shipyard with <code style="background:var(--bg-surface); padding:2px 6px; border-radius:4px;">--auth-token</code> to enable it.</div>
   </div>
 
   <!-- Empty state (auth enabled, no tokens) -->
   <div id="tokens-empty" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128273;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg></div>
     <div class="empty-title">No tokens yet</div>
     <div class="empty-desc">Create a bearer token to allow API clients to authenticate with Shipyard.</div>
-    <button class="btn btn-primary btn-sm" id="tokens-empty-create-btn">&#43; Create Token</button>
+    <button class="btn btn-primary btn-sm" id="tokens-empty-create-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Create Token</button>
   </div>
 
   <!-- Token Table -->
@@ -673,7 +673,7 @@
   <div id="tokens-stats-panel" style="display:none; padding:16px; border-top:1px solid var(--border-default); background:var(--bg-surface);">
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
       <strong id="tokens-stats-name" style="color:var(--text-primary); font-size:var(--font-size-md);"></strong>
-      <button class="btn btn-ghost btn-sm" id="tokens-stats-close">&#10005; Close</button>
+      <button class="btn btn-ghost btn-sm" id="tokens-stats-close"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg> Close</button>
     </div>
     <div id="tokens-stats-body" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px;"></div>
   </div>
@@ -692,7 +692,7 @@
       <div style="flex:1; min-width:0;">
         <div style="font-size:var(--font-size-sm); color:var(--text-muted); margin-bottom:8px;">Scopes — format: <code style="background:var(--bg-surface); padding:1px 4px; border-radius:3px;">server:tool_pattern</code> (use * as wildcard)</div>
         <div id="tokens-scope-rows" style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;"></div>
-        <button class="btn btn-default btn-sm" id="tokens-scope-add-row">&#43; Add Scope</button>
+        <button class="btn btn-default btn-sm" id="tokens-scope-add-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Scope</button>
       </div>
       <!-- Live preview -->
       <div style="flex:1; min-width:0;">
@@ -957,6 +957,76 @@
     var div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+  }
+
+  function iconSvg(size, color, body, fill) {
+    var fillValue = fill || 'none';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="' + fillValue + '" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' + body + '</svg>';
+  }
+
+  function iconAlertTriangle(size, color) {
+    return iconSvg(size, color, '<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>');
+  }
+
+  function iconPlus(size, color) {
+    return iconSvg(size, color, '<path d="M5 12h14"/><path d="M12 5v14"/>');
+  }
+
+  function iconDownload(size, color) {
+    return iconSvg(size, color, '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>');
+  }
+
+  function iconSearch(size, color) {
+    return iconSvg(size, color, '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>');
+  }
+
+  function iconChartLine(size, color) {
+    return iconSvg(size, color, '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>');
+  }
+
+  function iconShield(size, color) {
+    return iconSvg(size, color, '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>');
+  }
+
+  function iconLock(size, color) {
+    return iconSvg(size, color, '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+  }
+
+  function iconKey(size, color) {
+    return iconSvg(size, color, '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>');
+  }
+
+  function iconCircle(size, color) {
+    return iconSvg(size, color, '<circle cx="12" cy="12" r="9"/>', color);
+  }
+
+  function iconChevronDown(size, color) {
+    return iconSvg(size, color, '<path d="m6 9 6 6 6-6"/>');
+  }
+
+  function iconArrowDown(size, color) {
+    return iconSvg(size, color, '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>');
+  }
+
+  function iconArrowUp(size, color) {
+    return iconSvg(size, color, '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>');
+  }
+
+  function iconPlay(size, color) {
+    return iconSvg(size, color, '<polygon points="6 3 20 12 6 21 6 3"/>');
+  }
+
+  function iconSquare(size, color) {
+    return iconSvg(size, color, '<rect width="14" height="14" x="5" y="5" rx="1"/>', color);
+  }
+
+  function setButtonIconLabel(button, iconHTML, label) {
+    if (!button) return;
+    button.innerHTML = iconHTML + ' <span>' + escapeHtml(label) + '</span>';
+  }
+
+  function renderSortHeaderLabel(el, label, order) {
+    el.innerHTML = escapeHtml(label) + ' ' + (order === 'desc' ? iconArrowDown(10, 'currentColor') : iconArrowUp(10, 'currentColor'));
   }
 
   function relativeTime(tsMs) {
@@ -2144,7 +2214,7 @@
     var conflictCount = Object.keys(toolConflicts).length;
     if (conflictCount > 0) {
       html += '<div style="padding:6px 8px; margin:0 4px 4px 4px; background:var(--warning-subtle); border-radius:var(--radius-s); font-size:var(--font-size-xs); color:var(--warning-fg); display:flex; align-items:center; gap:4px;">';
-      html += '<span>&#9888;</span> ' + conflictCount + ' tool name conflict' + (conflictCount !== 1 ? 's' : '') + ' detected';
+      html += iconAlertTriangle(12, 'var(--warning-fg)') + '<span>' + conflictCount + ' tool name conflict' + (conflictCount !== 1 ? 's' : '') + ' detected</span>';
       html += '</div>';
     }
 
@@ -2196,7 +2266,7 @@
       html += '</span>';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">' + filteredTools.length + '</span>';
-      html += '<span class="tool-group-chevron">&#9660;</span>';
+      html += '<span class="tool-group-chevron">' + iconChevronDown(12, 'currentColor') + '</span>';
       html += '</span>';
       html += '</div>';
       html += '<div class="tool-group-items">';
@@ -2220,7 +2290,7 @@
         // Left: icon + name
         html += '<div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0; overflow:hidden;">';
         if (isConflict) {
-          html += '<span style="color:var(--warning-fg); flex-shrink:0;">&#9888;</span>';
+          html += iconAlertTriangle(14, 'var(--warning-fg)');
         } else {
           html += '<svg class="tool-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
         }
@@ -2264,7 +2334,7 @@
       if (offlineCount > 0) parts.push(offlineCount + ' server' + (offlineCount !== 1 ? 's' : '') + ' offline');
       if (restartingCount > 0) parts.push(restartingCount + ' server' + (restartingCount !== 1 ? 's' : '') + ' restarting');
       html += '<div id="tool-availability-banner" style="display:flex; align-items:center; justify-content:center; gap:8px; padding:8px 12px; background:var(--danger-subtle); font-size:var(--font-size-xs); font-weight:500; color:var(--danger-fg);">';
-      html += '<span style="font-size:14px; line-height:1; flex-shrink:0;">&#9888;</span>';
+      html += iconAlertTriangle(14, 'var(--danger-fg)');
       html += '<span>' + parts.join(', ') + '</span>';
       html += '</div>';
     }
@@ -2557,7 +2627,7 @@
       .then(function() {
         // Reset button
         toolExecuteBtn.disabled = false;
-        toolExecuteBtn.innerHTML = '<span>&#9654;</span> Execute';
+        setButtonIconLabel(toolExecuteBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Execute');
       });
   }
 
@@ -3042,7 +3112,7 @@
               }
 
               // Update button text
-              toolExecuteBtn.innerHTML = '<span>&#9654;</span> Replay';
+              setButtonIconLabel(toolExecuteBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Replay');
             }, 100);
           } else if (waitCount < 50) {
             setTimeout(waitForTools, 100);
@@ -3474,7 +3544,9 @@
           html += escapeHtml(s.command);
           html += '</div>';
         }
-        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">&#128274; Blocked by gateway policy. Use the toggle to re-enable.</div>';
+        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">';
+        html += iconLock(14, 'var(--warning-fg)');
+        html += '<span>Blocked by gateway policy. Use the toggle to re-enable.</span></div>';
         html += '</div>';
         // No separate actions area for gateway-disabled — the Switch/Off toggle in header handles it.
       } else {
@@ -3779,11 +3851,11 @@
     if (!execBtn) return;
     if (!toolEnabled) {
       execBtn.disabled = true;
-      execBtn.innerHTML = '<span>&#9654;</span> Tool Disabled';
+      setButtonIconLabel(execBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Tool Disabled');
       if (execHint) execHint.textContent = '';
     } else {
       execBtn.disabled = false;
-      execBtn.innerHTML = '<span>&#9654;</span> Execute';
+      setButtonIconLabel(execBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Execute');
       if (execHint) execHint.textContent = 'Sends tools/call to the child server';
     }
   }
@@ -4021,7 +4093,7 @@
 
   function renderSessionRow(s) {
     var statusClass = s.status === 'recording' ? 'badge-error' : (s.status === 'complete' ? 'badge-success' : 'badge-neutral');
-    var statusText = s.status === 'recording' ? '&#128308; Recording' : (s.status === 'complete' ? 'Complete' : s.status);
+    var statusText = s.status === 'recording' ? iconCircle(10, 'var(--danger-fg)') + ' Recording' : (s.status === 'complete' ? 'Complete' : s.status);
     var duration = s.duration_ms ? formatDuration(s.duration_ms) : (s.status === 'recording' ? 'In progress' : '-');
     var size = s.size_bytes ? formatBytes(s.size_bytes) : '-';
     var started = s.started_at ? relativeTime(new Date(s.started_at).getTime()) : '-';
@@ -4072,7 +4144,7 @@
         .then(function() {
           activeRecordingId = null;
           activeRecordingServer = null;
-          sessionRecordIcon.innerHTML = '&#128308;';
+          sessionRecordIcon.innerHTML = iconCircle(12, 'var(--danger-fg)');
           sessionRecordLabel.textContent = 'Record';
           sessionRecordBtn.className = 'btn btn-primary btn-sm';
           sessionNameInput.disabled = false;
@@ -4140,7 +4212,7 @@
       .then(function(sess) {
         activeRecordingId = sess.id;
         activeRecordingServer = sess.server;
-        sessionRecordIcon.innerHTML = '&#9632;';
+        sessionRecordIcon.innerHTML = iconSquare(12, 'var(--text-on-emphasis)');
         sessionRecordLabel.textContent = 'Stop';
         sessionRecordBtn.className = 'btn btn-danger btn-sm';
         sessionNameInput.disabled = true;
@@ -4170,7 +4242,7 @@
           if (activeRecordingId === sid) {
             activeRecordingId = null;
             activeRecordingServer = null;
-            sessionRecordIcon.innerHTML = '&#128308;';
+            sessionRecordIcon.innerHTML = iconCircle(12, 'var(--danger-fg)');
             sessionRecordLabel.textContent = 'Record';
             sessionRecordBtn.className = 'btn btn-primary btn-sm';
             sessionNameInput.disabled = false;
@@ -4251,7 +4323,7 @@
     var diff = current - prev;
     if (diff === 0) return '';
     var isUp = diff > 0;
-    var arrow = isUp ? '\u2191' : '\u2193';
+    var arrow = isUp ? iconArrowUp(10, 'currentColor') : iconArrowDown(10, 'currentColor');
     var color;
     if (lowerIsBetter) {
       color = isUp ? 'var(--danger-fg)' : 'var(--success-fg)';
@@ -4260,7 +4332,7 @@
     }
     var val = Math.abs(diff);
     var text = unit === 'ms' ? formatMs(val) : (unit === '%' ? val.toFixed(1) + '%' : val.toString());
-    return '<span style="color:' + color + ';">' + arrow + ' ' + text + '</span>';
+    return '<span style="color:' + color + '; display:inline-flex; align-items:center; gap:4px;">' + arrow + '<span>' + text + '</span></span>';
   }
 
   function loadPerformance() {
@@ -4386,10 +4458,10 @@
       var sk = h.getAttribute('data-sort');
       if (sk === perfSort) {
         h.style.color = 'var(--accent-fg)';
-        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim() + ' ' + (perfOrder === 'desc' ? '\u2193' : '\u2191');
+        renderSortHeaderLabel(h, h.textContent.trim(), perfOrder);
       } else {
         h.style.color = '';
-        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim();
+        h.textContent = h.textContent.trim();
       }
     }
 
@@ -5136,7 +5208,7 @@
     var escapedToken = escapeHtml(plaintext);
     var body = '<div style="display:flex; flex-direction:column; gap:12px;">'
       + '<div style="background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m); padding:10px; font-size:var(--font-size-sm); color:var(--warning-fg);">'
-      +   '&#9888; This token will not be shown again. Copy it now.'
+      +   '<span style="display:inline-flex; align-items:center; gap:8px;">' + iconAlertTriangle(14, 'var(--warning-fg)') + '<span>This token will not be shown again. Copy it now.</span></span>'
       + '</div>'
       + '<div style="font-size:var(--font-size-sm); color:var(--text-muted);">Token: <strong style="color:var(--text-primary);">' + escapeHtml(tokenName) + '</strong></div>'
       + '<div style="display:flex; align-items:center; gap:8px;">'
