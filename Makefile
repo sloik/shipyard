@@ -1,4 +1,4 @@
-.PHONY: build test snapshot release wails-dev wails-build wails-build-server build-mcp install-mcp
+.PHONY: build test snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 build:
 	go build ./cmd/shipyard/
@@ -29,3 +29,12 @@ wails-build:
 
 wails-build-server:
 	wails3 task build:server
+
+package-macos:
+	wails3 package GOOS=darwin
+
+sign-macos:
+	wails3 sign GOOS=darwin
+
+notarize-macos:
+	wails3 task darwin:sign:notarize

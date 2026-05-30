@@ -15,3 +15,21 @@ tasks:
     cmds:
       - mkdir -p {{.BIN_DIR}}
       - go build -tags server -ldflags="-s -w" -o {{.BIN_DIR}}/shipyard-server ./cmd/shipyard
+
+  darwin:package:
+    summary: Packages the Wails v3 macOS desktop binary as bin/Shipyard.app.
+    deps: [build]
+    cmds:
+      - scripts/package-macos-app.sh --skip-build
+
+  darwin:sign:
+    summary: Packages and signs bin/Shipyard.app with a Developer ID identity.
+    deps: [darwin:package]
+    cmds:
+      - scripts/sign-macos-app.sh
+
+  darwin:sign:notarize:
+    summary: Packages, signs, notarizes, and staples bin/Shipyard.app.
+    deps: [darwin:package]
+    cmds:
+      - scripts/sign-macos-app.sh --notarize
