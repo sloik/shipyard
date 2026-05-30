@@ -4,7 +4,7 @@ template_version: 3
 priority: 5
 layer: 3
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-BUG-141]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -41,27 +41,27 @@ UX-002 reference:
 
 ## Requirements
 
-- [ ] R1: Traffic split-view request/response panel copy controls must render
+- [x] R1: Traffic split-view request/response panel copy controls must render
   as icon-only actions in the panel headers.
-- [ ] R2: The icon-only controls must preserve accessible labels via
+- [x] R2: The icon-only controls must preserve accessible labels via
   `aria-label` or equivalent title text.
-- [ ] R3: The icon size and muted color must match UX-002's 12px copy icon.
-- [ ] R4: Existing clipboard behavior and copied feedback must continue to work
+- [x] R3: The icon size and muted color must match UX-002's 12px copy icon.
+- [x] R4: Existing clipboard behavior and copied feedback must continue to work
   for request and response payloads.
-- [ ] R5: Generic `.btn-copy` behavior elsewhere must not be broken; this spec
+- [x] R5: Generic `.btn-copy` behavior elsewhere must not be broken; this spec
   only changes Traffic split-view panel headers.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Request panel header copy action contains a copy icon and no visible
+- [x] AC 1: Request panel header copy action contains a copy icon and no visible
   `Copy` text.
-- [ ] AC 2: Response panel header copy action contains a copy icon and no
+- [x] AC 2: Response panel header copy action contains a copy icon and no
   visible `Copy` text.
-- [ ] AC 3: Both icon-only controls have accessible labels.
-- [ ] AC 4: Clicking each copy icon copies only that panel's payload.
-- [ ] AC 5: Existing copy buttons in modals, Tool Browser response, and generic
+- [x] AC 3: Both icon-only controls have accessible labels.
+- [x] AC 4: Clicking each copy icon copies only that panel's payload.
+- [x] AC 5: Existing copy buttons in modals, Tool Browser response, and generic
   code blocks keep their current label behavior.
-- [ ] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
+- [x] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
   `go vet ./...`, and `go build ./...` pass.
 
 ## Context
