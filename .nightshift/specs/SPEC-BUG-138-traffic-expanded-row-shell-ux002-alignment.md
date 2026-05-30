@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: ready
+status: in_progress
 after: [SPEC-006, UX-002]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
