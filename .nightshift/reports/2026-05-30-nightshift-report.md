@@ -138,3 +138,70 @@ Note: `go test`, `go build`, and the race gate emitted existing macOS linker war
 ## Suggested Follow-up Specs
 
 None.
+
+---
+
+## SPEC-BUG-129 Addendum - Wails v3 GUI Smoke Coverage
+
+### Summary Stats
+
+- Spec: `SPEC-BUG-129`
+- Current branch: `nightshift/SPEC-BUG-129`
+- Current worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-129`
+- Domain: code
+- Specs completed: 1
+- Current run files changed: 5
+- Blockers: none
+
+### Per-Spec Changes
+
+- Added `scripts/macos-wails-gui-smoke.sh`, a repeatable macOS Wails v3 GUI smoke command.
+- The script builds with `wails3 task build`, launches the native app on an isolated temporary config/port, verifies `/api/servers`, records process/window evidence, and writes a Markdown artifact under `reports/gui-smoke/`.
+- The script requires explicit operator answers for tray/menu steps instead of overclaiming full automation. This covers tray visibility, tray click show/toggle, right-click menu items `Show Dashboard` and `Quit`, close-to-tray, and panel detach.
+- Added `README.md` documentation for the smoke command and evidence path.
+- Added regression coverage in `cmd/shipyard/desktop_test.go` so the smoke procedure must continue documenting the required native coverage and evidence path.
+- Added `scripts/macos-wails-gui-smoke.test` for shell syntax and checklist-content validation.
+- Marked `SPEC-BUG-129` complete with root cause and checked requirements/acceptance criteria.
+
+### Test Results
+
+- `scripts/macos-wails-gui-smoke.test` - PASS
+- `go test ./cmd/shipyard -run TestMacOSWailsGUISmokeProcedureDocumentsNativeCoverage -count=1` - PASS
+- `go test ./...` - PASS
+- `go vet ./...` - PASS
+- `go build ./...` - PASS
+- `wails3 task build` - PASS
+- `wails3 task build:server` - PASS
+
+Note: `go test`, `go build`, and Wails task builds emitted existing non-fatal
+macOS linker warnings about Wails native objects built for macOS 26.0 while
+linking target 11.0.
+
+### Smoke Evidence
+
+- Documented command: `scripts/macos-wails-gui-smoke.sh`
+- Documented evidence path: `reports/gui-smoke/SPEC-BUG-129-<timestamp>.md`
+- Procedure validation evidence:
+  - `scripts/macos-wails-gui-smoke.test` passed.
+  - `go test ./cmd/shipyard -run TestMacOSWailsGUISmokeProcedureDocumentsNativeCoverage -count=1` passed.
+- Live probe discovery: launching `bin/shipyard --config <temp>/servers.json` opened a Wails window and served `/api/servers`; macOS Accessibility exposed the Shipyard process, one native window, and a second nameless menu bar item. The nameless tray node confirms why the final smoke path uses a structured manual checklist for tray/menu contents rather than treating System Events inspection as stable automation.
+
+### AC Checklist
+
+- [x] AC 1: README documents `scripts/macos-wails-gui-smoke.sh`; the script itself has `--help`.
+- [x] AC 2: The smoke checklist explicitly verifies tray click show/toggle behavior.
+- [x] AC 3: The smoke checklist explicitly verifies tray menu items `Show Dashboard` and `Quit`.
+- [x] AC 4: The smoke checklist verifies closing the main window hides to tray and that the process remains alive.
+- [x] AC 5: The smoke checklist verifies `Open in New Window` opens a separate native window; the script also records native window counts.
+- [x] AC 6: This report records the procedure validation and links the runtime evidence artifact path the smoke command writes on a successful operator run.
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, `wails3 task build`, and `wails3 task build:server` passed.
+
+### Blockers / Discoveries
+
+- No implementation blocker remains.
+- Full automation for macOS menu-bar tray contents is not treated as reliable because the Wails tray Accessibility item can be unnamed and permission-dependent. The selected approach is the spec-allowed semi-automated script plus structured manual evidence checklist.
+- Existing Wails macOS linker warnings remain non-fatal and match the SPEC-018 run behavior.
+
+### Suggested Follow-up Specs
+
+None.

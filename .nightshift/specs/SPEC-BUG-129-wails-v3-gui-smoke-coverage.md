@@ -4,13 +4,14 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-018]
 violates: [SPEC-018]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
 attachments: []
 created: 2026-05-29
+completed: 2026-05-30
 ---
 
 # Add Wails v3 GUI Smoke Coverage
@@ -43,33 +44,37 @@ should have repeatable smoke evidence after the Wails v3 migration.
 
 ## Root Cause
 
-Leave blank for the implementation pass.
+SPEC-018 relied on implementation, build, and source-level tests for native
+Wails behavior, but the repository had no repeatable operator procedure that
+launched the macOS GUI and captured tray/window evidence. macOS menu-bar extras
+are also brittle to inspect fully from automation because their Accessibility
+nodes may be unnamed and permissions-dependent.
 
 ## Requirements
 
-- [ ] R1: Add a repeatable smoke procedure for macOS Wails v3 tray and
+- [x] R1: Add a repeatable smoke procedure for macOS Wails v3 tray and
   multi-window behavior.
-- [ ] R2: The smoke procedure must cover tray icon visibility or accessibility,
+- [x] R2: The smoke procedure must cover tray icon visibility or accessibility,
   click-to-show/toggle behavior, right-click menu contents, close-to-tray, and
   panel detach.
-- [ ] R3: If full automation is brittle for menu-bar UI, provide a
+- [x] R3: If full automation is brittle for menu-bar UI, provide a
   semi-automated script plus a structured manual evidence checklist.
-- [ ] R4: The smoke procedure must write or reference evidence artifacts under
+- [x] R4: The smoke procedure must write or reference evidence artifacts under
   `.nightshift/reports/` or another repo-documented evidence path.
-- [ ] R5: Existing Go, Wails build, and server-mode validation must remain green.
+- [x] R5: Existing Go, Wails build, and server-mode validation must remain green.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: A documented command or checklist exists for Wails v3 macOS GUI smoke
+- [x] AC 1: A documented command or checklist exists for Wails v3 macOS GUI smoke
   coverage.
-- [ ] AC 2: The smoke path verifies tray show/toggle behavior.
-- [ ] AC 3: The smoke path verifies tray menu items: `Show Dashboard` and `Quit`.
-- [ ] AC 4: The smoke path verifies closing the main window hides to tray rather
+- [x] AC 2: The smoke path verifies tray show/toggle behavior.
+- [x] AC 3: The smoke path verifies tray menu items: `Show Dashboard` and `Quit`.
+- [x] AC 4: The smoke path verifies closing the main window hides to tray rather
   than exiting.
-- [ ] AC 5: The smoke path verifies panel detach opens a separate native window.
-- [ ] AC 6: Evidence from a successful smoke run is recorded in the Nightshift
+- [x] AC 5: The smoke path verifies panel detach opens a separate native window.
+- [x] AC 6: Evidence from a successful smoke run is recorded in the Nightshift
   report or linked artifact.
-- [ ] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and relevant Wails
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and relevant Wails
   build commands pass.
 
 ## Context
