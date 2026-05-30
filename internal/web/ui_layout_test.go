@@ -3478,6 +3478,168 @@ func TestSPECBUG138_TrafficExpandedRowShellCSS(t *testing.T) {
 	}
 }
 
+func TestSPECBUG139_TrafficDetailMetaAndSharedFilterStructure(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-139 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	metaIdx := strings.Index(detailBody, `class="traffic-detail-meta"`)
+	if metaIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC1 FAIL: metadata should use a dedicated traffic-detail-meta bar")
+	}
+	filterIdx := strings.Index(detailBody, `class="json-filter json-filter-bar"`)
+	if filterIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC2 FAIL: shared filter should use the composed json-filter-bar class")
+	}
+	metaBlock := detailBody[metaIdx:filterIdx]
+	if strings.Contains(metaBlock, "table-row") {
+		t.Fatal("SPEC-BUG-139 AC1/R5 FAIL: metadata bar must not reuse table-row structure")
+	}
+
+	required := []string{
+		`class="json-filter json-filter-bar" id="combined-filter-`,
+		`class="json-filter-input"`,
+		`iconSearch(14, 'var(--text-muted)')`,
+		`placeholder="Filter JSON..."`,
+		`class="mode-toggle json-filter-mode"`,
+		`data-mode="text">Text</button>`,
+		`data-mode="jq">JQ</button>`,
+		`class="json-filter-spacer"`,
+		`class="json-filter-match-count" hidden`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-139 AC2/R2/R3 FAIL: expected shared filter structure %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-filter panel-filter"`) != 2 {
+		t.Fatal("SPEC-BUG-139 AC5 FAIL: request and response panel filters should remain separate from the shared filter")
+	}
+
+	order := []string{
+		`class="json-filter-input"`,
+		`class="mode-toggle json-filter-mode"`,
+		`class="json-filter-spacer"`,
+		`class="json-filter-match-count" hidden`,
+	}
+	last := -1
+	for _, needle := range order {
+		idx := strings.Index(detailBody, needle)
+		if idx == -1 {
+			continue
+		}
+		if idx <= last {
+			t.Fatalf("SPEC-BUG-139 AC2 FAIL: shared filter element %q appears out of order", needle)
+		}
+		last = idx
+	}
+}
+
+func TestSPECBUG139_TrafficDetailMetaAndSharedFilterCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	metaBlock := regexp.MustCompile(`(?s)\.traffic-detail-meta\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(metaBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC1 FAIL: .traffic-detail-meta CSS block not found")
+	}
+	for _, needle := range []string{"gap: 16px;", "padding: 8px 0;"} {
+		if !strings.Contains(metaBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC1 FAIL: metadata bar missing UX-002 spacing %q", needle)
+		}
+	}
+	for _, forbidden := range []string{"cursor:", "border-bottom:"} {
+		if strings.Contains(metaBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-139 AC1 FAIL: metadata bar must not behave like a table row: %q", forbidden)
+		}
+	}
+
+	barBlock := regexp.MustCompile(`(?s)\.json-filter-bar\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(barBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC2 FAIL: .json-filter-bar CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "align-items: center;", "gap: 8px;", "background: transparent;", "border: 0;", "padding: 0;"} {
+		if !strings.Contains(barBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC2 FAIL: shared filter bar missing %q", needle)
+		}
+	}
+
+	inputBlock := regexp.MustCompile(`(?s)\.json-filter-input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(inputBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC2/AC3 FAIL: .json-filter-input CSS block not found")
+	}
+	for _, needle := range []string{"width: 280px;", "background: #0d1117;", "border: 1px solid #30363d;", "border-radius: 6px;", "padding: 5px 10px;"} {
+		if !strings.Contains(inputBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC2/AC3 FAIL: input capsule missing %q", needle)
+		}
+	}
+	if !strings.Contains(content, ".json-filter-spacer {\n  flex: 1;\n}") {
+		t.Error("SPEC-BUG-139 AC2 FAIL: shared filter should include a flex spacer")
+	}
+	if !strings.Contains(content, ".json-filter-match-count[hidden] {\n  display: none;\n}") {
+		t.Error("SPEC-BUG-139 AC2 FAIL: match count slot should be hidden/future-ready")
+	}
+}
+
+func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	wireIdx := strings.Index(content, "function wireFilterInputs(container)")
+	if wireIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC3/AC4 FAIL: wireFilterInputs not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     Mode Toggle in Detail Panels"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"container.querySelector('.json-filter:not(.panel-filter)')",
+		"container.querySelectorAll('.split-view .json-viewer')",
+		"container.querySelectorAll('.json-filter.panel-filter')",
+		"pf.nextElementSibling",
+	} {
+		if !strings.Contains(wireBody, needle) {
+			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: filter wiring missing %q", needle)
+		}
+	}
+
+	modeIdx := strings.Index(content, "trafficBody.addEventListener('click', function(e) {")
+	if modeIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC3/AC4 FAIL: detail mode-toggle click handler not found")
+	}
+	modeBody := content[modeIdx:]
+	if endIdx := strings.Index(modeBody, "/* ======================================================================\n     Row Click"); endIdx > 0 {
+		modeBody = modeBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"modeBtn.closest('.json-filter')",
+		"filterEl.classList.contains('panel-filter')",
+		"container.querySelectorAll('.split-view .json-viewer')",
+	} {
+		if !strings.Contains(modeBody, needle) {
+			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: mode toggle behavior missing %q", needle)
+		}
+	}
+}
+
 func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
 	html, err := uiFS.ReadFile("ui/index.html")
 	if err != nil {

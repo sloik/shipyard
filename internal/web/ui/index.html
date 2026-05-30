@@ -1360,12 +1360,14 @@
     html += '</div>';
 
     // Combined filter
-    html += '<div class="json-filter" id="combined-filter-' + entry.id + '">';
-    html += '<input type="text" placeholder="Filter JSON...">';
-    html += '<div class="mode-toggle">';
+    html += '<div class="json-filter json-filter-bar" id="combined-filter-' + entry.id + '">';
+    html += '<label class="json-filter-input">' + iconSearch(14, 'var(--text-muted)') + '<input type="text" placeholder="Filter JSON..."></label>';
+    html += '<div class="mode-toggle json-filter-mode">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div>';
+    html += '<div class="json-filter-spacer"></div>';
+    html += '<span class="json-filter-match-count" hidden data-match-count></span>';
     html += '</div>';
 
     // Split view
