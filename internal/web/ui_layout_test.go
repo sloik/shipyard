@@ -3235,7 +3235,7 @@ func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) 
 		"var clientTelemetrySamples = [];",
 		"function recordClientTelemetry(name, start, meta)",
 		"window.shipyardClientTelemetry = clientTelemetrySamples;",
-		"recordClientTelemetry('tools.load'",
+		"var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';",
 		"recordClientTelemetry('servers.load'",
 		"recordClientTelemetry('servers.render'",
 		"recordClientTelemetry('timeline.load'",
@@ -3245,6 +3245,32 @@ func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) 
 	for _, needle := range required {
 		if !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-134 frontend telemetry missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG135_ToolsUIUsesCachedLoadAndShowsSnapshotState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="tool-refresh-btn"`,
+		"function loadTools(forceRefresh)",
+		"var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';",
+		"if (forceRefresh) toolsURL += '&force_refresh=1';",
+		"cache_status: data.cache_status || ''",
+		"status_message: data.status_message || ''",
+		"Snapshot missing",
+		"Snapshot error",
+		"Cached",
+		"loadTools(true);",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-135 UI missing %q", needle)
 		}
 	}
 }

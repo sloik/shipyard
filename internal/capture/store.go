@@ -1121,24 +1121,35 @@ func (s *Store) SaveSnapshot(server string, tools []ToolSchema) (int64, error) {
 // Returns the tools, snapshot ID, and any error.
 // If no snapshot exists, returns nil tools and id 0 with no error.
 func (s *Store) GetLatestSnapshot(server string) ([]ToolSchema, int64, error) {
+	tools, id, _, err := s.GetLatestSnapshotWithCapturedAt(server)
+	return tools, id, err
+}
+
+// GetLatestSnapshotWithCapturedAt retrieves the latest schema snapshot and its capture time.
+func (s *Store) GetLatestSnapshotWithCapturedAt(server string) ([]ToolSchema, int64, time.Time, error) {
 	var id int64
 	var snapshot string
+	var capturedAtText string
 	err := s.db.QueryRow(
-		`SELECT id, snapshot FROM schema_snapshots WHERE server_name = ? ORDER BY id DESC LIMIT 1`,
+		`SELECT id, snapshot, captured_at FROM schema_snapshots WHERE server_name = ? ORDER BY id DESC LIMIT 1`,
 		server,
-	).Scan(&id, &snapshot)
+	).Scan(&id, &snapshot, &capturedAtText)
 	if err == sql.ErrNoRows {
-		return nil, 0, nil
+		return nil, 0, time.Time{}, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("get latest snapshot: %w", err)
+		return nil, 0, time.Time{}, fmt.Errorf("get latest snapshot: %w", err)
+	}
+	capturedAt, err := time.Parse(time.RFC3339Nano, capturedAtText)
+	if err != nil {
+		return nil, 0, time.Time{}, fmt.Errorf("parse snapshot captured_at: %w", err)
 	}
 
 	var tools []ToolSchema
 	if err := json.Unmarshal([]byte(snapshot), &tools); err != nil {
-		return nil, 0, fmt.Errorf("unmarshal snapshot: %w", err)
+		return nil, 0, time.Time{}, fmt.Errorf("unmarshal snapshot: %w", err)
 	}
-	return tools, id, nil
+	return tools, id, capturedAt, nil
 }
 
 // InsertSchemaChange records a detected schema change.

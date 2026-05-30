@@ -987,6 +987,15 @@ type gatewayToolInfo struct {
 	Enabled       bool            `json:"enabled"`
 }
 
+type toolsAPIResponse struct {
+	Tools              []map[string]interface{} `json:"tools"`
+	Source             string                   `json:"source"`
+	CacheStatus        string                   `json:"cache_status"`
+	StatusMessage      string                   `json:"status_message,omitempty"`
+	SnapshotID         int64                    `json:"snapshot_id,omitempty"`
+	SnapshotCapturedAt string                   `json:"snapshot_captured_at,omitempty"`
+}
+
 func (s *Server) handleAutoImportScan(w http.ResponseWriter, r *http.Request) {
 	var existing map[string]bool
 	if s.proxies != nil {
@@ -1018,32 +1027,17 @@ func (s *Server) handleToolConflicts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect tools from each server by sending tools/list
-	type toolEntry struct {
-		Name   string `json:"name"`
-		Server string `json:"server"`
-	}
-
 	toolMap := make(map[string][]string) // toolName -> []serverName
 	for _, srv := range servers {
 		if srv.Status != "online" {
 			continue
 		}
-		result, err := s.proxies.SendRequest(r.Context(), srv.Name, "tools/list", json.RawMessage("{}"))
+		snapTools, _, err := s.store.GetLatestSnapshot(srv.Name)
 		if err != nil {
+			slog.Warn("tool conflicts: snapshot error", "server", srv.Name, "err", err)
 			continue
 		}
-		var rpcResp struct {
-			Result struct {
-				Tools []struct {
-					Name string `json:"name"`
-				} `json:"tools"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(result, &rpcResp); err != nil {
-			continue
-		}
-		for _, t := range rpcResp.Result.Tools {
+		for _, t := range snapTools {
 			toolMap[t.Name] = append(toolMap[t.Name], srv.Name)
 		}
 	}
@@ -1078,53 +1072,163 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no proxy manager configured", http.StatusServiceUnavailable)
 		return
 	}
+	forceRefresh := r.URL.Query().Get("force_refresh") == "1" || r.URL.Query().Get("refresh") == "1"
 
-	result, err := s.fetchToolsResult(r.Context(), serverName)
+	resp, err := s.toolsResponse(r.Context(), serverName, forceRefresh)
 	if err != nil {
 		slog.Error("tools/list failed", "server", serverName, "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
 
+func (s *Server) toolsResponse(ctx context.Context, serverName string, forceRefresh bool) (toolsAPIResponse, error) {
+	if serverName == "shipyard" {
+		result, err := s.selfToolsResult()
+		if err != nil {
+			return toolsAPIResponse{}, err
+		}
+		tools, err := toolsFromRPCResult(result)
+		if err != nil {
+			return toolsAPIResponse{}, err
+		}
+		s.applyGatewayPolicyToTools(serverName, tools)
+		return toolsAPIResponse{
+			Tools:         tools,
+			Source:        "self",
+			CacheStatus:   "not_applicable",
+			StatusMessage: "Shipyard built-in tools are served directly.",
+		}, nil
+	}
+
+	if forceRefresh {
+		result, err := s.fetchToolsResult(ctx, serverName)
+		if err != nil {
+			return toolsAPIResponse{}, err
+		}
+		tools, err := toolsFromRPCResult(result)
+		if err != nil {
+			return toolsAPIResponse{}, err
+		}
+		if s.store != nil {
+			if _, err := s.store.SaveSnapshot(serverName, toolSchemasFromMaps(tools)); err != nil {
+				return toolsAPIResponse{}, err
+			}
+		}
+		s.applyGatewayPolicyToTools(serverName, tools)
+		return toolsAPIResponse{
+			Tools:         tools,
+			Source:        "live",
+			CacheStatus:   "refreshed",
+			StatusMessage: "Live tools/list refresh completed and the snapshot cache was updated.",
+		}, nil
+	}
+
+	if s.store == nil {
+		return toolsAPIResponse{}, fmt.Errorf("no capture store configured")
+	}
+	snapTools, snapID, capturedAt, err := s.store.GetLatestSnapshotWithCapturedAt(serverName)
+	if err != nil {
+		return toolsAPIResponse{}, err
+	}
+	if snapID == 0 {
+		return toolsAPIResponse{
+			Tools:         []map[string]interface{}{},
+			Source:        "cache",
+			CacheStatus:   "missing",
+			StatusMessage: "No cached tools snapshot is available yet. Use force_refresh=1 to fetch live tools.",
+		}, nil
+	}
+	tools := toolMapsFromSchemas(snapTools)
+	s.applyGatewayPolicyToTools(serverName, tools)
+	return toolsAPIResponse{
+		Tools:              tools,
+		Source:             "cache",
+		CacheStatus:        "cached",
+		StatusMessage:      "Loaded from the latest cached schema snapshot.",
+		SnapshotID:         snapID,
+		SnapshotCapturedAt: capturedAt.UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func toolsFromRPCResult(result json.RawMessage) ([]map[string]interface{}, error) {
 	// Parse the JSON-RPC response to extract the result
 	var rpcResp struct {
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(result, &rpcResp); err != nil {
-		http.Error(w, "invalid response from server", http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("invalid response from server")
 	}
 	if rpcResp.Error != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": json.RawMessage(rpcResp.Error),
-		})
-		return
+		return nil, fmt.Errorf("server returned tools/list error: %s", string(rpcResp.Error))
 	}
 
-	// SPEC-028: augment each tool with enabled/server_enabled fields from gateway policy.
-	if s.gateway != nil {
-		var toolsResult struct {
-			Tools []map[string]interface{} `json:"tools"`
+	var toolsResult struct {
+		Tools []map[string]interface{} `json:"tools"`
+	}
+	if err := json.Unmarshal(rpcResp.Result, &toolsResult); err != nil {
+		return nil, fmt.Errorf("invalid tools/list result: %w", err)
+	}
+	if toolsResult.Tools == nil {
+		toolsResult.Tools = []map[string]interface{}{}
+	}
+	return toolsResult.Tools, nil
+}
+
+func toolMapsFromSchemas(schemas []capture.ToolSchema) []map[string]interface{} {
+	tools := make([]map[string]interface{}, 0, len(schemas))
+	for _, tool := range schemas {
+		entry := map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
 		}
-		if err := json.Unmarshal(rpcResp.Result, &toolsResult); err == nil {
-			serverEnabled := s.gateway.ServerEnabled(serverName)
-			for i, t := range toolsResult.Tools {
-				toolName, _ := t["name"].(string)
-				toolEnabled := s.gateway.ToolEnabled(serverName, toolName)
-				toolsResult.Tools[i]["enabled"] = serverEnabled && toolEnabled
-				toolsResult.Tools[i]["server_enabled"] = serverEnabled
+		if len(tool.InputSchema) > 0 {
+			entry["inputSchema"] = tool.InputSchema
+		}
+		tools = append(tools, entry)
+	}
+	return tools
+}
+
+func toolSchemasFromMaps(tools []map[string]interface{}) []capture.ToolSchema {
+	schemas := make([]capture.ToolSchema, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		description, _ := tool["description"].(string)
+		var inputSchema json.RawMessage
+		if raw, ok := tool["inputSchema"]; ok && raw != nil {
+			if data, err := json.Marshal(raw); err == nil {
+				inputSchema = json.RawMessage(data)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(toolsResult)
-			return
 		}
+		schemas = append(schemas, capture.ToolSchema{
+			Name:        name,
+			Description: description,
+			InputSchema: inputSchema,
+		})
 	}
+	return schemas
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(rpcResp.Result)
+func (s *Server) applyGatewayPolicyToTools(serverName string, tools []map[string]interface{}) {
+	for i, t := range tools {
+		if t == nil {
+			tools[i] = map[string]interface{}{}
+			t = tools[i]
+		}
+		serverEnabled := true
+		toolEnabled := true
+		if s.gateway != nil {
+			serverEnabled = s.gateway.ServerEnabled(serverName)
+			toolName, _ := t["name"].(string)
+			toolEnabled = s.gateway.ToolEnabled(serverName, toolName)
+		}
+		t["enabled"] = serverEnabled && toolEnabled
+		t["server_enabled"] = serverEnabled
+	}
 }
 
 func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {

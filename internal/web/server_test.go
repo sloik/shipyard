@@ -1141,17 +1141,18 @@ func TestHandleTools_NoProxyManager(t *testing.T) {
 	}
 }
 
-func TestHandleTools_Success(t *testing.T) {
+func TestHandleTools_UsesCachedSnapshotByDefault(t *testing.T) {
 	srv := newTestServer(t)
-
-	// The handler sends tools/list, gets back a JSON-RPC envelope, extracts result
-	rpcResponse := `{"jsonrpc":"2.0","id":"shipyard-1","result":{"tools":[{"name":"read_file"}]}}`
+	if _, err := srv.store.SaveSnapshot("test", []capture.ToolSchema{
+		{Name: "read_file", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	called := false
 	srv.SetProxyManager(&mockProxyManager{
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			if method != "tools/list" {
-				t.Fatalf("expected method tools/list, got %s", method)
-			}
-			return json.RawMessage(rpcResponse), nil
+			called = true
+			return nil, fmt.Errorf("unexpected live %s call for %s", method, server)
 		},
 	})
 
@@ -1162,19 +1163,156 @@ func TestHandleTools_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
+	if called {
+		t.Fatal("expected default /api/tools load to use cached snapshot without live tools/list")
+	}
 
-	// The handler extracts "result" from the RPC envelope
-	var result map[string]interface{}
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+		Source      string `json:"source"`
+		CacheStatus string `json:"cache_status"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	tools, ok := result["tools"]
-	if !ok {
-		t.Fatal("expected 'tools' key in response")
+	if result.Source != "cache" || result.CacheStatus != "cached" {
+		t.Fatalf("expected cached response, got source=%q cache_status=%q body=%s", result.Source, result.CacheStatus, w.Body.String())
 	}
-	toolList, ok := tools.([]interface{})
-	if !ok || len(toolList) != 1 {
-		t.Fatalf("expected 1 tool, got %v", tools)
+	if len(result.Tools) != 1 || result.Tools[0].Name != "read_file" {
+		t.Fatalf("expected read_file from snapshot, got %+v", result.Tools)
+	}
+	if !result.Tools[0].Enabled || !result.Tools[0].ServerEnabled {
+		t.Fatalf("expected cached policy fields to default enabled, got %+v", result.Tools[0])
+	}
+}
+
+func TestHandleTools_MissingSnapshotReportsState(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Tools         []map[string]interface{} `json:"tools"`
+		Source        string                   `json:"source"`
+		CacheStatus   string                   `json:"cache_status"`
+		StatusMessage string                   `json:"status_message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Source != "cache" || result.CacheStatus != "missing" {
+		t.Fatalf("expected missing cache state, got source=%q cache_status=%q", result.Source, result.CacheStatus)
+	}
+	if result.StatusMessage == "" {
+		t.Fatal("expected non-empty status_message for missing snapshot")
+	}
+	if len(result.Tools) != 0 {
+		t.Fatalf("expected no tools for missing snapshot, got %+v", result.Tools)
+	}
+}
+
+func TestHandleTools_CachedSnapshotReflectsGatewayPolicy(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := srv.store.SaveSnapshot("test", []capture.ToolSchema{
+		{Name: "read_file"},
+		{Name: "write_file"},
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetServerEnabled("test", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	if err := policy.SetToolEnabled("test", "write_file", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Tools) != 2 {
+		t.Fatalf("expected 2 tools, got %+v", result.Tools)
+	}
+	for _, tool := range result.Tools {
+		if tool.ServerEnabled {
+			t.Fatalf("expected cached tool %q to report server_enabled=false", tool.Name)
+		}
+		if tool.Enabled {
+			t.Fatalf("expected cached tool %q to report enabled=false while server disabled", tool.Name)
+		}
+	}
+}
+
+func TestHandleTools_ForceRefreshCallsLiveAndUpdatesSnapshot(t *testing.T) {
+	srv := newTestServer(t)
+	calls := 0
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			calls++
+			if server != "test" || method != "tools/list" {
+				t.Fatalf("unexpected live request server=%s method=%s", server, method)
+			}
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"shipyard-1","result":{"tools":[{"name":"fresh_tool","description":"fresh","inputSchema":{"type":"object"}}]}}`), nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("expected one live tools/list call, got %d", calls)
+	}
+	var result struct {
+		Tools       []struct{ Name string } `json:"tools"`
+		Source      string                  `json:"source"`
+		CacheStatus string                  `json:"cache_status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Source != "live" || result.CacheStatus != "refreshed" {
+		t.Fatalf("expected refreshed live response, got source=%q cache_status=%q", result.Source, result.CacheStatus)
+	}
+	cached, _, err := srv.store.GetLatestSnapshot("test")
+	if err != nil {
+		t.Fatalf("GetLatestSnapshot: %v", err)
+	}
+	if len(cached) != 1 || cached[0].Name != "fresh_tool" {
+		t.Fatalf("expected force refresh to update snapshot cache, got %+v", cached)
 	}
 }
 
@@ -1367,7 +1505,7 @@ func TestHandleTools_SendRequestError(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1384,7 +1522,7 @@ func TestHandleTools_InvalidRPCResponse(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1403,7 +1541,7 @@ func TestHandleTools_RPCError(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1411,12 +1549,8 @@ func TestHandleTools_RPCError(t *testing.T) {
 		t.Fatalf("expected 502, got %d", w.Code)
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := result["error"]; !ok {
-		t.Fatal("expected 'error' key in response body")
+	if !strings.Contains(w.Body.String(), "method not found") {
+		t.Fatalf("expected live RPC error body to surface method not found, got %q", w.Body.String())
 	}
 }
 
@@ -2301,16 +2435,20 @@ func TestHandleAutoImportScan_NoProxyManager(t *testing.T) {
 
 func TestHandleToolConflicts_NoConflicts(t *testing.T) {
 	srv := newTestServer(t)
+	if _, err := srv.store.SaveSnapshot("alpha", []capture.ToolSchema{{Name: "read_file"}}); err != nil {
+		t.Fatalf("SaveSnapshot alpha: %v", err)
+	}
+	if _, err := srv.store.SaveSnapshot("beta", []capture.ToolSchema{{Name: "write_file"}}); err != nil {
+		t.Fatalf("SaveSnapshot beta: %v", err)
+	}
 	srv.SetProxyManager(&mockProxyManager{
 		servers: []ServerInfo{
 			{Name: "alpha", Status: "online"},
 			{Name: "beta", Status: "online"},
 		},
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			if server == "alpha" {
-				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"}]}}`), nil
-			}
-			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"write_file"}]}}`), nil
+			t.Fatalf("expected conflicts to use cached snapshots, got live %s call for %s", method, server)
+			return nil, nil
 		},
 	})
 
@@ -2333,14 +2471,22 @@ func TestHandleToolConflicts_NoConflicts(t *testing.T) {
 
 func TestHandleToolConflicts_WithConflicts(t *testing.T) {
 	srv := newTestServer(t)
+	for _, server := range []string{"alpha", "beta"} {
+		if _, err := srv.store.SaveSnapshot(server, []capture.ToolSchema{
+			{Name: "read_file"},
+			{Name: "write_file"},
+		}); err != nil {
+			t.Fatalf("SaveSnapshot %s: %v", server, err)
+		}
+	}
 	srv.SetProxyManager(&mockProxyManager{
 		servers: []ServerInfo{
 			{Name: "alpha", Status: "online"},
 			{Name: "beta", Status: "online"},
 		},
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			// Both servers have "read_file" tool
-			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"},{"name":"write_file"}]}}`), nil
+			t.Fatalf("expected conflicts to use cached snapshots, got live %s call for %s", method, server)
+			return nil, nil
 		},
 	})
 
