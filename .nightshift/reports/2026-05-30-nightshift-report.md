@@ -1,5 +1,63 @@
 # Nightshift Report — 2026-05-30
 
+## SPEC-BUG-135 — Tool Browser Avoids Repeated Live tools/list Fan-Out
+
+## Summary Stats
+
+- Spec: `SPEC-BUG-135`
+- Branch: `nightshift/SPEC-BUG-135`
+- Worktree: `/Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-135`
+- Domain: code
+- Files changed: 7 tracked files plus 1 ignored metrics artifact
+- Validation gates: 5/5 passing
+- Blockers: none
+
+## Per-Spec Changes
+
+- Changed `GET /api/tools?server=...` to use the latest cached schema snapshot by default for child servers.
+- Added explicit live refresh via `force_refresh=1` / `refresh=1`; successful refreshes update the schema snapshot cache.
+- Added cache metadata to `/api/tools` responses: `source`, `cache_status`, `status_message`, `snapshot_id`, and `snapshot_captured_at`.
+- Kept built-in `shipyard` self-tools on the direct static path with policy state intact.
+- Changed `/api/tools/conflicts` to compute conflicts from schema snapshots instead of a second live `tools/list` fan-out.
+- Added Tool Browser UI snapshot badges/messages for cached, missing, and error states, plus a force-refresh button.
+- Split frontend telemetry names into `tools.load.cached` and `tools.load.force_refresh` so SPEC-BUG-134 telemetry distinguishes the normal cached path from explicit refresh.
+- Added regression tests for cached direct tools, missing snapshot state, policy fields on cached tools, force-refresh live RPC/writeback, cached conflict detection, and UI source contracts.
+
+## Test Results
+
+- `go test ./internal/web ./internal/capture` — PASS
+- Extracted inline script from `internal/web/ui/index.html` to `/tmp/shipyard-spec-bug-135-inline.js`; `node --check /tmp/shipyard-spec-bug-135-inline.js` — PASS
+- `git diff --check` — PASS
+- `go test ./...` — PASS
+- `go vet ./...` — PASS
+- `go build ./...` — PASS
+- `go test -race -count=1 -timeout 5m ./...` — PASS
+
+Note: `go test`, `go build`, and the race gate emitted existing macOS linker warnings about object files built for macOS 26.0 while linking for 11.0. All commands exited 0.
+
+## AC Checklist
+
+- [x] AC 1: With cached schema snapshots present, loading the Tools tab does not invoke child `tools/list` RPCs.
+- [x] AC 2: `/api/tools/conflicts` has regression coverage proving it does not invoke child `tools/list` RPCs when snapshots are present.
+- [x] AC 3: A force-refresh path exists and has tests proving it does call live `tools/list` and updates the snapshot/cache.
+- [x] AC 4: Missing snapshot state is represented in the API and UI with a non-empty status message or badge.
+- [x] AC 5: Gateway policy fields `enabled` and `server_enabled` remain present and accurate for cached tool entries.
+- [x] AC 6: Tool load performance telemetry from SPEC-BUG-134 distinguishes cached load from force-refresh load.
+- [x] AC 7: `go test ./...`, `go vet ./...`, `go build ./...`, and `go test -race -count=1 -timeout 5m ./...` pass.
+
+## Blockers / Discoveries
+
+- No blockers remain.
+- The direct Tool Browser path and conflict endpoint were the only remaining live fan-out paths; the gateway catalog was already snapshot-backed.
+- The explicit refresh path must surface live RPC errors. Existing live-error tests were moved to `force_refresh=1` so the cached default does not hide refresh failures.
+- Missing snapshots now return a clear API state instead of letting the UI display an ordinary empty tool group.
+
+## Suggested Follow-up Specs
+
+None.
+
+---
+
 ## Summary Stats
 
 - Spec: `SPEC-BUG-131`, `SPEC-BUG-132`, `SPEC-BUG-133`

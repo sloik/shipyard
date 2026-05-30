@@ -167,6 +167,7 @@
     <div class="search-bar search-bar-strip" id="tool-search-bar">
       <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <input type="text" id="tool-search" placeholder="Search tools...">
+      <button type="button" id="tool-refresh-btn" title="Force refresh tool snapshots"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
       <button class="search-clear"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     </div>
     <div id="tool-groups" style="flex:1; overflow-y:auto; padding:0 4px 8px 4px;"></div>
@@ -2068,6 +2069,7 @@
      ====================================================================== */
   var toolGroups       = document.getElementById('tool-groups');
   var toolSearch       = document.getElementById('tool-search');
+  var toolRefreshBtn   = document.getElementById('tool-refresh-btn');
   var toolsEmpty       = document.getElementById('tools-empty');
   var toolDetail       = document.getElementById('tool-detail');
   var toolDetailToggle = document.getElementById('tool-detail-toggle');
@@ -2249,8 +2251,10 @@
   /* ======================================================================
      Tool Browser — Load Tools
      ====================================================================== */
-  function loadTools() {
+  function loadTools(forceRefresh) {
+    forceRefresh = !!forceRefresh;
     var telemetryStart = performance.now();
+    var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';
     // Load Shipyard's built-in tools via gateway catalog first, then child server tools.
     fetch('/api/gateway/tools?include_disabled=1')
       .then(function(resp) { return resp.json(); })
@@ -2284,25 +2288,34 @@
             if (childServers.length === 0) {
               toolsLoaded = true;
               renderToolSidebar();
-              recordClientTelemetry('tools.load', telemetryStart, { servers: 0, tools: shipyardToolList.length });
+              recordClientTelemetry(telemetryName, telemetryStart, { servers: 0, tools: shipyardToolList.length, source: forceRefresh ? 'live' : 'cache' });
               return;
             }
 
             var pending = childServers.length;
             childServers.forEach(function(srv) {
               var srvEnabled = srv.enabled !== false; // SPEC-028: track server enabled state
-              fetch('/api/tools?server=' + encodeURIComponent(srv.name))
+              var toolsURL = '/api/tools?server=' + encodeURIComponent(srv.name);
+              if (forceRefresh) toolsURL += '&force_refresh=1';
+              fetch(toolsURL)
                 .then(function(resp) {
                   if (!resp.ok) throw new Error('Failed to fetch tools');
                   return resp.json();
                 })
                 .then(function(data) {
                   var tools = data.tools || [];
-                  allTools[srv.name] = { status: srv.status, tools: tools, enabled: srvEnabled };
+                  allTools[srv.name] = {
+                    status: srv.status,
+                    tools: tools,
+                    enabled: srvEnabled,
+                    cache_status: data.cache_status || '',
+                    status_message: data.status_message || '',
+                    snapshot_captured_at: data.snapshot_captured_at || ''
+                  };
                 })
                 .catch(function(err) {
                   console.error('Failed to load tools for', srv.name, err);
-                  allTools[srv.name] = { status: 'offline', tools: [], enabled: srvEnabled };
+                  allTools[srv.name] = { status: srv.status || 'offline', tools: [], enabled: srvEnabled, cache_status: 'error', status_message: 'Failed to load cached tool snapshot.' };
                 })
                 .then(function() {
                   pending--;
@@ -2319,11 +2332,11 @@
                           }
                         }
                         renderToolSidebar();
-                        recordClientTelemetry('tools.load', telemetryStart, { servers: childServers.length, groups: Object.keys(allTools).length });
+                        recordClientTelemetry(telemetryName, telemetryStart, { servers: childServers.length, groups: Object.keys(allTools).length, source: forceRefresh ? 'live' : 'cache' });
                       })
                       .catch(function() {
                         renderToolSidebar();
-                        recordClientTelemetry('tools.load', telemetryStart, { servers: childServers.length, conflicts_error: true });
+                        recordClientTelemetry(telemetryName, telemetryStart, { servers: childServers.length, conflicts_error: true, source: forceRefresh ? 'live' : 'cache' });
                       });
                   }
                 });
@@ -2333,7 +2346,7 @@
       .catch(function(err) {
         console.error('Failed to load tools:', err);
         toolGroups.innerHTML = '<div style="padding:16px; color:var(--danger-fg); font-size:var(--font-size-sm); text-align:center;">Failed to load servers</div>';
-        recordClientTelemetry('tools.load', telemetryStart, { error: true });
+        recordClientTelemetry(telemetryName, telemetryStart, { error: true, source: forceRefresh ? 'live' : 'cache' });
       });
   }
 
@@ -2352,6 +2365,8 @@
         status: srvData.status || '',
         enabled: srvData.enabled !== false,
         isSelf: !!srvData.isSelf,
+        cache_status: srvData.cache_status || '',
+        status_message: srvData.status_message || '',
         tools: tools.map(function(t) {
           return {
             name: t.name || '',
@@ -2398,6 +2413,8 @@
       var isOffline = srvData.status === 'offline';
       var isRestarting = srvData.status === 'restarting';
       var isSelf = !!srvData.isSelf; // true for the Shipyard built-in group
+      var cacheStatus = srvData.cache_status || '';
+      var statusMessage = srvData.status_message || '';
 
       // Filter tools by search
       var filteredTools = tools;
@@ -2406,7 +2423,7 @@
           return t.name.toLowerCase().indexOf(searchVal) !== -1 ||
                  (t.description && t.description.toLowerCase().indexOf(searchVal) !== -1);
         });
-        if (filteredTools.length === 0) continue;
+        if (filteredTools.length === 0 && cacheStatus !== 'missing' && cacheStatus !== 'error') continue;
       }
 
       var groupClass = 'tool-group';
@@ -2433,6 +2450,12 @@
       html += statusLabel;
       if (isSelf) {
         html += ' <span class="badge badge-neutral" style="font-size:var(--font-size-xs);">Built-in</span>';
+      } else if (cacheStatus === 'missing') {
+        html += ' <span class="badge badge-warning" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Snapshot missing</span>';
+      } else if (cacheStatus === 'error') {
+        html += ' <span class="badge badge-error" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Snapshot error</span>';
+      } else if (cacheStatus === 'cached') {
+        html += ' <span class="badge badge-neutral" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Cached</span>';
       }
       html += '</span>';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
@@ -2441,6 +2464,13 @@
       html += '</span>';
       html += '</div>';
       html += '<div class="tool-group-items">';
+
+      if (!isSelf && (cacheStatus === 'missing' || cacheStatus === 'error') && filteredTools.length === 0) {
+        html += '<div style="padding:8px 12px 8px 32px; color:var(--text-secondary); font-size:var(--font-size-xs); display:flex; align-items:center; gap:6px;">';
+        html += iconAlertTriangle(12, cacheStatus === 'error' ? 'var(--danger-fg)' : 'var(--warning-fg)');
+        html += '<span>' + escapeHtml(statusMessage || 'Tool snapshot is not available.') + '</span>';
+        html += '</div>';
+      }
 
       for (var t = 0; t < filteredTools.length; t++) {
         var tool = filteredTools[t];
@@ -2869,6 +2899,14 @@
   toolSearch.addEventListener('input', function() {
     renderToolSidebar();
   });
+
+  if (toolRefreshBtn) {
+    toolRefreshBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      toolsLoaded = false;
+      loadTools(true);
+    });
+  }
 
   toolExecuteBtn.addEventListener('click', function() {
     executeTool();
