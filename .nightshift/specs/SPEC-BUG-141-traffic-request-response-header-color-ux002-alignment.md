@@ -4,7 +4,7 @@ template_version: 3
 priority: 4
 layer: 3
 type: bugfix
-status: in_progress
+status: done
 after: [SPEC-BUG-140]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -43,31 +43,31 @@ UX-002 reference:
 
 ## Requirements
 
-- [ ] R1: Request panel headers must use a request-specific blue-tinted header
+- [x] R1: Request panel headers must use a request-specific blue-tinted header
   strip and blue uppercase `REQUEST` label.
-- [ ] R2: Response panel headers must use a response-specific green-tinted
+- [x] R2: Response panel headers must use a response-specific green-tinted
   header strip and green uppercase `RESPONSE` label for normal responses.
-- [ ] R3: Error responses must preserve the response panel structure while
+- [x] R3: Error responses must preserve the response panel structure while
   making error status visible; they must not fall back to a generic neutral
   code header.
-- [ ] R4: Pending responses must preserve the response header strip and show
+- [x] R4: Pending responses must preserve the response header strip and show
   pending/awaiting state in the response body.
-- [ ] R5: Tests must assert that traffic request/response panel headers do not
+- [x] R5: Tests must assert that traffic request/response panel headers do not
   use the generic `.code-header` class.
 
 ## Acceptance Criteria
 
-- [ ] AC 1: Request panel header has a request-specific class and blue
+- [x] AC 1: Request panel header has a request-specific class and blue
   request-tinted background.
-- [ ] AC 2: Response panel header has a response-specific class and green
+- [x] AC 2: Response panel header has a response-specific class and green
   response-tinted background for successful responses.
-- [ ] AC 3: Error response detail shows error state without replacing the
+- [x] AC 3: Error response detail shows error state without replacing the
   response panel header with a generic `.code-header`.
-- [ ] AC 4: Pending response detail shows the response header even when there is
+- [x] AC 4: Pending response detail shows the response header even when there is
   no matched response payload yet.
-- [ ] AC 5: Source tests fail if `renderDetailPanel` emits `.code-header` for
+- [x] AC 5: Source tests fail if `renderDetailPanel` emits `.code-header` for
   Traffic request/response panel headers.
-- [ ] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
+- [x] AC 6: `go test ./internal/web -run UI -count=1`, `go test ./...`,
   `go vet ./...`, and `go build ./...` pass.
 
 ## Context
