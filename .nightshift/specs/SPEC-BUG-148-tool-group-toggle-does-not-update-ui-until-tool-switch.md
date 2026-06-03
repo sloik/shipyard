@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: in_progress
+status: blocked
 after: [SPEC-BUG-145, SPEC-BUG-147]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -13,6 +13,11 @@ created: 2026-06-03
 ---
 
 # Tools tab: clicking expand/collapse on a group does not update the UI until a different tool is selected
+
+## Block Reason
+
+Two consecutive background orchestrator runs (initial + one unblock pass) died to API stream idle timeout during investigation; no diagnosis, code, or report produced. Transient infra/API issue, not a spec defect. Re-run when background-agent streaming is stable, or run inline.
+
 
 ## Problem
 
