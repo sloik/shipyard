@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 1
 type: feature
-status: in_progress
+status: blocked
 after: [SPEC-BUG-149]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -13,6 +13,11 @@ created: 2026-06-03
 ---
 
 # Extend the headless smoke harness to other views (opt-in `make smoke-full`)
+
+## Block Reason
+
+Harness extension is committed on branch nightshift/SPEC-BUG-150 (7505b62) and make smoke (Tool Browser) passes, but the new Servers smoke test correctly FAILS on a real pre-existing bug it caught: the server enable/disable toggle is non-functional (onclick=toggleServer throws "toggleServer is not defined" — runtime-confirmed; backend enabled state never changes). Per testing discipline the test is not weakened. SPEC-BUG-150 merges once the toggle bug (filed separately) is fixed and make smoke-full goes green.
+
 
 ## Problem
 
