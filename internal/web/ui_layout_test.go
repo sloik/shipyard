@@ -4576,6 +4576,56 @@ func TestSPECBUG148_SingleToolGroupCollapseToggleOwner(t *testing.T) {
 	}
 }
 
+// TestSPECBUG148_CollapseToggleSingleOwnerInvariant is the core regression guard
+// for SPEC-BUG-148: across the WHOLE embedded UI (index.html + ds.js), there must
+// be exactly ONE place that toggles `is-collapsed`. The bug was two togglers (one
+// in each file) cancelling each other on click. If anyone re-adds a second toggle
+// anywhere, this count breaks and the test fails — catching the structural
+// regression at merge time even though source-scan can't see the runtime DOM.
+//
+// NOTE: this guards the *structure* (one owner). The runtime behavior (one visible
+// toggle per click) is proven by the headless-browser smoke test tracked in
+// SPEC-BUG-149; a source-scan pass is not proof of behavior.
+func TestSPECBUG148_CollapseToggleSingleOwnerInvariant(t *testing.T) {
+	files := []string{"ui/index.html", "ui/ds.js"}
+	total := 0
+	per := map[string]int{}
+	for _, f := range files {
+		b, err := uiFS.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", f, err)
+		}
+		n := strings.Count(string(b), "classList.toggle('is-collapsed')")
+		per[f] = n
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: expected exactly ONE is-collapsed toggle across the embedded UI, got %d %v. "+
+			"A second toggler re-introduces the double-toggle cancel bug.", total, per)
+	}
+	if per["ui/index.html"] != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: the single is-collapsed toggle owner must live in index.html's #tool-groups handler, got %d in index.html", per["ui/index.html"])
+	}
+}
+
+// TestSPECBUG148_DsJsDoesNotHandleToolGroupHeaderClicks guards against ds.js
+// re-acquiring any tool-group-header click handling (the document-level branch
+// that was the duplicate). Collapse is owned solely by index.html's #tool-groups
+// handler; ds.js must not reference the header in its click delegation.
+func TestSPECBUG148_DsJsDoesNotHandleToolGroupHeaderClicks(t *testing.T) {
+	b, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	ds := string(b)
+	if strings.Contains(ds, "closest('.tool-group-header')") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js must not match .tool-group-header in its click delegation — collapse is owned by index.html")
+	}
+	if strings.Contains(ds, "handleToolGroupClick") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js must not define/call handleToolGroupClick (the removed duplicate collapse toggle)")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).
