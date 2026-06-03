@@ -875,6 +875,17 @@
   // SPEC-BUG-145: per-server user-set collapse state for Tool Browser groups,
   // retained across tool selection changes (keyed by server name).
   var userCollapsedGroups = {};
+  // SPEC-BUG-147: localStorage key backing userCollapsedGroups so folds persist
+  // across Tools reload / page reload / app restart (one blob, keyed per server).
+  var TOOL_GROUP_COLLAPSE_KEY = 'shipyard_tool_group_collapsed';
+  // SPEC-BUG-147: hydrate the in-memory store from localStorage on init so a
+  // reload/restart restores the user's per-server folds (R1, R2, R3).
+  (function() {
+    try {
+      var stored = JSON.parse(localStorage.getItem(TOOL_GROUP_COLLAPSE_KEY) || '{}');
+      if (stored && typeof stored === 'object') Object.assign(userCollapsedGroups, stored);
+    } catch (e) { /* corrupt/unavailable storage: start with empty folds */ }
+  })();
   var clientTelemetryMaxSamples = 256;
   var clientTelemetrySamples = [];
   window.shipyardClientTelemetry = clientTelemetrySamples;
@@ -2970,6 +2981,10 @@
         var groupServer = group.getAttribute('data-server');
         var nowCollapsed = group.classList.toggle('is-collapsed');
         userCollapsedGroups[groupServer] = nowCollapsed;
+        // SPEC-BUG-147: persist the updated store so folds survive reload/restart.
+        try {
+          localStorage.setItem(TOOL_GROUP_COLLAPSE_KEY, JSON.stringify(userCollapsedGroups));
+        } catch (e) { /* storage unavailable: in-session retention still works */ }
       }
       return;
     }
