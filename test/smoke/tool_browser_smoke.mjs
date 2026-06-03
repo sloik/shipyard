@@ -11,144 +11,16 @@
 //   AC3 - launches/tears down its own ephemeral Shipyard process.
 //   AC4 - skips (exit 0) with a clear reason when Chrome is unavailable.
 //
-// Usage: `make smoke`. The Makefile builds the binaries, supplies their paths
-// via env, and guards on node presence. This script guards on Chrome presence.
+// SPEC-BUG-150: launch/teardown/skip scaffolding now lives in lib/harness.mjs
+// so this fast Tool-Browser path and the opt-in `make smoke-full` share it.
 //
-// Env (set by the Makefile):
-//   SHIPYARD_BIN   - path to the built `shipyard` binary (required)
-//   STUBCHILD_BIN  - path to the built test stub child server (required)
-//   CHROME_BIN     - path to a Chrome/Chromium executable (optional; falls back
-//                    to the standard macOS Google Chrome location)
+// Usage: `make smoke`. The Makefile builds the binaries, supplies their paths
+// via env, and guards on node presence. lib/harness.mjs guards on Chrome.
 
-import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import net from 'node:net';
+import { withHarness, makeChecker } from './lib/harness.mjs';
 
-const DEFAULT_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-
-function skip(reason) {
-  console.log(`SKIP: ${reason}`);
-  process.exit(0);
-}
-
-function fail(reason) {
-  console.error(`FAIL: ${reason}`);
-  process.exit(1);
-}
-
-// --- Resolve Chrome (AC4: skip gracefully if absent) -----------------------
-import { existsSync as fsExists } from 'node:fs';
-
-const chromePath = process.env.CHROME_BIN || DEFAULT_CHROME;
-if (!fsExists(chromePath)) {
-  skip(`Chrome not found at "${chromePath}" (set CHROME_BIN to override)`);
-}
-
-// playwright-core is an optional dev dependency; if it's missing, skip too.
-let chromium;
-try {
-  ({ chromium } = await import('playwright-core'));
-} catch {
-  skip('playwright-core not installed (run `npm install` in the repo root)');
-}
-
-const shipyardBin = process.env.SHIPYARD_BIN;
-const stubchildBin = process.env.STUBCHILD_BIN;
-if (!shipyardBin || !stubchildBin) {
-  fail('SHIPYARD_BIN and STUBCHILD_BIN must be set (run via `make smoke`)');
-}
-
-// --- Pick an ephemeral port (NOT the dev default 9417) ----------------------
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForReady(base, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(base + '/api/servers', { signal: AbortSignal.timeout(1000) });
-      if (res.ok) {
-        const servers = await res.json();
-        // Wait for BOTH the self "shipyard" group and the stub "alpha" server,
-        // so a clickable alpha tool item reliably exists for the AC2
-        // tool-selection step (mirrors cmd/shipyard/e2e_smoke_test.go).
-        if (
-          Array.isArray(servers) &&
-          servers.length >= 2 &&
-          servers[0].name === 'shipyard' &&
-          servers.some((s) => s.name === 'alpha')
-        ) {
-          return;
-        }
-      }
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`shipyard did not become ready at ${base} within ${timeoutMs}ms`);
-}
-
-// --- Main -------------------------------------------------------------------
-const workDir = mkdtempSync(join(tmpdir(), 'shipyard-smoke-'));
-const port = await freePort();
-const base = `http://127.0.0.1:${port}`;
-
-// Minimal config: runConfig() exits(1) on an empty servers map, so we point one
-// server at the test stub child (mirrors cmd/shipyard/e2e_smoke_test.go). The
-// built-in "shipyard" self group renders regardless and is what we drive.
-const configPath = join(workDir, 'config.json');
-writeFileSync(
-  configPath,
-  JSON.stringify({
-    servers: { alpha: { command: stubchildBin, args: [], cwd: workDir } },
-    web: { port },
-  }),
-);
-
-let serverProc;
-let browser;
-let failures = [];
-
-function check(label, ok) {
-  if (ok) {
-    console.log(`  PASS  ${label}`);
-  } else {
-    console.log(`  FAIL  ${label}`);
-    failures.push(label);
-  }
-}
-
-try {
-  serverProc = spawn(shipyardBin, ['--headless', '--config', configPath], {
-    cwd: workDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let serverLog = '';
-  serverProc.stdout.on('data', (d) => (serverLog += d));
-  serverProc.stderr.on('data', (d) => (serverLog += d));
-  serverProc.on('exit', (code) => {
-    if (code && code !== 0 && !browser) {
-      console.error(`shipyard exited early (code ${code}):\n${serverLog}`);
-    }
-  });
-
-  await waitForReady(base);
-
-  browser = await chromium.launch({ executablePath: chromePath, headless: true });
-  const ctx = await browser.newContext();
-  const page = await ctx.newPage();
+const failures = await withHarness(async ({ page, base }) => {
+  const { check, failures } = makeChecker();
 
   const SELF = '.tool-group[data-server="shipyard"]';
   const HEADER = `${SELF} .tool-group-header`;
@@ -234,28 +106,8 @@ try {
   await openTools();
   check('AC2: collapse persisted across reload', (await isCollapsed()) === true);
 
-  await browser.close();
-  browser = null;
-} catch (err) {
-  fail(err && err.stack ? err.stack : String(err));
-} finally {
-  // AC3: always tear down our own instance, even on assertion failure.
-  if (browser) {
-    try {
-      await browser.close();
-    } catch {
-      /* ignore */
-    }
-  }
-  if (serverProc && serverProc.exitCode === null) {
-    serverProc.kill('SIGTERM');
-  }
-  try {
-    rmSync(workDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
-}
+  return failures;
+});
 
 if (failures.length > 0) {
   console.error(`\nSMOKE FAILED: ${failures.length} check(s) failed: ${failures.join('; ')}`);
