@@ -12,6 +12,9 @@ credentials.json
 *.exe
 dist/
 
+# SPEC-BUG-149 smoke harness deps (playwright-core; drives system Chrome — no browser download committed)
+/node_modules/
+
 # Wails build output
 cmd/shipyard/build/
 internal/web/ui/wailsjs/
