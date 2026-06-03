@@ -4423,6 +4423,69 @@ func TestSPECBUG136_ToolsSidebarRenderSkipAndTelemetry(t *testing.T) {
 	}
 }
 
+// TestSPECBUG145_ToolGroupCollapseStateRetainedAcrossSelection verifies that
+// the Tool Browser retains each server group's user-set collapse state when the
+// selected tool changes (AC1-AC4). The sidebar re-renders on selection (the
+// signature includes the selected tool), so retention requires a persistent
+// per-server collapse store that renderToolSidebar consults, plus a group-header
+// click handler that records the state. These are Go source-scan assertions
+// over the embedded UI, mirroring the existing Tool Browser test style.
+func TestSPECBUG145_ToolGroupCollapseStateRetainedAcrossSelection(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// A persistent per-server collapse store must exist (retention vehicle).
+	if !strings.Contains(content, "var userCollapsedGroups = {};") {
+		t.Error("SPEC-BUG-145 AC1/AC2 FAIL: expected a persistent userCollapsedGroups store keyed by server")
+	}
+
+	// renderToolSidebar must consult the store IN ADDITION to offline/restarting
+	// auto-collapse, so retained folds survive the re-render on tool selection
+	// (AC1, AC2) without regressing offline auto-collapse (R4).
+	renderIdx := strings.Index(content, "function renderToolSidebar()")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-BUG-145 FAIL: renderToolSidebar not found")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  /* ======================================================================\n     Tool Browser — Select Tool"); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+	if !strings.Contains(renderBody, "userCollapsedGroups[srvName]") {
+		t.Error("SPEC-BUG-145 AC1/AC4 FAIL: renderToolSidebar must apply retained collapse state from userCollapsedGroups")
+	}
+	if !strings.Contains(renderBody, "(isOffline || isRestarting)") {
+		t.Error("SPEC-BUG-145 R4 FAIL: renderToolSidebar must keep offline/restarting auto-collapse")
+	}
+	// The group element must carry data-server so the handler and render can key
+	// on it without parsing the mixed header text.
+	if !strings.Contains(renderBody, `'<div class="' + groupClass + '" data-server="' + escapeHtml(srvName) + '"`) {
+		t.Error("SPEC-BUG-145 AC3 FAIL: tool-group element must carry data-server for per-group keying")
+	}
+
+	// The click handler must toggle exactly one group via the header and record
+	// the new state, giving AC3 isolation and AC4 chevron retention.
+	clickIdx := strings.Index(content, "toolGroups.addEventListener('click', function(e) {")
+	if clickIdx == -1 {
+		t.Fatal("SPEC-BUG-145 FAIL: toolGroups click handler not found")
+	}
+	clickBody := content[clickIdx:]
+	if endIdx := strings.Index(clickBody[1:], "\n  });"); endIdx > 0 {
+		clickBody = clickBody[:endIdx+1]
+	}
+	if !strings.Contains(clickBody, "e.target.closest('.tool-group-header')") {
+		t.Error("SPEC-BUG-145 FAIL: click handler must detect group-header clicks")
+	}
+	if !strings.Contains(clickBody, "group.classList.toggle('is-collapsed')") {
+		t.Error("SPEC-BUG-145 AC3/AC4 FAIL: header click must toggle is-collapsed on the single targeted group")
+	}
+	if !strings.Contains(clickBody, "userCollapsedGroups[groupServer] = nowCollapsed;") {
+		t.Error("SPEC-BUG-145 AC1/AC2 FAIL: header click must record the new collapse state for retention")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).
