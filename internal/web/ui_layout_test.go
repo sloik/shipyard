@@ -4486,6 +4486,52 @@ func TestSPECBUG145_ToolGroupCollapseStateRetainedAcrossSelection(t *testing.T) 
 	}
 }
 
+// TestSPECBUG147_ToolGroupCollapseStatePersistsAcrossReload verifies that the
+// in-memory userCollapsedGroups store (SPEC-BUG-145) is backed by localStorage
+// so per-server folds survive a Tools reload, page reload, or app restart
+// (AC1-AC3, R1-R3). The persistence has two halves: hydrate the store from
+// storage on init, and write the store back on every header-toggle. This is a
+// Go source-scan assertion over the embedded UI, mirroring the SPEC-BUG-145
+// test and the wider Tool Browser test style. AC4/R4 (in-session retention
+// intact) is covered by TestSPECBUG145_*.
+func TestSPECBUG147_ToolGroupCollapseStatePersistsAcrossReload(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// A stable, versionable storage key namespace must back the store.
+	if !strings.Contains(content, "var TOOL_GROUP_COLLAPSE_KEY = 'shipyard_tool_group_collapsed';") {
+		t.Error("SPEC-BUG-147 FAIL: expected a TOOL_GROUP_COLLAPSE_KEY localStorage namespace constant")
+	}
+
+	// Hydration on init: the store must be populated from localStorage so a
+	// reload/restart restores the user's folds (AC1, AC2). Object.assign onto
+	// the existing store keeps SPEC-BUG-145's `var userCollapsedGroups = {};`
+	// declaration intact (no regression).
+	if !strings.Contains(content, "localStorage.getItem(TOOL_GROUP_COLLAPSE_KEY)") {
+		t.Error("SPEC-BUG-147 AC1/AC2 FAIL: store must be hydrated from localStorage on init")
+	}
+	if !strings.Contains(content, "Object.assign(userCollapsedGroups, stored)") {
+		t.Error("SPEC-BUG-147 AC1/AC2 FAIL: hydration must populate the existing userCollapsedGroups store")
+	}
+
+	// Persistence on toggle: the header-click handler must write the whole
+	// per-server store back to localStorage so folds survive reload (AC1-AC3).
+	clickIdx := strings.Index(content, "toolGroups.addEventListener('click', function(e) {")
+	if clickIdx == -1 {
+		t.Fatal("SPEC-BUG-147 FAIL: toolGroups click handler not found")
+	}
+	clickBody := content[clickIdx:]
+	if endIdx := strings.Index(clickBody[1:], "\n  });"); endIdx > 0 {
+		clickBody = clickBody[:endIdx+1]
+	}
+	if !strings.Contains(clickBody, "localStorage.setItem(TOOL_GROUP_COLLAPSE_KEY, JSON.stringify(userCollapsedGroups))") {
+		t.Error("SPEC-BUG-147 AC1/AC2/AC3 FAIL: header toggle must persist the per-server store to localStorage")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).
