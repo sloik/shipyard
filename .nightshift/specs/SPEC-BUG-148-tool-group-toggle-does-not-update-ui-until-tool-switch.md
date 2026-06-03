@@ -16,7 +16,14 @@ created: 2026-06-03
 
 ## Block Reason
 
-Two consecutive background orchestrator runs (initial + one unblock pass) died to API stream idle timeout during investigation; no diagnosis, code, or report produced. Transient infra/API issue, not a spec defect. Re-run when background-agent streaming is stable, or run inline.
+**Not a code defect — stale build.** (Two background kickoff runs first died to API stream idle timeout producing nothing; the spec was then investigated inline.)
+
+Inline investigation of current `main` found the reported symptom does NOT exist in source:
+- The `.tool-group-header` click handler (`internal/web/ui/index.html`, added by SPEC-BUG-145) calls `group.classList.toggle('is-collapsed')` on the live element, and the CSS (`internal/web/ui/ds.css`: `.tool-group.is-collapsed .tool-group-items { display:none }` + chevron `rotate(-90deg)`) applies immediately. Nothing reverts it; the render-skip signature excludes collapse state, so a re-render only *preserves* a direct toggle.
+
+Root cause of the user-observed behavior: the **Wails desktop app** (`cmd/shipyard/build/bin/shipyard.app`, built **2026-05-28**) embeds a UI snapshot from BEFORE SPEC-BUG-145/147 — it has the `tool-group-header` markup but NONE of the 145 handler (`userCollapsedGroups`, verified absent in the binary) — so clicking a group header does nothing. The live web server on `:9417` (`bin/shipyard`, rebuilt today) serves current source WITH the 145/147 markers (verified via curl) and behaves correctly.
+
+**Resolution: rebuild the desktop app (`make wails-build`) and relaunch — no source change required.** Verify by testing collapse in the browser at http://127.0.0.1:9417 (current) vs the stale `.app`. If collapse still fails on a freshly-built app against current source, reopen as a genuine code bug.
 
 
 ## Problem
