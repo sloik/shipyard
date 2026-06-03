@@ -872,6 +872,9 @@
   var panelContextRoute = null;
   var lastServerCardsSignature = '';
   var lastToolSidebarSignature = '';
+  // SPEC-BUG-145: per-server user-set collapse state for Tool Browser groups,
+  // retained across tool selection changes (keyed by server name).
+  var userCollapsedGroups = {};
   var clientTelemetryMaxSamples = 256;
   var clientTelemetrySamples = [];
   window.shipyardClientTelemetry = clientTelemetrySamples;
@@ -2503,7 +2506,9 @@
       }
 
       var groupClass = 'tool-group';
-      if (!isSelf && (isOffline || isRestarting)) groupClass += ' is-collapsed';
+      // SPEC-BUG-145: offline/restarting groups auto-collapse (R4); otherwise
+      // honor the user's retained per-server collapse state across tool switches.
+      if ((!isSelf && (isOffline || isRestarting)) || userCollapsedGroups[srvName]) groupClass += ' is-collapsed';
 
       var statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
       var statusLabel = '';
@@ -2518,7 +2523,7 @@
       }
 
       var groupOpacity = (!isSelf && isOffline) ? 'opacity:0.5;' : '';
-      html += '<div class="' + groupClass + '" style="' + groupOpacity + '">';
+      html += '<div class="' + groupClass + '" data-server="' + escapeHtml(srvName) + '" style="' + groupOpacity + '">';
       html += '<div class="tool-group-header">';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += statusDot;
@@ -2954,6 +2959,18 @@
     if (toggleBtn) {
       e.preventDefault();
       toggleTool(toggleBtn);
+      return;
+    }
+    // SPEC-BUG-145: clicking a group header toggles that group's collapse state
+    // and records it so the fold is retained across tool selection changes.
+    var header = e.target.closest('.tool-group-header');
+    if (header) {
+      var group = header.closest('.tool-group[data-server]');
+      if (group) {
+        var groupServer = group.getAttribute('data-server');
+        var nowCollapsed = group.classList.toggle('is-collapsed');
+        userCollapsedGroups[groupServer] = nowCollapsed;
+      }
       return;
     }
     var item = e.target.closest('.tool-item');
