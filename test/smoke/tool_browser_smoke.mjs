@@ -80,8 +80,15 @@ async function waitForReady(base, timeoutMs = 20000) {
       const res = await fetch(base + '/api/servers', { signal: AbortSignal.timeout(1000) });
       if (res.ok) {
         const servers = await res.json();
-        // self "shipyard" + the stub "alpha" both present and online enough.
-        if (Array.isArray(servers) && servers.length >= 1 && servers[0].name === 'shipyard') {
+        // Wait for BOTH the self "shipyard" group and the stub "alpha" server,
+        // so a clickable alpha tool item reliably exists for the AC2
+        // tool-selection step (mirrors cmd/shipyard/e2e_smoke_test.go).
+        if (
+          Array.isArray(servers) &&
+          servers.length >= 2 &&
+          servers[0].name === 'shipyard' &&
+          servers.some((s) => s.name === 'alpha')
+        ) {
           return;
         }
       }
@@ -208,13 +215,18 @@ try {
   const toolItem = await page.$(
     '.tool-group:not([data-server="shipyard"]):not(.is-collapsed) .tool-item[data-server][data-tool]',
   );
+  // waitForReady guarantees alpha is online, so the item must exist; a missing
+  // item is a real failure, not a skip (avoids a vacuous pass).
+  check('a clickable tool item exists in another group', toolItem !== null);
   if (toolItem) {
-    await toolItem.click(); // selecting a tool forces renderToolSidebar re-render
-    await page.waitForTimeout(100);
+    const toolName = await toolItem.getAttribute('data-tool');
+    await toolItem.click();
+    // selectTool() calls renderToolSidebar() and marks the item is-active
+    // (index.html:2576) — waiting for is-active proves a re-render actually
+    // fired, so the retention assertion below is not checking a static DOM.
+    await page.waitForSelector(`.tool-item.is-active[data-tool="${toolName}"]`, { timeout: 5000 });
     await page.waitForSelector(SELF, { timeout: 5000 });
-    check('AC2: collapse retained across tool selection', (await isCollapsed()) === true);
-  } else {
-    check('AC2: collapse retained across tool selection (no visible tool to click — skipped)', true);
+    check('AC2: collapse retained across tool selection re-render', (await isCollapsed()) === true);
   }
 
   // --- AC2 part 2: collapse survives a page reload (localStorage) -----------

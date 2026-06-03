@@ -62,7 +62,8 @@ make smoke
   PASS  second click re-expands group
   PASS  second click shows items again
   PASS  group collapsed again before tool-select
-  PASS  AC2: collapse retained across tool selection
+  PASS  a clickable tool item exists in another group
+  PASS  AC2: collapse retained across tool selection re-render
   PASS  AC2: collapse persisted across reload
 
 SMOKE PASSED: all Tool Browser interactive behaviors verified.
@@ -81,7 +82,7 @@ EXIT=0
 | AC | Description | Status | Evidence |
 |----|-------------|--------|----------|
 | AC1 | Single header click toggles visible collapsed state exactly once | PASS | 3 checks: is-collapsed added, items `display:none`, toggle counter == 1 |
-| AC2 | Collapse survives tool-selection re-render AND page reload | PASS | "retained across tool selection" + "persisted across reload" checks |
+| AC2 | Collapse survives tool-selection re-render AND page reload | PASS | non-vacuous: waitForReady requires alpha online, asserts a tool item exists, waits for `is-active` (proves render fired) before checking retention; + "persisted across reload" |
 | AC3 | Launches/tears down own ephemeral instance, no dev interference | PASS | `freePort()` ephemeral port (never 9417); `try/finally` SIGTERM kill + tmpdir cleanup |
 | AC4 | Skips with clear reason when no browser | PASS | Chrome-absent run printed SKIP, exit 0; node-absent guarded in Makefile |
 | AC5 | Documentation explains how to run it | PASS | README "Tool Browser Smoke" section + Makefile target |
