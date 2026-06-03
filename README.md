@@ -328,6 +328,25 @@ go build ./cmd/shipyard/
 go test ./...
 ```
 
+### Tool Browser Smoke (headless browser)
+
+The Go tests above are source-scan assertions over the embedded UI — they
+verify strings exist, not that the UI behaves. A headless-browser smoke harness
+(SPEC-BUG-149) drives real clicks against a live ephemeral Shipyard instance to
+catch DOM/runtime regressions in the Tool Browser (group collapse toggling,
+collapse retention across tool selection, persistence across reload).
+
+```bash
+npm install   # first run only — pulls playwright-core (no browser download)
+make smoke
+```
+
+`make smoke` builds the binaries, launches a throwaway Shipyard on an ephemeral
+port, and drives the system Google Chrome via `playwright-core`. It is
+intentionally **not** part of `make test`, so a missing browser never blocks the
+Go suite. It skips gracefully (exit 0) when `node` or Chrome is unavailable.
+Override the browser path with `CHROME_BIN=/path/to/chrome make smoke`.
+
 ### Lint
 
 ```bash
