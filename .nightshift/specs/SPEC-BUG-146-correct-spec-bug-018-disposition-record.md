@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 3
 type: refactor
-status: draft
+status: in_progress
 after: [SPEC-BUG-145]
 nfrs: []
 prior_attempts: []
