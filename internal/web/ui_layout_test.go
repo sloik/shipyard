@@ -4532,6 +4532,50 @@ func TestSPECBUG147_ToolGroupCollapseStatePersistsAcrossReload(t *testing.T) {
 	}
 }
 
+// TestSPECBUG148_SingleToolGroupCollapseToggleOwner verifies that exactly ONE
+// handler toggles a tool group's collapse state on a header click. The bug
+// (SPEC-BUG-148) was that ds.js's document-level handleToolGroupClick AND
+// index.html's #tool-groups handler BOTH toggled `is-collapsed` per click, so
+// they cancelled out (no visible change) while index.html still recorded the
+// state — making the fold appear only after a tool-switch re-render. The fix
+// removes the duplicate, persistence-less toggle from ds.js, leaving index.html
+// as the sole owner (it toggles AND persists, SPEC-BUG-145/147).
+//
+// NOTE: this is a source-scan assertion (the house style for the embedded UI);
+// it guards against the duplicate returning, but the behavior itself was
+// verified with a headless-Chrome reproduction (single toggle on click). A
+// source-scan pass alone is not proof of the runtime behavior.
+func TestSPECBUG148_SingleToolGroupCollapseToggleOwner(t *testing.T) {
+	indexHTML, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	dsJS, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	index := string(indexHTML)
+	ds := string(dsJS)
+
+	// ds.js must NOT also toggle tool-group collapse — that was the duplicate
+	// that cancelled index.html's toggle. Its handler and toggle must be gone.
+	if strings.Contains(ds, "handleToolGroupClick") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js still defines/calls handleToolGroupClick — the duplicate collapse toggle that cancels index.html's handler")
+	}
+	if strings.Contains(ds, "classList.toggle('is-collapsed')") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js still toggles is-collapsed — collapse must be owned solely by index.html's #tool-groups handler")
+	}
+
+	// index.html must remain the sole owner: exactly one is-collapsed toggle,
+	// and it must still record per-server state (SPEC-BUG-145/147 intact).
+	if got := strings.Count(index, "classList.toggle('is-collapsed')"); got != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: expected exactly 1 is-collapsed toggle in index.html (the sole owner), got %d", got)
+	}
+	if !strings.Contains(index, "userCollapsedGroups[groupServer] = nowCollapsed;") {
+		t.Error("SPEC-BUG-148 FAIL: index.html handler must still record per-server collapse state (SPEC-BUG-145 retention)")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).

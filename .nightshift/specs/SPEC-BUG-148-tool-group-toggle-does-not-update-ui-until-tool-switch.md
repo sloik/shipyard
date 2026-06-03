@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: blocked
+status: in_progress
 after: [SPEC-BUG-145, SPEC-BUG-147]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -14,16 +14,18 @@ created: 2026-06-03
 
 # Tools tab: clicking expand/collapse on a group does not update the UI until a different tool is selected
 
-## Block Reason
+## Root Cause (confirmed, behavioral repro)
 
-**Not a code defect — stale build.** (Two background kickoff runs first died to API stream idle timeout producing nothing; the spec was then investigated inline.)
+**Duplicate collapse handlers cancel each other.** Two handlers toggle `is-collapsed` on every group-header click (proven via headless-Chrome stack traces against `:9417`):
 
-Inline investigation of current `main` found the reported symptom does NOT exist in source:
-- The `.tool-group-header` click handler (`internal/web/ui/index.html`, added by SPEC-BUG-145) calls `group.classList.toggle('is-collapsed')` on the live element, and the CSS (`internal/web/ui/ds.css`: `.tool-group.is-collapsed .tool-group-items { display:none }` + chevron `rotate(-90deg)`) applies immediately. Nothing reverts it; the render-skip signature excludes collapse state, so a re-render only *preserves* a direct toggle.
+1. `internal/web/ui/ds.js` — `handleToolGroupClick()` (Design System runtime, SPEC-005), wired at the document level. This is the *original, persistence-less* collapse toggle.
+2. `internal/web/ui/index.html` — the SPEC-BUG-145 handler on `#tool-groups`, which toggles AND records `userCollapsedGroups` + persists (147).
 
-Root cause of the user-observed behavior: the **Wails desktop app** (`cmd/shipyard/build/bin/shipyard.app`, built **2026-05-28**) embeds a UI snapshot from BEFORE SPEC-BUG-145/147 — it has the `tool-group-header` markup but NONE of the 145 handler (`userCollapsedGroups`, verified absent in the binary) — so clicking a group header does nothing. The live web server on `:9417` (`bin/shipyard`, rebuilt today) serves current source WITH the 145/147 markers (verified via curl) and behaves correctly.
+Both fire per click → toggle on then off → **no visible change**. But the index.html handler still records `userCollapsedGroups`, so the next tool-selection re-render *does* show the fold — exactly the reported "switch tool then it refreshes." SPEC-BUG-145 should have only *added persistence on top of ds.js's existing toggle*; instead it re-implemented the toggle, creating the duplication. (Pre-145, ds.js's toggle worked but wasn't retained — which was the original SPEC-BUG-145 report.)
 
-**Resolution: rebuild the desktop app (`make wails-build`) and relaunch — no source change required.** Verify by testing collapse in the browser at http://127.0.0.1:9417 (current) vs the stale `.app`. If collapse still fails on a freshly-built app against current source, reopen as a genuine code bug.
+The earlier "stale build" hypothesis was wrong; the user runs a freshly built `bin/shipyard` via `run-local-app.sh`, which has current code. The two background kickoff runs separately failed to API stream idle timeouts (infra).
+
+**Fix:** make index.html's handler the sole owner; remove the redundant collapse handling from `ds.js`.
 
 
 ## Problem
