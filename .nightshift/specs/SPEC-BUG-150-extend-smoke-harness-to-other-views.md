@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 1
 type: feature
-status: blocked
+status: done
 after: [SPEC-BUG-149]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -14,35 +14,17 @@ created: 2026-06-03
 
 # Extend the headless smoke harness to other views (opt-in `make smoke-full`)
 
-## Block Reason
+## Resolution (done 2026-06-04)
 
-The Servers smoke extension did its job — it CAUGHT a real bug (SPEC-BUG-152, the
-non-functional server enable/disable toggle), which is now FIXED on main. But the
-orchestrator's harness (branch nightshift/SPEC-BUG-150, 7505b62) was never
-validated (the run timed out) and is **non-hermetic**, so it was reverted off main
-(revert daa6c19) to keep `make smoke`/`go test` green. It needs the following
-before it can merge:
-
-1. **Isolate global state.** The spawned shipyard writes gateway policy to the
-   GLOBAL `~/Library/Application Support/shipyard/gateway-policy.json`. `servers_smoke`
-   toggling "alpha" pollutes it and (a) flaps across runs (a run can leave alpha
-   disabled → the next run's "starts enabled" check fails) and (b) breaks the Go
-   e2e test `TestShipyardE2E_ConfigMode_RealProcessFlow`, which also uses a server
-   named "alpha". Fix: spawn with `env.HOME` (and XDG_*) pointed at the per-run
-   tmpdir so global state is isolated.
-2. **Wait for the stub's tools under a cold cache.** With an isolated/fresh HOME
-   there is no cached tool snapshot, so the Tool Browser's "a clickable tool item
-   exists in another group" check fails. Fix: `waitForReady` must wait until the
-   "alpha" stub's tools are actually loaded (e.g. poll `/api/servers` until
-   alpha.tool_count >= 1, or force a tools fetch) before handing back the page.
-3. **Robust banner waits** in `servers_smoke` (wait for the "Blocked by gateway
-   policy" banner to appear/disappear rather than reading textContent the instant
-   the switch class flips).
-
-The Tool Browser smoke (SPEC-BUG-149) remains on main and green. Redo the Servers
-extension with the three fixes above (do NOT weaken any assertion), verify
-`make smoke-full` is green AND `go test ./...` stays green after it runs, then
-merge.
+Done inline after the original kickoff timed out with a non-hermetic first cut
+(which was reverted off main). The redo added a shared `lib/harness.mjs`, the
+Servers view smoke (`servers_smoke.mjs`), and `make smoke-full`, with three
+hermeticity fixes: (1) isolate the spawned shipyard's global state via
+`env.HOME`/`XDG_*` → per-run tmpdir; (2) warm the stub's tool snapshot under the
+resulting cold cache; (3) robust gateway-policy banner waits. Verified:
+`make smoke-full` green twice (no flapping), global `gateway-policy.json`
+untouched after runs (no "alpha" leak), `go test ./...` green afterward. See
+`reports/2026-06-04-nightshift-report-SPEC-BUG-150.md`.
 
 
 ## Problem
