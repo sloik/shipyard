@@ -16,7 +16,33 @@ created: 2026-06-03
 
 ## Block Reason
 
-Harness extension is committed on branch nightshift/SPEC-BUG-150 (7505b62) and make smoke (Tool Browser) passes, but the new Servers smoke test correctly FAILS on a real pre-existing bug it caught: the server enable/disable toggle is non-functional (onclick=toggleServer throws "toggleServer is not defined" — runtime-confirmed; backend enabled state never changes). Per testing discipline the test is not weakened. SPEC-BUG-150 merges once the toggle bug (filed separately) is fixed and make smoke-full goes green.
+The Servers smoke extension did its job — it CAUGHT a real bug (SPEC-BUG-152, the
+non-functional server enable/disable toggle), which is now FIXED on main. But the
+orchestrator's harness (branch nightshift/SPEC-BUG-150, 7505b62) was never
+validated (the run timed out) and is **non-hermetic**, so it was reverted off main
+(revert daa6c19) to keep `make smoke`/`go test` green. It needs the following
+before it can merge:
+
+1. **Isolate global state.** The spawned shipyard writes gateway policy to the
+   GLOBAL `~/Library/Application Support/shipyard/gateway-policy.json`. `servers_smoke`
+   toggling "alpha" pollutes it and (a) flaps across runs (a run can leave alpha
+   disabled → the next run's "starts enabled" check fails) and (b) breaks the Go
+   e2e test `TestShipyardE2E_ConfigMode_RealProcessFlow`, which also uses a server
+   named "alpha". Fix: spawn with `env.HOME` (and XDG_*) pointed at the per-run
+   tmpdir so global state is isolated.
+2. **Wait for the stub's tools under a cold cache.** With an isolated/fresh HOME
+   there is no cached tool snapshot, so the Tool Browser's "a clickable tool item
+   exists in another group" check fails. Fix: `waitForReady` must wait until the
+   "alpha" stub's tools are actually loaded (e.g. poll `/api/servers` until
+   alpha.tool_count >= 1, or force a tools fetch) before handing back the page.
+3. **Robust banner waits** in `servers_smoke` (wait for the "Blocked by gateway
+   policy" banner to appear/disappear rather than reading textContent the instant
+   the switch class flips).
+
+The Tool Browser smoke (SPEC-BUG-149) remains on main and green. Redo the Servers
+extension with the three fixes above (do NOT weaken any assertion), verify
+`make smoke-full` is green AND `go test ./...` stays green after it runs, then
+merge.
 
 
 ## Problem
