@@ -4099,6 +4099,11 @@
       if (getRoute() === 'tools') { loadTools(); }
     }).catch(function(err) { console.error('Toggle server failed:', err); });
   }
+  // SPEC-BUG-152: the Servers card enable/disable switch uses inline
+  // onclick="toggleServer(...)", which resolves in global scope. The app runs
+  // inside an IIFE, so toggleServer must be exposed on window (mirrors the
+  // window.__shipyard_* handlers) or the click throws "toggleServer is not defined".
+  window.toggleServer = toggleServer;
 
   // toggleTool: called from Switch button in tool sidebar row.
   // btn is the <button> element with data-server and data-tool attributes.

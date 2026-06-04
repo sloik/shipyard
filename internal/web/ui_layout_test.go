@@ -4626,6 +4626,32 @@ func TestSPECBUG148_DsJsDoesNotHandleToolGroupHeaderClicks(t *testing.T) {
 	}
 }
 
+// TestSPECBUG152_ToggleServerExposedOnWindow guards SPEC-BUG-152: the Servers
+// card enable/disable switch is wired via inline onclick="toggleServer(...)",
+// which resolves in GLOBAL scope. The whole app runs inside an IIFE, so
+// toggleServer must be exposed on window or the click throws "toggleServer is
+// not defined" and the toggle silently does nothing (the bug this guards).
+//
+// Structural guard (source-scan). The behavioral proof is the SPEC-BUG-150
+// Servers smoke test (`make smoke-full`), which exercises the real click.
+func TestSPECBUG152_ToggleServerExposedOnWindow(t *testing.T) {
+	b, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(b)
+
+	// The handler must be invoked by inline onclick (the wiring that needs a global).
+	if !strings.Contains(html, "onclick=\"toggleServer(") {
+		t.Error("SPEC-BUG-152: expected the Servers card switch to call toggleServer via inline onclick")
+	}
+	// ...and it MUST be exposed on window, or the inline onclick can't resolve it.
+	if !strings.Contains(html, "window.toggleServer = toggleServer") {
+		t.Error("SPEC-BUG-152 FAIL: toggleServer must be exposed on window (window.toggleServer = toggleServer); " +
+			"inline onclick=\"toggleServer(...)\" resolves in global scope and the app is IIFE-wrapped, so without this the toggle throws \"toggleServer is not defined\"")
+	}
+}
+
 // TestSPECBUG103_LoadServersHidesEmptyAndShowsGridWhenServersPresent verifies
 // that loadServers() hides the empty state and shows the grid when the API
 // returns one or more servers (AC3).
