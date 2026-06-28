@@ -663,6 +663,79 @@ func TestManager_RestartServer(t *testing.T) {
 	}
 }
 
+func TestManager_RestartServer_ClearsInitializedStateBeforeNextToolsList(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	sink := newLineObserverWriteCloser()
+	cw.attach(sink)
+	mp.SetInputWriter(cw)
+	mp.initReady = true
+	m.SetToolCount("alpha", 7)
+
+	if err := m.RestartServer("alpha"); err != nil {
+		t.Fatalf("RestartServer: %v", err)
+	}
+	if servers := m.Servers(); len(servers) != 1 || servers[0].ToolCount != 0 {
+		t.Fatalf("expected restart to clear cached tool count, got %+v", servers)
+	}
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := m.SendRequest(context.Background(), "alpha", "tools/list", json.RawMessage(`{}`))
+		resultCh <- err
+	}()
+
+	for handled := 0; handled < 3; handled++ {
+		select {
+		case line := <-sink.lines:
+			var req map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(line), &req); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+
+			var method string
+			if err := json.Unmarshal(req["method"], &method); err != nil {
+				t.Fatalf("unmarshal method: %v", err)
+			}
+
+			switch handled {
+			case 0:
+				if method != "initialize" {
+					t.Fatalf("expected post-restart first request initialize, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s"}}`, req["id"], managedChildProtocolVersion))) {
+					t.Fatal("expected initialize response to resolve")
+				}
+			case 1:
+				if method != "notifications/initialized" {
+					t.Fatalf("expected post-restart second message notifications/initialized, got %q", method)
+				}
+			case 2:
+				if method != "tools/list" {
+					t.Fatalf("expected post-restart third request tools/list, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"lms_status"}]}}`, req["id"]))) {
+					t.Fatal("expected tools/list response to resolve")
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for post-restart writes")
+		}
+	}
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("SendRequest returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tools/list result")
+	}
+}
+
 func TestManager_RestartServer_NotFound(t *testing.T) {
 	m := NewManager()
 	err := m.RestartServer("nonexistent")

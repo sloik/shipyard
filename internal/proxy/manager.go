@@ -224,7 +224,11 @@ func (m *Manager) RestartServer(name string) error {
 	cancel := mp.cancelFn
 	mp.status = "restarting"
 	mp.restartCount++
+	mp.toolCount = 0
 	mp.errorMessage = ""
+	mp.initMu.Lock()
+	mp.initReady = false
+	mp.initMu.Unlock()
 	m.mu.Unlock()
 
 	// Broadcast restarting status
