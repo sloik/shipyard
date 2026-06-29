@@ -26,21 +26,21 @@ traceability guard.
 
 ## Requirements
 
-- [ ] R1: The commit-message hook accepts exact Shipyard spec IDs with hyphenated
+- [x] R1: The commit-message hook accepts exact Shipyard spec IDs with hyphenated
   prefixes, including `[SPEC-BUG-154]`.
-- [ ] R2: The hook still rejects malformed or missing spec IDs.
-- [ ] R3: The hook behavior is covered by a local validation script or focused
+- [x] R2: The hook still rejects malformed or missing spec IDs.
+- [x] R3: The hook behavior is covered by a local validation script or focused
   test command that can be run without making real commits.
-- [ ] R4: Existing Nightshift status commits (`chore: mark <spec-id> ...`) are
+- [x] R4: Existing Nightshift status commits (`chore: mark <spec-id> ...`) are
   not made less strict by this change.
 
 ## Acceptance Criteria
 
-- [ ] AC1: A message like `[SPEC-BUG-154] fix: accept SPEC-BUG commit IDs`
+- [x] AC1: A message like `[SPEC-BUG-154] fix: accept SPEC-BUG commit IDs`
   passes the commit-message validation.
-- [ ] AC2: A message with no bracketed spec ID still fails.
-- [ ] AC3: A message with a malformed ID still fails.
-- [ ] AC4: The validation command and expected examples are documented in the
+- [x] AC2: A message with no bracketed spec ID still fails.
+- [x] AC3: A message with a malformed ID still fails.
+- [x] AC4: The validation command and expected examples are documented in the
   run report.
 
 ## Context

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Nightshift Kit — Commit message hook
+# Validates that every commit message starts with [SPEC-ID] prefix.
+# Policy source of truth: .nightshift/GIT.md
+#
+# Format: [SPEC-NNN] type: subject
+# Shipyard also uses hyphenated prefixes such as [SPEC-BUG-NNN].
+# Examples:
+#   [SPEC-033] feat: handler registry with pluggable domains
+#   [SPEC-004-002] test: add NFR hierarchy tests
+#   [SPEC-033] chore: mark in_progress
+#   [SPEC-BUG-154] fix: accept SPEC-BUG commit IDs
+#
+# Install: cp .nightshift/hooks/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+# Disable: set git.commit_prefix: "none" in config.yaml
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+FIRST_LINE=$(head -1 "$COMMIT_MSG_FILE")
+
+# Allow merge commits and reverts without prefix
+if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
+    exit 0
+fi
+
+# Check for [SPEC-ID] prefix. Valid Shipyard/Nightshift IDs use a known
+# uppercase prefix family followed by a numeric ID, with an optional numeric
+# child suffix: SPEC-033, SPEC-004-002, SPEC-BUG-154, UX-002.
+if ! echo "$FIRST_LINE" | grep -qE "^\[((SPEC(-[A-Z]+)*)|(FART-[A-Z]+)|UX)-[0-9]+(-[0-9]+)?\]"; then
+    echo ""
+    echo "[nightshift commit-msg] ERROR: Commit message must start with [SPEC-ID] prefix."
+    echo ""
+    echo "  Got:      $FIRST_LINE"
+    echo "  Expected: [SPEC-NNN] type: description"
+    echo "  Example:  [SPEC-BUG-154] fix: accept SPEC-BUG commit IDs"
+    echo ""
+    echo "  This ensures every commit is traceable to its spec."
+    echo "  To bypass (not recommended): git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+exit 0
