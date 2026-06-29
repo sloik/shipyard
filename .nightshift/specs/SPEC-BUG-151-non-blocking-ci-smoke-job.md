@@ -25,22 +25,22 @@ flaky gate that blocks unrelated merges.
 
 ## Requirements
 
-- [ ] R1: A CI job runs `make smoke` (system Chrome, headless) on PRs that
+- [x] R1: A CI job runs `make smoke` (system Chrome, headless) on PRs that
   change UI assets (`internal/web/ui/**`) or the smoke harness.
-- [ ] R2: The job is **non-blocking** (informational / does not gate merge) at
+- [x] R2: The job is **non-blocking** (informational / does not gate merge) at
   least initially, to avoid a flaky browser job blocking unrelated work.
-- [ ] R3: The job skips gracefully (and reports skip) when a browser cannot be
+- [x] R3: The job skips gracefully (and reports skip) when a browser cannot be
   provisioned in CI, rather than failing red.
-- [ ] R4: The existing blocking Go CI (`go test -race`, vet, build) is unchanged.
+- [x] R4: The existing blocking Go CI (`go test -race`, vet, build) is unchanged.
 
 ## Acceptance Criteria
 
-- [ ] AC1: A CI workflow/job runs `make smoke` triggered on UI-touching PRs.
-- [ ] AC2: The job is configured non-blocking (e.g. `continue-on-error` or a
+- [x] AC1: A CI workflow/job runs `make smoke` triggered on UI-touching PRs.
+- [x] AC2: The job is configured non-blocking (e.g. `continue-on-error` or a
   separate informational check) and documented as such.
-- [ ] AC3: Browser provisioning failure produces a SKIP/neutral result, not a
+- [x] AC3: Browser provisioning failure produces a SKIP/neutral result, not a
   hard failure.
-- [ ] AC4: The existing CI test/vet/build jobs are untouched.
+- [x] AC4: The existing CI test/vet/build jobs are untouched.
 
 ## Context
 
