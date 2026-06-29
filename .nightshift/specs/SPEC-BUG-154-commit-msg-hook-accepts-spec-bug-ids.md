@@ -4,7 +4,7 @@ template_version: 4
 priority: 3
 layer: 1
 type: bugfix
-status: ready
+status: in_progress
 parent: SPEC-BUG-151
 after: [SPEC-BUG-151]
 nfrs: []
