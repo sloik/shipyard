@@ -23,6 +23,7 @@ import (
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
 	"github.com/sloik/shipyard/internal/web"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // ---------------------------------------------------------------------------
@@ -177,6 +178,24 @@ func TestDesktopBridge_DifferentPorts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDesktopSingleInstanceOptions(t *testing.T) {
+	opts := desktopSingleInstanceOptions(&desktopApp{})
+	if opts == nil {
+		t.Fatal("expected single instance options")
+	}
+	if opts.UniqueID == "" {
+		t.Fatal("expected stable unique ID")
+	}
+	if opts.ExitCode != 0 {
+		t.Fatalf("expected second instance exit code 0, got %d", opts.ExitCode)
+	}
+	if opts.OnSecondInstanceLaunch == nil {
+		t.Fatal("expected second instance callback")
+	}
+
+	opts.OnSecondInstanceLaunch(application.SecondInstanceData{Args: []string{"shipyard"}})
 }
 
 type fakeDesktopNative struct {

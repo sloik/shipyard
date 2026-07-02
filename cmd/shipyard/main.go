@@ -79,6 +79,28 @@ var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, comman
 var runProxyFn = runProxy
 var runMultiServerFn = runMultiServer
 var runNoServersFn = runNoServers
+var acquireDesktopInstanceLockFn = acquireDesktopInstanceLock
+
+var errDesktopInstanceAlreadyRunning = fmt.Errorf("desktop instance already running")
+
+func acquireDesktopInstanceLock(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	file, err := os.OpenFile(filepath.Join(dir, "shipyard-desktop.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open desktop lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, errDesktopInstanceAlreadyRunning
+	}
+	release := func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}
+	return release, nil
+}
 
 // dataDir returns a writable directory for Shipyard's database and logs.
 // On macOS .app launch, cwd is "/" (read-only), so we use a platform-appropriate
@@ -324,6 +346,20 @@ func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
 		slog.Error("config does not define any servers", "path", configPath)
 		exitFn(1)
 		return
+	}
+
+	if !headless {
+		releaseLock, err := acquireDesktopInstanceLockFn(dataDirFn())
+		if err != nil {
+			if err == errDesktopInstanceAlreadyRunning {
+				slog.Info("Shipyard desktop instance already running; exiting duplicate process")
+				return
+			}
+			slog.Error("failed to acquire desktop instance lock", "error", err)
+			exitFn(1)
+			return
+		}
+		defer releaseLock()
 	}
 
 	port := cfg.Web.Port

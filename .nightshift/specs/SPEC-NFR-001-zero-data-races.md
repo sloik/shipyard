@@ -3,7 +3,7 @@ id: SPEC-NFR-001
 priority: 1
 layer: 0
 type: nfr
-status: ongoing
+status: active
 after: [SPEC-BUG-043]
 created: 2026-04-14
 ---

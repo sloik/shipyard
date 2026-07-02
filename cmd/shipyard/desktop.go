@@ -68,6 +68,18 @@ var detachablePanels = map[string]string{
 	"servers":  "Servers",
 }
 
+func desktopSingleInstanceOptions(desktop *desktopApp) *application.SingleInstanceOptions {
+	return &application.SingleInstanceOptions{
+		UniqueID: "com.sloik.shipyard.local",
+		ExitCode: 0,
+		OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+			if desktop != nil {
+				desktop.showDashboard()
+			}
+		},
+	}
+}
+
 // runDesktop starts the Wails v3 native shell using Shipyard's bundled
 // frontend. It blocks until the app quits. The existing localhost HTTP server
 // remains the source of truth for API, websocket, and MCP proxy behavior.
@@ -104,8 +116,9 @@ func runDesktop(port int, cancel context.CancelFunc) {
 	}
 
 	wailsApp := application.New(application.Options{
-		Name:        "Shipyard",
-		Description: "MCP traffic inspector and tool browser",
+		Name:           "Shipyard",
+		Description:    "MCP traffic inspector and tool browser",
+		SingleInstance: desktopSingleInstanceOptions(desktop),
 		Assets: application.AssetOptions{
 			Handler:        newDesktopBridgeWithAssets(port, application.AssetFileServerFS(uiAssets), desktop),
 			DisableLogging: true,
