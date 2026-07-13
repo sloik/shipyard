@@ -20,18 +20,28 @@ created: 2026-07-13
 
 The `Desktop Build` GitHub Actions workflow (`.github/workflows/desktop.yml`)
 fails on every push to `main`. The "Package unsigned macOS app" step runs
-`wails3 package GOOS=darwin`, which resolves to a Taskfile task literally named
-`package`. That task does not exist — CI fails with:
+`wails3 package GOOS=darwin`, and CI fails with:
 
 ```
 Wails v3.0.0-alpha2.117 › Package
 ERROR  task: Task "package" does not exist
 ```
 
-The Taskfile (`Taskfile.yml`) defines the macOS packaging task as
-`darwin:package`. The workflow and the task were introduced in the same commit
-(`d6c1094 feat: add Wails v3 macOS packaging flow`) with the mismatched name, so
-the Desktop Build has never succeeded.
+This is a Wails v3 alpha dependency drift. CI installs `wails3` via `@latest`.
+At SPEC-BUG-130 implementation time (2026-05-30) the `wails3 package GOOS=darwin`
+wrapper resolved to the Taskfile task `darwin:package` (the report records the
+pre-fix error `Task "darwin:package" does not exist`, fixed by adding that task),
+and Desktop Build was green through 2026-06-05. A later alpha (`alpha2.117`)
+changed the wrapper so `wails3 package` now looks for a task literally named
+`package` — which this project's flat `Taskfile.yml` never defines (it uses the
+`darwin:`-prefixed `darwin:package`). Desktop Build first went red on 2026-07-13.
+
+Fix: call the task directly with `wails3 task darwin:package`, which is robust to
+`wails3 package` wrapper behavior changes and matches the codebase's existing
+convention (`notarize-macos` already uses `wails3 task darwin:sign:notarize`).
+The same broken wrapper invocation is mirrored in the `package-macos` Makefile
+target, the README packaging note, and the `SPEC-BUG-130` packaging tests, all
+of which are updated to the working invocation.
 
 ## Requirements
 

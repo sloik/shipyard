@@ -44,7 +44,7 @@ func TestSPECBUG130_WailsV3PackagingTasks(t *testing.T) {
 	makefile := readRepoFile(t, "Makefile")
 	for _, needle := range []string{
 		"package-macos:",
-		"wails3 package GOOS=darwin",
+		"wails3 task darwin:package",
 		"sign-macos:",
 		"wails3 sign GOOS=darwin",
 		"notarize-macos:",
@@ -100,7 +100,7 @@ func TestSPECBUG130_DesktopWorkflowUsesWailsV3PackagePath(t *testing.T) {
 	for _, needle := range []string{
 		"github.com/wailsapp/wails/v3/cmd/wails3@latest",
 		"wails3 task build",
-		"wails3 package GOOS=darwin",
+		"wails3 task darwin:package",
 		"bin/Shipyard.app",
 		"bin/shipyard-macos.zip",
 	} {

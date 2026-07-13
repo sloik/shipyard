@@ -390,10 +390,9 @@ To inspect local signing prerequisites:
 security find-identity -v -p codesigning
 ```
 
-The macOS app package is produced by `wails3 package GOOS=darwin`, which runs
-the repo's `darwin:package` task. Signing uses `wails3 sign GOOS=darwin`, which
-runs `darwin:sign`. Notarization is explicit through
-`wails3 task darwin:sign:notarize`.
+The macOS app package is produced by `wails3 task darwin:package`. Signing uses
+`wails3 sign GOOS=darwin`, which runs `darwin:sign`. Notarization is explicit
+through `wails3 task darwin:sign:notarize`.
 
 ### UI
 

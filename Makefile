@@ -70,7 +70,7 @@ wails-build-server:
 	wails3 task build:server
 
 package-macos:
-	wails3 package GOOS=darwin
+	wails3 task darwin:package
 
 sign-macos:
 	wails3 sign GOOS=darwin
