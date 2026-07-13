@@ -28,7 +28,7 @@ jobs:
         run: |
           SHIPYARD_VERSION="${{ github.ref_name }}" \
           SHIPYARD_BUILD="${{ github.run_number }}" \
-          wails3 package GOOS=darwin
+          wails3 task darwin:package
 
       - name: Show binary size
         run: |
