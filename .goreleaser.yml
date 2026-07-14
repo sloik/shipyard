@@ -2,8 +2,9 @@ version: 2
 project_name: shipyard
 
 # NOTE: This builds the headless/CLI binary (CGO_ENABLED=0).
-# Desktop .app/.exe builds require CGO and use `wails build` separately.
-# See: make wails-build
+# Desktop .app builds require Wails v3 and live in the macOS desktop workflow:
+#   make package-macos
+#   make sign-macos / make notarize-macos
 builds:
   - main: ./cmd/shipyard
     binary: shipyard

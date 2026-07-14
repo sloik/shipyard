@@ -4,19 +4,29 @@ template_version: 2
 priority: 3
 layer: 3
 type: feature
-status: blocked
+status: done
 after: [SPEC-017]
+nfrs: [SPEC-NFR-001]
 prior_attempts: []
 created: 2026-04-06
+completed: 2026-05-29
 ---
 
-# Block Reason
-
-Blocked on two conditions:
-1. **SPEC-017** (Wails v2 desktop app) must be complete first — this spec builds on the v2 foundation.
-2. **Wails v3 must reach beta or stable.** As of 2026-04-06, v3 is at alpha.74 with no announced release date. The maintainer says "nearly ready" but the API is not frozen and breaking changes still land. The migration guide doesn't exist yet (gated on beta). **Unblock signal:** Wails v3.0.0-beta.1 release on GitHub, or the official migration guide published at v3alpha.wails.io/migration/v2-to-v3/.
-
 # Wails v3 Native Desktop Features
+
+## Unblock Note
+
+Unblocked on 2026-05-29.
+
+Original blockers:
+1. **SPEC-017** (Wails v2 desktop app) must be complete first — satisfied; SPEC-017 is `done`.
+2. **Wails v3 must reach beta/stable or publish the official migration guide** — satisfied by the official
+   v2-to-v3 migration guide now published at `https://v3.wails.io/migration/v2-to-v3/`.
+
+Wails v3 is still alpha as of this unblock (`v3.0.0-alpha.96` on GitHub), so the run must
+treat API drift as a concrete implementation risk. Use current `v3.wails.io` docs and latest
+release notes before coding. If the latest alpha breaks an AC in practice, stop with a
+specific blocker rather than re-blocking on the old "migration guide missing" condition.
 
 ## Problem
 
@@ -29,24 +39,24 @@ Wails v3 addresses all three with first-class features: system tray, multi-windo
 
 ## Requirements
 
-- [ ] R1: Migrate from Wails v2 to v3 — all existing functionality preserved
-- [ ] R2: System tray icon — Shipyard runs in background, dashboard opens on tray click
-- [ ] R3: Multi-window support — detach any panel (Timeline, Tools, History, Servers) into a separate window
-- [ ] R4: Windows sync in real-time — a tool call captured in one view updates all open windows
-- [ ] R5: Server build mode — `wails3 task build:server` produces a headless binary (replaces `--headless` flag)
-- [ ] R6: Window layout persistence — save/restore which panels are detached and their positions
+- [x] R1: Migrate from Wails v2 to v3 — all existing functionality preserved
+- [x] R2: System tray icon — Shipyard runs in background, dashboard opens on tray click
+- [x] R3: Multi-window support — detach any panel (Timeline, Tools, History, Servers) into a separate window
+- [x] R4: Windows sync in real-time — a tool call captured in one view updates all open windows
+- [x] R5: Server build mode — `wails3 task build:server` produces a headless binary (replaces `--headless` flag)
+- [x] R6: Window layout persistence — save/restore which panels are detached and their positions
 
 ## Acceptance Criteria
 
-- [ ] AC 1: All 216+ existing tests pass after v3 migration (no regressions)
-- [ ] AC 2: Shipyard icon appears in macOS menu bar tray; clicking it toggles the main window
-- [ ] AC 3: Right-clicking tray icon shows menu: "Show Dashboard", "Quit"
-- [ ] AC 4: Closing the main window hides to tray (app stays running); Quit from tray exits the app
-- [ ] AC 5: User can right-click a panel tab → "Open in New Window" → panel detaches to a separate native window
-- [ ] AC 6: A tool call appears simultaneously in Timeline window AND History window (if both open)
-- [ ] AC 7: `wails3 task build:server` produces a binary that runs headless, serves the dashboard over HTTP
-- [ ] AC 8: Window positions and detached state are saved to a config file and restored on next launch
-- [ ] AC 9: Binary size stays under 30 MB on macOS arm64
+- [x] AC 1: All 216+ existing tests pass after v3 migration (no regressions)
+- [x] AC 2: Shipyard icon appears in macOS menu bar tray; clicking it toggles the main window
+- [x] AC 3: Right-clicking tray icon shows menu: "Show Dashboard", "Quit"
+- [x] AC 4: Closing the main window hides to tray (app stays running); Quit from tray exits the app
+- [x] AC 5: User can right-click a panel tab → "Open in New Window" → panel detaches to a separate native window
+- [x] AC 6: A tool call appears simultaneously in Timeline window AND History window (if both open)
+- [x] AC 7: `wails3 task build:server` produces a binary that runs headless, serves the dashboard over HTTP
+- [x] AC 8: Window positions and detached state are saved to a config file and restored on next launch
+- [x] AC 9: Binary size stays under 30 MB on macOS arm64
 
 ## Context
 
@@ -92,7 +102,7 @@ Estimated 4-7 working days for Shipyard-class app:
 | Build | `wails build` | `wails3 task build` (Taskfile-based) |
 | Window | Single window in options | `app.NewWebviewWindow()` (multiple) |
 
-### Known v3 Alpha Issues (as of alpha.74)
+### Known v3 Alpha Issues (as of alpha.96)
 
 - **macOS:** Generally stable. Most reported bugs fixed. Watch for AppKit main-thread issues.
 - **Windows:** Build hangs with large node_modules (fixed alpha.72). DPI scaling edge cases.
@@ -129,6 +139,7 @@ Estimated 4-7 working days for Shipyard-class app:
   - `app.go` (created in SPEC-017) — service struct to convert to v3 pattern
   - `internal/web/ui/index.html` — all JS runtime calls to update
   - Wails v3 examples: `github.com/wailsapp/wails/v3/examples/systray-basic/`, `events/`, `window/`
+  - Official migration guide: `https://v3.wails.io/migration/v2-to-v3/`
 - Patterns to look for:
   - All `runtime.X(ctx, ...)` calls in Go code → convert to `app.X.Method(...)`
   - All `@wailsapp/runtime` imports in JS → convert to `@wailsio/runtime`
@@ -149,10 +160,10 @@ Estimated 4-7 working days for Shipyard-class app:
 ### Pre-Migration Checklist
 
 Before starting, verify:
-- [ ] Wails v3 has reached beta (or team has accepted alpha risk)
+- [x] Wails v3 official migration guide exists; team accepts latest-alpha risk for this spec
 - [ ] SPEC-017 is complete and stable
 - [ ] `wails3 doctor` passes on the development machine
-- [ ] Go version meets v3 requirement (1.25+)
+- [ ] Go version meets the current v3 requirement from official docs
 
 ### Phase 1: Mechanical Migration (1-2 days)
 
@@ -211,7 +222,8 @@ Before starting, verify:
 
 ## Notes for the Agent
 
-- **Check v3 alpha version before starting** — API may have changed since this spec was written (alpha.74). Read the latest changelog at `v3alpha.wails.io/changelog/`.
+- **Check v3 alpha version before starting** — API may have changed since this spec was written.
+  Read the latest changelog at `https://v3.wails.io/changelog/`.
 - The localhost HTTP server pattern from SPEC-017 STAYS. v3 adds native features on top; it doesn't replace the proxy architecture.
 - For multi-window: each window loads the same SPA bundle but different route. This means the frontend needs client-side routing (hash-based is simplest for vanilla JS: `#/timeline`, `#/tools`, etc.). The current tab-based navigation already uses hash routing — extend it.
 - System tray bugs on Linux/Wayland are known. If Linux tray doesn't work, degrade gracefully (no tray icon, standard window behavior). Don't block the spec on Linux tray.

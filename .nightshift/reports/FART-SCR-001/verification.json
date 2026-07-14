@@ -1,0 +1,29 @@
+{
+  "spec_id": "FART-SCR-001",
+  "status": "pass",
+  "dimensions": {
+    "completeness": {
+      "status": "pass",
+      "critical": [],
+      "warnings": []
+    },
+    "correctness": {
+      "status": "pass",
+      "critical": [],
+      "warnings": []
+    },
+    "coherence": {
+      "status": "pass",
+      "critical": [],
+      "warnings": []
+    }
+  },
+  "evidence": [
+    "go test ./internal/web -run 'FARTSCR001|SPECBUG132|UI' -count=1",
+    "go test ./...",
+    "go vet ./...",
+    "go build ./...",
+    "jsdom live shared filter check passed: text=2 matches; jq=5 matches; invalid-hidden=true",
+    "python3 .nightshift/validate_specs.py .nightshift/specs/FART-SCR-001-live-shared-json-filter-match-counts.md"
+  ]
+}

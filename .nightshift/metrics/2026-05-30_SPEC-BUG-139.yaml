@@ -1,0 +1,39 @@
+spec_id: SPEC-BUG-139
+date: 2026-05-30
+branch: nightshift/SPEC-BUG-139
+worktree: /Users/ed/Dropbox/Developer/Repos/shipyard-nightshift-SPEC-BUG-139
+domain: code
+status: implemented
+files_changed:
+  - internal/web/ui/index.html
+  - internal/web/ui/ds.css
+  - internal/web/ui_layout_test.go
+  - .nightshift/knowledge/devkb-updates/frontend-SPEC-BUG-139.md
+  - .nightshift/reports/2026-05-30-nightshift-report.md
+  - .nightshift/metrics/2026-05-30_SPEC-BUG-139.yaml
+validation:
+  - command: go test ./internal/web -run 'SPECBUG139|UI' -count=1
+    result: pass
+    notes: red/green focused spec test
+  - command: go test ./internal/web -run UI -count=1
+    result: pass
+  - command: go test ./...
+    result: pass
+    notes: existing non-fatal macOS linker warnings
+  - command: go vet ./...
+    result: pass
+  - command: go build ./...
+    result: pass
+    notes: existing non-fatal macOS linker warnings
+acceptance_criteria:
+  ac1: pass
+  ac2: pass
+  ac3: pass
+  ac4: pass
+  ac5: pass
+blockers: []
+discoveries:
+  - SPEC-BUG-138 had already moved metadata off table-row; SPEC-BUG-139 closed spacing and shared filter composition drift.
+  - Keeping the shared bar as .json-filter plus .json-filter-bar preserved existing Text/JQ wiring while changing visual composition.
+suggested_follow_up_specs:
+  - Live shared match counts could populate the hidden json-filter-match-count slot if visible count feedback becomes required.

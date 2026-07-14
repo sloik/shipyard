@@ -20,6 +20,29 @@ behavior is that `lmstudio` groups do expand/collapse by clicking the chevron
 or server row, so this spec should not be used as a fix target. Static code
 inspection was insufficient evidence for a real bug here.
 
+## Disposition Correction (2026-06-03, SPEC-BUG-146)
+
+The "Invalidated — groups already collapse on click" disposition above was
+**inaccurate** and is corrected here additively (the original text is preserved
+for the historical record).
+
+SPEC-BUG-145 established, by static code inspection of the Tool Browser
+frontend, that before that fix there was **no `.tool-group-header` click
+handler** and online groups had **no user-driven collapse path** — the only
+Tools sidebar click handler targeted `.tool-item`, and `.is-collapsed` was
+applied only at render time for offline/restarting groups (auto-collapse). The
+reported bug in this spec was therefore real; user-driven expand/collapse did
+not exist when this spec was marked invalidated.
+
+User-driven group-collapse interactivity (the header-click toggle, per-server
+collapse state, and chevron reflecting that state) was actually implemented by
+**SPEC-BUG-145**, which is the authoritative record of the implemented behavior.
+Cross-reload persistence of that collapse state is tracked separately by
+**SPEC-BUG-147**.
+
+This correction annotates the historical record only; it makes no code or test
+changes and does not re-open or re-run this spec.
+
 ## Problem
 
 The current Tool Browser sidebar renders server groups with a chevron and group

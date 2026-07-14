@@ -13,7 +13,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 var openSQLiteDB = func(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
@@ -91,6 +91,12 @@ func (s *Store) migrate() error {
 	if version < 2 {
 		if err := s.migrateToV2(); err != nil {
 			return fmt.Errorf("migrate to v2: %w", err)
+		}
+	}
+
+	if version < 3 {
+		if err := s.migrateToV3(); err != nil {
+			return fmt.Errorf("migrate to v3: %w", err)
 		}
 	}
 
@@ -199,6 +205,39 @@ func (s *Store) migrateToV2() error {
 	return nil
 }
 
+// migrateToV3 adds bounded application performance rollups.
+func (s *Store) migrateToV3() error {
+	return s.createPerformanceRollupSchema()
+}
+
+func (s *Store) createPerformanceRollupSchema() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS performance_rollups (
+			bucket_start          TEXT PRIMARY KEY,
+			bucket_seconds        INTEGER NOT NULL,
+			http_count            INTEGER NOT NULL DEFAULT 0,
+			http_total_ms         INTEGER NOT NULL DEFAULT 0,
+			http_max_ms           INTEGER NOT NULL DEFAULT 0,
+			rpc_count             INTEGER NOT NULL DEFAULT 0,
+			rpc_total_ms          INTEGER NOT NULL DEFAULT 0,
+			rpc_max_ms            INTEGER NOT NULL DEFAULT 0,
+			frontend_count        INTEGER NOT NULL DEFAULT 0,
+			frontend_total_ms     INTEGER NOT NULL DEFAULT 0,
+			frontend_max_ms       INTEGER NOT NULL DEFAULT 0,
+			active_dom_rows       INTEGER NOT NULL DEFAULT 0,
+			goroutines            INTEGER NOT NULL DEFAULT 0,
+			heap_alloc_bytes      INTEGER NOT NULL DEFAULT 0,
+			db_file_size_bytes    INTEGER NOT NULL DEFAULT 0,
+			traffic_rows          INTEGER NOT NULL DEFAULT 0,
+			schema_snapshot_rows  INTEGER NOT NULL DEFAULT 0,
+			access_log_rows       INTEGER NOT NULL DEFAULT 0,
+			updated_at            TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_performance_rollups_updated ON performance_rollups(updated_at);
+	`)
+	return err
+}
+
 // Direction constants
 const (
 	DirectionClientToServer = "client→server"
@@ -244,9 +283,17 @@ type TrafficPage struct {
 // Store handles traffic persistence in SQLite and JSONL.
 type Store struct {
 	db      *sql.DB
+	dbPath  string
 	jsonlF  *os.File
 	mu      sync.Mutex
 	pending map[string]pendingRequest // keyed by message_id
+}
+
+type PerformanceStats struct {
+	DBFileSizeBytes    int64 `json:"db_file_size_bytes"`
+	TrafficRows        int64 `json:"traffic_rows"`
+	SchemaSnapshotRows int64 `json:"schema_snapshot_rows"`
+	AccessLogRows      int64 `json:"access_log_rows"`
 }
 
 type pendingRequest struct {
@@ -349,6 +396,10 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := tempStore.createPerformanceRollupSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create performance rollup schema: %w", err)
+	}
 
 	// Ensure user_version is set for fresh databases
 	_, _ = db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion))
@@ -364,9 +415,36 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 
 	return &Store{
 		db:      db,
+		dbPath:  dbPath,
 		jsonlF:  jsonlF,
 		pending: make(map[string]pendingRequest),
 	}, nil
+}
+
+func (s *Store) PerformanceStats() (PerformanceStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats := PerformanceStats{}
+	if s.dbPath != "" {
+		if info, err := os.Stat(s.dbPath); err == nil {
+			stats.DBFileSizeBytes = info.Size()
+		}
+	}
+	counts := []struct {
+		table string
+		dest  *int64
+	}{
+		{"traffic", &stats.TrafficRows},
+		{"schema_snapshots", &stats.SchemaSnapshotRows},
+		{"access_log", &stats.AccessLogRows},
+	}
+	for _, c := range counts {
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM " + c.table).Scan(c.dest); err != nil {
+			return stats, fmt.Errorf("count %s: %w", c.table, err)
+		}
+	}
+	return stats, nil
 }
 
 // Insert stores a traffic entry and returns the row ID and optional latency.
@@ -464,9 +542,9 @@ type QueryFilter struct {
 	Server    string
 	Method    string
 	Direction string
-	Search    string  // free-text search in payload (SQL LIKE)
-	FromTs    *int64  // unix milliseconds, inclusive
-	ToTs      *int64  // unix milliseconds, inclusive
+	Search    string // free-text search in payload (SQL LIKE)
+	FromTs    *int64 // unix milliseconds, inclusive
+	ToTs      *int64 // unix milliseconds, inclusive
 }
 
 // QueryFiltered retrieves paginated traffic entries with extended filters.
@@ -690,12 +768,12 @@ type Session struct {
 
 // SessionCassette is the export format for a recorded session.
 type SessionCassette struct {
-	Version    int              `json:"version"`
-	Name       string           `json:"name"`
-	Server     string           `json:"server"`
-	RecordedAt string           `json:"recorded_at"`
-	DurationMs *int64           `json:"duration_ms,omitempty"`
-	Requests   []CassetteEntry  `json:"requests"`
+	Version    int             `json:"version"`
+	Name       string          `json:"name"`
+	Server     string          `json:"server"`
+	RecordedAt string          `json:"recorded_at"`
+	DurationMs *int64          `json:"duration_ms,omitempty"`
+	Requests   []CassetteEntry `json:"requests"`
 }
 
 // CassetteEntry is a single request/response pair in a cassette.
@@ -1043,24 +1121,35 @@ func (s *Store) SaveSnapshot(server string, tools []ToolSchema) (int64, error) {
 // Returns the tools, snapshot ID, and any error.
 // If no snapshot exists, returns nil tools and id 0 with no error.
 func (s *Store) GetLatestSnapshot(server string) ([]ToolSchema, int64, error) {
+	tools, id, _, err := s.GetLatestSnapshotWithCapturedAt(server)
+	return tools, id, err
+}
+
+// GetLatestSnapshotWithCapturedAt retrieves the latest schema snapshot and its capture time.
+func (s *Store) GetLatestSnapshotWithCapturedAt(server string) ([]ToolSchema, int64, time.Time, error) {
 	var id int64
 	var snapshot string
+	var capturedAtText string
 	err := s.db.QueryRow(
-		`SELECT id, snapshot FROM schema_snapshots WHERE server_name = ? ORDER BY id DESC LIMIT 1`,
+		`SELECT id, snapshot, captured_at FROM schema_snapshots WHERE server_name = ? ORDER BY id DESC LIMIT 1`,
 		server,
-	).Scan(&id, &snapshot)
+	).Scan(&id, &snapshot, &capturedAtText)
 	if err == sql.ErrNoRows {
-		return nil, 0, nil
+		return nil, 0, time.Time{}, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("get latest snapshot: %w", err)
+		return nil, 0, time.Time{}, fmt.Errorf("get latest snapshot: %w", err)
+	}
+	capturedAt, err := time.Parse(time.RFC3339Nano, capturedAtText)
+	if err != nil {
+		return nil, 0, time.Time{}, fmt.Errorf("parse snapshot captured_at: %w", err)
 	}
 
 	var tools []ToolSchema
 	if err := json.Unmarshal([]byte(snapshot), &tools); err != nil {
-		return nil, 0, fmt.Errorf("unmarshal snapshot: %w", err)
+		return nil, 0, time.Time{}, fmt.Errorf("unmarshal snapshot: %w", err)
 	}
-	return tools, id, nil
+	return tools, id, capturedAt, nil
 }
 
 // InsertSchemaChange records a detected schema change.

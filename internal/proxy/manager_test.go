@@ -56,6 +56,30 @@ func TestNewResponseTracker(t *testing.T) {
 	}
 }
 
+func TestManager_RPCPerformanceSnapshotRedactsPayloadsAndClassifiesErrors(t *testing.T) {
+	m := NewManager()
+	m.recordRPCSample("alpha", "tools/list", time.Now(), json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"token":"secret"}}`), nil)
+	m.recordRPCSample("alpha", "tools/call", time.Now(), json.RawMessage(`{"jsonrpc":"2.0","id":2,"error":{"message":"boom","params":{"token":"secret"}}}`), nil)
+	m.recordRPCSample("beta", "tools/list", time.Now(), nil, context.DeadlineExceeded)
+
+	got := m.RPCPerformanceSnapshot()
+	if len(got) != 3 {
+		t.Fatalf("got %d samples, want 3", len(got))
+	}
+	if got[0].Result != "ok" || got[1].Result != "error" || got[2].Reason != "timeout" {
+		t.Fatalf("unexpected rpc classifications: %+v", got)
+	}
+	for _, sample := range got {
+		if sample.Server == "" || sample.Method == "" {
+			t.Fatalf("missing server/method in sample: %+v", sample)
+		}
+		encoded, _ := json.Marshal(sample)
+		if strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "params") {
+			t.Fatalf("rpc sample leaked payload data: %s", encoded)
+		}
+	}
+}
+
 func TestResponseTracker_Register(t *testing.T) {
 	rt := newResponseTracker()
 	ch := rt.register("req-1")
@@ -225,6 +249,56 @@ func TestManager_Servers(t *testing.T) {
 	}
 }
 
+func TestManager_Servers_RegistrationOrderStable(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"zeta", "alpha", "mcp"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	for i := 0; i < 20; i++ {
+		assertServerNames(t, m.Servers(), []string{"zeta", "alpha", "mcp"})
+	}
+}
+
+func TestManager_Servers_StatusChangesKeepServerIndex(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	assertServerNames(t, m.Servers(), []string{"alpha", "beta", "gamma"})
+
+	m.SetStatus("beta", "restarting", "")
+	m.SetToolCount("gamma", 9)
+	servers := m.Servers()
+	assertServerNames(t, servers, []string{"alpha", "beta", "gamma"})
+	if servers[1].Name != "beta" || servers[1].Status != "restarting" {
+		t.Fatalf("expected beta to remain at index 1 while restarting, got %+v", servers)
+	}
+
+	m.SetStatus("beta", "online", "")
+	servers = m.Servers()
+	assertServerNames(t, servers, []string{"alpha", "beta", "gamma"})
+	if servers[2].Name != "gamma" || servers[2].ToolCount != 9 {
+		t.Fatalf("expected gamma to remain at index 2 with tool count 9, got %+v", servers)
+	}
+}
+
+func TestManager_RegisterExistingServerKeepsOriginalIndex(t *testing.T) {
+	m := NewManager()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		p, _ := newTestProxy(t)
+		m.Register(name, p)
+	}
+
+	restarted, _ := newTestProxy(t)
+	m.Register("beta", restarted)
+
+	assertServerNames(t, m.Servers(), []string{"alpha", "beta", "gamma"})
+}
+
 func TestManager_Servers_Empty(t *testing.T) {
 	m := NewManager()
 	servers := m.Servers()
@@ -233,6 +307,18 @@ func TestManager_Servers_Empty(t *testing.T) {
 	}
 	if len(servers) != 0 {
 		t.Fatalf("expected 0 servers, got %d", len(servers))
+	}
+}
+
+func assertServerNames(t *testing.T, servers []web.ServerInfo, want []string) {
+	t.Helper()
+	if len(servers) != len(want) {
+		t.Fatalf("expected %d servers, got %d: %+v", len(want), len(servers), servers)
+	}
+	for i, name := range want {
+		if servers[i].Name != name {
+			t.Fatalf("server[%d]: expected %q, got %q in %+v", i, name, servers[i].Name, servers)
+		}
 	}
 }
 
@@ -574,6 +660,79 @@ func TestManager_RestartServer(t *testing.T) {
 	}
 	if got := m.ServerStatus("alpha"); got != "restarting" {
 		t.Fatalf("expected restarting, got %q", got)
+	}
+}
+
+func TestManager_RestartServer_ClearsInitializedStateBeforeNextToolsList(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p)
+
+	cw := newChildInputWriter()
+	sink := newLineObserverWriteCloser()
+	cw.attach(sink)
+	mp.SetInputWriter(cw)
+	mp.initReady = true
+	m.SetToolCount("alpha", 7)
+
+	if err := m.RestartServer("alpha"); err != nil {
+		t.Fatalf("RestartServer: %v", err)
+	}
+	if servers := m.Servers(); len(servers) != 1 || servers[0].ToolCount != 0 {
+		t.Fatalf("expected restart to clear cached tool count, got %+v", servers)
+	}
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := m.SendRequest(context.Background(), "alpha", "tools/list", json.RawMessage(`{}`))
+		resultCh <- err
+	}()
+
+	for handled := 0; handled < 3; handled++ {
+		select {
+		case line := <-sink.lines:
+			var req map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(line), &req); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+
+			var method string
+			if err := json.Unmarshal(req["method"], &method); err != nil {
+				t.Fatalf("unmarshal method: %v", err)
+			}
+
+			switch handled {
+			case 0:
+				if method != "initialize" {
+					t.Fatalf("expected post-restart first request initialize, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s"}}`, req["id"], managedChildProtocolVersion))) {
+					t.Fatal("expected initialize response to resolve")
+				}
+			case 1:
+				if method != "notifications/initialized" {
+					t.Fatalf("expected post-restart second message notifications/initialized, got %q", method)
+				}
+			case 2:
+				if method != "tools/list" {
+					t.Fatalf("expected post-restart third request tools/list, got %q", method)
+				}
+				if !mp.HandleChildOutput([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"lms_status"}]}}`, req["id"]))) {
+					t.Fatal("expected tools/list response to resolve")
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for post-restart writes")
+		}
+	}
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("SendRequest returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tools/list result")
 	}
 }
 

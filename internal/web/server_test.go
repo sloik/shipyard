@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/sloik/shipyard/internal/auth"
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/gateway"
+	"github.com/sloik/shipyard/internal/performance"
 )
 
 // mockProxyManager implements ProxyManager for testing.
@@ -23,6 +25,7 @@ type mockProxyManager struct {
 	restartFunc    func(name string) error
 	stopFunc       func(name string) error
 	activeSessions map[string]int64
+	rpcSamples     []performance.RPCSample
 }
 
 func (m *mockProxyManager) Servers() []ServerInfo {
@@ -78,6 +81,10 @@ func (m *mockProxyManager) ServersForAuth() []string {
 	return names
 }
 
+func (m *mockProxyManager) RPCPerformanceSnapshot() []performance.RPCSample {
+	return m.rpcSamples
+}
+
 // newTestServer creates a Server with a real Store for testing HTTP handlers.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -124,6 +131,243 @@ func TestHandleServers_NoProxyManager(t *testing.T) {
 	}
 }
 
+func TestHandlePerformanceRuntime_ReturnsProcessAndStoreStats(t *testing.T) {
+	srv := newTestServer(t)
+	srv.store.Insert(&capture.TrafficEntry{
+		Timestamp:  time.Now(),
+		Direction:  capture.DirectionClientToServer,
+		ServerName: "alpha",
+		Method:     "tools/list",
+		MessageID:  "1",
+		Payload:    `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		Status:     "pending",
+	})
+	srv.store.RecordAccess(capture.AccessLogEntry{
+		Timestamp:  time.Now(),
+		ServerName: "alpha",
+		ToolName:   "tool",
+		Status:     "ok",
+	})
+	if _, err := srv.store.SaveSnapshot("alpha", []capture.ToolSchema{{Name: "tool"}}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/runtime", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceRuntime(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var got runtimePerformanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Goroutines < 1 {
+		t.Fatalf("goroutines = %d, want at least 1", got.Goroutines)
+	}
+	if got.Memory.HeapAllocBytes == 0 {
+		t.Fatal("expected non-zero heap allocation")
+	}
+	if got.Store.DBFileSizeBytes == 0 {
+		t.Fatal("expected non-zero db file size")
+	}
+	if got.Store.TrafficRows != 1 || got.Store.AccessLogRows != 1 || got.Store.SchemaSnapshotRows != 1 {
+		t.Fatalf("unexpected store stats: %+v", got.Store)
+	}
+}
+
+func TestInstrumentHTTP_CapturesRouteStatusAndResponseSize(t *testing.T) {
+	srv := newTestServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/performance-test/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("payload"))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance-test/123?token=secret", nil)
+	w := httptest.NewRecorder()
+	srv.instrumentHTTP(mux).ServeHTTP(w, req)
+
+	samples := srv.perf.HTTP()
+	if len(samples) != 1 {
+		t.Fatalf("got %d samples, want 1", len(samples))
+	}
+	got := samples[0]
+	if got.Route != "GET /api/performance-test/{id}" {
+		t.Fatalf("route = %q, want route pattern", got.Route)
+	}
+	if got.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", got.StatusCode, http.StatusAccepted)
+	}
+	if got.ResponseSize != int64(len("payload")) {
+		t.Fatalf("response size = %d, want %d", got.ResponseSize, len("payload"))
+	}
+	if strings.Contains(got.Route, "secret") {
+		t.Fatalf("route leaked query secret: %+v", got)
+	}
+}
+
+func TestHandlePerformanceRPC_ReturnsRedactedSamples(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Server:     "alpha",
+			Method:     "tools/list",
+			Result:     "ok",
+			DurationMs: 3,
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/rpc", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceRPC(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"method":"tools/list"`) {
+		t.Fatalf("expected rpc method in response: %s", body)
+	}
+	if strings.Contains(body, "params") || strings.Contains(body, "result\":{") || strings.Contains(body, "secret") {
+		t.Fatalf("rpc telemetry leaked payload-like fields: %s", body)
+	}
+}
+
+func TestHandlePerformanceHistory_ReturnsPersistentAppHealthRollups(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Timestamp:  time.Now().UTC(),
+			Server:     "alpha",
+			Method:     "tools/call",
+			Result:     "ok",
+			DurationMs: 44,
+		}},
+	})
+
+	body := []byte(`{"name":"servers.render","duration_ms":18,"active_dom_rows":42,"meta":{"payload":"must-not-persist"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/performance/frontend", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handlePerformanceFrontend(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("frontend status = %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/performance/history?window=24h", nil)
+	w = httptest.NewRecorder()
+	srv.handlePerformanceHistory(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("history status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var got performanceHistoryResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Rollups) == 0 {
+		t.Fatal("expected at least one performance rollup")
+	}
+	last := got.Rollups[len(got.Rollups)-1]
+	if last.FrontendCount == 0 || last.FrontendMaxMs != 18 || last.ActiveDOMRows != 42 {
+		t.Fatalf("frontend rollup missing: %+v", last)
+	}
+	if last.RPCCount == 0 || last.RPCMaxMs != 44 {
+		t.Fatalf("rpc rollup missing: %+v", last)
+	}
+	if got.Current.Goroutines < 1 || got.Current.Store.DBFileSizeBytes == 0 {
+		t.Fatalf("current runtime missing process/store stats: %+v", got.Current)
+	}
+}
+
+func TestHandlePerformanceDebugBundle_RedactsSecretsAndIncludesBuildRuntimeMetadata(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetDiagnostics(
+		DiagnosticBuildInfo{Version: "test-version", GitRevision: "abc123", GitModified: true},
+		"/tmp/servers.json",
+		DiagnosticConfigShape{
+			HasConfig:      true,
+			AuthEnabled:    true,
+			SecretsBackend: "keychain",
+			ServerCount:    1,
+			Servers: map[string]DiagnosticServerShape{
+				"alpha": {CommandPresent: true, ArgsCount: 2, EnvKeyCount: 3, CwdPresent: true, ToolCount: 1},
+			},
+		},
+	)
+	srv.SetProxyManager(&mockProxyManager{
+		rpcSamples: []performance.RPCSample{{
+			Timestamp:  time.Now().UTC(),
+			Server:     "alpha",
+			Method:     "tools/call",
+			Result:     "ok",
+			Reason:     "redacted",
+			DurationMs: 7,
+		}},
+	})
+	srv.SetRawServerEnvs(map[string]map[string]string{
+		"alpha": {
+			"API_TOKEN": "super-secret-env-value",
+			"PLAIN":     "also-secret-shape-only",
+		},
+	})
+	srv.store.RecordAccess(capture.AccessLogEntry{
+		Timestamp:  time.Now(),
+		TokenName:  "nightly-token",
+		ServerName: "alpha",
+		ToolName:   "danger",
+		Status:     "ok",
+		ArgsJSON:   `{"token":"secret-tool-argument","request_body":"secret-request"}`,
+		LogLevel:   "full",
+	})
+	srv.recordPerformanceRollup(capture.PerformanceRollupSample{
+		Timestamp:          time.Now().UTC(),
+		HTTPDurationMs:     9,
+		FrontendDurationMs: 11,
+		ActiveDOMRows:      4,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/performance/debug-bundle", nil)
+	w := httptest.NewRecorder()
+	srv.handlePerformanceDebugBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, forbidden := range []string{
+		"super-secret-env-value",
+		"also-secret-shape-only",
+		"secret-tool-argument",
+		"secret-request",
+		"args_json",
+		"request_body",
+		"API_TOKEN",
+		"nightly-token",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("debug bundle leaked %q: %s", forbidden, body)
+		}
+	}
+
+	var got performanceDebugBundle
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Build.Version != "test-version" || got.Build.GitRevision != "abc123" || !got.Build.GitModified {
+		t.Fatalf("build metadata missing: %+v", got.Build)
+	}
+	if got.Build.BinaryPath == "" || got.Build.UptimeMs < 0 || got.Config.Path != "/tmp/servers.json" {
+		t.Fatalf("runtime/config metadata missing: build=%+v config=%+v", got.Build, got.Config)
+	}
+	if !got.Config.Shape.HasConfig || got.Config.Shape.Servers["alpha"].EnvKeyCount != 3 {
+		t.Fatalf("config shape missing: %+v", got.Config.Shape)
+	}
+	if len(got.History) == 0 || got.TableCounts.AccessLogRows != 1 {
+		t.Fatalf("bundle missing history/table counts: history=%d counts=%+v", len(got.History), got.TableCounts)
+	}
+}
+
 func TestHandleServers_WithServers(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
@@ -154,6 +398,28 @@ func TestHandleServers_WithServers(t *testing.T) {
 	}
 }
 
+func TestHandleServers_PreservesProxyOrderWithSelfFirst(t *testing.T) {
+	srv := newTestServer(t)
+	pm := &mockProxyManager{
+		servers: []ServerInfo{
+			{Name: "zeta", Status: "online"},
+			{Name: "alpha", Status: "restarting", RestartCount: 1},
+			{Name: "mcp", Status: "online", ToolCount: 4},
+		},
+	}
+	srv.SetProxyManager(pm)
+
+	first := serverNamesFromHandleServers(t, srv)
+	want := []string{"shipyard", "zeta", "alpha", "mcp"}
+	assertNames(t, first, want)
+
+	pm.servers[1].Status = "online"
+	pm.servers[1].RestartCount = 2
+	pm.servers[2].ToolCount = 9
+	second := serverNamesFromHandleServers(t, srv)
+	assertNames(t, second, want)
+}
+
 func TestHandleServers_Empty(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
@@ -178,6 +444,37 @@ func TestHandleServers_Empty(t *testing.T) {
 	}
 	if result[0].Name != "shipyard" || !result[0].IsSelf {
 		t.Fatalf("expected Shipyard self-entry, got %+v", result[0])
+	}
+}
+
+func serverNamesFromHandleServers(t *testing.T, srv *Server) []string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	w := httptest.NewRecorder()
+	srv.handleServers(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result []ServerInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	names := make([]string, 0, len(result))
+	for _, server := range result {
+		names = append(names, server.Name)
+	}
+	return names
+}
+
+func assertNames(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d names, got %d: %v", len(want), len(got), got)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Fatalf("name[%d]: expected %q, got %q in %v", i, name, got[i], got)
+		}
 	}
 }
 
@@ -844,17 +1141,18 @@ func TestHandleTools_NoProxyManager(t *testing.T) {
 	}
 }
 
-func TestHandleTools_Success(t *testing.T) {
+func TestHandleTools_UsesCachedSnapshotByDefault(t *testing.T) {
 	srv := newTestServer(t)
-
-	// The handler sends tools/list, gets back a JSON-RPC envelope, extracts result
-	rpcResponse := `{"jsonrpc":"2.0","id":"shipyard-1","result":{"tools":[{"name":"read_file"}]}}`
+	if _, err := srv.store.SaveSnapshot("test", []capture.ToolSchema{
+		{Name: "read_file", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	called := false
 	srv.SetProxyManager(&mockProxyManager{
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			if method != "tools/list" {
-				t.Fatalf("expected method tools/list, got %s", method)
-			}
-			return json.RawMessage(rpcResponse), nil
+			called = true
+			return nil, fmt.Errorf("unexpected live %s call for %s", method, server)
 		},
 	})
 
@@ -865,19 +1163,156 @@ func TestHandleTools_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
+	if called {
+		t.Fatal("expected default /api/tools load to use cached snapshot without live tools/list")
+	}
 
-	// The handler extracts "result" from the RPC envelope
-	var result map[string]interface{}
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+		Source      string `json:"source"`
+		CacheStatus string `json:"cache_status"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	tools, ok := result["tools"]
-	if !ok {
-		t.Fatal("expected 'tools' key in response")
+	if result.Source != "cache" || result.CacheStatus != "cached" {
+		t.Fatalf("expected cached response, got source=%q cache_status=%q body=%s", result.Source, result.CacheStatus, w.Body.String())
 	}
-	toolList, ok := tools.([]interface{})
-	if !ok || len(toolList) != 1 {
-		t.Fatalf("expected 1 tool, got %v", tools)
+	if len(result.Tools) != 1 || result.Tools[0].Name != "read_file" {
+		t.Fatalf("expected read_file from snapshot, got %+v", result.Tools)
+	}
+	if !result.Tools[0].Enabled || !result.Tools[0].ServerEnabled {
+		t.Fatalf("expected cached policy fields to default enabled, got %+v", result.Tools[0])
+	}
+}
+
+func TestHandleTools_MissingSnapshotReportsState(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Tools         []map[string]interface{} `json:"tools"`
+		Source        string                   `json:"source"`
+		CacheStatus   string                   `json:"cache_status"`
+		StatusMessage string                   `json:"status_message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Source != "cache" || result.CacheStatus != "missing" {
+		t.Fatalf("expected missing cache state, got source=%q cache_status=%q", result.Source, result.CacheStatus)
+	}
+	if result.StatusMessage == "" {
+		t.Fatal("expected non-empty status_message for missing snapshot")
+	}
+	if len(result.Tools) != 0 {
+		t.Fatalf("expected no tools for missing snapshot, got %+v", result.Tools)
+	}
+}
+
+func TestHandleTools_CachedSnapshotReflectsGatewayPolicy(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := srv.store.SaveSnapshot("test", []capture.ToolSchema{
+		{Name: "read_file"},
+		{Name: "write_file"},
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetServerEnabled("test", false); err != nil {
+		t.Fatalf("SetServerEnabled: %v", err)
+	}
+	if err := policy.SetToolEnabled("test", "write_file", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Tools) != 2 {
+		t.Fatalf("expected 2 tools, got %+v", result.Tools)
+	}
+	for _, tool := range result.Tools {
+		if tool.ServerEnabled {
+			t.Fatalf("expected cached tool %q to report server_enabled=false", tool.Name)
+		}
+		if tool.Enabled {
+			t.Fatalf("expected cached tool %q to report enabled=false while server disabled", tool.Name)
+		}
+	}
+}
+
+func TestHandleTools_ForceRefreshCallsLiveAndUpdatesSnapshot(t *testing.T) {
+	srv := newTestServer(t)
+	calls := 0
+	srv.SetProxyManager(&mockProxyManager{
+		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
+			calls++
+			if server != "test" || method != "tools/list" {
+				t.Fatalf("unexpected live request server=%s method=%s", server, method)
+			}
+			return json.RawMessage(`{"jsonrpc":"2.0","id":"shipyard-1","result":{"tools":[{"name":"fresh_tool","description":"fresh","inputSchema":{"type":"object"}}]}}`), nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
+	w := httptest.NewRecorder()
+	srv.handleTools(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("expected one live tools/list call, got %d", calls)
+	}
+	var result struct {
+		Tools       []struct{ Name string } `json:"tools"`
+		Source      string                  `json:"source"`
+		CacheStatus string                  `json:"cache_status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Source != "live" || result.CacheStatus != "refreshed" {
+		t.Fatalf("expected refreshed live response, got source=%q cache_status=%q", result.Source, result.CacheStatus)
+	}
+	cached, _, err := srv.store.GetLatestSnapshot("test")
+	if err != nil {
+		t.Fatalf("GetLatestSnapshot: %v", err)
+	}
+	if len(cached) != 1 || cached[0].Name != "fresh_tool" {
+		t.Fatalf("expected force refresh to update snapshot cache, got %+v", cached)
 	}
 }
 
@@ -990,6 +1425,78 @@ func TestHandleTools_ShipyardSelfServerReflectsToolPolicy(t *testing.T) {
 	}
 }
 
+func TestHandleTools_ShipyardSelfServerMatchesGatewayCatalogNaming(t *testing.T) {
+	srv := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "gateway-policy.json")
+	policy, err := gateway.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := policy.SetToolEnabled("shipyard", "status", false); err != nil {
+		t.Fatalf("SetToolEnabled: %v", err)
+	}
+	srv.SetGatewayPolicyStore(policy)
+	srv.SetProxyManager(&mockProxyManager{servers: []ServerInfo{}})
+
+	gatewayReq := httptest.NewRequest(http.MethodGet, "/api/gateway/tools?include_disabled=1", nil)
+	gatewayW := httptest.NewRecorder()
+	srv.handleGatewayTools(gatewayW, gatewayReq)
+	if gatewayW.Code != http.StatusOK {
+		t.Fatalf("gateway tools: expected 200, got %d: %s", gatewayW.Code, gatewayW.Body.String())
+	}
+	var gatewayResp struct {
+		Tools []gatewayToolInfo `json:"tools"`
+	}
+	if err := json.Unmarshal(gatewayW.Body.Bytes(), &gatewayResp); err != nil {
+		t.Fatalf("unmarshal gateway tools: %v", err)
+	}
+
+	directReq := httptest.NewRequest(http.MethodGet, "/api/tools?server=shipyard", nil)
+	directW := httptest.NewRecorder()
+	srv.handleTools(directW, directReq)
+	if directW.Code != http.StatusOK {
+		t.Fatalf("direct tools: expected 200, got %d: %s", directW.Code, directW.Body.String())
+	}
+	var directResp struct {
+		Tools []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			ServerEnabled bool   `json:"server_enabled"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(directW.Body.Bytes(), &directResp); err != nil {
+		t.Fatalf("unmarshal direct tools: %v", err)
+	}
+
+	gatewayByTool := make(map[string]gatewayToolInfo, len(gatewayResp.Tools))
+	for _, tool := range gatewayResp.Tools {
+		if tool.Server == "shipyard" {
+			gatewayByTool[tool.Tool] = tool
+		}
+	}
+	if len(gatewayByTool) != len(shipyardTools) {
+		t.Fatalf("expected %d shipyard gateway tools, got %d", len(shipyardTools), len(gatewayByTool))
+	}
+	if len(directResp.Tools) != len(shipyardTools) {
+		t.Fatalf("expected %d direct shipyard tools, got %d", len(shipyardTools), len(directResp.Tools))
+	}
+	for _, directTool := range directResp.Tools {
+		gatewayTool, ok := gatewayByTool[directTool.Name]
+		if !ok {
+			t.Fatalf("direct bare tool %q missing from gateway catalog", directTool.Name)
+		}
+		if gatewayTool.Name != "shipyard__"+directTool.Name {
+			t.Fatalf("gateway tool for %q used name %q", directTool.Name, gatewayTool.Name)
+		}
+		if gatewayTool.Enabled != directTool.Enabled {
+			t.Fatalf("enabled mismatch for %q: gateway=%v direct=%v", directTool.Name, gatewayTool.Enabled, directTool.Enabled)
+		}
+		if gatewayTool.ServerEnabled != directTool.ServerEnabled {
+			t.Fatalf("server_enabled mismatch for %q: gateway=%v direct=%v", directTool.Name, gatewayTool.ServerEnabled, directTool.ServerEnabled)
+		}
+	}
+}
+
 func TestHandleTools_SendRequestError(t *testing.T) {
 	srv := newTestServer(t)
 	srv.SetProxyManager(&mockProxyManager{
@@ -998,7 +1505,7 @@ func TestHandleTools_SendRequestError(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1015,7 +1522,7 @@ func TestHandleTools_InvalidRPCResponse(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1034,7 +1541,7 @@ func TestHandleTools_RPCError(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tools?server=test&force_refresh=1", nil)
 	w := httptest.NewRecorder()
 	srv.handleTools(w, req)
 
@@ -1042,12 +1549,8 @@ func TestHandleTools_RPCError(t *testing.T) {
 		t.Fatalf("expected 502, got %d", w.Code)
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := result["error"]; !ok {
-		t.Fatal("expected 'error' key in response body")
+	if !strings.Contains(w.Body.String(), "method not found") {
+		t.Fatalf("expected live RPC error body to surface method not found, got %q", w.Body.String())
 	}
 }
 
@@ -1932,16 +2435,20 @@ func TestHandleAutoImportScan_NoProxyManager(t *testing.T) {
 
 func TestHandleToolConflicts_NoConflicts(t *testing.T) {
 	srv := newTestServer(t)
+	if _, err := srv.store.SaveSnapshot("alpha", []capture.ToolSchema{{Name: "read_file"}}); err != nil {
+		t.Fatalf("SaveSnapshot alpha: %v", err)
+	}
+	if _, err := srv.store.SaveSnapshot("beta", []capture.ToolSchema{{Name: "write_file"}}); err != nil {
+		t.Fatalf("SaveSnapshot beta: %v", err)
+	}
 	srv.SetProxyManager(&mockProxyManager{
 		servers: []ServerInfo{
 			{Name: "alpha", Status: "online"},
 			{Name: "beta", Status: "online"},
 		},
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			if server == "alpha" {
-				return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"}]}}`), nil
-			}
-			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"write_file"}]}}`), nil
+			t.Fatalf("expected conflicts to use cached snapshots, got live %s call for %s", method, server)
+			return nil, nil
 		},
 	})
 
@@ -1964,14 +2471,22 @@ func TestHandleToolConflicts_NoConflicts(t *testing.T) {
 
 func TestHandleToolConflicts_WithConflicts(t *testing.T) {
 	srv := newTestServer(t)
+	for _, server := range []string{"alpha", "beta"} {
+		if _, err := srv.store.SaveSnapshot(server, []capture.ToolSchema{
+			{Name: "read_file"},
+			{Name: "write_file"},
+		}); err != nil {
+			t.Fatalf("SaveSnapshot %s: %v", server, err)
+		}
+	}
 	srv.SetProxyManager(&mockProxyManager{
 		servers: []ServerInfo{
 			{Name: "alpha", Status: "online"},
 			{Name: "beta", Status: "online"},
 		},
 		sendFunc: func(ctx context.Context, server, method string, params json.RawMessage) (json.RawMessage, error) {
-			// Both servers have "read_file" tool
-			return json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"read_file"},{"name":"write_file"}]}}`), nil
+			t.Fatalf("expected conflicts to use cached snapshots, got live %s call for %s", method, server)
+			return nil, nil
 		},
 	})
 
@@ -2825,18 +3340,58 @@ func TestHandleTokenList_NoPlaintertext(t *testing.T) {
 	}
 }
 
+func TestHandleTokenList_RejectsScopedTokenForTokenAdmin(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	scopedPlaintext, _, err := authStore.GenerateToken("scoped", 0, []string{"filesystem:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken scoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+scopedPlaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenList(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for scoped token on token-admin route, got %d", w.Code)
+	}
+}
+
+func TestHandleTokenList_AllowsWildcardAdminToken(t *testing.T) {
+	srv, authStore := newTestServerWithAuth(t)
+
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
+	w := httptest.NewRecorder()
+	srv.handleTokenList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin token, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // AC-12: DELETE /api/tokens/{id} revokes token.
 func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 	srv, authStore := newTestServerWithAuth(t)
 
-	plaintext, id, err := authStore.GenerateToken("to-delete", 0, nil)
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
 	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+	victimPlaintext, id, err := authStore.GenerateToken("to-delete", 0, nil)
+	if err != nil {
+		t.Fatalf("GenerateToken victim: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/tokens/%d", id), nil)
 	req.SetPathValue("id", fmt.Sprintf("%d", id))
-	req.Header.Set("Authorization", "Bearer "+plaintext) // use own token to delete itself
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
 	w := httptest.NewRecorder()
 	srv.handleTokenDelete(w, req)
 
@@ -2845,7 +3400,7 @@ func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 	}
 
 	// Token must no longer authenticate
-	_, err = authStore.Authenticate(plaintext)
+	_, err = authStore.Authenticate(victimPlaintext)
 	if err == nil {
 		t.Fatal("deleted token should no longer authenticate (AC-12)")
 	}
@@ -2855,15 +3410,19 @@ func TestHandleTokenDelete_RevokesToken(t *testing.T) {
 func TestHandleTokenUpdateScopes(t *testing.T) {
 	srv, authStore := newTestServerWithAuth(t)
 
-	plaintext, id, err := authStore.GenerateToken("scoped", 0, []string{"old:*"})
+	adminPlaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
 	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
+		t.Fatalf("GenerateToken admin: %v", err)
+	}
+	victimPlaintext, id, err := authStore.GenerateToken("scoped", 0, []string{"old:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken victim: %v", err)
 	}
 
 	body := `{"scopes":["new:read","new:write"]}`
 	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/tokens/%d/scopes", id), strings.NewReader(body))
 	req.SetPathValue("id", fmt.Sprintf("%d", id))
-	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("Authorization", "Bearer "+adminPlaintext)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleTokenUpdateScopes(w, req)
@@ -2873,7 +3432,7 @@ func TestHandleTokenUpdateScopes(t *testing.T) {
 	}
 
 	// Verify scopes were updated (AC-18)
-	rec, err := authStore.Authenticate(plaintext)
+	rec, err := authStore.Authenticate(victimPlaintext)
 	if err != nil {
 		t.Fatalf("Authenticate after scope update: %v", err)
 	}
@@ -2946,6 +3505,36 @@ func TestHandleMCPPassthrough_NoAuth(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleMCPPassthrough_PrefixedToolWithoutProxyManagerReturnsJSONRPCError(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetAuthStore(nil, nil, false)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleMCPPassthrough(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected JSON-RPC error with HTTP 200, got %d", w.Code)
+	}
+	var resp struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Error.Code != -32603 {
+		t.Fatalf("expected JSON-RPC error code -32603, got %d: %s", resp.Error.Code, w.Body.String())
+	}
+	if resp.Error.Message != "no proxy manager configured" {
+		t.Fatalf("expected no proxy manager message, got %q", resp.Error.Message)
 	}
 }
 

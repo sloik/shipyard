@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ import (
 	"github.com/sloik/shipyard/internal/capture"
 	"github.com/sloik/shipyard/internal/proxy"
 	"github.com/sloik/shipyard/internal/web"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // ---------------------------------------------------------------------------
@@ -109,7 +113,7 @@ func TestDesktopBridge_ServesConfigEndpoint(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("expected Content-Type application/json, got %q", ct)
 	}
-	if got := strings.TrimSpace(w.Body.String()); got != `{"api_base":"http://127.0.0.1:9417","ws_base":"ws://127.0.0.1:9417"}` {
+	if got := strings.TrimSpace(w.Body.String()); got != `{"api_base":"http://127.0.0.1:9417","native_windows":false,"ws_base":"ws://127.0.0.1:9417"}` {
 		t.Fatalf("unexpected desktop config payload: %s", got)
 	}
 }
@@ -168,9 +172,133 @@ func TestDesktopBridge_DifferentPorts(t *testing.T) {
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 
-			want := fmt.Sprintf(`{"api_base":"http://127.0.0.1:%d","ws_base":"ws://127.0.0.1:%d"}`, tc.port, tc.port)
+			want := fmt.Sprintf(`{"api_base":"http://127.0.0.1:%d","native_windows":false,"ws_base":"ws://127.0.0.1:%d"}`, tc.port, tc.port)
 			if got := strings.TrimSpace(w.Body.String()); got != want {
 				t.Fatalf("expected config %s, got %s", want, got)
+			}
+		})
+	}
+}
+
+func TestDesktopSingleInstanceOptions(t *testing.T) {
+	opts := desktopSingleInstanceOptions(&desktopApp{})
+	if opts == nil {
+		t.Fatal("expected single instance options")
+	}
+	if opts.UniqueID == "" {
+		t.Fatal("expected stable unique ID")
+	}
+	if opts.ExitCode != 0 {
+		t.Fatalf("expected second instance exit code 0, got %d", opts.ExitCode)
+	}
+	if opts.OnSecondInstanceLaunch == nil {
+		t.Fatal("expected second instance callback")
+	}
+
+	opts.OnSecondInstanceLaunch(application.SecondInstanceData{Args: []string{"shipyard"}})
+}
+
+type fakeDesktopNative struct {
+	mu     sync.Mutex
+	panels []string
+	err    error
+}
+
+func (f *fakeDesktopNative) OpenPanelWindow(panel string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.panels = append(f.panels, panel)
+	return f.err
+}
+
+func TestDesktopBridge_ConfigAdvertisesNativeWindowsWhenControllerPresent(t *testing.T) {
+	handler := newDesktopBridgeWithAssets(9417, http.NotFoundHandler(), &fakeDesktopNative{})
+
+	req := httptest.NewRequest(http.MethodGet, "/_shipyard/desktop-config", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	want := `{"api_base":"http://127.0.0.1:9417","native_windows":true,"ws_base":"ws://127.0.0.1:9417"}`
+	if got := strings.TrimSpace(w.Body.String()); got != want {
+		t.Fatalf("expected config %s, got %s", want, got)
+	}
+}
+
+func TestDesktopBridge_OpenPanelWindowEndpoint(t *testing.T) {
+	native := &fakeDesktopNative{}
+	handler := newDesktopBridgeWithAssets(9417, http.NotFoundHandler(), native)
+
+	req := httptest.NewRequest(http.MethodPost, "/_shipyard/windows/open?panel=history", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 from native window endpoint, got %d", w.Code)
+	}
+	if len(native.panels) != 1 || native.panels[0] != "history" {
+		t.Fatalf("expected history panel to be opened, got %#v", native.panels)
+	}
+}
+
+func TestDesktopBridge_OpenPanelWindowRejectsUnknownPanel(t *testing.T) {
+	handler := newDesktopBridgeWithAssets(9417, http.NotFoundHandler(), &fakeDesktopNative{})
+
+	req := httptest.NewRequest(http.MethodPost, "/_shipyard/windows/open?panel=tokens", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-detachable panel, got %d", w.Code)
+	}
+}
+
+func TestDesktopBridge_OpenPanelWindowRequiresNativeController(t *testing.T) {
+	handler := newDesktopBridge(9417)
+
+	req := httptest.NewRequest(http.MethodPost, "/_shipyard/windows/open?panel=tools", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501 without native controller, got %d", w.Code)
+	}
+}
+
+func TestMacOSWailsGUISmokeProcedureDocumentsNativeCoverage(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+
+	scriptPath := filepath.Join(repoRoot, "scripts", "macos-wails-gui-smoke.sh")
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read smoke script: %v", err)
+	}
+	readme, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		source string
+		needle string
+	}{
+		{"script evidence path", string(script), "reports/gui-smoke"},
+		{"script tray visibility", string(script), "tray icon visibility"},
+		{"script tray toggle", string(script), "Tray click show/toggle behavior"},
+		{"script menu show", string(script), "Show Dashboard"},
+		{"script menu quit", string(script), "Quit"},
+		{"script close to tray", string(script), "close-to-tray"},
+		{"script panel detach", string(script), "Panel detach opens a separate native window"},
+		{"readme command", string(readme), "scripts/macos-wails-gui-smoke.sh"},
+		{"readme evidence path", string(readme), "reports/gui-smoke/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.source, tc.needle) {
+				t.Fatalf("expected %s to contain %q", tc.name, tc.needle)
 			}
 		})
 	}
@@ -438,16 +566,6 @@ func TestRunMultiServer_HeadlessFalse_CallsDesktop(t *testing.T) {
 // desktopApp lifecycle tests
 // ---------------------------------------------------------------------------
 
-func TestDesktopApp_BeforeClose_ReturnsFalse(t *testing.T) {
-	app := &desktopApp{
-		port:       9417,
-		cancelFunc: func() {},
-	}
-	if app.beforeClose(context.Background()) {
-		t.Fatal("expected beforeClose to return false (allow close)")
-	}
-}
-
 func TestDesktopApp_Shutdown_CallsCancel(t *testing.T) {
 	var called atomic.Bool
 	app := &desktopApp{
@@ -455,8 +573,9 @@ func TestDesktopApp_Shutdown_CallsCancel(t *testing.T) {
 		cancelFunc: func() {
 			called.Store(true)
 		},
+		layout: defaultDesktopWindowLayout(),
 	}
-	app.shutdown(context.Background())
+	app.shutdown()
 	if !called.Load() {
 		t.Fatal("expected shutdown to call cancelFunc")
 	}
@@ -467,8 +586,9 @@ func TestDesktopApp_Shutdown_NilCancel(t *testing.T) {
 	app := &desktopApp{
 		port:       9417,
 		cancelFunc: nil,
+		layout:     defaultDesktopWindowLayout(),
 	}
-	app.shutdown(context.Background()) // should not panic
+	app.shutdown() // should not panic
 }
 
 // ---------------------------------------------------------------------------
@@ -477,20 +597,71 @@ func TestDesktopApp_Shutdown_NilCancel(t *testing.T) {
 
 func TestDesktopApp_MultipleCancelCalls_NoPanic(t *testing.T) {
 	// context.CancelFunc is idempotent — calling it multiple times must not panic.
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	app := &desktopApp{
 		port:       9417,
 		cancelFunc: cancel,
+		layout:     defaultDesktopWindowLayout(),
 	}
 
 	// Call shutdown multiple times (simulates both shutdown callback and runDesktop's deferred cancel)
-	app.shutdown(ctx)
-	app.shutdown(ctx)
+	app.shutdown()
+	app.shutdown()
 	cancel() // one more direct call
 
 	// If we get here without panic, the test passes.
+}
+
+func TestDesktopWindowLayout_SaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "window-layout.json")
+	layout := desktopWindowLayout{
+		Main: desktopWindowBounds{X: 10, Y: 20, Width: 1280, Height: 800},
+		Panels: map[string]desktopPanelLayout{
+			"tools": {
+				Detached: true,
+				Bounds:   desktopWindowBounds{X: 30, Y: 40, Width: 1100, Height: 720},
+			},
+		},
+	}
+
+	if err := saveDesktopWindowLayout(path, layout); err != nil {
+		t.Fatalf("saveDesktopWindowLayout: %v", err)
+	}
+	got, err := loadDesktopWindowLayout(path)
+	if err != nil {
+		t.Fatalf("loadDesktopWindowLayout: %v", err)
+	}
+
+	if got.Main != layout.Main {
+		t.Fatalf("expected main bounds %#v, got %#v", layout.Main, got.Main)
+	}
+	if !got.Panels["tools"].Detached {
+		t.Fatal("expected tools detached state to persist")
+	}
+	if got.Panels["tools"].Bounds != layout.Panels["tools"].Bounds {
+		t.Fatalf("expected tools bounds %#v, got %#v", layout.Panels["tools"].Bounds, got.Panels["tools"].Bounds)
+	}
+}
+
+func TestDesktopWindowLayout_NormalizesMissingBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "window-layout.json")
+	if err := os.WriteFile(path, []byte(`{"main":{},"panels":{"history":{"detached":true,"bounds":{}}}}`), 0o600); err != nil {
+		t.Fatalf("write layout fixture: %v", err)
+	}
+
+	got, err := loadDesktopWindowLayout(path)
+	if err != nil {
+		t.Fatalf("loadDesktopWindowLayout: %v", err)
+	}
+
+	if got.Main.Width != 1280 || got.Main.Height != 800 {
+		t.Fatalf("expected default main size, got %#v", got.Main)
+	}
+	if got.Panels["history"].Bounds.Width != 0 {
+		t.Fatalf("panel bounds should stay as persisted until window creation normalizes them, got %#v", got.Panels["history"].Bounds)
+	}
 }
 
 func TestRunProxy_HeadlessFalse_DesktopReceivesCorrectCancel(t *testing.T) {

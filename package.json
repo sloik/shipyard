@@ -1,0 +1,12 @@
+{
+  "name": "shipyard-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Headless-browser smoke harness for the Shipyard Tool Browser (SPEC-BUG-149). Not a shipped package; drives the system Chrome via playwright-core.",
+  "scripts": {
+    "smoke": "node test/smoke/tool_browser_smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

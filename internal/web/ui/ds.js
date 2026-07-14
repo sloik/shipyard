@@ -75,8 +75,7 @@
     var el = document.createElement('div');
     el.className = 'toast toast-' + type;
 
-    var icons = { success: '\u2713', error: '\u2716', info: '\u24D8' };
-    el.textContent = (icons[type] || '') + ' ' + message;
+    el.textContent = message;
 
     el.addEventListener('click', function() { dismiss(el); });
 
@@ -303,16 +302,6 @@
   }
 
   /* ========================================================================
-     Tool Group Collapse
-     ======================================================================== */
-
-  function handleToolGroupClick(header) {
-    var group = header.closest('.tool-group');
-    if (!group) return;
-    group.classList.toggle('is-collapsed');
-  }
-
-  /* ========================================================================
      JSON Filter
      ======================================================================== */
 
@@ -442,12 +431,9 @@
       return;
     }
 
-    // Tool group header
-    var toolHeader = target.closest('.tool-group-header');
-    if (toolHeader) {
-      handleToolGroupClick(toolHeader);
-      return;
-    }
+    // Tool group header collapse is owned by index.html's #tool-groups handler
+    // (it toggles is-collapsed AND persists per-server state; SPEC-BUG-145/147).
+    // ds.js must NOT also toggle here or the two handlers cancel out (SPEC-BUG-148).
 
     // Theme toggle
     var themeBtn = target.closest('.theme-toggle');

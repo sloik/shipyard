@@ -1,0 +1,35 @@
+version: '3'
+
+vars:
+  BIN_DIR: bin
+
+tasks:
+  build:
+    summary: Builds the Wails v3 desktop-capable Shipyard binary.
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags="-s -w" -o {{.BIN_DIR}}/shipyard ./cmd/shipyard
+
+  build:server:
+    summary: Builds a headless Shipyard binary that serves the dashboard over HTTP.
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -tags server -ldflags="-s -w" -o {{.BIN_DIR}}/shipyard-server ./cmd/shipyard
+
+  darwin:package:
+    summary: Packages the Wails v3 macOS desktop binary as bin/Shipyard.app.
+    deps: [build]
+    cmds:
+      - scripts/package-macos-app.sh --skip-build
+
+  darwin:sign:
+    summary: Packages and signs bin/Shipyard.app with a Developer ID identity.
+    deps: [darwin:package]
+    cmds:
+      - scripts/sign-macos-app.sh
+
+  darwin:sign:notarize:
+    summary: Packages, signs, notarizes, and staples bin/Shipyard.app.
+    deps: [darwin:package]
+    cmds:
+      - scripts/sign-macos-app.sh --notarize

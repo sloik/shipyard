@@ -49,6 +49,90 @@ func TestInsert_BasicEntry(t *testing.T) {
 	}
 }
 
+func TestPerformanceRollups_PersistAcrossRestartAndQueryWindow(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	s, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	base := time.Now().UTC().Add(-10 * time.Minute)
+	if err := s.UpsertPerformanceRollup(PerformanceRollupSample{
+		Timestamp:          base,
+		HTTPDurationMs:     25,
+		RPCDurationMs:      40,
+		FrontendDurationMs: 15,
+		ActiveDOMRows:      123,
+		Goroutines:         9,
+		HeapAllocBytes:     2048,
+		DBFileSizeBytes:    4096,
+		TrafficRows:        7,
+		SchemaSnapshotRows: 3,
+		AccessLogRows:      5,
+	}); err != nil {
+		t.Fatalf("UpsertPerformanceRollup: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("reopen NewStore: %v", err)
+	}
+	defer reopened.Close()
+
+	rows, err := reopened.ListPerformanceRollups(base.Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatalf("ListPerformanceRollups: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.HTTPCount != 1 || got.RPCCount != 1 || got.FrontendCount != 1 {
+		t.Fatalf("unexpected rollup counts: %+v", got)
+	}
+	if got.ActiveDOMRows != 123 || got.TrafficRows != 7 || got.SchemaSnapshotRows != 3 {
+		t.Fatalf("unexpected rollup stats: %+v", got)
+	}
+}
+
+func TestPerformanceRollups_RetentionBounded(t *testing.T) {
+	s := newTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		if err := s.UpsertPerformanceRollup(PerformanceRollupSample{
+			Timestamp:      start.Add(time.Duration(i) * time.Minute),
+			HTTPDurationMs: int64(i + 1),
+		}); err != nil {
+			t.Fatalf("UpsertPerformanceRollup %d: %v", i, err)
+		}
+	}
+	if err := s.EnforcePerformanceRollupRetention(3); err != nil {
+		t.Fatalf("EnforcePerformanceRollupRetention: %v", err)
+	}
+	count, err := s.PerformanceRollupCount()
+	if err != nil {
+		t.Fatalf("PerformanceRollupCount: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("rollup count = %d, want 3", count)
+	}
+	rows, err := s.ListPerformanceRollups(time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("ListPerformanceRollups: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	if !rows[0].BucketStart.Equal(start.Add(2 * time.Minute).Truncate(PerformanceRollupBucket)) {
+		t.Fatalf("oldest retained bucket = %s, want %s", rows[0].BucketStart, start.Add(2*time.Minute).Truncate(PerformanceRollupBucket))
+	}
+}
+
 func TestInsert_RequestResponseCorrelation(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now()
@@ -1378,13 +1462,13 @@ func TestExportSession(t *testing.T) {
 		Timestamp: time.Now(), Direction: DirectionClientToServer,
 		ServerName: "srv", Method: "tools/call",
 		Payload: `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"read_file"}}`,
-		Status: "pending",
+		Status:  "pending",
 	}, id)
 	s.InsertWithSession(&TrafficEntry{
 		Timestamp: time.Now().Add(50 * time.Millisecond), Direction: DirectionServerToClient,
 		ServerName: "srv", Method: "tools/call",
 		Payload: `{"jsonrpc":"2.0","id":1,"result":{"content":"hello"}}`,
-		Status: "ok", IsResponse: true,
+		Status:  "ok", IsResponse: true,
 	}, id)
 
 	s.StopSession(id)

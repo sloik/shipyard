@@ -79,6 +79,28 @@ var runManagedProxy = func(ctx context.Context, mgr *proxy.Manager, name, comman
 var runProxyFn = runProxy
 var runMultiServerFn = runMultiServer
 var runNoServersFn = runNoServers
+var acquireDesktopInstanceLockFn = acquireDesktopInstanceLock
+
+var errDesktopInstanceAlreadyRunning = fmt.Errorf("desktop instance already running")
+
+func acquireDesktopInstanceLock(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	file, err := os.OpenFile(filepath.Join(dir, "shipyard-desktop.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open desktop lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, errDesktopInstanceAlreadyRunning
+	}
+	release := func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}
+	return release, nil
+}
 
 // dataDir returns a writable directory for Shipyard's database and logs.
 // On macOS .app launch, cwd is "/" (read-only), so we use a platform-appropriate
@@ -121,6 +143,7 @@ type Config struct {
 	Web         WebConfig               `json:"web"`
 	Auth        AuthConfig              `json:"auth"`
 	Secrets     SecretsConfig           `json:"secrets"`
+	ConfigPath  string                  `json:"-"`
 }
 
 // ToolConfig holds per-tool configuration within a server config.
@@ -175,6 +198,36 @@ func resolveEnv(ctx context.Context, env map[string]string, reg *secrets.Registr
 	return resolved
 }
 
+func shipyardBuildInfo() web.DiagnosticBuildInfo {
+	return web.DiagnosticBuildInfo{
+		Version:     version,
+		GitRevision: commit,
+	}
+}
+
+func shipyardConfigShape(cfg *Config, auth AuthConfig) web.DiagnosticConfigShape {
+	shape := web.DiagnosticConfigShape{
+		HasConfig:   cfg != nil,
+		AuthEnabled: auth.Enabled,
+	}
+	if cfg == nil {
+		return shape
+	}
+	shape.SecretsBackend = cfg.Secrets.Backend
+	shape.ServerCount = len(cfg.Servers)
+	shape.Servers = make(map[string]web.DiagnosticServerShape, len(cfg.Servers))
+	for name, server := range cfg.Servers {
+		shape.Servers[name] = web.DiagnosticServerShape{
+			CommandPresent: server.Command != "",
+			ArgsCount:      len(server.Args),
+			EnvKeyCount:    len(server.Env),
+			CwdPresent:     server.Cwd != "",
+			ToolCount:      len(server.Tools),
+		}
+	}
+	return shape
+}
+
 func (c *Config) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Servers json.RawMessage `json:"servers"`
@@ -223,7 +276,7 @@ func main() {
 	configPath := global.String("config", "", "path to JSON config file")
 	schemaPoll := global.Duration("schema-poll", 60*time.Second, "schema change polling interval")
 	showVersion := global.Bool("version", false, "print version and exit")
-	headless := global.Bool("headless", false, "run without desktop window (CLI/server mode)")
+	headless := global.Bool("headless", defaultHeadless(), "run without desktop window (CLI/server mode)")
 
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "usage: shipyard wrap [--name NAME] [--port PORT] -- <command> [args...]")
@@ -287,11 +340,26 @@ func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
 		exitFn(1)
 		return
 	}
+	cfg.ConfigPath = configPath
 
 	if len(cfg.ServerOrder) == 0 {
 		slog.Error("config does not define any servers", "path", configPath)
 		exitFn(1)
 		return
+	}
+
+	if !headless {
+		releaseLock, err := acquireDesktopInstanceLockFn(dataDirFn())
+		if err != nil {
+			if err == errDesktopInstanceAlreadyRunning {
+				slog.Info("Shipyard desktop instance already running; exiting duplicate process")
+				return
+			}
+			slog.Error("failed to acquire desktop instance lock", "error", err)
+			exitFn(1)
+			return
+		}
+		defer releaseLock()
 	}
 
 	port := cfg.Web.Port
@@ -380,6 +448,7 @@ func runProxy(name string, port int, command string, args []string, env map[stri
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(nil, nil, false) // auth not configured in wrap mode
+	srv.SetDiagnostics(shipyardBuildInfo(), "", shipyardConfigShape(nil, AuthConfig{}))
 
 	// Capture function variable values at goroutine-creation time so that test
 	// helpers restoring these variables after runProxy returns cannot race with
@@ -511,6 +580,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 	srv.SetToolLogLevels(toolLogLevels)
 	srv.SetSettingsStore(web.NewSettingsStore(cfg.Secrets.Backend))
 	srv.SetRawServerEnvs(rawServerEnvs)
+	srv.SetDiagnostics(shipyardBuildInfo(), cfg.ConfigPath, shipyardConfigShape(cfg, cfg.Auth))
 
 	// Capture function variable value at goroutine-creation time.
 	webServerFn := startWebServer
@@ -658,6 +728,7 @@ func runNoServers(port int, headless bool) {
 	srv.SetProxyManager(mgr)
 	srv.SetGatewayPolicyStore(gatewayStore)
 	srv.SetAuthStore(nil, nil, false) // no config file in no-servers mode
+	srv.SetDiagnostics(shipyardBuildInfo(), "", shipyardConfigShape(nil, AuthConfig{}))
 
 	// Capture function variable value at goroutine-creation time.
 	webServerFn := startWebServer

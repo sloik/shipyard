@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script="scripts/macos-wails-gui-smoke.sh"
+
+test -f "$script"
+test -x "$script"
+
+grep -q "reports/gui-smoke" "$script"
+grep -q "tray icon visibility" "$script"
+grep -q "Tray click show/toggle behavior" "$script"
+grep -q "Show Dashboard" "$script"
+grep -q "Quit" "$script"
+grep -q "close-to-tray" "$script"
+grep -q "Panel detach opens a separate native window" "$script"
+
+zsh -n "$script"

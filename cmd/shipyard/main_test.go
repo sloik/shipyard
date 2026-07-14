@@ -153,6 +153,37 @@ func TestMain_ConfigMissingCommand(t *testing.T) {
 	}
 }
 
+func TestAcquireDesktopInstanceLockRejectsSecondHolder(t *testing.T) {
+	dir := t.TempDir()
+
+	release, err := acquireDesktopInstanceLock(dir)
+	if err != nil {
+		t.Fatalf("first acquireDesktopInstanceLock: %v", err)
+	}
+	defer release()
+
+	_, err = acquireDesktopInstanceLock(dir)
+	if err != errDesktopInstanceAlreadyRunning {
+		t.Fatalf("expected errDesktopInstanceAlreadyRunning, got %v", err)
+	}
+}
+
+func TestAcquireDesktopInstanceLockAllowsAfterRelease(t *testing.T) {
+	dir := t.TempDir()
+
+	release, err := acquireDesktopInstanceLock(dir)
+	if err != nil {
+		t.Fatalf("first acquireDesktopInstanceLock: %v", err)
+	}
+	release()
+
+	release, err = acquireDesktopInstanceLock(dir)
+	if err != nil {
+		t.Fatalf("second acquireDesktopInstanceLock after release: %v", err)
+	}
+	release()
+}
+
 func TestRunWrap_ParsesFlagsAndSeparator(t *testing.T) {
 	dir := t.TempDir()
 	code, output := runShipyardMainInDir(t, dir, "--headless", "wrap", "--name", "alpha", "--port", "0", "--", "sh", "-c", "exit 0")

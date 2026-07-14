@@ -1,6 +1,7 @@
 package web
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,60 @@ func TestSPECBUG016_DesktopBridgeConfigBootstrap(t *testing.T) {
 	for _, needle := range requiredSnippets {
 		if !strings.Contains(content, needle) {
 			t.Errorf("SPEC-BUG-016 FAIL: expected %q in desktop bridge bootstrap", needle)
+		}
+	}
+}
+
+func TestSPEC018_PanelTabsExposeNativeDetachMenu(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	requiredSnippets := []string{
+		`id="panel-context-menu"`,
+		`id="panel-context-open"`,
+		`Open in New Window`,
+		`function isDetachablePanel(route)`,
+		`return route === 'timeline' || route === 'tools' || route === 'history' || route === 'servers';`,
+		`tabNav.addEventListener('contextmenu'`,
+		`function openPanelInNewWindow(route)`,
+		`if (!config.native_windows) return null;`,
+		`nativeFetch('/_shipyard/windows/open?panel=' + encodeURIComponent(route), { method: 'POST' })`,
+	}
+	for _, needle := range requiredSnippets {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-018 FAIL: expected %q in native detach UI", needle)
+		}
+	}
+}
+
+func TestSPEC018_DesktopBridgeFetchBypassesAllNativeEndpoints(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	if !strings.Contains(content, "input.indexOf('/_shipyard/') === 0") {
+		t.Fatal("SPEC-018 FAIL: appFetch should bypass all /_shipyard/ native bridge endpoints")
+	}
+	if strings.Contains(content, "input.indexOf('/_shipyard/desktop-config') === 0") {
+		t.Fatal("SPEC-018 FAIL: appFetch must not special-case only desktop-config")
+	}
+}
+
+func TestSPEC018_ContextMenuCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	for _, needle := range []string{".context-menu {", "position: fixed;", ".context-menu.is-active {", ".context-menu button:hover"} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-018 FAIL: expected context menu CSS %q", needle)
 		}
 	}
 }
@@ -2838,6 +2893,90 @@ func TestSPECBUG045_IconsAsSeparateDOMElements(t *testing.T) {
 	}
 }
 
+func TestSPECBUG132_NoVisibleDashboardIconEntities(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+
+	content := string(html)
+	banned := []string{
+		"&#43;", "&#8595;", "&#8681;", "&#9632;", "&#9654;", "&#9660;",
+		"&#9881;", "&#9888;", "&#10005;", "&#128202;", "&#128269;",
+		"&#128273;", "&#128274;", "&#128308;", "&#128737;",
+	}
+	for _, entity := range banned {
+		if strings.Contains(content, entity) {
+			t.Errorf("SPEC-BUG-132 AC1/AC6 FAIL: visible icon entity %s still appears in index.html", entity)
+		}
+	}
+
+	allowedTextEntities := map[string]bool{
+		"&#10;":   true, // textarea newline placeholder
+		"&#123;":  true, // literal ${VAR} documentation
+		"&#125;":  true, // literal ${VAR} documentation
+		"&#8592;": true, // request/response direction text
+		"&#8594;": true, // request/response direction text and prose link arrow
+	}
+	entityPattern := regexp.MustCompile(`&#[0-9]+;`)
+	for _, entity := range entityPattern.FindAllString(content, -1) {
+		if !allowedTextEntities[entity] {
+			t.Errorf("SPEC-BUG-132 AC6 FAIL: unapproved HTML entity %s in index.html", entity)
+		}
+	}
+
+	dsContent := string(js)
+	for _, token := range []string{`'\u2713'`, `'\u2716'`, `'\u24D8'`} {
+		if strings.Contains(dsContent, token) {
+			t.Errorf("SPEC-BUG-132 AC5 FAIL: DS.toast() still uses Unicode icon token %s", token)
+		}
+	}
+	if strings.Contains(dsContent, "icons[type]") {
+		t.Error("SPEC-BUG-132 AC5 FAIL: DS.toast() should not prefix toast text with icon lookup output")
+	}
+}
+
+func TestSPECBUG132_LucideIconReplacementsPresent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"function iconAlertTriangle",
+		"function iconPlus",
+		"function iconDownload",
+		"function iconSearch",
+		"function iconChartLine",
+		"function iconShield",
+		"function iconLock",
+		"function iconKey",
+		"function iconCircle",
+		"function iconChevronDown",
+		"function iconArrowDown",
+		"function iconArrowUp",
+		"setButtonIconLabel(toolExecuteBtn, iconPlay(12",
+		"sessionRecordIcon.innerHTML = iconCircle(12",
+		"sessionRecordIcon.innerHTML = iconSquare(12",
+		"renderSortHeaderLabel(h,",
+		`id="history-no-results"`,
+		`id="sessions-empty"`,
+		`id="perf-empty"`,
+		`id="schema-empty"`,
+		`id="tokens-empty"`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-132 FAIL: expected Lucide icon replacement marker %q", needle)
+		}
+	}
+}
+
 // TestSPECBUG045_StatsDualColorLabelValue verifies that each stat uses two
 // <span> elements: label in var(--text-muted) and value in accent color (AC 8).
 func TestSPECBUG045_StatsDualColorLabelValue(t *testing.T) {
@@ -3055,6 +3194,1461 @@ func TestSPECBUG103_RenderServerCardsShowsNameStatusTools(t *testing.T) {
 	// AC2: child server card renders server name via escapeHtml(s.name)
 	if !strings.Contains(body, "escapeHtml(s.name)") {
 		t.Error("SPEC-BUG-103 AC2 FAIL: expected 'escapeHtml(s.name)' in child server card rendering")
+	}
+}
+
+func TestSPECBUG131_RenderServerCardsUsesAPIOrderWithoutSorting(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	loadIdx := strings.Index(content, "function loadServers()")
+	if loadIdx == -1 {
+		t.Fatal("SPEC-BUG-131 FAIL: expected loadServers() function in index.html")
+	}
+	loadBody := content[loadIdx:]
+	if endIdx := strings.Index(loadBody[1:], "\n  function renderServerCards"); endIdx > 0 {
+		loadBody = loadBody[:endIdx+1]
+	}
+	if !strings.Contains(loadBody, "renderServerCards(servers)") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: loadServers() must pass API response order directly to renderServerCards")
+	}
+
+	body := renderServerCardsJS(t)
+	if strings.Contains(body, ".sort(") || strings.Contains(body, "sort(function") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: renderServerCards() must not apply a second client-side sort")
+	}
+	if !strings.Contains(body, "for (var i = 0; i < servers.length; i++)") {
+		t.Fatal("SPEC-BUG-131 AC3 FAIL: renderServerCards() must render by iterating the API array order")
+	}
+}
+
+func TestSPECBUG134_FrontendTelemetryHooksMajorLoadAndRenderPaths(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"var clientTelemetrySamples = [];",
+		"function recordClientTelemetry(name, start, meta)",
+		"window.shipyardClientTelemetry = clientTelemetrySamples;",
+		"var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';",
+		"recordClientTelemetry('servers.load'",
+		"recordClientTelemetry('servers.render'",
+		"recordClientTelemetry('timeline.load'",
+		"recordClientTelemetry('history.load'",
+		"clientTelemetryMaxSamples",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-134 frontend telemetry missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG135_ToolsUIUsesCachedLoadAndShowsSnapshotState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="tool-refresh-btn"`,
+		"function loadTools(forceRefresh)",
+		"var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';",
+		"if (forceRefresh) toolsURL += '&force_refresh=1';",
+		"cache_status: data.cache_status || ''",
+		"status_message: data.status_message || ''",
+		"Snapshot missing",
+		"Snapshot error",
+		"Cached",
+		"loadTools(true);",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-135 UI missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG137_AppHealthPerformanceDashboardAndDebugBundleUI(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="perf-app-health"`,
+		`id="perf-health-grid"`,
+		`id="perf-health-table-body"`,
+		`id="perf-debug-bundle-btn"`,
+		`/api/performance/history?window=`,
+		`/api/performance/debug-bundle`,
+		`function loadAppHealthPerformance(rangeVal)`,
+		`function renderAppHealthPerformance(data)`,
+		`active_dom_rows`,
+		`/api/performance/frontend`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-137 app health UI missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG136_ServerPollingRouteAndVisibilityAware(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"function startServerStatePolling()",
+		"function stopServerStatePolling()",
+		"function shouldServerStatePoll()",
+		"function syncServerStatePolling()",
+		"return getRoute() === 'servers' && document.visibilityState !== 'hidden';",
+		"document.addEventListener('visibilitychange', function() { syncServerStatePolling(); });",
+		"clearInterval(serverStateTimer);",
+		"serverStateTimer = null;",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-136 AC1/R1/R2 FAIL: expected %q", needle)
+		}
+	}
+
+	initIdx := strings.Index(content, "// Load initial data")
+	if initIdx == -1 {
+		t.Fatal("SPEC-BUG-136 FAIL: expected init section")
+	}
+	initBody := content[initIdx:]
+	if endIdx := strings.Index(initBody, "// Check schema alert banner"); endIdx > 0 {
+		initBody = initBody[:endIdx]
+	}
+	if !strings.Contains(initBody, "syncServerStatePolling();") {
+		t.Error("SPEC-BUG-136 AC1 FAIL: bootstrap should sync polling state through route/visibility guard")
+	}
+	if strings.Contains(initBody, "startServerStatePolling();") {
+		t.Error("SPEC-BUG-136 AC1 FAIL: bootstrap should not unconditionally start server polling")
+	}
+}
+
+func TestSPECBUG136_TimelineDOMAndTimestampBudgets(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		"var timelineActiveRowBudget = 500;",
+		"function enforceTimelineRowBudget(trigger)",
+		"trafficBody.querySelectorAll('.table-row:not([data-detail-for])')",
+		"i >= timelineActiveRowBudget",
+		"data-detail-for",
+		"recordClientTelemetry('timeline.dom.prune'",
+		"enforceTimelineRowBudget('load');",
+		"enforceTimelineRowBudget('live');",
+		"recordClientTelemetry('timeline.live.insert'",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-136 AC2/R3 FAIL: expected %q", needle)
+		}
+	}
+
+	timestampIdx := strings.Index(content, "// Periodically refresh relative timestamps")
+	if timestampIdx == -1 {
+		t.Fatal("SPEC-BUG-136 AC3 FAIL: timestamp refresh block not found")
+	}
+	timestampBody := content[timestampIdx:]
+	for _, needle := range []string{
+		"var limit = Math.min(timestamps.length, timelineActiveRowBudget);",
+		"for (var i = 0; i < limit; i++)",
+		"recordClientTelemetry('timeline.timestamps.refresh'",
+		"scanned: limit",
+		"budget: timelineActiveRowBudget",
+	} {
+		if !strings.Contains(timestampBody, needle) {
+			t.Errorf("SPEC-BUG-136 AC3/R4 FAIL: expected %q in timestamp refresh block", needle)
+		}
+	}
+}
+
+func TestSPECBUG138_TrafficExpandedRowShellStructure(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-138 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if !strings.Contains(detailBody, `class="detail-panel traffic-detail-panel is-visible"`) {
+		t.Fatal("SPEC-BUG-138 AC2 FAIL: traffic details should use the dedicated expanded-row shell class")
+	}
+	if !strings.Contains(detailBody, `class="traffic-detail-meta"`) {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: traffic metadata should use a dedicated metadata element")
+	}
+	if strings.Contains(detailBody, `html += '<div class="table-row">'`) {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: traffic metadata must not render as a nested table-row")
+	}
+}
+
+func TestSPECBUG138_TrafficExpandedRowShellCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	rowBlock := regexp.MustCompile(`(?s)\.table-row\.row-expanded\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(rowBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC1 FAIL: .table-row.row-expanded CSS block not found")
+	}
+	if !strings.Contains(rowBlock[1], "background: var(--row-selected);") {
+		t.Error("SPEC-BUG-138 AC1/AC2 FAIL: expanded row should use the selected row surface")
+	}
+	if !strings.Contains(rowBlock[1], "border-left: 3px solid var(--accent-fg);") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row should use a 3px left accent")
+	}
+	if strings.Contains(rowBlock[1], "border-left: 2px") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row must not keep the 2px fallback left border")
+	}
+	if !strings.Contains(rowBlock[1], "border-bottom-color: var(--accent-fg);") {
+		t.Error("SPEC-BUG-138 AC1 FAIL: expanded row should expose the accent bottom stroke")
+	}
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-detail-panel\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC2/AC4 FAIL: .traffic-detail-panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--row-selected);",
+		"border-top: 0;",
+		"border-left: 3px solid var(--accent-fg);",
+		"padding: 0 16px 12px 16px;",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-138 AC2/AC4 FAIL: traffic detail panel missing %q", needle)
+		}
+	}
+	visiblePanelBlock := regexp.MustCompile(`(?s)\.row-expanded \+ \.traffic-detail-panel,\s*\.traffic-detail-panel\.is-visible\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(visiblePanelBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC2 FAIL: visible traffic detail panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"flex-direction: column;",
+		"gap: 6px;",
+	} {
+		if !strings.Contains(visiblePanelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-138 AC2 FAIL: visible traffic detail panel missing %q", needle)
+		}
+	}
+	if strings.Contains(panelBlock[1], "padding: 12px") {
+		t.Error("SPEC-BUG-138 AC4 FAIL: traffic detail panel must not use generic 12px padding")
+	}
+	if strings.Contains(panelBlock[1], "border-top: 1px") {
+		t.Error("SPEC-BUG-138 AC4 FAIL: traffic detail panel must not use the generic top border")
+	}
+
+	metaBlock := regexp.MustCompile(`(?s)\.traffic-detail-meta\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(metaBlock) != 2 {
+		t.Fatal("SPEC-BUG-138 AC3 FAIL: .traffic-detail-meta CSS block not found")
+	}
+	for _, forbidden := range []string{"cursor:", "border-bottom:", "[data-col]"} {
+		if strings.Contains(metaBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-138 AC3 FAIL: traffic metadata should not inherit table-row behavior %q", forbidden)
+		}
+	}
+}
+
+func TestSPECBUG139_TrafficDetailMetaAndSharedFilterStructure(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-139 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	metaIdx := strings.Index(detailBody, `class="traffic-detail-meta"`)
+	if metaIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC1 FAIL: metadata should use a dedicated traffic-detail-meta bar")
+	}
+	filterIdx := strings.Index(detailBody, `class="json-filter json-filter-bar"`)
+	if filterIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC2 FAIL: shared filter should use the composed json-filter-bar class")
+	}
+	metaBlock := detailBody[metaIdx:filterIdx]
+	if strings.Contains(metaBlock, "table-row") {
+		t.Fatal("SPEC-BUG-139 AC1/R5 FAIL: metadata bar must not reuse table-row structure")
+	}
+
+	required := []string{
+		`class="json-filter json-filter-bar" id="combined-filter-`,
+		`class="json-filter-input"`,
+		`iconSearch(14, 'var(--text-muted)')`,
+		`placeholder="Filter JSON..."`,
+		`class="mode-toggle json-filter-mode"`,
+		`data-mode="text">Text</button>`,
+		`data-mode="jq">JQ</button>`,
+		`class="json-filter-spacer"`,
+		`class="json-filter-match-count" hidden`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-139 AC2/R2/R3 FAIL: expected shared filter structure %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-filter panel-filter"`) != 2 {
+		t.Fatal("SPEC-BUG-139 AC5 FAIL: request and response panel filters should remain separate from the shared filter")
+	}
+
+	order := []string{
+		`class="json-filter-input"`,
+		`class="mode-toggle json-filter-mode"`,
+		`class="json-filter-spacer"`,
+		`class="json-filter-match-count" hidden`,
+	}
+	last := -1
+	for _, needle := range order {
+		idx := strings.Index(detailBody, needle)
+		if idx == -1 {
+			continue
+		}
+		if idx <= last {
+			t.Fatalf("SPEC-BUG-139 AC2 FAIL: shared filter element %q appears out of order", needle)
+		}
+		last = idx
+	}
+}
+
+func TestSPECBUG139_TrafficDetailMetaAndSharedFilterCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	metaBlock := regexp.MustCompile(`(?s)\.traffic-detail-meta\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(metaBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC1 FAIL: .traffic-detail-meta CSS block not found")
+	}
+	for _, needle := range []string{"gap: 16px;", "padding: 8px 0;"} {
+		if !strings.Contains(metaBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC1 FAIL: metadata bar missing UX-002 spacing %q", needle)
+		}
+	}
+	for _, forbidden := range []string{"cursor:", "border-bottom:"} {
+		if strings.Contains(metaBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-139 AC1 FAIL: metadata bar must not behave like a table row: %q", forbidden)
+		}
+	}
+
+	barBlock := regexp.MustCompile(`(?s)\.json-filter-bar\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(barBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC2 FAIL: .json-filter-bar CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "align-items: center;", "gap: 8px;", "background: transparent;", "border: 0;", "padding: 0;"} {
+		if !strings.Contains(barBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC2 FAIL: shared filter bar missing %q", needle)
+		}
+	}
+
+	inputBlock := regexp.MustCompile(`(?s)\.json-filter-input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(inputBlock) != 2 {
+		t.Fatal("SPEC-BUG-139 AC2/AC3 FAIL: .json-filter-input CSS block not found")
+	}
+	for _, needle := range []string{"width: 280px;", "background: #0d1117;", "border: 1px solid #30363d;", "border-radius: 6px;", "padding: 5px 10px;"} {
+		if !strings.Contains(inputBlock[1], needle) {
+			t.Errorf("SPEC-BUG-139 AC2/AC3 FAIL: input capsule missing %q", needle)
+		}
+	}
+	if !strings.Contains(content, ".json-filter-spacer {\n  flex: 1;\n}") {
+		t.Error("SPEC-BUG-139 AC2 FAIL: shared filter should include a flex spacer")
+	}
+	if !strings.Contains(content, ".json-filter-match-count[hidden] {\n  display: none;\n}") {
+		t.Error("SPEC-BUG-139 AC2 FAIL: match count slot should be hidden/future-ready")
+	}
+}
+
+func TestSPECBUG139_SharedAndPanelFilterWiringStayIndependent(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	wireIdx := strings.Index(content, "function wireFilterInputs(container)")
+	if wireIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC3/AC4 FAIL: wireFilterInputs not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     Mode Toggle in Detail Panels"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"container.querySelector('.json-filter:not(.panel-filter)')",
+		"container.querySelectorAll('.split-view .json-viewer')",
+		"container.querySelectorAll('.json-filter.panel-filter')",
+		"pf.closest('.traffic-panel')",
+	} {
+		if !strings.Contains(wireBody, needle) && !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: filter wiring missing %q", needle)
+		}
+	}
+
+	modeIdx := strings.Index(content, "trafficBody.addEventListener('click', function(e) {")
+	if modeIdx == -1 {
+		t.Fatal("SPEC-BUG-139 AC3/AC4 FAIL: detail mode-toggle click handler not found")
+	}
+	modeBody := content[modeIdx:]
+	if endIdx := strings.Index(modeBody, "/* ======================================================================\n     Row Click"); endIdx > 0 {
+		modeBody = modeBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"modeBtn.closest('.json-filter')",
+		"filterEl.classList.contains('panel-filter')",
+		"container.querySelectorAll('.split-view .json-viewer')",
+		"filterEl.closest('.traffic-panel')",
+	} {
+		if !strings.Contains(modeBody, needle) && !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-139 AC3/AC4 FAIL: mode toggle behavior missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG140_TrafficPanelFiltersUseUX002StripMarkup(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-140 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	reqIdx := strings.Index(detailBody, `placeholder="Filter request..."`)
+	if reqIdx == -1 {
+		t.Fatal("SPEC-BUG-140 AC1 FAIL: request filter placeholder not found")
+	}
+	resIdx := strings.Index(detailBody, `placeholder="Filter response..."`)
+	if resIdx == -1 {
+		t.Fatal("SPEC-BUG-140 AC2 FAIL: response filter placeholder not found")
+	}
+	if reqIdx >= resIdx {
+		t.Fatal("SPEC-BUG-140 FAIL: request filter should appear before response filter")
+	}
+	reqStart := strings.LastIndex(detailBody[:reqIdx], `class="json-filter panel-filter"`)
+	if reqStart == -1 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: request panel filter strip class not found")
+	}
+	resStart := strings.LastIndex(detailBody[:resIdx], `class="json-filter panel-filter"`)
+	if resStart == -1 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: response panel filter strip class not found")
+	}
+	reqSlice := detailBody[reqStart:resStart]
+	resSlice := detailBody[resStart:]
+
+	for name, slice := range map[string]string{
+		"request":  reqSlice,
+		"response": resSlice,
+	} {
+		for _, needle := range []string{
+			`class="json-filter panel-filter"><label class="panel-filter-input">`,
+			`iconSearch(11, 'var(--text-muted)')`,
+			`class="json-filter-spacer"`,
+			`class="mode-toggle mode-toggle-sm"`,
+			`data-mode="text">Text</button>`,
+			`data-mode="jq">JQ</button>`,
+		} {
+			if !strings.Contains(slice, needle) {
+				t.Errorf("SPEC-BUG-140 %s filter FAIL: expected strip markup %q", name, needle)
+			}
+		}
+
+		iconIdx := strings.Index(slice, `iconSearch(11, 'var(--text-muted)')`)
+		inputIdx := strings.Index(slice, `placeholder="Filter `+name+`..."`)
+		spacerIdx := strings.Index(slice, `class="json-filter-spacer"`)
+		toggleIdx := strings.Index(slice, `class="mode-toggle mode-toggle-sm"`)
+		if !(iconIdx >= 0 && inputIdx > iconIdx && spacerIdx > inputIdx && toggleIdx > spacerIdx) {
+			t.Errorf("SPEC-BUG-140 %s filter FAIL: expected icon, input, spacer, toggle order; got icon=%d input=%d spacer=%d toggle=%d", name, iconIdx, inputIdx, spacerIdx, toggleIdx)
+		}
+	}
+	if strings.Count(detailBody, `iconSearch(11, 'var(--text-muted)')`) != 2 {
+		t.Fatal("SPEC-BUG-140 AC1/AC2 FAIL: expected exactly two 11px panel search icons")
+	}
+	if strings.Count(detailBody, `class="mode-toggle mode-toggle-sm"`) != 2 {
+		t.Fatal("SPEC-BUG-140 AC4 FAIL: expected one compact Text/JQ toggle per panel")
+	}
+}
+
+func TestSPECBUG140_TrafficPanelFiltersUseUX002StripCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	panelBlock := regexp.MustCompile(`(?s)\.json-filter\.panel-filter\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: .json-filter.panel-filter CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 100%;",
+		"gap: 6px;",
+		"background: #161b22;",
+		"border: 0;",
+		"border-bottom: 1px solid #21262d;",
+		"border-radius: 0;",
+		"padding: 4px 8px;",
+		"font-size: var(--font-size-xs);",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-140 AC3 FAIL: panel strip CSS missing %q", needle)
+		}
+	}
+	for _, forbidden := range []string{"border: 1px", "border-radius: var(--radius-s)", "border-radius: var(--radius-m)"} {
+		if strings.Contains(panelBlock[1], forbidden) {
+			t.Errorf("SPEC-BUG-140 AC3 FAIL: panel strip should not be a rounded bordered box: %q", forbidden)
+		}
+	}
+
+	inputBlock := regexp.MustCompile(`(?s)\.panel-filter-input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(inputBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC1/AC2 FAIL: .panel-filter-input CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "align-items: center;", "gap: 6px;", "flex: 1;", "min-width: 0;"} {
+		if !strings.Contains(inputBlock[1], needle) {
+			t.Errorf("SPEC-BUG-140 AC1/AC2 FAIL: panel input CSS missing %q", needle)
+		}
+	}
+
+	panelInputBlock := regexp.MustCompile(`(?s)\.json-filter\.panel-filter input\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelInputBlock) != 2 {
+		t.Fatal("SPEC-BUG-140 AC3 FAIL: panel filter input typography block not found")
+	}
+	if !strings.Contains(panelInputBlock[1], "font-size: var(--font-size-xs);") {
+		t.Error("SPEC-BUG-140 AC3 FAIL: panel placeholder/input typography should be compact")
+	}
+}
+
+func TestSPECBUG142_TrafficSplitCopyControlsAreIconOnly(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-142 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if !strings.Contains(content, "function iconCopy(size, color)") {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: expected Lucide copy icon helper")
+	}
+	if got := strings.Count(detailBody, `aria-label="Copy request payload"`); got != 1 {
+		t.Fatalf("SPEC-BUG-142 AC1/AC3 FAIL: expected one accessible request copy action, got %d", got)
+	}
+	if got := strings.Count(detailBody, `aria-label="Copy response payload"`); got != 2 {
+		t.Fatalf("SPEC-BUG-142 AC2/AC3 FAIL: expected response copy action in success and error branches, got %d", got)
+	}
+	if strings.Contains(detailBody, `>Copy</button>`) {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: traffic panel copy actions must not render visible Copy text")
+	}
+	for _, needle := range []string{
+		`class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy request payload" title="Copy request payload">`,
+		`class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">`,
+		`iconCopy(12, 'var(--text-muted)')`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-142 AC1/AC2/AC3 FAIL: expected traffic copy markup %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG142_TrafficSplitCopyCSSMatchesUX002Icon(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	copyBlock := regexp.MustCompile(`(?s)\.traffic-panel-copy\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(copyBlock) != 2 {
+		t.Fatal("SPEC-BUG-142 AC1/AC2 FAIL: .traffic-panel-copy CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 12px;",
+		"height: 12px;",
+		"min-width: 12px;",
+		"padding: 0;",
+		"gap: 0;",
+		"background: transparent;",
+		"border-color: transparent;",
+		"color: var(--text-muted);",
+	} {
+		if !strings.Contains(copyBlock[1], needle) {
+			t.Errorf("SPEC-BUG-142 AC1/AC2 FAIL: traffic copy CSS missing %q", needle)
+		}
+	}
+	if !strings.Contains(content, ".traffic-panel-copy.btn-copied") {
+		t.Error("SPEC-BUG-142 AC4 FAIL: icon-only copy action should retain copied feedback styling")
+	}
+}
+
+func TestSPECBUG142_CopyWiringStaysScopedToEachPanelPayload(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	wireIdx := strings.Index(content, "function wireCopyButtons(panelEl)")
+	if wireIdx == -1 {
+		t.Fatal("SPEC-BUG-142 AC4 FAIL: wireCopyButtons not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     JSON Filter Logic"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"panelEl.querySelectorAll('.btn-copy')",
+		"btn.closest('.traffic-panel')",
+		"panel.querySelector('.json-viewer')",
+		"btn.setAttribute('data-copy', jv.textContent)",
+	} {
+		if !strings.Contains(wireBody, needle) {
+			t.Errorf("SPEC-BUG-142 AC4 FAIL: copy wiring missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG142_GenericCopyButtonsKeepVisibleLabels(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		`id="tool-response-copy"><svg width="12" height="12"`,
+		`</svg>Copy</button>`,
+		`<button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerCommand) + '">Copy</button>`,
+		`<button class="btn btn-copy btn-sm" type="button" data-copy="' + escapeHtml(addServerConfig) + '">Copy</button>`,
+		`<button class="btn btn-copy btn-sm" id="tok-copy-btn">Copy</button>`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-142 AC5 FAIL: generic copy button label behavior missing %q", needle)
+		}
+	}
+}
+
+func TestFARTSCR001_SharedFilterMatchCountLiveWiring(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"function escapeAttr(s)",
+		"data-raw-json=\"' + escapeAttr(reqEntry.payload) + '\"",
+		"data-raw-json=\"' + escapeAttr(resEntry.payload) + '\"",
+		"function updateSharedFilterMatchCount(matchCount, active, count)",
+		"function applyCombinedFilter(combinedFilter, container)",
+		"combinedFilter.querySelector('[data-match-count]')",
+		"updateSharedFilterMatchCount(matchCount, val && allOk, totalMatches)",
+		"count === 1 ? ' match' : ' matches'",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("FART-SCR-001 AC1/AC3 FAIL: shared match-count live wiring missing %q", needle)
+		}
+	}
+
+	wireIdx := strings.Index(content, "function wireFilterInputs(container)")
+	if wireIdx == -1 {
+		t.Fatal("FART-SCR-001 AC1 FAIL: wireFilterInputs not found")
+	}
+	wireBody := content[wireIdx:]
+	if endIdx := strings.Index(wireBody, "/* ======================================================================\n     Mode Toggle in Detail Panels"); endIdx > 0 {
+		wireBody = wireBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"applyCombinedFilter(combinedFilter, container)",
+		"combinedInput.addEventListener('input', debouncedCombined)",
+	} {
+		if !strings.Contains(wireBody, needle) {
+			t.Errorf("FART-SCR-001 AC1 FAIL: shared input should update match count via %q", needle)
+		}
+	}
+}
+
+func TestFARTSCR001_SharedFilterModeSwitchAndInvalidJQCountState(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"return { ok: false, count: 0 }",
+		"countRenderedJsonLines(viewer)",
+		"matchCount.textContent = ''",
+		"matchCount.hidden = true",
+		"jq error:",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("FART-SCR-001 AC2/AC4 FAIL: invalid/empty count state missing %q", needle)
+		}
+	}
+
+	modeIdx := strings.Index(content, "trafficBody.addEventListener('click', function(e) {")
+	if modeIdx == -1 {
+		t.Fatal("FART-SCR-001 AC2 FAIL: detail mode-toggle click handler not found")
+	}
+	modeBody := content[modeIdx:]
+	if endIdx := strings.Index(modeBody, "/* ======================================================================\n     Row Click"); endIdx > 0 {
+		modeBody = modeBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"applyCombinedFilter(filterEl, container)",
+		"filterEl.classList.contains('panel-filter')",
+	} {
+		if !strings.Contains(modeBody, needle) {
+			t.Errorf("FART-SCR-001 AC2 FAIL: mode switch should recompute shared count without panel-state changes, missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG143_TrafficJSONBodiesAreDedicatedPanelBodies(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-143 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	if strings.Contains(detailBody, `class="code-block"`) {
+		t.Fatal("SPEC-BUG-143 AC1/AC3 FAIL: traffic split-view panels must not render nested generic .code-block wrappers")
+	}
+	if strings.Contains(detailBody, `code-body`) {
+		t.Fatal("SPEC-BUG-143 AC1 FAIL: traffic JSON bodies must not use generic .code-body typography")
+	}
+	for _, needle := range []string{
+		`class="traffic-panel traffic-panel-request"`,
+		`class="traffic-panel traffic-panel-response"`,
+		`class="json-viewer traffic-panel-body" data-raw-json="`,
+		`class="json-viewer traffic-panel-body"><span class="spinner">No request data</span></div>`,
+		`class="json-viewer traffic-panel-body"><span class="spinner">Awaiting response\u2026</span></div>`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-143 AC1/AC4 FAIL: traffic detail body markup missing %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-viewer traffic-panel-body"`) != 5 {
+		t.Fatal("SPEC-BUG-143 AC1 FAIL: request/response success, empty, error, and pending branches should all use traffic-panel-body")
+	}
+}
+
+func TestSPECBUG143_TrafficPanelBodyCSSMatchesUX002Metrics(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-panel\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC1/AC3 FAIL: .traffic-panel CSS block not found")
+	}
+	for _, needle := range []string{"display: flex;", "flex-direction: column;", "overflow: hidden;"} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC3 FAIL: traffic panel CSS missing %q", needle)
+		}
+	}
+
+	bodyBlock := regexp.MustCompile(`(?s)\.traffic-panel-body\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(bodyBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC2 FAIL: .traffic-panel-body CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: #010409;",
+		"border: 0;",
+		"border-radius: 0;",
+		"padding: 4px 10px 4px 6px;",
+		"font-size: 11px;",
+		"line-height: 1.45;",
+		"overflow: auto;",
+		"flex: 1;",
+		"min-height: 0;",
+		"max-height: none;",
+	} {
+		if !strings.Contains(bodyBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC2 FAIL: traffic body CSS missing %q", needle)
+		}
+	}
+
+	lnBlock := regexp.MustCompile(`(?s)\.traffic-panel-body \.json-line \.ln\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(lnBlock) != 2 {
+		t.Fatal("SPEC-BUG-143 AC2 FAIL: traffic line-number CSS block not found")
+	}
+	for _, needle := range []string{"width: 20px;", "min-width: 20px;", "max-width: 20px;", "font-size: 11px;"} {
+		if !strings.Contains(lnBlock[1], needle) {
+			t.Errorf("SPEC-BUG-143 AC2 FAIL: traffic line-number metrics missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG143_FilterAndCopyWiringTargetsTrafficPanelBody(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, section := range []struct {
+		name  string
+		start string
+		end   string
+		want  []string
+		ban   []string
+	}{
+		{
+			name:  "copy",
+			start: "function wireCopyButtons(panelEl)",
+			end:   "/* ======================================================================\n     JSON Filter Logic",
+			want: []string{
+				"btn.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"btn.closest('.code-block')"},
+		},
+		{
+			name:  "filters",
+			start: "function wireFilterInputs(container)",
+			end:   "/* ======================================================================\n     Traffic Detail Resize",
+			want: []string{
+				"pf.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"pf.nextElementSibling"},
+		},
+		{
+			name:  "mode toggles",
+			start: "trafficBody.addEventListener('click', function(e) {",
+			end:   "/* ======================================================================\n     Row Click",
+			want: []string{
+				"filterEl.closest('.traffic-panel')",
+				"panel.querySelector('.json-viewer')",
+			},
+			ban: []string{"var codeBlock = filterEl.nextElementSibling"},
+		},
+	} {
+		idx := strings.Index(content, section.start)
+		if idx == -1 {
+			t.Fatalf("SPEC-BUG-143 %s wiring FAIL: section %q not found", section.name, section.start)
+		}
+		body := content[idx:]
+		if endIdx := strings.Index(body, section.end); endIdx > 0 {
+			body = body[:endIdx]
+		}
+		for _, needle := range section.want {
+			if !strings.Contains(body, needle) {
+				t.Errorf("SPEC-BUG-143 %s wiring FAIL: missing %q", section.name, needle)
+			}
+		}
+		for _, forbidden := range section.ban {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("SPEC-BUG-143 %s wiring FAIL: must not retain generic code-block targeting %q", section.name, forbidden)
+			}
+		}
+	}
+}
+
+func TestSPECBUG141_UITrafficHeadersUseDirectionalPanelClasses(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-141 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	for _, pattern := range []string{
+		`class="[^"]*\bcode-header\b[^"]*"\s+data-req-header`,
+		`class="[^"]*\bcode-header\b[^"]*"\s+data-res-header`,
+	} {
+		if regexp.MustCompile(pattern).MatchString(detailBody) {
+			t.Fatalf("SPEC-BUG-141 AC5 FAIL: traffic request/response headers must not use generic .code-header, matched %q", pattern)
+		}
+	}
+
+	if !strings.Contains(detailBody, `class="traffic-panel-header traffic-panel-header-request" data-req-header`) {
+		t.Fatal("SPEC-BUG-141 AC1 FAIL: request header should use request-specific traffic panel classes")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-label">REQUEST</span>`) {
+		t.Fatal("SPEC-BUG-141 AC1/R1 FAIL: request header should render uppercase REQUEST label with directional label class")
+	}
+	if strings.Count(detailBody, `class="traffic-panel-header traffic-panel-header-response" data-res-header`) != 3 {
+		t.Fatal("SPEC-BUG-141 AC2/AC3/AC4 FAIL: response, error, and pending branches should all keep the response header strip")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-label">RESPONSE</span>`) {
+		t.Fatal("SPEC-BUG-141 AC2/R2 FAIL: response header should render uppercase RESPONSE label with directional label class")
+	}
+	if !strings.Contains(detailBody, `<span class="traffic-panel-title"><span class="traffic-panel-label">RESPONSE</span><span class="badge badge-error">ERROR</span></span>`) {
+		t.Fatal("SPEC-BUG-141 AC3/R3 FAIL: error response should preserve response panel header and surface error status")
+	}
+	if !strings.Contains(detailBody, `Awaiting response\u2026`) {
+		t.Fatal("SPEC-BUG-141 AC4/R4 FAIL: pending response should keep awaiting-state body text")
+	}
+}
+
+func TestSPECBUG141_UITrafficHeaderDirectionalCSS(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	baseBlock := regexp.MustCompile(`(?s)\.traffic-panel-header\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(baseBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC1/AC2 FAIL: .traffic-panel-header CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"justify-content: space-between;",
+		"padding: 6px 10px;",
+		"font-family: var(--font-mono);",
+		"font-size: var(--font-size-xs);",
+		"font-weight: 700;",
+		"text-transform: uppercase;",
+	} {
+		if !strings.Contains(baseBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC1/AC2 FAIL: directional header base CSS missing %q", needle)
+		}
+	}
+
+	reqBlock := regexp.MustCompile(`(?s)\.traffic-panel-header-request\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(reqBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC1 FAIL: .traffic-panel-header-request CSS block not found")
+	}
+	for _, needle := range []string{"background: var(--traffic-req-bg);", "color: var(--traffic-req-fg);"} {
+		if !strings.Contains(reqBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC1/R1 FAIL: request header CSS missing %q", needle)
+		}
+	}
+
+	resBlock := regexp.MustCompile(`(?s)\.traffic-panel-header-response\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(resBlock) != 2 {
+		t.Fatal("SPEC-BUG-141 AC2 FAIL: .traffic-panel-header-response CSS block not found")
+	}
+	for _, needle := range []string{"background: var(--traffic-res-bg);", "color: var(--traffic-res-fg);"} {
+		if !strings.Contains(resBlock[1], needle) {
+			t.Errorf("SPEC-BUG-141 AC2/R2 FAIL: response header CSS missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG144_TrafficResizeHandleMatchesUX002(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	handleBlock := regexp.MustCompile(`(?s)\.resize-handle\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(handleBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: .resize-handle CSS block not found")
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"align-items: center;",
+		"justify-content: center;",
+		"height: 8px;",
+		"cursor: row-resize;",
+	} {
+		if !strings.Contains(handleBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC1 FAIL: resize handle missing %q", needle)
+		}
+	}
+
+	gripBlock := regexp.MustCompile(`(?s)\.resize-handle::after\s*\{([^}]*)\}`).FindStringSubmatch(content)
+	if len(gripBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: .resize-handle::after CSS block not found")
+	}
+	for _, needle := range []string{
+		"width: 40px;",
+		"height: 3px;",
+		"background: var(--border-default);",
+		"border-radius: 2px;",
+	} {
+		if !strings.Contains(gripBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC1 FAIL: resize grip missing %q", needle)
+		}
+	}
+	if strings.Contains(gripBlock[1], "width: 32px") || strings.Contains(gripBlock[1], "height: 2px") {
+		t.Fatal("SPEC-BUG-144 AC1 FAIL: resize grip must not keep old 32x2 dimensions")
+	}
+}
+
+func TestSPECBUG144_TrafficPendingAndErrorDetailMarkup(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	detailIdx := strings.Index(content, "function renderDetailPanel(entry, matched)")
+	if detailIdx == -1 {
+		t.Fatal("SPEC-BUG-144 FAIL: renderDetailPanel not found")
+	}
+	detailBody := content[detailIdx:]
+	if endIdx := strings.Index(detailBody, "/* ======================================================================\n     Copy Button Wiring"); endIdx > 0 {
+		detailBody = detailBody[:endIdx]
+	}
+
+	for _, needle := range []string{
+		"var isErrorDetail = resEntry && resEntry.status === 'error';",
+		`traffic-detail-panel-error`,
+		`class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span>`,
+		`class="btn traffic-panel-copy traffic-panel-copy-disabled" type="button" disabled aria-disabled="true" aria-label="Response payload unavailable" title="Response payload unavailable">`,
+		`Awaiting response\u2026`,
+	} {
+		if !strings.Contains(detailBody, needle) {
+			t.Errorf("SPEC-BUG-144 AC2/AC3/AC4 FAIL: detail markup missing %q", needle)
+		}
+	}
+	if strings.Count(detailBody, `class="json-filter panel-filter"`) != 2 {
+		t.Fatal("SPEC-BUG-144 AC2/AC3 FAIL: request and response panel filters must remain visible in every detail state")
+	}
+	if strings.Count(detailBody, `aria-label="Copy response payload"`) != 2 {
+		t.Fatal("SPEC-BUG-144 AC4 FAIL: completed and error response payloads should keep active copy controls")
+	}
+	if strings.Count(detailBody, `aria-label="Response payload unavailable"`) != 1 {
+		t.Fatal("SPEC-BUG-144 AC4 FAIL: pending response should expose one intentionally disabled copy control")
+	}
+}
+
+func TestSPECBUG144_TrafficErrorAccentCSS(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderRowIdx := strings.Index(content, "function renderRow(evt, idx)")
+	if renderRowIdx == -1 {
+		t.Fatal("SPEC-BUG-144 FAIL: renderRow not found")
+	}
+	renderRowBody := content[renderRowIdx:]
+	if endIdx := strings.Index(renderRowBody, "function renderDetailPanel(entry, matched)"); endIdx > 0 {
+		renderRowBody = renderRowBody[:endIdx]
+	}
+	for _, needle := range []string{
+		"var errorClass = expandedRowId === evt.id && evt.status === 'error' ? ' row-error' : '';",
+		`altClass + expandedClass + errorClass`,
+	} {
+		if !strings.Contains(renderRowBody, needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error row accent markup missing %q", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	rowBlock := regexp.MustCompile(`(?s)\.table-row\.row-expanded\.row-error\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+	if len(rowBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC3 FAIL: expanded error row CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--danger-subtle);",
+		"border-left-color: var(--danger-fg);",
+		"border-bottom-color: var(--danger-fg);",
+	} {
+		if !strings.Contains(rowBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error row CSS missing %q", needle)
+		}
+	}
+
+	panelBlock := regexp.MustCompile(`(?s)\.traffic-detail-panel\.traffic-detail-panel-error\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+	if len(panelBlock) != 2 {
+		t.Fatal("SPEC-BUG-144 AC3 FAIL: error detail panel CSS block not found")
+	}
+	for _, needle := range []string{
+		"background: var(--danger-subtle);",
+		"border-left-color: var(--danger-fg);",
+	} {
+		if !strings.Contains(panelBlock[1], needle) {
+			t.Errorf("SPEC-BUG-144 AC3 FAIL: error detail panel CSS missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG144_TrafficDetailResizeBehaviorWired(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	for _, needle := range []string{
+		"var trafficResizeDragging = false;",
+		"trafficBody.addEventListener('mousedown', function(e) {",
+		"e.target.closest('.traffic-detail-panel .resize-handle')",
+		"trafficResizePanel = handle.closest('.traffic-detail-panel')",
+		"trafficResizeTarget = trafficResizePanel.querySelector('.split-view')",
+		"trafficResizeStartHeight = trafficResizeTarget.offsetHeight",
+		"if (!trafficResizeDragging || !trafficResizeTarget) return;",
+		"trafficResizeTarget.style.height = newH + 'px'",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-144 AC5 FAIL: traffic detail resize behavior missing %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG136_ServersRenderChangeDetectionAndTelemetry(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	body := renderServerCardsJS(t)
+
+	for _, needle := range []string{
+		"var lastServerCardsSignature = '';",
+		"function serverCardsSignature(servers)",
+		"JSON.stringify((servers || []).map(function(s)",
+		"if (signature === lastServerCardsSignature)",
+		"recordClientTelemetry('servers.render.skip'",
+		"lastServerCardsSignature = signature;",
+		"recordClientTelemetry('servers.render'",
+		"skipped: 0",
+	} {
+		if !strings.Contains(content, needle) && !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-136 AC4/AC6 FAIL: expected %q", needle)
+		}
+	}
+}
+
+func TestSPECBUG136_ToolsSidebarRenderSkipAndTelemetry(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	renderIdx := strings.Index(content, "function renderToolSidebar()")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-BUG-136 AC5 FAIL: renderToolSidebar not found")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  /* ======================================================================\n     Tool Browser — Select Tool"); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+
+	required := []string{
+		"var lastToolSidebarSignature = '';",
+		"function toolSidebarSignature(searchVal)",
+		"selectedTool ? selectedTool.server + '\\n' + selectedTool.name : ''",
+		"if (signature === lastToolSidebarSignature)",
+		"recordClientTelemetry('tools.sidebar.render.skip'",
+		"toolGroups.innerHTML = html;",
+		"recordClientTelemetry('tools.sidebar.render'",
+		"skipped: 0",
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) && !strings.Contains(renderBody, needle) {
+			t.Errorf("SPEC-BUG-136 AC5/AC6 FAIL: expected %q", needle)
+		}
+	}
+
+	if !strings.Contains(content, "applyToolEnabledState(data.server, data.tool, data.enabled);") {
+		t.Error("SPEC-BUG-136 AC5 FAIL: websocket tool toggles should use targeted sidebar state updates")
+	}
+	if !strings.Contains(content, "if (getRoute() === 'tools' && toolsLoaded && !findSidebarToolButton(data.server, data.tool))") {
+		t.Error("SPEC-BUG-136 AC5 FAIL: websocket tool toggles should only rerender when the targeted row is missing")
+	}
+}
+
+// TestSPECBUG145_ToolGroupCollapseStateRetainedAcrossSelection verifies that
+// the Tool Browser retains each server group's user-set collapse state when the
+// selected tool changes (AC1-AC4). The sidebar re-renders on selection (the
+// signature includes the selected tool), so retention requires a persistent
+// per-server collapse store that renderToolSidebar consults, plus a group-header
+// click handler that records the state. These are Go source-scan assertions
+// over the embedded UI, mirroring the existing Tool Browser test style.
+func TestSPECBUG145_ToolGroupCollapseStateRetainedAcrossSelection(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// A persistent per-server collapse store must exist (retention vehicle).
+	if !strings.Contains(content, "var userCollapsedGroups = {};") {
+		t.Error("SPEC-BUG-145 AC1/AC2 FAIL: expected a persistent userCollapsedGroups store keyed by server")
+	}
+
+	// renderToolSidebar must consult the store IN ADDITION to offline/restarting
+	// auto-collapse, so retained folds survive the re-render on tool selection
+	// (AC1, AC2) without regressing offline auto-collapse (R4).
+	renderIdx := strings.Index(content, "function renderToolSidebar()")
+	if renderIdx == -1 {
+		t.Fatal("SPEC-BUG-145 FAIL: renderToolSidebar not found")
+	}
+	renderBody := content[renderIdx:]
+	if endIdx := strings.Index(renderBody[1:], "\n  /* ======================================================================\n     Tool Browser — Select Tool"); endIdx > 0 {
+		renderBody = renderBody[:endIdx+1]
+	}
+	if !strings.Contains(renderBody, "userCollapsedGroups[srvName]") {
+		t.Error("SPEC-BUG-145 AC1/AC4 FAIL: renderToolSidebar must apply retained collapse state from userCollapsedGroups")
+	}
+	if !strings.Contains(renderBody, "(isOffline || isRestarting)") {
+		t.Error("SPEC-BUG-145 R4 FAIL: renderToolSidebar must keep offline/restarting auto-collapse")
+	}
+	// The group element must carry data-server so the handler and render can key
+	// on it without parsing the mixed header text.
+	if !strings.Contains(renderBody, `'<div class="' + groupClass + '" data-server="' + escapeHtml(srvName) + '"`) {
+		t.Error("SPEC-BUG-145 AC3 FAIL: tool-group element must carry data-server for per-group keying")
+	}
+
+	// The click handler must toggle exactly one group via the header and record
+	// the new state, giving AC3 isolation and AC4 chevron retention.
+	clickIdx := strings.Index(content, "toolGroups.addEventListener('click', function(e) {")
+	if clickIdx == -1 {
+		t.Fatal("SPEC-BUG-145 FAIL: toolGroups click handler not found")
+	}
+	clickBody := content[clickIdx:]
+	if endIdx := strings.Index(clickBody[1:], "\n  });"); endIdx > 0 {
+		clickBody = clickBody[:endIdx+1]
+	}
+	if !strings.Contains(clickBody, "e.target.closest('.tool-group-header')") {
+		t.Error("SPEC-BUG-145 FAIL: click handler must detect group-header clicks")
+	}
+	if !strings.Contains(clickBody, "group.classList.toggle('is-collapsed')") {
+		t.Error("SPEC-BUG-145 AC3/AC4 FAIL: header click must toggle is-collapsed on the single targeted group")
+	}
+	if !strings.Contains(clickBody, "userCollapsedGroups[groupServer] = nowCollapsed;") {
+		t.Error("SPEC-BUG-145 AC1/AC2 FAIL: header click must record the new collapse state for retention")
+	}
+}
+
+// TestSPECBUG147_ToolGroupCollapseStatePersistsAcrossReload verifies that the
+// in-memory userCollapsedGroups store (SPEC-BUG-145) is backed by localStorage
+// so per-server folds survive a Tools reload, page reload, or app restart
+// (AC1-AC3, R1-R3). The persistence has two halves: hydrate the store from
+// storage on init, and write the store back on every header-toggle. This is a
+// Go source-scan assertion over the embedded UI, mirroring the SPEC-BUG-145
+// test and the wider Tool Browser test style. AC4/R4 (in-session retention
+// intact) is covered by TestSPECBUG145_*.
+func TestSPECBUG147_ToolGroupCollapseStatePersistsAcrossReload(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	// A stable, versionable storage key namespace must back the store.
+	if !strings.Contains(content, "var TOOL_GROUP_COLLAPSE_KEY = 'shipyard_tool_group_collapsed';") {
+		t.Error("SPEC-BUG-147 FAIL: expected a TOOL_GROUP_COLLAPSE_KEY localStorage namespace constant")
+	}
+
+	// Hydration on init: the store must be populated from localStorage so a
+	// reload/restart restores the user's folds (AC1, AC2). Object.assign onto
+	// the existing store keeps SPEC-BUG-145's `var userCollapsedGroups = {};`
+	// declaration intact (no regression).
+	if !strings.Contains(content, "localStorage.getItem(TOOL_GROUP_COLLAPSE_KEY)") {
+		t.Error("SPEC-BUG-147 AC1/AC2 FAIL: store must be hydrated from localStorage on init")
+	}
+	if !strings.Contains(content, "Object.assign(userCollapsedGroups, stored)") {
+		t.Error("SPEC-BUG-147 AC1/AC2 FAIL: hydration must populate the existing userCollapsedGroups store")
+	}
+
+	// Persistence on toggle: the header-click handler must write the whole
+	// per-server store back to localStorage so folds survive reload (AC1-AC3).
+	clickIdx := strings.Index(content, "toolGroups.addEventListener('click', function(e) {")
+	if clickIdx == -1 {
+		t.Fatal("SPEC-BUG-147 FAIL: toolGroups click handler not found")
+	}
+	clickBody := content[clickIdx:]
+	if endIdx := strings.Index(clickBody[1:], "\n  });"); endIdx > 0 {
+		clickBody = clickBody[:endIdx+1]
+	}
+	if !strings.Contains(clickBody, "localStorage.setItem(TOOL_GROUP_COLLAPSE_KEY, JSON.stringify(userCollapsedGroups))") {
+		t.Error("SPEC-BUG-147 AC1/AC2/AC3 FAIL: header toggle must persist the per-server store to localStorage")
+	}
+}
+
+// TestSPECBUG148_SingleToolGroupCollapseToggleOwner verifies that exactly ONE
+// handler toggles a tool group's collapse state on a header click. The bug
+// (SPEC-BUG-148) was that ds.js's document-level handleToolGroupClick AND
+// index.html's #tool-groups handler BOTH toggled `is-collapsed` per click, so
+// they cancelled out (no visible change) while index.html still recorded the
+// state — making the fold appear only after a tool-switch re-render. The fix
+// removes the duplicate, persistence-less toggle from ds.js, leaving index.html
+// as the sole owner (it toggles AND persists, SPEC-BUG-145/147).
+//
+// NOTE: this is a source-scan assertion (the house style for the embedded UI);
+// it guards against the duplicate returning, but the behavior itself was
+// verified with a headless-Chrome reproduction (single toggle on click). A
+// source-scan pass alone is not proof of the runtime behavior.
+func TestSPECBUG148_SingleToolGroupCollapseToggleOwner(t *testing.T) {
+	indexHTML, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	dsJS, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	index := string(indexHTML)
+	ds := string(dsJS)
+
+	// ds.js must NOT also toggle tool-group collapse — that was the duplicate
+	// that cancelled index.html's toggle. Its handler and toggle must be gone.
+	if strings.Contains(ds, "handleToolGroupClick") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js still defines/calls handleToolGroupClick — the duplicate collapse toggle that cancels index.html's handler")
+	}
+	if strings.Contains(ds, "classList.toggle('is-collapsed')") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js still toggles is-collapsed — collapse must be owned solely by index.html's #tool-groups handler")
+	}
+
+	// index.html must remain the sole owner: exactly one is-collapsed toggle,
+	// and it must still record per-server state (SPEC-BUG-145/147 intact).
+	if got := strings.Count(index, "classList.toggle('is-collapsed')"); got != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: expected exactly 1 is-collapsed toggle in index.html (the sole owner), got %d", got)
+	}
+	if !strings.Contains(index, "userCollapsedGroups[groupServer] = nowCollapsed;") {
+		t.Error("SPEC-BUG-148 FAIL: index.html handler must still record per-server collapse state (SPEC-BUG-145 retention)")
+	}
+}
+
+// TestSPECBUG148_CollapseToggleSingleOwnerInvariant is the core regression guard
+// for SPEC-BUG-148: across the WHOLE embedded UI (index.html + ds.js), there must
+// be exactly ONE place that toggles `is-collapsed`. The bug was two togglers (one
+// in each file) cancelling each other on click. If anyone re-adds a second toggle
+// anywhere, this count breaks and the test fails — catching the structural
+// regression at merge time even though source-scan can't see the runtime DOM.
+//
+// NOTE: this guards the *structure* (one owner). The runtime behavior (one visible
+// toggle per click) is proven by the headless-browser smoke test tracked in
+// SPEC-BUG-149; a source-scan pass is not proof of behavior.
+func TestSPECBUG148_CollapseToggleSingleOwnerInvariant(t *testing.T) {
+	files := []string{"ui/index.html", "ui/ds.js"}
+	total := 0
+	per := map[string]int{}
+	for _, f := range files {
+		b, err := uiFS.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", f, err)
+		}
+		n := strings.Count(string(b), "classList.toggle('is-collapsed')")
+		per[f] = n
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: expected exactly ONE is-collapsed toggle across the embedded UI, got %d %v. "+
+			"A second toggler re-introduces the double-toggle cancel bug.", total, per)
+	}
+	if per["ui/index.html"] != 1 {
+		t.Errorf("SPEC-BUG-148 FAIL: the single is-collapsed toggle owner must live in index.html's #tool-groups handler, got %d in index.html", per["ui/index.html"])
+	}
+}
+
+// TestSPECBUG148_DsJsDoesNotHandleToolGroupHeaderClicks guards against ds.js
+// re-acquiring any tool-group-header click handling (the document-level branch
+// that was the duplicate). Collapse is owned solely by index.html's #tool-groups
+// handler; ds.js must not reference the header in its click delegation.
+func TestSPECBUG148_DsJsDoesNotHandleToolGroupHeaderClicks(t *testing.T) {
+	b, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	ds := string(b)
+	if strings.Contains(ds, "closest('.tool-group-header')") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js must not match .tool-group-header in its click delegation — collapse is owned by index.html")
+	}
+	if strings.Contains(ds, "handleToolGroupClick") {
+		t.Error("SPEC-BUG-148 FAIL: ds.js must not define/call handleToolGroupClick (the removed duplicate collapse toggle)")
+	}
+}
+
+// TestSPECBUG152_ToggleServerExposedOnWindow guards SPEC-BUG-152: the Servers
+// card enable/disable switch is wired via inline onclick="toggleServer(...)",
+// which resolves in GLOBAL scope. The whole app runs inside an IIFE, so
+// toggleServer must be exposed on window or the click throws "toggleServer is
+// not defined" and the toggle silently does nothing (the bug this guards).
+//
+// Structural guard (source-scan). The behavioral proof is the SPEC-BUG-150
+// Servers smoke test (`make smoke-full`), which exercises the real click.
+func TestSPECBUG152_ToggleServerExposedOnWindow(t *testing.T) {
+	b, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(b)
+
+	// The handler must be invoked by inline onclick (the wiring that needs a global).
+	if !strings.Contains(html, "onclick=\"toggleServer(") {
+		t.Error("SPEC-BUG-152: expected the Servers card switch to call toggleServer via inline onclick")
+	}
+	// ...and it MUST be exposed on window, or the inline onclick can't resolve it.
+	if !strings.Contains(html, "window.toggleServer = toggleServer") {
+		t.Error("SPEC-BUG-152 FAIL: toggleServer must be exposed on window (window.toggleServer = toggleServer); " +
+			"inline onclick=\"toggleServer(...)\" resolves in global scope and the app is IIFE-wrapped, so without this the toggle throws \"toggleServer is not defined\"")
 	}
 }
 
@@ -3417,5 +5011,133 @@ func TestSPEC029_UIToastFunctionPresent(t *testing.T) {
 	}
 	if !strings.Contains(content, "Failed to update toggle") {
 		t.Error("SPEC-029 R3 FAIL: expected 'Failed to update toggle' toast message in index.html")
+	}
+}
+
+// --- SPEC-BUG-133: Phase 4 views must be top-level dashboard routes ---
+
+func TestSPECBUG133_Phase4TabsAreTopLevelAndTokensExcluded(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	navStart := strings.Index(content, `<nav id="tab-nav">`)
+	navEnd := strings.Index(content, `</nav>`)
+	if navStart == -1 || navEnd == -1 || navEnd <= navStart {
+		t.Fatal("SPEC-BUG-133 FAIL: expected top-level tab-nav")
+	}
+	nav := content[navStart:navEnd]
+
+	for _, tab := range []struct {
+		route string
+		label string
+	}{
+		{`data-route="sessions"`, "Sessions"},
+		{`data-route="profiling"`, "Profiling"},
+		{`data-route="schema"`, "Schema"},
+	} {
+		if !strings.Contains(nav, tab.route) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 1): expected top-level nav route %s", tab.route)
+		}
+		if !strings.Contains(nav, tab.label) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 1): expected top-level nav label %q", tab.label)
+		}
+	}
+	if strings.Contains(nav, `data-route="tokens"`) || strings.Contains(nav, `>Tokens<`) {
+		t.Error("SPEC-BUG-133 FAIL (AC 6): Tokens must not return to the top-level nav")
+	}
+}
+
+func TestSPECBUG133_Phase4RoutesRenderExistingViews(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	required := []string{
+		`id="sessions" class="route-target"`,
+		`id="profiling" class="route-target"`,
+		`id="schema" class="route-target"`,
+		`id="view-sessions" class="route-view"`,
+		`id="view-profiling" class="route-view"`,
+		`id="view-schema" class="route-view"`,
+		`id="history-sessions-view"`,
+		`id="history-performance-view"`,
+		`id="servers-schema-view"`,
+	}
+	for _, needle := range required {
+		if !strings.Contains(content, needle) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 2): missing %q", needle)
+		}
+	}
+
+	if strings.Index(content, `<main id="view-history"`) > strings.Index(content, `<main id="view-sessions"`) {
+		t.Error("SPEC-BUG-133 FAIL (AC 7): Sessions route should not be nested before History view declaration")
+	}
+	historyClose := strings.Index(content, `</main>`+"\n\n"+`<!-- ================================================================`+"\n"+`     View: Sessions (#/sessions)`)
+	if historyClose == -1 {
+		t.Error("SPEC-BUG-133 FAIL (AC 7): expected History main to close before Sessions top-level view")
+	}
+}
+
+func TestSPECBUG133_OldNestedRouteAliasesResolveCleanly(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	aliases := []string{
+		`if (hash === 'history/sessions') return 'sessions';`,
+		`if (hash === 'history/performance' || hash === 'performance') return 'profiling';`,
+		`if (hash === 'servers/schema') return 'schema';`,
+	}
+	for _, alias := range aliases {
+		if !strings.Contains(content, alias) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 3): missing route alias %q", alias)
+		}
+	}
+	for _, loader := range []string{
+		`if (baseRoute === 'sessions')`,
+		`loadSessions();`,
+		`if (baseRoute === 'profiling')`,
+		`loadPerformance();`,
+		`if (baseRoute === 'schema')`,
+		`showSchemaView();`,
+	} {
+		if !strings.Contains(content, loader) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 7): missing route activation snippet %q", loader)
+		}
+	}
+}
+
+func TestSPECBUG133_AppBarDoesNotWrapPhase4Tabs(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	content := string(css)
+
+	tabNavIdx := strings.Index(content, "#tab-nav {")
+	if tabNavIdx == -1 {
+		t.Fatal("SPEC-BUG-133 FAIL (AC 4): expected #tab-nav CSS block")
+	}
+	tabNavBlock := content[tabNavIdx:]
+	if endIdx := strings.Index(tabNavBlock, "\n}"); endIdx > 0 {
+		tabNavBlock = tabNavBlock[:endIdx+2]
+	}
+	for _, needle := range []string{
+		"display: flex;",
+		"align-items: center;",
+		"gap: 0;",
+		"flex-wrap: nowrap;",
+		"min-width: 0;",
+	} {
+		if !strings.Contains(tabNavBlock, needle) {
+			t.Errorf("SPEC-BUG-133 FAIL (AC 4/5): #tab-nav block missing %q", needle)
+		}
 	}
 }

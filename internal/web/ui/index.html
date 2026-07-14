@@ -21,6 +21,9 @@
     <a class="tab tab-default" href="#tools" data-route="tools"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</a>
     <a class="tab tab-default" href="#history" data-route="history"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>History</a>
     <a class="tab tab-default" href="#servers" data-route="servers"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>Servers<span id="server-count-label"></span></a>
+    <a class="tab tab-default" href="#sessions" data-route="sessions"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/></svg>Sessions</a>
+    <a class="tab tab-default" href="#profiling" data-route="profiling"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>Profiling</a>
+    <a class="tab tab-default" href="#schema" data-route="schema"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>Schema</a>
   </nav>
   </div>
   <div style="display:flex;align-items:center;gap:12px;">
@@ -38,11 +41,17 @@
 <div id="tools" class="route-target" aria-hidden="true"></div>
 <div id="history" class="route-target" aria-hidden="true"></div>
 <div id="servers" class="route-target" aria-hidden="true"></div>
+<div id="sessions" class="route-target" aria-hidden="true"></div>
+<div id="profiling" class="route-target" aria-hidden="true"></div>
+<div id="schema" class="route-target" aria-hidden="true"></div>
 <div id="tokens" class="route-target" aria-hidden="true"></div>
 <div id="settings" class="route-target" aria-hidden="true"></div>
 
 <!-- Toast container (SPEC-029: R3) -->
 <div id="toast-container" class="toast-container"></div>
+<div id="panel-context-menu" class="context-menu" role="menu" aria-hidden="true">
+  <button type="button" id="panel-context-open" role="menuitem">Open in New Window</button>
+</div>
 
 <div id="app-chrome">
   <div id="global-banners">
@@ -58,9 +67,9 @@
          Schema Change Alert Banner (global, SPEC-009)
          ================================================================ -->
     <div id="schema-alert-banner" style="display:none; background:var(--bg-warning, #4a3600); border-bottom:1px solid var(--border-default); padding:8px 16px; align-items:center; gap:8px;">
-      <span style="font-size:16px;">&#9888;</span>
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
       <span id="schema-alert-text" style="color:var(--text-primary); font-size:var(--font-size-sm);">Schema changes detected</span>
-      <a href="#/servers/schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
+      <a href="#schema" id="schema-alert-link" style="color:var(--accent-primary, #58a6ff); font-size:var(--font-size-sm); margin-left:8px;">Review Changes &#8594;</a>
     </div>
   </div>
 
@@ -158,7 +167,8 @@
     <div class="search-bar search-bar-strip" id="tool-search-bar">
       <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <input type="text" id="tool-search" placeholder="Search tools...">
-      <button class="search-clear">&#10005;</button>
+      <button type="button" id="tool-refresh-btn" title="Force refresh tool snapshots"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
+      <button class="search-clear"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     </div>
     <div id="tool-groups" style="flex:1; overflow-y:auto; padding:0 4px 8px 4px;"></div>
   </div>
@@ -200,7 +210,7 @@
 
         <div id="tool-conflict-section" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m);">
           <div style="display:flex; align-items:flex-start; gap:10px;">
-            <span style="font-size:18px; line-height:1; color:var(--warning-fg);">&#9888;</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
             <div style="flex:1; min-width:0;">
               <div id="tool-conflict-title" style="font-size:var(--font-size-md); font-weight:600; color:var(--text-primary); margin-bottom:2px;"></div>
               <div id="tool-conflict-message" style="font-size:var(--font-size-sm); color:var(--text-secondary);"></div>
@@ -226,7 +236,7 @@
         <!-- Execute Button Row -->
         <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
           <button class="btn btn-primary" id="tool-execute-btn" style="display:inline-flex; align-items:center; gap:6px;">
-            <span>&#9654;</span> Execute
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="6 3 20 12 6 21 6 3"/></svg> <span>Execute</span>
           </button>
           <span id="tool-execute-hint" style="font-size:var(--font-size-sm); color:var(--text-muted);">Sends tools/call to the child server</span>
         </div>
@@ -290,7 +300,7 @@
 
   <!-- No Search Results -->
   <div id="history-no-results" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128269;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
     <div class="empty-title">No results found</div>
     <div class="empty-desc">Try adjusting your search filters.</div>
     <button class="btn btn-default" id="history-clear-search-btn">Clear search</button>
@@ -305,7 +315,7 @@
         <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <input type="text" id="history-search" placeholder="Search payload...">
         <span id="history-search-count" class="badge badge-neutral" style="display:none;"></span>
-        <button class="search-clear" id="history-search-clear" style="display:none;">&#10005;</button>
+        <button class="search-clear" id="history-search-clear" style="display:none;"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>
       <div class="seg-toggle" id="history-time-toggle">
         <button class="seg-active" data-value="">All</button>
@@ -385,12 +395,19 @@
 
   </div><!-- /history-requests-view -->
 
-  <!-- Sub-view: Sessions (SPEC-007) -->
-  <div id="history-sessions-view" style="display:none;">
+</main>
+
+<!-- ================================================================
+     View: Sessions (#/sessions)
+     ================================================================ -->
+<main id="view-sessions" class="route-view">
+
+  <!-- Sessions view (SPEC-006-001, formerly History sub-view) -->
+  <div id="history-sessions-view">
 
     <!-- Sessions Empty State -->
     <div id="sessions-empty" class="empty-state">
-      <div class="empty-icon">&#128308;</div>
+      <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="var(--danger-fg)" stroke="var(--danger-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg></div>
       <div class="empty-title">No sessions recorded</div>
       <div class="empty-desc">Record a session to capture a sequence of MCP requests for replay and export.</div>
       <button class="btn btn-primary" id="sessions-empty-record-btn">Record Session</button>
@@ -402,7 +419,7 @@
       <!-- Action Bar -->
       <div class="app-bar" style="gap:8px; flex-wrap:wrap;">
         <button class="btn btn-primary btn-sm" id="session-record-btn" style="display:inline-flex; align-items:center; gap:4px;">
-          <span id="session-record-icon">&#128308;</span> <span id="session-record-label">Record</span>
+          <span id="session-record-icon"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="var(--danger-fg)" stroke="var(--danger-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="9"/></svg></span> <span id="session-record-label">Record</span>
         </button>
         <div class="input-group" id="session-name-group">
           <input type="text" id="session-name-input" class="input" placeholder="Session name..." style="width:180px;">
@@ -439,8 +456,15 @@
 
   </div><!-- /history-sessions-view -->
 
-  <!-- Sub-view: Performance (SPEC-008) -->
-  <div id="history-performance-view" style="display:none;">
+</main>
+
+<!-- ================================================================
+     View: Profiling (#/profiling)
+     ================================================================ -->
+<main id="view-profiling" class="route-view">
+
+  <!-- Profiling view (SPEC-006-002, formerly History Performance sub-view) -->
+  <div id="history-performance-view">
 
     <!-- Action Bar -->
     <div class="app-bar" id="perf-action-bar" style="padding:8px 16px; gap:8px;">
@@ -460,6 +484,30 @@
         </select>
       </div>
       <div style="flex:1;"></div>
+      <button class="btn btn-primary btn-sm" id="perf-debug-bundle-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>Debug Bundle</button>
+    </div>
+
+    <!-- App Health Trend (SPEC-BUG-137) -->
+    <div id="perf-app-health" style="padding:12px 16px 0 16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
+        <div style="font-size:var(--font-size-sm); font-weight:600; color:var(--text-primary);">App Health</div>
+        <div id="perf-health-updated" style="font-size:var(--font-size-xs); color:var(--text-muted);"></div>
+      </div>
+      <div id="perf-health-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:8px;"></div>
+      <div id="perf-health-table" style="margin-top:10px; border:1px solid var(--border-muted); border-radius:6px; overflow:hidden;">
+        <div class="table-header">
+          <span style="width:120px;">Bucket</span>
+          <span style="width:90px;">HTTP Avg</span>
+          <span style="width:90px;">RPC Avg</span>
+          <span style="width:110px;">Render Avg</span>
+          <span style="width:90px;">DOM Rows</span>
+          <span style="width:90px;">Heap</span>
+          <span style="width:90px;">DB</span>
+          <span style="width:80px;">Traffic</span>
+          <span style="width:80px;">Schemas</span>
+        </div>
+        <div id="perf-health-table-body"></div>
+      </div>
     </div>
 
     <!-- Stats Cards -->
@@ -509,7 +557,7 @@
         <span data-col="min" style="width:70px;" data-sort="min">Min</span>
         <span data-col="avg" style="width:70px;" data-sort="avg">Avg</span>
         <span data-col="p50" style="width:70px;" data-sort="p50">P50</span>
-        <span data-col="p95" style="width:70px; color:var(--accent-fg);" data-sort="p95">P95 &#8595;</span>
+        <span data-col="p95" style="width:70px; color:var(--accent-fg); display:inline-flex; align-items:center; gap:4px;" data-sort="p95">P95 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></span>
         <span data-col="max" style="width:70px;" data-sort="max">Max</span>
         <span data-col="errpct" style="width:70px;" data-sort="error_rate">Err%</span>
       </div>
@@ -518,7 +566,7 @@
 
     <!-- Empty State -->
     <div id="perf-empty" class="empty-state">
-      <div class="empty-icon">&#128202;</div>
+      <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
       <div class="empty-title">No traffic data yet</div>
       <div class="empty-desc">Latency profiling will appear here once MCP traffic flows through Shipyard.</div>
     </div>
@@ -543,20 +591,20 @@
       <span id="servers-stat-crashed-lbl" style="color:var(--danger-fg); font-weight:500;"></span>
     </span>
     <span id="servers-stat-tools" style="display:none; align-items:center; gap:6px; font-size:var(--font-size-sm);">
-      <span style="font-size:12px; color:var(--text-muted);">&#9881;</span>
+      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
       <span id="servers-stat-tools-lbl" style="color:var(--text-secondary);"></span>
     </span>
     <div style="flex:1;"></div>
     <button class="btn btn-default btn-sm" id="servers-auto-import-btn">Auto-Import</button>
-    <button class="btn btn-primary btn-sm" id="servers-add-btn">&#43; Add Server</button>
+    <button class="btn btn-primary btn-sm" id="servers-add-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Server</button>
   </div>
 
   <!-- Plain-text secrets warning banner (SPEC-038-003) -->
   <div id="servers-plain-text-warning" style="display:none; align-items:center; gap:12px; background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-s); padding:10px 16px; margin:0 24px 12px 24px; font-size:var(--font-size-sm);">
-    <span style="color:var(--warning-fg);">&#9888;</span>
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
     <span style="flex:1; color:var(--text-secondary);">One or more servers have plain-text secrets in their config. Consider using a secret manager.</span>
     <button class="btn btn-default btn-sm" onclick="showView('settings'); document.getElementById('servers-plain-text-warning').style.display='none';">Go to Settings</button>
-    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('servers-plain-text-warning').style.display='none';">&#10005;</button>
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('servers-plain-text-warning').style.display='none';"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
   </div>
 
   <!-- Empty State (matches design: UX-002 → "Desktop — First Run (0 servers)") -->
@@ -565,8 +613,8 @@
     <div class="empty-title">No servers configured</div>
     <div class="empty-desc">Add your first MCP server or auto-import from Claude Desktop, Claude Code, or Cursor configurations.</div>
     <div style="display:flex; gap:12px; margin-top:4px;">
-      <button class="btn btn-default btn-sm" id="servers-empty-import-btn">&#8681; Auto-Import</button>
-      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" type="button">&#43; Add Server</button>
+      <button class="btn btn-default btn-sm" id="servers-empty-import-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg> Auto-Import</button>
+      <button class="btn btn-primary btn-sm" id="servers-empty-add-btn" type="button"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Server</button>
     </div>
     <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">Or run: <code style="background:var(--bg-tertiary, #161b22); padding:2px 6px; border-radius:4px;">shipyard --config servers.json</code></div>
   </div>
@@ -574,10 +622,34 @@
   <!-- Server Card Grid -->
   <div id="servers-grid" style="display:none; padding:24px; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:16px;"></div>
 
-  <!-- Schema Sub-View (SPEC-009) -->
-  <div id="servers-schema-view" style="display:none; height:calc(100vh - 96px);">
+  <!-- Auto-Import Modal -->
+  <div id="auto-import-modal" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
+    <div style="background:var(--bg-surface); border:1px solid var(--border-default); border-radius:var(--radius-l); width:560px; max-height:80vh; display:flex; flex-direction:column;">
+      <div style="padding:16px; border-bottom:1px solid var(--border-muted); display:flex; align-items:center;">
+        <strong style="color:var(--text-primary);">Auto-Import MCP Servers</strong>
+        <div style="flex:1;"></div>
+        <button class="btn btn-ghost btn-sm" id="auto-import-close"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+      </div>
+      <div id="auto-import-body" style="padding:16px; overflow-y:auto; flex:1;">
+        <div style="text-align:center; color:var(--text-muted); padding:24px;">Scanning...</div>
+      </div>
+      <div id="auto-import-footer" style="padding:12px 16px; border-top:1px solid var(--border-muted); display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn btn-default btn-sm" id="auto-import-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="auto-import-confirm" disabled>Import 0 Servers</button>
+      </div>
+    </div>
+  </div>
+</main>
 
-    <!-- Sub-nav -->
+<!-- ================================================================
+     View: Schema (#/schema)
+     ================================================================ -->
+<main id="view-schema" class="route-view">
+
+  <!-- Schema view (SPEC-006-003, formerly Servers sub-view) -->
+  <div id="servers-schema-view" style="height:calc(100vh - 96px);">
+
+    <!-- Subnav/alias affordance -->
     <div class="app-bar" style="padding:4px 16px; gap:8px; border-bottom:1px solid var(--border-muted);">
       <a href="#/servers" class="btn btn-ghost btn-sm" id="schema-back-btn">Overview</a>
       <span class="btn btn-default btn-sm" style="font-weight:600; pointer-events:none;">Schema</span>
@@ -595,7 +667,7 @@
       <div id="schema-detail" style="flex:1; overflow-y:auto; padding:24px;">
         <!-- Empty State -->
         <div id="schema-empty" class="empty-state" style="height:100%;">
-          <div class="empty-icon">&#128737;</div>
+          <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></div>
           <div class="empty-title">No schema changes detected</div>
           <div class="empty-desc">All schemas stable</div>
         </div>
@@ -606,23 +678,6 @@
     </div>
   </div>
 
-  <!-- Auto-Import Modal -->
-  <div id="auto-import-modal" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
-    <div style="background:var(--bg-surface); border:1px solid var(--border-default); border-radius:var(--radius-l); width:560px; max-height:80vh; display:flex; flex-direction:column;">
-      <div style="padding:16px; border-bottom:1px solid var(--border-muted); display:flex; align-items:center;">
-        <strong style="color:var(--text-primary);">Auto-Import MCP Servers</strong>
-        <div style="flex:1;"></div>
-        <button class="btn btn-ghost btn-sm" id="auto-import-close">&#10005;</button>
-      </div>
-      <div id="auto-import-body" style="padding:16px; overflow-y:auto; flex:1;">
-        <div style="text-align:center; color:var(--text-muted); padding:24px;">Scanning...</div>
-      </div>
-      <div id="auto-import-footer" style="padding:12px 16px; border-top:1px solid var(--border-muted); display:flex; justify-content:flex-end; gap:8px;">
-        <button class="btn btn-default btn-sm" id="auto-import-cancel">Cancel</button>
-        <button class="btn btn-primary btn-sm" id="auto-import-confirm" disabled>Import 0 Servers</button>
-      </div>
-    </div>
-  </div>
 </main>
 
 <!-- ================================================================
@@ -634,22 +689,22 @@
   <div class="app-bar" style="padding:8px 16px;">
     <span style="font-size:var(--font-size-sm); color:var(--text-secondary);">Bearer tokens for MCP API access</span>
     <div style="flex:1;"></div>
-    <button class="btn btn-primary btn-sm" id="tokens-create-btn">&#43; Create Token</button>
+    <button class="btn btn-primary btn-sm" id="tokens-create-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Create Token</button>
   </div>
 
   <!-- Auth-not-configured state -->
   <div id="tokens-auth-disabled" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128274;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
     <div class="empty-title">Auth not configured</div>
     <div class="empty-desc">Bearer token authentication is not enabled. Start Shipyard with <code style="background:var(--bg-surface); padding:2px 6px; border-radius:4px;">--auth-token</code> to enable it.</div>
   </div>
 
   <!-- Empty state (auth enabled, no tokens) -->
   <div id="tokens-empty" class="empty-state" style="display:none;">
-    <div class="empty-icon">&#128273;</div>
+    <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg></div>
     <div class="empty-title">No tokens yet</div>
     <div class="empty-desc">Create a bearer token to allow API clients to authenticate with Shipyard.</div>
-    <button class="btn btn-primary btn-sm" id="tokens-empty-create-btn">&#43; Create Token</button>
+    <button class="btn btn-primary btn-sm" id="tokens-empty-create-btn"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-on-emphasis)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Create Token</button>
   </div>
 
   <!-- Token Table -->
@@ -670,7 +725,7 @@
   <div id="tokens-stats-panel" style="display:none; padding:16px; border-top:1px solid var(--border-default); background:var(--bg-surface);">
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
       <strong id="tokens-stats-name" style="color:var(--text-primary); font-size:var(--font-size-md);"></strong>
-      <button class="btn btn-ghost btn-sm" id="tokens-stats-close">&#10005; Close</button>
+      <button class="btn btn-ghost btn-sm" id="tokens-stats-close"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg> Close</button>
     </div>
     <div id="tokens-stats-body" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px;"></div>
   </div>
@@ -689,7 +744,7 @@
       <div style="flex:1; min-width:0;">
         <div style="font-size:var(--font-size-sm); color:var(--text-muted); margin-bottom:8px;">Scopes — format: <code style="background:var(--bg-surface); padding:1px 4px; border-radius:3px;">server:tool_pattern</code> (use * as wildcard)</div>
         <div id="tokens-scope-rows" style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;"></div>
-        <button class="btn btn-default btn-sm" id="tokens-scope-add-row">&#43; Add Scope</button>
+        <button class="btn btn-default btn-sm" id="tokens-scope-add-row"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add Scope</button>
       </div>
       <!-- Live preview -->
       <div style="flex:1; min-width:0;">
@@ -763,6 +818,9 @@
     tools:    document.getElementById('view-tools'),
     history:  document.getElementById('view-history'),
     servers:  document.getElementById('view-servers'),
+    sessions: document.getElementById('view-sessions'),
+    profiling: document.getElementById('view-profiling'),
+    schema:   document.getElementById('view-schema'),
     tokens:   document.getElementById('view-tokens'),
     settings: document.getElementById('view-settings')
   };
@@ -781,16 +839,24 @@
   var wsBanner        = document.getElementById('ws-banner');
   var retryBtn        = document.getElementById('retry-btn');
   var serverCountEl   = document.getElementById('server-count-label');
+  var panelContextMenu = document.getElementById('panel-context-menu');
+  var panelContextOpen = document.getElementById('panel-context-open');
 
   /* ======================================================================
      State
      ====================================================================== */
   var timelineOffset  = 0;
   var timelinePageSize = 25;
+  var timelineActiveRowBudget = 500;
   var timelineTotal   = 0;
   var timelineLoading = false;
   var timelineAllLoaded = false;
   var expandedRowId = null;
+  var trafficResizeDragging = false;
+  var trafficResizeTarget = null;
+  var trafficResizePanel = null;
+  var trafficResizeStartY = 0;
+  var trafficResizeStartHeight = 0;
   var nativeFetch   = window.fetch.bind(window);
   var ws            = null;
   var wsBackoff     = 1000;
@@ -803,30 +869,66 @@
   var filterTimer   = null;
   var desktopBridgeConfig = null;
   var desktopBridgeConfigPromise = null;
+  var panelContextRoute = null;
+  var lastServerCardsSignature = '';
+  var lastToolSidebarSignature = '';
+  // SPEC-BUG-145: per-server user-set collapse state for Tool Browser groups,
+  // retained across tool selection changes (keyed by server name).
+  var userCollapsedGroups = {};
+  // SPEC-BUG-147: localStorage key backing userCollapsedGroups so folds persist
+  // across Tools reload / page reload / app restart (one blob, keyed per server).
+  var TOOL_GROUP_COLLAPSE_KEY = 'shipyard_tool_group_collapsed';
+  // SPEC-BUG-147: hydrate the in-memory store from localStorage on init so a
+  // reload/restart restores the user's per-server folds (R1, R2, R3).
+  (function() {
+    try {
+      var stored = JSON.parse(localStorage.getItem(TOOL_GROUP_COLLAPSE_KEY) || '{}');
+      if (stored && typeof stored === 'object') Object.assign(userCollapsedGroups, stored);
+    } catch (e) { /* corrupt/unavailable storage: start with empty folds */ }
+  })();
+  var clientTelemetryMaxSamples = 256;
+  var clientTelemetrySamples = [];
+  window.shipyardClientTelemetry = clientTelemetrySamples;
+
+  function recordClientTelemetry(name, start, meta) {
+    var duration = Math.max(0, Math.round(performance.now() - start));
+    var activeRows = document.querySelectorAll('.table-row').length;
+    clientTelemetrySamples.push({
+      name: name,
+      duration_ms: duration,
+      timestamp: new Date().toISOString(),
+      active_dom_rows: activeRows,
+      meta: meta || {}
+    });
+    if (clientTelemetrySamples.length > clientTelemetryMaxSamples) {
+      clientTelemetrySamples.splice(0, clientTelemetrySamples.length - clientTelemetryMaxSamples);
+    }
+    nativeFetch('/api/performance/frontend', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, duration_ms: duration, active_dom_rows: activeRows})
+    }).catch(function() {});
+  }
 
   /* ======================================================================
      Routing
      ====================================================================== */
   function getRoute() {
     var hash = location.hash.replace(/^#\/?/, '') || 'timeline';
-    // Handle sub-routes: history/performance, history/sessions
-    if (hash.indexOf('history/') === 0 || hash === 'history') {
-      return hash;
-    }
+    if (hash === 'history/sessions') return 'sessions';
+    if (hash === 'history/performance' || hash === 'performance') return 'profiling';
+    if (hash === 'servers/schema') return 'schema';
+    if (hash === 'history') return 'history';
     if (!views[hash]) hash = 'timeline';
     return hash;
   }
 
   function navigateRoute(route) {
-    // Handle sub-routes within history
     var baseRoute = route;
-    var historySub = null;
-    if (route.indexOf('history') === 0) {
-      baseRoute = 'history';
-      if (route === 'history/performance') historySub = 'performance';
-      else if (route === 'history/sessions') historySub = 'sessions';
-      else historySub = 'requests';
-    }
+    if (baseRoute === 'history/sessions') baseRoute = 'sessions';
+    if (baseRoute === 'history/performance' || baseRoute === 'performance') baseRoute = 'profiling';
+    if (baseRoute === 'servers/schema') baseRoute = 'schema';
+    if (!views[baseRoute]) baseRoute = 'timeline';
 
     // Show exactly one top-level view.
     Object.keys(views).forEach(function(key) {
@@ -835,6 +937,18 @@
     views[baseRoute].classList.add('is-active');
     if (baseRoute === 'servers') {
       loadServers();
+    }
+    syncServerStatePolling();
+    if (baseRoute === 'sessions') {
+      loadSessions();
+    }
+    if (baseRoute === 'profiling') {
+      loadPerformance();
+    }
+    if (baseRoute === 'schema') {
+      showSchemaView();
+    } else if (typeof hideSchemaView === 'function') {
+      hideSchemaView();
     }
     if (baseRoute === 'settings') {
       loadSettings();
@@ -853,9 +967,8 @@
       }
     }
 
-    // Switch history sub-view if applicable
-    if (historySub && typeof switchHistorySub === 'function') {
-      switchHistorySub(historySub);
+    if (baseRoute === 'history' && typeof switchHistorySub === 'function') {
+      switchHistorySub('requests');
     }
   }
 
@@ -868,6 +981,39 @@
   };
 
   window.addEventListener('hashchange', function() { navigateRoute(getRoute()); });
+  document.addEventListener('visibilitychange', function() { syncServerStatePolling(); });
+
+  function isDetachablePanel(route) {
+    return route === 'timeline' || route === 'tools' || route === 'history' || route === 'servers';
+  }
+
+  function showPanelContextMenu(route, x, y) {
+    panelContextRoute = route;
+    panelContextMenu.style.left = x + 'px';
+    panelContextMenu.style.top = y + 'px';
+    panelContextMenu.classList.add('is-active');
+    panelContextMenu.setAttribute('aria-hidden', 'false');
+    panelContextOpen.focus();
+  }
+
+  function hidePanelContextMenu() {
+    panelContextRoute = null;
+    panelContextMenu.classList.remove('is-active');
+    panelContextMenu.setAttribute('aria-hidden', 'true');
+  }
+
+  function openPanelInNewWindow(route) {
+    return loadDesktopBridgeConfig().then(function(config) {
+      if (!config.native_windows) return null;
+      return nativeFetch('/_shipyard/windows/open?panel=' + encodeURIComponent(route), { method: 'POST' })
+        .then(function(resp) {
+          if (!resp.ok) throw new Error('open panel window ' + resp.status);
+          return null;
+        });
+    }).catch(function(err) {
+      console.error('Failed to open panel window:', err);
+    });
+  }
 
   // Wails/webview nuance: clicking the already-active Servers tab may not
   // produce a new hashchange, so same-route activation still needs to re-sync
@@ -878,6 +1024,32 @@
     if (getRoute() === 'servers') {
       loadServers();
     }
+  });
+
+  tabNav.addEventListener('contextmenu', function(e) {
+    var tab = e.target.closest('.tab');
+    if (!tab) return;
+    var route = tab.getAttribute('data-route');
+    if (!isDetachablePanel(route)) return;
+    e.preventDefault();
+    showPanelContextMenu(route, e.clientX, e.clientY);
+  });
+
+  panelContextOpen.addEventListener('click', function() {
+    var route = panelContextRoute;
+    hidePanelContextMenu();
+    if (route) openPanelInNewWindow(route);
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!panelContextMenu.contains(e.target)) {
+      hidePanelContextMenu();
+    }
+  });
+
+  window.addEventListener('blur', hidePanelContextMenu);
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hidePanelContextMenu();
   });
 
   // Settings gear icon — navigate to settings view (BUG-052)
@@ -893,6 +1065,84 @@
     var div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/"/g, '&quot;');
+  }
+
+  function iconSvg(size, color, body, fill) {
+    var fillValue = fill || 'none';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="' + fillValue + '" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' + body + '</svg>';
+  }
+
+  function iconAlertTriangle(size, color) {
+    return iconSvg(size, color, '<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>');
+  }
+
+  function iconPlus(size, color) {
+    return iconSvg(size, color, '<path d="M5 12h14"/><path d="M12 5v14"/>');
+  }
+
+  function iconDownload(size, color) {
+    return iconSvg(size, color, '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>');
+  }
+
+  function iconSearch(size, color) {
+    return iconSvg(size, color, '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>');
+  }
+
+  function iconCopy(size, color) {
+    return iconSvg(size, color, '<rect width="14" height="14" x="8" y="2" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>');
+  }
+
+  function iconChartLine(size, color) {
+    return iconSvg(size, color, '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>');
+  }
+
+  function iconShield(size, color) {
+    return iconSvg(size, color, '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>');
+  }
+
+  function iconLock(size, color) {
+    return iconSvg(size, color, '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+  }
+
+  function iconKey(size, color) {
+    return iconSvg(size, color, '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>');
+  }
+
+  function iconCircle(size, color) {
+    return iconSvg(size, color, '<circle cx="12" cy="12" r="9"/>', color);
+  }
+
+  function iconChevronDown(size, color) {
+    return iconSvg(size, color, '<path d="m6 9 6 6 6-6"/>');
+  }
+
+  function iconArrowDown(size, color) {
+    return iconSvg(size, color, '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>');
+  }
+
+  function iconArrowUp(size, color) {
+    return iconSvg(size, color, '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>');
+  }
+
+  function iconPlay(size, color) {
+    return iconSvg(size, color, '<polygon points="6 3 20 12 6 21 6 3"/>');
+  }
+
+  function iconSquare(size, color) {
+    return iconSvg(size, color, '<rect width="14" height="14" x="5" y="5" rx="1"/>', color);
+  }
+
+  function setButtonIconLabel(button, iconHTML, label) {
+    if (!button) return;
+    button.innerHTML = iconHTML + ' <span>' + escapeHtml(label) + '</span>';
+  }
+
+  function renderSortHeaderLabel(el, label, order) {
+    el.innerHTML = escapeHtml(label) + ' ' + (order === 'desc' ? iconArrowDown(10, 'currentColor') : iconArrowUp(10, 'currentColor'));
   }
 
   function relativeTime(tsMs) {
@@ -948,7 +1198,7 @@
   }
 
   function appFetch(input, init) {
-    if (!usesDesktopAssetOrigin() || typeof input !== 'string' || input.charAt(0) !== '/' || input.indexOf('/_shipyard/desktop-config') === 0) {
+    if (!usesDesktopAssetOrigin() || typeof input !== 'string' || input.charAt(0) !== '/' || input.indexOf('/_shipyard/') === 0) {
       return nativeFetch(input, init);
     }
     return loadDesktopBridgeConfig().then(function() {
@@ -1100,9 +1350,10 @@
   function renderRow(evt, idx) {
     var altClass = idx % 2 === 1 ? ' row-alt' : '';
     var expandedClass = expandedRowId === evt.id ? ' row-expanded' : '';
+    var errorClass = expandedRowId === evt.id && evt.status === 'error' ? ' row-error' : '';
     var chevronClass = expandedRowId === evt.id ? ' is-expanded' : '';
 
-    return '<div class="table-row' + altClass + expandedClass + '" data-id="' + evt.id + '">' +
+    return '<div class="table-row' + altClass + expandedClass + errorClass + '" data-id="' + evt.id + '">' +
       '<span class="timestamp" title="' + absoluteTime(evt.timestamp) + '" data-col="time">' + relativeTime(evt.timestamp) + '</span>' +
       '<span data-col="dir">' + dirBadge(evt.direction) + '</span>' +
       '<span data-col="server">' + escapeHtml(evt.server_name) + '</span>' +
@@ -1125,10 +1376,13 @@
       reqEntry = matched || null;
     }
 
-    var html = '<div class="detail-panel is-visible" data-detail-for="' + entry.id + '">';
+    var isErrorDetail = resEntry && resEntry.status === 'error';
+    var html = isErrorDetail
+      ? '<div class="detail-panel traffic-detail-panel is-visible traffic-detail-panel-error" data-detail-for="' + entry.id + '">'
+      : '<div class="detail-panel traffic-detail-panel is-visible" data-detail-for="' + entry.id + '">';
 
     // Metadata bar
-    html += '<div class="table-row">';
+    html += '<div class="traffic-detail-meta">';
     html += '<span class="badge badge-neutral">ID: ' + entry.id + '</span>';
     html += '<span class="timestamp">' + absoluteTime(entry.timestamp) + '</span>';
     if (entry.latency_ms != null) {
@@ -1137,62 +1391,64 @@
     html += '</div>';
 
     // Combined filter
-    html += '<div class="json-filter" id="combined-filter-' + entry.id + '">';
-    html += '<input type="text" placeholder="Filter JSON...">';
-    html += '<div class="mode-toggle">';
+    html += '<div class="json-filter json-filter-bar" id="combined-filter-' + entry.id + '">';
+    html += '<label class="json-filter-input">' + iconSearch(14, 'var(--text-muted)') + '<input type="text" placeholder="Filter JSON..."></label>';
+    html += '<div class="mode-toggle json-filter-mode">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div>';
+    html += '<div class="json-filter-spacer"></div>';
+    html += '<span class="json-filter-match-count" hidden data-match-count></span>';
     html += '</div>';
 
     // Split view
     html += '<div class="split-view" id="split-' + entry.id + '">';
 
     // REQUEST panel
-    html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter request...">';
+    html += '<div class="traffic-panel traffic-panel-request">';
+    html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter request..."></label>';
+    html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div></div>';
-    html += '<div class="code-block">';
-    html += '<div class="code-header" data-req-header>' +
-      '<span>REQUEST</span>' +
-      '<button class="btn btn-copy">Copy</button>' +
+    html += '<div class="traffic-panel-header traffic-panel-header-request" data-req-header>' +
+      '<span class="traffic-panel-label">REQUEST</span>' +
+      '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy request payload" title="Copy request payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
     '</div>';
     if (reqEntry) {
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(reqEntry.payload) + '">' + highlightJSON(reqEntry.payload) + '</div>';
     } else {
-      html += '<div class="json-viewer code-body"><span class="spinner">No request data</span></div>';
+      html += '<div class="json-viewer traffic-panel-body"><span class="spinner">No request data</span></div>';
     }
-    html += '</div>';
     html += '</div>';
 
     // RESPONSE panel
-    html += '<div>';
-    html += '<div class="json-filter panel-filter"><input type="text" placeholder="Filter response...">';
+    html += '<div class="traffic-panel traffic-panel-response">';
+    html += '<div class="json-filter panel-filter"><label class="panel-filter-input">' + iconSearch(11, 'var(--text-muted)') + '<input type="text" placeholder="Filter response..."></label>';
+    html += '<div class="json-filter-spacer"></div>';
     html += '<div class="mode-toggle mode-toggle-sm">';
     html += '<button class="is-active" data-mode="text">Text</button>';
     html += '<button data-mode="jq">JQ</button>';
     html += '</div></div>';
-    html += '<div class="code-block">';
     if (resEntry && resEntry.status === 'error') {
-      html += '<div class="code-header" data-res-header>' +
-        '<span class="badge badge-error">RESPONSE \u2014 ERROR</span>' +
-        '<button class="btn btn-copy">Copy</button>' +
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
+        '<span class="traffic-panel-title"><span class="traffic-panel-label">RESPONSE</span><span class="badge badge-error">ERROR</span></span>' +
+        '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else if (resEntry) {
-      html += '<div class="code-header" data-res-header>' +
-        '<span>RESPONSE</span>' +
-        '<button class="btn btn-copy">Copy</button>' +
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header>' +
+        '<span class="traffic-panel-label">RESPONSE</span>' +
+        '<button class="btn btn-copy traffic-panel-copy" type="button" aria-label="Copy response payload" title="Copy response payload">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
       '</div>';
-      html += '<div class="json-viewer code-body" data-raw-json="' + escapeHtml(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
+      html += '<div class="json-viewer traffic-panel-body" data-raw-json="' + escapeAttr(resEntry.payload) + '">' + highlightJSON(resEntry.payload) + '</div>';
     } else {
-      html += '<div class="code-header" data-res-header><span>RESPONSE</span></div>';
-      html += '<div class="json-viewer code-body"><span class="spinner">Awaiting response\u2026</span></div>';
+      html += '<div class="traffic-panel-header traffic-panel-header-response" data-res-header><span class="traffic-panel-label">RESPONSE</span>' +
+        '<button class="btn traffic-panel-copy traffic-panel-copy-disabled" type="button" disabled aria-disabled="true" aria-label="Response payload unavailable" title="Response payload unavailable">' + iconCopy(12, 'var(--text-muted)') + '</button>' +
+      '</div>';
+      html += '<div class="json-viewer traffic-panel-body"><span class="spinner">Awaiting response\u2026</span></div>';
     }
-    html += '</div>';
     html += '</div>';
 
     html += '</div>'; // /split-view
@@ -1211,9 +1467,9 @@
     var copyBtns = panelEl.querySelectorAll('.btn-copy');
     for (var i = 0; i < copyBtns.length; i++) {
       (function(btn) {
-        var viewer = btn.closest('.code-block');
-        if (!viewer) return;
-        var jv = viewer.querySelector('.json-viewer');
+        var panel = btn.closest('.traffic-panel');
+        if (!panel) return;
+        var jv = panel.querySelector('.json-viewer');
         if (jv) {
           btn.setAttribute('data-copy', jv.textContent);
         }
@@ -1242,15 +1498,18 @@
       for (var j = 0; j < lines.length; j++) {
         lines[j].style.display = '';
       }
-      return;
+      return 0;
     }
 
     // Phase 1: determine which lines match content
     var matched = [];
+    var matchCount = 0;
     for (var i = 0; i < lines.length; i++) {
       var lc = lines[i].querySelector('.lc');
       var text = lc ? lc.textContent : '';
-      matched.push(text.toLowerCase().indexOf(lowerQuery) !== -1);
+      var isMatch = text.toLowerCase().indexOf(lowerQuery) !== -1;
+      if (isMatch) matchCount++;
+      matched.push(isMatch);
     }
 
     // Phase 2: mark ancestor structural lines of each match as visible
@@ -1274,6 +1533,23 @@
     for (var i = 0; i < lines.length; i++) {
       lines[i].style.display = visible[i] ? '' : 'none';
     }
+    return matchCount;
+  }
+
+  function countRenderedJsonLines(viewer) {
+    if (!viewer) return 0;
+    return viewer.querySelectorAll('.json-line').length;
+  }
+
+  function updateSharedFilterMatchCount(matchCount, active, count) {
+    if (!matchCount) return;
+    if (!active) {
+      matchCount.textContent = '';
+      matchCount.hidden = true;
+      return;
+    }
+    matchCount.textContent = count + (count === 1 ? ' match' : ' matches');
+    matchCount.hidden = false;
   }
 
   /* ======================================================================
@@ -1374,22 +1650,23 @@
   // the result (or an inline error) into the viewer.
   function applyJqToViewer(viewer, expr) {
     var rawJson = viewer.getAttribute('data-raw-json');
-    if (!rawJson) return;
+    if (!rawJson) return { ok: true, count: 0 };
     if (!expr) {
       viewer.innerHTML = highlightJSON(rawJson);
-      return;
+      return { ok: true, count: 0 };
     }
     var parsed;
     try { parsed = JSON.parse(rawJson); } catch(e) {
       viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">Invalid JSON in viewer</div>';
-      return;
+      return { ok: false, count: 0 };
     }
     var result = jqEval(expr, parsed);
     if (!result.ok) {
       viewer.innerHTML = '<div style="padding:8px; color:var(--danger-fg);">jq error: ' + escapeHtml(result.error) + '</div>';
-      return;
+      return { ok: false, count: 0 };
     }
     viewer.innerHTML = highlightJSON(JSON.stringify(result.value, null, 2));
+    return { ok: true, count: countRenderedJsonLines(viewer) };
   }
 
   // getActiveMode returns 'text' or 'jq' for the mode toggle associated with
@@ -1400,6 +1677,29 @@
     return activeBtn.getAttribute('data-mode') || 'text';
   }
 
+  function applyCombinedFilter(combinedFilter, container) {
+    var input = combinedFilter.querySelector('input');
+    if (!input || !container) return;
+    var mode = getActiveMode(combinedFilter);
+    var val = input.value.trim();
+    var viewers = container.querySelectorAll('.split-view .json-viewer');
+    var matchCount = combinedFilter.querySelector('[data-match-count]');
+    var totalMatches = 0;
+    var allOk = true;
+    for (var i = 0; i < viewers.length; i++) {
+      if (mode === 'jq') {
+        var result = applyJqToViewer(viewers[i], val);
+        if (result && result.ok === false) allOk = false;
+        totalMatches += result && result.count ? result.count : 0;
+      } else {
+        var rawJson = viewers[i].getAttribute('data-raw-json');
+        if (rawJson) viewers[i].innerHTML = highlightJSON(rawJson);
+        totalMatches += filterJsonLines(viewers[i], val);
+      }
+    }
+    updateSharedFilterMatchCount(matchCount, val && allOk, totalMatches);
+  }
+
   function wireFilterInputs(container) {
     // Combined filter — filters all json-viewers in the container
     var combinedFilter = container.querySelector('.json-filter:not(.panel-filter)');
@@ -1407,16 +1707,7 @@
       var combinedInput = combinedFilter.querySelector('input');
       if (combinedInput) {
         var debouncedCombined = debounce(function() {
-          var mode = getActiveMode(combinedFilter);
-          var val = combinedInput.value.trim();
-          var viewers = container.querySelectorAll('.split-view .json-viewer');
-          for (var i = 0; i < viewers.length; i++) {
-            if (mode === 'jq') {
-              applyJqToViewer(viewers[i], val);
-            } else {
-              filterJsonLines(viewers[i], val);
-            }
-          }
+          applyCombinedFilter(combinedFilter, container);
         }, 200);
         combinedInput.addEventListener('input', debouncedCombined);
       }
@@ -1428,9 +1719,9 @@
       (function(pf) {
         var input = pf.querySelector('input');
         if (!input) return;
-        var codeBlock = pf.nextElementSibling;
-        if (!codeBlock) return;
-        var viewer = codeBlock.querySelector('.json-viewer');
+        var panel = pf.closest('.traffic-panel');
+        if (!panel) return;
+        var viewer = panel.querySelector('.json-viewer');
         if (!viewer) return;
         var debouncedPanel = debounce(function() {
           var mode = getActiveMode(pf);
@@ -1445,6 +1736,37 @@
       })(panelFilters[p]);
     }
   }
+
+  /* ======================================================================
+     Traffic Detail Resize
+     ====================================================================== */
+  trafficBody.addEventListener('mousedown', function(e) {
+    var handle = e.target.closest('.traffic-detail-panel .resize-handle');
+    if (!handle) return;
+    e.preventDefault();
+    trafficResizePanel = handle.closest('.traffic-detail-panel');
+    if (!trafficResizePanel) return;
+    trafficResizeTarget = trafficResizePanel.querySelector('.split-view');
+    if (!trafficResizeTarget) return;
+    trafficResizeDragging = true;
+    trafficResizeStartY = e.clientY;
+    trafficResizeStartHeight = trafficResizeTarget.offsetHeight;
+    trafficResizeTarget.style.height = trafficResizeStartHeight + 'px';
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!trafficResizeDragging || !trafficResizeTarget) return;
+    var delta = e.clientY - trafficResizeStartY;
+    var newH = Math.min(Math.max(trafficResizeStartHeight + delta, 160), 720);
+    trafficResizeTarget.style.height = newH + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!trafficResizeDragging) return;
+    trafficResizeDragging = false;
+    trafficResizeTarget = null;
+    trafficResizePanel = null;
+  });
 
   /* ======================================================================
      Mode Toggle in Detail Panels
@@ -1466,31 +1788,22 @@
       // Combined filter targets all split-view viewers in the container
       var container = filterEl.closest('.detail-panel');
       if (filterEl.classList.contains('panel-filter')) {
-        // Per-panel filter: viewer is in the next sibling code-block
-        var codeBlock = filterEl.nextElementSibling;
-        if (codeBlock) viewer = codeBlock.querySelector('.json-viewer');
+        // Per-panel filter: viewer lives in the same traffic panel.
+        var panel = filterEl.closest('.traffic-panel');
+        if (panel) viewer = panel.querySelector('.json-viewer');
       }
       if (input) {
         input.placeholder = mode === 'jq' ? 'jq expression...' : 'Filter JSON...';
         var val = input.value.trim();
-        if (mode === 'jq') {
+        if (!filterEl.classList.contains('panel-filter')) {
+          applyCombinedFilter(filterEl, container);
+        } else if (mode === 'jq') {
           if (viewer) applyJqToViewer(viewer, val);
-          else if (container) {
-            var viewers = container.querySelectorAll('.split-view .json-viewer');
-            for (var j = 0; j < viewers.length; j++) { applyJqToViewer(viewers[j], val); }
-          }
         } else {
           if (viewer) {
             var rawJson = viewer.getAttribute('data-raw-json');
             if (rawJson) viewer.innerHTML = highlightJSON(rawJson);
             filterJsonLines(viewer, val);
-          } else if (container) {
-            var viewers = container.querySelectorAll('.split-view .json-viewer');
-            for (var j = 0; j < viewers.length; j++) {
-              var rj = viewers[j].getAttribute('data-raw-json');
-              if (rj) viewers[j].innerHTML = highlightJSON(rj);
-              filterJsonLines(viewers[j], val);
-            }
           }
         }
       }
@@ -1642,8 +1955,42 @@
     timelineScrollInfo.style.display = 'none';
   }
 
+  function activeTimelineRowCount() {
+    return trafficBody.querySelectorAll('.table-row').length;
+  }
+
+  function enforceTimelineRowBudget(trigger) {
+    var telemetryStart = performance.now();
+    var removed = 0;
+    var mainRows = trafficBody.querySelectorAll('.table-row:not([data-detail-for])');
+    for (var i = mainRows.length - 1; i >= timelineActiveRowBudget; i--) {
+      var row = mainRows[i];
+      var rowID = row.getAttribute('data-id');
+      if (rowID) {
+        var detail = trafficBody.querySelector('.table-row[data-detail-for="' + rowID + '"]');
+        if (detail && detail.parentNode) {
+          detail.parentNode.removeChild(detail);
+          removed++;
+        }
+      }
+      if (row.parentNode) {
+        row.parentNode.removeChild(row);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      recordClientTelemetry('timeline.dom.prune', telemetryStart, {
+        trigger: trigger,
+        rows: activeTimelineRowCount(),
+        removed: removed,
+        budget: timelineActiveRowBudget
+      });
+    }
+  }
+
   function loadPage() {
     if (timelineLoading || timelineAllLoaded) return;
+    var telemetryStart = performance.now();
     timelineLoading = true;
     timelineLoadingEl.style.display = '';
 
@@ -1667,6 +2014,7 @@
         if (timelineTotal === 0 && timelineOffset === 0) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
+          recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0, active_rows: 0, budget: timelineActiveRowBudget });
           return;
         }
 
@@ -1690,6 +2038,7 @@
         for (var i = 0; i < items.length; i++) {
           trafficBody.insertAdjacentHTML('beforeend', renderRow(items[i], existingCount + i));
         }
+        enforceTimelineRowBudget('load');
 
         timelineOffset += items.length;
 
@@ -1701,11 +2050,13 @@
             timelineScrollInfo.style.display = '';
           }
         }
+        recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal, active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
       })
       .catch(function(err) {
         timelineLoading = false;
         timelineLoadingEl.style.display = 'none';
         console.error('Failed to load traffic:', err);
+        recordClientTelemetry('timeline.load', telemetryStart, { error: true });
       });
   }
 
@@ -1766,6 +2117,7 @@
 
     ws.onmessage = function(e) {
       try {
+        var telemetryStart = performance.now();
         var evt = JSON.parse(e.data);
 
         // Track filters
@@ -1778,10 +2130,12 @@
 
           var newIdx = 0; // new row is always first
           trafficBody.insertAdjacentHTML('afterbegin', renderRow(evt, newIdx));
+          enforceTimelineRowBudget('live');
 
           timelineTotal++;
           timelineOffset++;
           trafficCount.textContent = timelineTotal + ' entries';
+          recordClientTelemetry('timeline.live.insert', telemetryStart, { active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
         }
       } catch(err) {
         console.error('WS parse error:', err);
@@ -1805,6 +2159,7 @@
      ====================================================================== */
   var toolGroups       = document.getElementById('tool-groups');
   var toolSearch       = document.getElementById('tool-search');
+  var toolRefreshBtn   = document.getElementById('tool-refresh-btn');
   var toolsEmpty       = document.getElementById('tools-empty');
   var toolDetail       = document.getElementById('tool-detail');
   var toolDetailToggle = document.getElementById('tool-detail-toggle');
@@ -1986,7 +2341,10 @@
   /* ======================================================================
      Tool Browser — Load Tools
      ====================================================================== */
-  function loadTools() {
+  function loadTools(forceRefresh) {
+    forceRefresh = !!forceRefresh;
+    var telemetryStart = performance.now();
+    var telemetryName = forceRefresh ? 'tools.load.force_refresh' : 'tools.load.cached';
     // Load Shipyard's built-in tools via gateway catalog first, then child server tools.
     fetch('/api/gateway/tools?include_disabled=1')
       .then(function(resp) { return resp.json(); })
@@ -2020,24 +2378,34 @@
             if (childServers.length === 0) {
               toolsLoaded = true;
               renderToolSidebar();
+              recordClientTelemetry(telemetryName, telemetryStart, { servers: 0, tools: shipyardToolList.length, source: forceRefresh ? 'live' : 'cache' });
               return;
             }
 
             var pending = childServers.length;
             childServers.forEach(function(srv) {
               var srvEnabled = srv.enabled !== false; // SPEC-028: track server enabled state
-              fetch('/api/tools?server=' + encodeURIComponent(srv.name))
+              var toolsURL = '/api/tools?server=' + encodeURIComponent(srv.name);
+              if (forceRefresh) toolsURL += '&force_refresh=1';
+              fetch(toolsURL)
                 .then(function(resp) {
                   if (!resp.ok) throw new Error('Failed to fetch tools');
                   return resp.json();
                 })
                 .then(function(data) {
                   var tools = data.tools || [];
-                  allTools[srv.name] = { status: srv.status, tools: tools, enabled: srvEnabled };
+                  allTools[srv.name] = {
+                    status: srv.status,
+                    tools: tools,
+                    enabled: srvEnabled,
+                    cache_status: data.cache_status || '',
+                    status_message: data.status_message || '',
+                    snapshot_captured_at: data.snapshot_captured_at || ''
+                  };
                 })
                 .catch(function(err) {
                   console.error('Failed to load tools for', srv.name, err);
-                  allTools[srv.name] = { status: 'offline', tools: [], enabled: srvEnabled };
+                  allTools[srv.name] = { status: srv.status || 'offline', tools: [], enabled: srvEnabled, cache_status: 'error', status_message: 'Failed to load cached tool snapshot.' };
                 })
                 .then(function() {
                   pending--;
@@ -2054,9 +2422,11 @@
                           }
                         }
                         renderToolSidebar();
+                        recordClientTelemetry(telemetryName, telemetryStart, { servers: childServers.length, groups: Object.keys(allTools).length, source: forceRefresh ? 'live' : 'cache' });
                       })
                       .catch(function() {
                         renderToolSidebar();
+                        recordClientTelemetry(telemetryName, telemetryStart, { servers: childServers.length, conflicts_error: true, source: forceRefresh ? 'live' : 'cache' });
                       });
                   }
                 });
@@ -2066,21 +2436,61 @@
       .catch(function(err) {
         console.error('Failed to load tools:', err);
         toolGroups.innerHTML = '<div style="padding:16px; color:var(--danger-fg); font-size:var(--font-size-sm); text-align:center;">Failed to load servers</div>';
+        recordClientTelemetry(telemetryName, telemetryStart, { error: true, source: forceRefresh ? 'live' : 'cache' });
       });
   }
 
   /* ======================================================================
      Tool Browser — Render Sidebar
      ====================================================================== */
+  function toolSidebarSignature(searchVal) {
+    var serverNames = Object.keys(allTools);
+    var groups = [];
+    for (var i = 0; i < serverNames.length; i++) {
+      var srvName = serverNames[i];
+      var srvData = allTools[srvName] || {};
+      var tools = srvData.tools || [];
+      groups.push({
+        name: srvName,
+        status: srvData.status || '',
+        enabled: srvData.enabled !== false,
+        isSelf: !!srvData.isSelf,
+        cache_status: srvData.cache_status || '',
+        status_message: srvData.status_message || '',
+        tools: tools.map(function(t) {
+          return {
+            name: t.name || '',
+            description: t.description || '',
+            enabled: t.enabled !== false,
+            conflict: !!(toolConflicts[t.name] && toolConflicts[t.name].length > 1)
+          };
+        })
+      });
+    }
+    return JSON.stringify({
+      search: searchVal,
+      selected: selectedTool ? selectedTool.server + '\n' + selectedTool.name : '',
+      conflicts: toolConflicts,
+      groups: groups
+    });
+  }
+
   function renderToolSidebar() {
+    var telemetryStart = performance.now();
     var searchVal = toolSearch ? toolSearch.value.trim().toLowerCase() : '';
+    var signature = toolSidebarSignature(searchVal);
+    if (signature === lastToolSidebarSignature) {
+      recordClientTelemetry('tools.sidebar.render.skip', telemetryStart, { groups: Object.keys(allTools).length, skipped: 1 });
+      return;
+    }
+    lastToolSidebarSignature = signature;
     var html = '';
 
     // Show conflict warning banner
     var conflictCount = Object.keys(toolConflicts).length;
     if (conflictCount > 0) {
       html += '<div style="padding:6px 8px; margin:0 4px 4px 4px; background:var(--warning-subtle); border-radius:var(--radius-s); font-size:var(--font-size-xs); color:var(--warning-fg); display:flex; align-items:center; gap:4px;">';
-      html += '<span>&#9888;</span> ' + conflictCount + ' tool name conflict' + (conflictCount !== 1 ? 's' : '') + ' detected';
+      html += iconAlertTriangle(12, 'var(--warning-fg)') + '<span>' + conflictCount + ' tool name conflict' + (conflictCount !== 1 ? 's' : '') + ' detected</span>';
       html += '</div>';
     }
 
@@ -2093,6 +2503,8 @@
       var isOffline = srvData.status === 'offline';
       var isRestarting = srvData.status === 'restarting';
       var isSelf = !!srvData.isSelf; // true for the Shipyard built-in group
+      var cacheStatus = srvData.cache_status || '';
+      var statusMessage = srvData.status_message || '';
 
       // Filter tools by search
       var filteredTools = tools;
@@ -2101,11 +2513,13 @@
           return t.name.toLowerCase().indexOf(searchVal) !== -1 ||
                  (t.description && t.description.toLowerCase().indexOf(searchVal) !== -1);
         });
-        if (filteredTools.length === 0) continue;
+        if (filteredTools.length === 0 && cacheStatus !== 'missing' && cacheStatus !== 'error') continue;
       }
 
       var groupClass = 'tool-group';
-      if (!isSelf && (isOffline || isRestarting)) groupClass += ' is-collapsed';
+      // SPEC-BUG-145: offline/restarting groups auto-collapse (R4); otherwise
+      // honor the user's retained per-server collapse state across tool switches.
+      if ((!isSelf && (isOffline || isRestarting)) || userCollapsedGroups[srvName]) groupClass += ' is-collapsed';
 
       var statusDot = '<span class="badge-dot" style="background:var(--success-fg);"></span>';
       var statusLabel = '';
@@ -2120,7 +2534,7 @@
       }
 
       var groupOpacity = (!isSelf && isOffline) ? 'opacity:0.5;' : '';
-      html += '<div class="' + groupClass + '" style="' + groupOpacity + '">';
+      html += '<div class="' + groupClass + '" data-server="' + escapeHtml(srvName) + '" style="' + groupOpacity + '">';
       html += '<div class="tool-group-header">';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += statusDot;
@@ -2128,14 +2542,27 @@
       html += statusLabel;
       if (isSelf) {
         html += ' <span class="badge badge-neutral" style="font-size:var(--font-size-xs);">Built-in</span>';
+      } else if (cacheStatus === 'missing') {
+        html += ' <span class="badge badge-warning" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Snapshot missing</span>';
+      } else if (cacheStatus === 'error') {
+        html += ' <span class="badge badge-error" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Snapshot error</span>';
+      } else if (cacheStatus === 'cached') {
+        html += ' <span class="badge badge-neutral" style="font-size:var(--font-size-xs);" title="' + escapeHtml(statusMessage) + '">Cached</span>';
       }
       html += '</span>';
       html += '<span style="display:flex; align-items:center; gap:6px;">';
       html += '<span class="badge badge-neutral" style="font-size:var(--font-size-xs);">' + filteredTools.length + '</span>';
-      html += '<span class="tool-group-chevron">&#9660;</span>';
+      html += '<span class="tool-group-chevron">' + iconChevronDown(12, 'currentColor') + '</span>';
       html += '</span>';
       html += '</div>';
       html += '<div class="tool-group-items">';
+
+      if (!isSelf && (cacheStatus === 'missing' || cacheStatus === 'error') && filteredTools.length === 0) {
+        html += '<div style="padding:8px 12px 8px 32px; color:var(--text-secondary); font-size:var(--font-size-xs); display:flex; align-items:center; gap:6px;">';
+        html += iconAlertTriangle(12, cacheStatus === 'error' ? 'var(--danger-fg)' : 'var(--warning-fg)');
+        html += '<span>' + escapeHtml(statusMessage || 'Tool snapshot is not available.') + '</span>';
+        html += '</div>';
+      }
 
       for (var t = 0; t < filteredTools.length; t++) {
         var tool = filteredTools[t];
@@ -2156,7 +2583,7 @@
         // Left: icon + name
         html += '<div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0; overflow:hidden;">';
         if (isConflict) {
-          html += '<span style="color:var(--warning-fg); flex-shrink:0;">&#9888;</span>';
+          html += iconAlertTriangle(14, 'var(--warning-fg)');
         } else {
           html += '<svg class="tool-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
         }
@@ -2200,7 +2627,7 @@
       if (offlineCount > 0) parts.push(offlineCount + ' server' + (offlineCount !== 1 ? 's' : '') + ' offline');
       if (restartingCount > 0) parts.push(restartingCount + ' server' + (restartingCount !== 1 ? 's' : '') + ' restarting');
       html += '<div id="tool-availability-banner" style="display:flex; align-items:center; justify-content:center; gap:8px; padding:8px 12px; background:var(--danger-subtle); font-size:var(--font-size-xs); font-weight:500; color:var(--danger-fg);">';
-      html += '<span style="font-size:14px; line-height:1; flex-shrink:0;">&#9888;</span>';
+      html += iconAlertTriangle(14, 'var(--danger-fg)');
       html += '<span>' + parts.join(', ') + '</span>';
       html += '</div>';
     }
@@ -2210,6 +2637,7 @@
     }
 
     toolGroups.innerHTML = html;
+    recordClientTelemetry('tools.sidebar.render', telemetryStart, { groups: Object.keys(allTools).length, skipped: 0 });
   }
 
   /* ======================================================================
@@ -2493,7 +2921,7 @@
       .then(function() {
         // Reset button
         toolExecuteBtn.disabled = false;
-        toolExecuteBtn.innerHTML = '<span>&#9654;</span> Execute';
+        setButtonIconLabel(toolExecuteBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Execute');
       });
   }
 
@@ -2544,6 +2972,22 @@
       toggleTool(toggleBtn);
       return;
     }
+    // SPEC-BUG-145: clicking a group header toggles that group's collapse state
+    // and records it so the fold is retained across tool selection changes.
+    var header = e.target.closest('.tool-group-header');
+    if (header) {
+      var group = header.closest('.tool-group[data-server]');
+      if (group) {
+        var groupServer = group.getAttribute('data-server');
+        var nowCollapsed = group.classList.toggle('is-collapsed');
+        userCollapsedGroups[groupServer] = nowCollapsed;
+        // SPEC-BUG-147: persist the updated store so folds survive reload/restart.
+        try {
+          localStorage.setItem(TOOL_GROUP_COLLAPSE_KEY, JSON.stringify(userCollapsedGroups));
+        } catch (e) { /* storage unavailable: in-session retention still works */ }
+      }
+      return;
+    }
     var item = e.target.closest('.tool-item');
     if (item) {
       var server = item.getAttribute('data-server');
@@ -2563,6 +3007,14 @@
   toolSearch.addEventListener('input', function() {
     renderToolSidebar();
   });
+
+  if (toolRefreshBtn) {
+    toolRefreshBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      toolsLoaded = false;
+      loadTools(true);
+    });
+  }
 
   toolExecuteBtn.addEventListener('click', function() {
     executeTool();
@@ -2681,6 +3133,7 @@
 
   function historyLoadPage() {
     if (historyLoading || historyAllLoaded) return;
+    var telemetryStart = performance.now();
     historyLoading = true;
     historyLoadingEl.style.display = '';
 
@@ -2720,6 +3173,7 @@
           historyEmpty.style.display = '';
           historyNoResults.style.display = 'none';
           historyContent.style.display = 'none';
+          recordClientTelemetry('history.load', telemetryStart, { rows: 0, total: 0 });
           return;
         }
 
@@ -2728,6 +3182,7 @@
         if (historyTotal === 0 && historyOffset === 0) {
           historyNoResults.style.display = '';
           historyContent.style.display = 'none';
+          recordClientTelemetry('history.load', telemetryStart, { rows: 0, total: 0, filtered: true });
           return;
         }
 
@@ -2760,11 +3215,13 @@
             historyScrollInfo.style.display = '';
           }
         }
+        recordClientTelemetry('history.load', telemetryStart, { rows: items.length, total: historyTotal });
       })
       .catch(function(err) {
         historyLoading = false;
         historyLoadingEl.style.display = 'none';
         console.error('Failed to load history:', err);
+        recordClientTelemetry('history.load', telemetryStart, { error: true });
       });
   }
 
@@ -2978,7 +3435,7 @@
               }
 
               // Update button text
-              toolExecuteBtn.innerHTML = '<span>&#9654;</span> Replay';
+              setButtonIconLabel(toolExecuteBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Replay');
             }, 100);
           } else if (waitCount < 50) {
             setTimeout(waitForTools, 100);
@@ -3122,6 +3579,7 @@
   var autoImportConfirm = document.getElementById('auto-import-confirm');
 
   function loadServers() {
+    var telemetryStart = performance.now();
     fetch('/api/servers')
       .then(function(resp) { return resp.json(); })
       .then(function(servers) {
@@ -3136,6 +3594,7 @@
           serversEmpty.style.display = '';
           serversGrid.style.display = 'none';
           serversActionBar.style.display = 'none';
+          recordClientTelemetry('servers.load', telemetryStart, { servers: 0 });
           return;
         }
 
@@ -3198,6 +3657,7 @@
             warningBanner.style.display = 'flex';
           }
         }
+        recordClientTelemetry('servers.load', telemetryStart, { servers: servers.length, child_servers: childServers.length });
       })
       .catch(function(err) {
         console.error('Failed to load servers:', err);
@@ -3206,6 +3666,7 @@
           var errMsg = serversEmpty.querySelector('.empty-desc');
           if (errMsg) errMsg.textContent = 'Failed to load servers: ' + (err && err.message ? err.message : String(err));
         }
+        recordClientTelemetry('servers.load', telemetryStart, { error: true });
       });
   }
 
@@ -3214,6 +3675,24 @@
     serverStateTimer = setInterval(function() {
       loadServers();
     }, 2000);
+  }
+
+  function stopServerStatePolling() {
+    if (!serverStateTimer) return;
+    clearInterval(serverStateTimer);
+    serverStateTimer = null;
+  }
+
+  function shouldServerStatePoll() {
+    return getRoute() === 'servers' && document.visibilityState !== 'hidden';
+  }
+
+  function syncServerStatePolling() {
+    if (shouldServerStatePoll()) {
+      startServerStatePolling();
+    } else {
+      stopServerStatePolling();
+    }
   }
 
   /* ======================================================================
@@ -3257,7 +3736,31 @@
     });
   }
 
+  function serverCardsSignature(servers) {
+    return JSON.stringify((servers || []).map(function(s) {
+      return {
+        name: s.name || '',
+        status: s.status || '',
+        tool_count: s.tool_count || 0,
+        restart_count: s.restart_count || 0,
+        error_message: s.error_message || '',
+        command: s.command || '',
+        gateway_disabled: !!s.gateway_disabled,
+        enabled: s.enabled !== false,
+        is_self: !!s.is_self,
+        has_plain_text_secrets: !!s.has_plain_text_secrets
+      };
+    }));
+  }
+
   function renderServerCards(servers) {
+    var telemetryStart = performance.now();
+    var signature = serverCardsSignature(servers);
+    if (signature === lastServerCardsSignature) {
+      recordClientTelemetry('servers.render.skip', telemetryStart, { cards: servers ? servers.length : 0, skipped: 1 });
+      return;
+    }
+    lastServerCardsSignature = signature;
     // SPEC-BUG-045: Lucide inline SVG icon helpers (R1, R2)
     // Each returns an <svg> element string at the requested size and stroke color.
     var iconWrench = function(size, color) {
@@ -3410,7 +3913,9 @@
           html += escapeHtml(s.command);
           html += '</div>';
         }
-        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">&#128274; Blocked by gateway policy. Use the toggle to re-enable.</div>';
+        html += '<div style="display:flex; align-items:center; gap:8px; background:var(--warning-subtle); padding:8px 12px; border-radius:var(--radius-s); font-size:var(--font-size-sm); color:var(--warning-fg);">';
+        html += iconLock(14, 'var(--warning-fg)');
+        html += '<span>Blocked by gateway policy. Use the toggle to re-enable.</span></div>';
         html += '</div>';
         // No separate actions area for gateway-disabled — the Switch/Off toggle in header handles it.
       } else {
@@ -3520,6 +4025,7 @@
       html += '</div>';
     }
     serversGrid.innerHTML = html;
+    recordClientTelemetry('servers.render', telemetryStart, { cards: servers ? servers.length : 0, skipped: 0 });
   }
 
   function openAddServerModal() {
@@ -3593,6 +4099,11 @@
       if (getRoute() === 'tools') { loadTools(); }
     }).catch(function(err) { console.error('Toggle server failed:', err); });
   }
+  // SPEC-BUG-152: the Servers card enable/disable switch uses inline
+  // onclick="toggleServer(...)", which resolves in global scope. The app runs
+  // inside an IIFE, so toggleServer must be exposed on window (mirrors the
+  // window.__shipyard_* handlers) or the click throws "toggleServer is not defined".
+  window.toggleServer = toggleServer;
 
   // toggleTool: called from Switch button in tool sidebar row.
   // btn is the <button> element with data-server and data-tool attributes.
@@ -3715,11 +4226,11 @@
     if (!execBtn) return;
     if (!toolEnabled) {
       execBtn.disabled = true;
-      execBtn.innerHTML = '<span>&#9654;</span> Tool Disabled';
+      setButtonIconLabel(execBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Tool Disabled');
       if (execHint) execHint.textContent = '';
     } else {
       execBtn.disabled = false;
-      execBtn.innerHTML = '<span>&#9654;</span> Execute';
+      setButtonIconLabel(execBtn, iconPlay(12, 'var(--text-on-emphasis)'), 'Execute');
       if (execHint) execHint.textContent = 'Sends tools/call to the child server';
     }
   }
@@ -3868,6 +4379,10 @@
   var perfTableHeader    = document.getElementById('perf-table-header');
   var perfTableBody      = document.getElementById('perf-table-body');
   var perfEmpty          = document.getElementById('perf-empty');
+  var perfDebugBundleBtn = document.getElementById('perf-debug-bundle-btn');
+  var perfHealthGrid     = document.getElementById('perf-health-grid');
+  var perfHealthTableBody = document.getElementById('perf-health-table-body');
+  var perfHealthUpdated  = document.getElementById('perf-health-updated');
   var perfTotalCalls     = document.getElementById('perf-total-calls');
   var perfTotalCallsDelta = document.getElementById('perf-total-calls-delta');
   var perfAvgLatency     = document.getElementById('perf-avg-latency');
@@ -3885,23 +4400,11 @@
   var sessionsLoaded     = false;
 
   function switchHistorySub(sub) {
-    var allSubs = [
-      { el: historyRequestsView, nav: subNavRequests, key: 'requests' },
-      { el: historySessionsView, nav: subNavSessions, key: 'sessions' },
-      { el: historyPerformanceView, nav: subNavPerformance, key: 'performance' }
-    ];
-    for (var i = 0; i < allSubs.length; i++) {
-      if (allSubs[i].key === sub) {
-        allSubs[i].el.style.display = '';
-        allSubs[i].nav.className = 'tab tab-active';
-      } else {
-        allSubs[i].el.style.display = 'none';
-        allSubs[i].nav.className = 'tab tab-default';
-      }
-    }
+    if (historyRequestsView) historyRequestsView.style.display = '';
+    if (subNavRequests) subNavRequests.className = sub === 'requests' ? 'tab tab-active' : 'tab tab-default';
+    if (subNavSessions) subNavSessions.className = sub === 'sessions' ? 'tab tab-active' : 'tab tab-default';
+    if (subNavPerformance) subNavPerformance.className = sub === 'performance' ? 'tab tab-active' : 'tab tab-default';
     if (sub === 'requests' && !historyLoaded) historyLoadPage();
-    if (sub === 'sessions') loadSessions();
-    if (sub === 'performance') loadPerformance();
   }
 
   // Sub-nav switching
@@ -3909,7 +4412,18 @@
     var link = e.target.closest('[data-sub]');
     if (!link) return;
     e.preventDefault();
-    switchHistorySub(link.getAttribute('data-sub'));
+    var sub = link.getAttribute('data-sub');
+    if (sub === 'sessions') {
+      location.hash = '#sessions';
+      navigateRoute('sessions');
+      return;
+    }
+    if (sub === 'performance') {
+      location.hash = '#profiling';
+      navigateRoute('profiling');
+      return;
+    }
+    switchHistorySub(sub);
   });
 
   function loadSessions() {
@@ -3957,7 +4471,7 @@
 
   function renderSessionRow(s) {
     var statusClass = s.status === 'recording' ? 'badge-error' : (s.status === 'complete' ? 'badge-success' : 'badge-neutral');
-    var statusText = s.status === 'recording' ? '&#128308; Recording' : (s.status === 'complete' ? 'Complete' : s.status);
+    var statusText = s.status === 'recording' ? iconCircle(10, 'var(--danger-fg)') + ' Recording' : (s.status === 'complete' ? 'Complete' : s.status);
     var duration = s.duration_ms ? formatDuration(s.duration_ms) : (s.status === 'recording' ? 'In progress' : '-');
     var size = s.size_bytes ? formatBytes(s.size_bytes) : '-';
     var started = s.started_at ? relativeTime(new Date(s.started_at).getTime()) : '-';
@@ -4008,7 +4522,7 @@
         .then(function() {
           activeRecordingId = null;
           activeRecordingServer = null;
-          sessionRecordIcon.innerHTML = '&#128308;';
+          sessionRecordIcon.innerHTML = iconCircle(12, 'var(--danger-fg)');
           sessionRecordLabel.textContent = 'Record';
           sessionRecordBtn.className = 'btn btn-primary btn-sm';
           sessionNameInput.disabled = false;
@@ -4076,7 +4590,7 @@
       .then(function(sess) {
         activeRecordingId = sess.id;
         activeRecordingServer = sess.server;
-        sessionRecordIcon.innerHTML = '&#9632;';
+        sessionRecordIcon.innerHTML = iconSquare(12, 'var(--text-on-emphasis)');
         sessionRecordLabel.textContent = 'Stop';
         sessionRecordBtn.className = 'btn btn-danger btn-sm';
         sessionNameInput.disabled = true;
@@ -4106,7 +4620,7 @@
           if (activeRecordingId === sid) {
             activeRecordingId = null;
             activeRecordingServer = null;
-            sessionRecordIcon.innerHTML = '&#128308;';
+            sessionRecordIcon.innerHTML = iconCircle(12, 'var(--danger-fg)');
             sessionRecordLabel.textContent = 'Record';
             sessionRecordBtn.className = 'btn btn-primary btn-sm';
             sessionNameInput.disabled = false;
@@ -4182,12 +4696,19 @@
     return (ms / 1000).toFixed(1) + 's';
   }
 
+  function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
   function deltaHtml(current, prev, unit, lowerIsBetter) {
     if (prev === null || prev === undefined) return '';
     var diff = current - prev;
     if (diff === 0) return '';
     var isUp = diff > 0;
-    var arrow = isUp ? '\u2191' : '\u2193';
+    var arrow = isUp ? iconArrowUp(10, 'currentColor') : iconArrowDown(10, 'currentColor');
     var color;
     if (lowerIsBetter) {
       color = isUp ? 'var(--danger-fg)' : 'var(--success-fg)';
@@ -4196,12 +4717,13 @@
     }
     var val = Math.abs(diff);
     var text = unit === 'ms' ? formatMs(val) : (unit === '%' ? val.toFixed(1) + '%' : val.toString());
-    return '<span style="color:' + color + ';">' + arrow + ' ' + text + '</span>';
+    return '<span style="color:' + color + '; display:inline-flex; align-items:center; gap:4px;">' + arrow + '<span>' + text + '</span></span>';
   }
 
   function loadPerformance() {
     var rangeVal = perfRange.value;
     var serverVal = perfServer.value;
+    loadAppHealthPerformance(rangeVal);
 
     // Populate server filter from known servers
     var opts = perfServer.querySelectorAll('option');
@@ -4277,6 +4799,61 @@
     });
   }
 
+  function loadAppHealthPerformance(rangeVal) {
+    fetch('/api/performance/history?window=' + encodeURIComponent(rangeVal))
+      .then(function(r) {
+        if (!r.ok) throw new Error('performance history ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        renderAppHealthPerformance(data || {});
+      })
+      .catch(function(err) {
+        if (perfHealthUpdated) perfHealthUpdated.textContent = 'Unavailable';
+        console.error('Failed to load app health performance:', err);
+      });
+  }
+
+  function renderAppHealthPerformance(data) {
+    var rollups = data.rollups || [];
+    var current = data.current || {};
+    var latest = rollups.length ? rollups[rollups.length - 1] : {};
+    if (perfHealthUpdated) {
+      perfHealthUpdated.textContent = rollups.length ? ('Updated ' + new Date(latest.updated_at).toLocaleTimeString()) : 'No rollups yet';
+    }
+    if (perfHealthGrid) {
+      var cards = [
+        ['Goroutines', current.goroutines || latest.goroutines || 0],
+        ['Heap', formatBytes((current.memory && current.memory.heap_alloc_bytes) || latest.heap_alloc_bytes || 0)],
+        ['DB Size', formatBytes((current.store && current.store.db_file_size_bytes) || latest.db_file_size_bytes || 0)],
+        ['Traffic Rows', (current.store && current.store.traffic_rows) || latest.traffic_rows || 0],
+        ['Schema Snapshots', (current.store && current.store.schema_snapshot_rows) || latest.schema_snapshot_rows || 0],
+        ['DOM Rows', latest.active_dom_rows || 0]
+      ];
+      perfHealthGrid.innerHTML = cards.map(function(c) {
+        return '<div class="detail-panel" style="padding:10px;">'
+          + '<div style="font-size:var(--font-size-xs); color:var(--text-muted);">' + escapeHtml(c[0]) + '</div>'
+          + '<div style="font-size:var(--font-size-lg); font-weight:700; color:var(--text-primary);">' + escapeHtml(String(c[1])) + '</div>'
+          + '</div>';
+      }).join('');
+    }
+    if (perfHealthTableBody) {
+      perfHealthTableBody.innerHTML = rollups.slice(-12).map(function(r) {
+        return '<div class="table-row" style="display:flex; align-items:center; padding:6px 12px; border-bottom:1px solid var(--border-muted);">'
+          + '<span style="width:120px; font-size:var(--font-size-sm); color:var(--text-secondary);">' + new Date(r.bucket_start).toLocaleTimeString() + '</span>'
+          + '<span style="width:90px;">' + formatMs(r.http_avg_ms || 0) + '</span>'
+          + '<span style="width:90px;">' + formatMs(r.rpc_avg_ms || 0) + '</span>'
+          + '<span style="width:110px;">' + formatMs(r.frontend_avg_ms || 0) + '</span>'
+          + '<span style="width:90px;">' + (r.active_dom_rows || 0) + '</span>'
+          + '<span style="width:90px;">' + formatBytes(r.heap_alloc_bytes || 0) + '</span>'
+          + '<span style="width:90px;">' + formatBytes(r.db_file_size_bytes || 0) + '</span>'
+          + '<span style="width:80px;">' + (r.traffic_rows || 0) + '</span>'
+          + '<span style="width:80px;">' + (r.schema_snapshot_rows || 0) + '</span>'
+          + '</div>';
+      }).join('');
+    }
+  }
+
   function renderPerfTable(tools) {
     if (!tools || tools.length === 0) {
       perfTableBody.innerHTML = '';
@@ -4322,10 +4899,10 @@
       var sk = h.getAttribute('data-sort');
       if (sk === perfSort) {
         h.style.color = 'var(--accent-fg)';
-        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim() + ' ' + (perfOrder === 'desc' ? '\u2193' : '\u2191');
+        renderSortHeaderLabel(h, h.textContent.trim(), perfOrder);
       } else {
         h.style.color = '';
-        h.innerHTML = h.textContent.replace(/[\u2191\u2193]/g, '').trim();
+        h.textContent = h.textContent.trim();
       }
     }
 
@@ -4335,6 +4912,11 @@
   // Filter change handlers
   perfRange.addEventListener('change', function() { loadPerformance(); });
   perfServer.addEventListener('change', function() { loadPerformance(); });
+  if (perfDebugBundleBtn) {
+    perfDebugBundleBtn.addEventListener('click', function() {
+      window.location.href = '/api/performance/debug-bundle';
+    });
+  }
 
   /* ======================================================================
      WebSocket — Handle server_status events (SPEC-004 AC-3)
@@ -4591,20 +5173,6 @@
     if (sa) sa.style.display = '';
   }
 
-  var origGetRoute = getRoute;
-  getRoute = function() {
-    var hash = location.hash.replace(/^#\/?/, '') || 'timeline';
-    if (hash === 'servers/schema') return 'servers';
-    return origGetRoute();
-  };
-
-  var origSchemaNavigateRoute = navigateRoute;
-  navigateRoute = function(route) {
-    origSchemaNavigateRoute(route);
-    var hash = location.hash.replace(/^#\/?/, '');
-    if (hash === 'servers/schema') { showSchemaView(); } else { hideSchemaView(); }
-  };
-
   (function patchWsForSchemaChange() {
     var origCWS = connectWS;
     connectWS = function() {
@@ -4616,7 +5184,8 @@
             var data = JSON.parse(event.data);
             if (data.type === 'schema_change') {
               checkSchemaAlertBanner();
-              if (location.hash.replace(/^#\/?/, '') === 'servers/schema') loadSchemaChanges();
+              var schemaHash = location.hash.replace(/^#\/?/, '');
+              if (schemaHash === 'schema' || schemaHash === 'servers/schema') loadSchemaChanges();
               return;
             }
           } catch(e) {}
@@ -5072,7 +5641,7 @@
     var escapedToken = escapeHtml(plaintext);
     var body = '<div style="display:flex; flex-direction:column; gap:12px;">'
       + '<div style="background:var(--warning-subtle); border:1px solid var(--warning-fg); border-radius:var(--radius-m); padding:10px; font-size:var(--font-size-sm); color:var(--warning-fg);">'
-      +   '&#9888; This token will not be shown again. Copy it now.'
+      +   '<span style="display:inline-flex; align-items:center; gap:8px;">' + iconAlertTriangle(14, 'var(--warning-fg)') + '<span>This token will not be shown again. Copy it now.</span></span>'
       + '</div>'
       + '<div style="font-size:var(--font-size-sm); color:var(--text-muted);">Token: <strong style="color:var(--text-primary);">' + escapeHtml(tokenName) + '</strong></div>'
       + '<div style="display:flex; align-items:center; gap:8px;">'
@@ -5153,7 +5722,7 @@
 
   // Load initial data
   loadPage();
-  startServerStatePolling();
+  syncServerStatePolling();
 
   // Check schema alert banner on load
   checkSchemaAlertBanner();
@@ -5166,7 +5735,9 @@
   // Periodically refresh relative timestamps (every 30s)
   setInterval(function() {
     var timestamps = trafficBody.querySelectorAll('.timestamp[title]');
-    for (var i = 0; i < timestamps.length; i++) {
+    var limit = Math.min(timestamps.length, timelineActiveRowBudget);
+    var telemetryStart = performance.now();
+    for (var i = 0; i < limit; i++) {
       var title = timestamps[i].getAttribute('title');
       if (title) {
         var ms = new Date(title).getTime();
@@ -5175,6 +5746,7 @@
         }
       }
     }
+    recordClientTelemetry('timeline.timestamps.refresh', telemetryStart, { scanned: limit, total: timestamps.length, budget: timelineActiveRowBudget });
   }, 30000);
 
 })();

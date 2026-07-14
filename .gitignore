@@ -8,8 +8,12 @@ credentials.json
 /shipyard
 /shipyard-mcp
 /shipyard-v2
+/bin/
 *.exe
 dist/
+
+# SPEC-BUG-149 smoke harness deps (playwright-core; drives system Chrome — no browser download committed)
+/node_modules/
 
 # Wails build output
 cmd/shipyard/build/
