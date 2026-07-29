@@ -11,6 +11,22 @@
 
 ---
 
+## 2.60.0 (2026-07-29)
+
+### Completed release, lifecycle, and board reliability work
+
+- Fleet release policy declarations now reconcile with compatible repository
+  commit hooks before a guarded local rollout (SPEC-156-002).
+- The board's copy actions work from both the standalone board and the
+  Nightshift Control modal, with a supported browser fallback (SPEC-171,
+  SPEC-171-001).
+- Spec maturity, priority, and run-admission state are represented separately
+  in lifecycle and board views (SPEC-162-001).
+- `board.sh` backgrounds the board, reports its exact stop command, and can
+  safely stop only its own recorded board process (SPEC-167).
+
+---
+
 ## 2.59.0 (2026-07-29)
 
 ### Atomic versioned fleet release (SPEC-156)

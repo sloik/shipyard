@@ -23,6 +23,46 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+def analyze_fleet_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose allowlisted fleet evidence through the existing analyzer surface.
+
+    The collector owns IO and redaction.  This adapter intentionally performs no
+    proposal scoring or persistence, so /evolve remains the sole decision flow.
+    """
+    denominators = snapshot.get("denominators", {}) if isinstance(snapshot, dict) else {}
+    observations = snapshot.get("observations", []) if isinstance(snapshot, dict) else []
+    return {
+        "denominators": denominators,
+        "observations": observations if isinstance(observations, list) else [],
+        "outcomes": snapshot.get("outcomes", {}) if isinstance(snapshot, dict) else {},
+        "collection_failures": snapshot.get("collection_failures", 0) if isinstance(snapshot, dict) else 0,
+    }
+
+
+def compute_fleet_improvement_outcomes(records: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Measure existing /evolve decisions against a later fleet window.
+
+    ``records`` are existing evolve-log entries, not a new ledger.  Missing
+    measurements remain explicit rather than being treated as successful.
+    """
+    proposals = [record for record in records if isinstance(record, dict)]
+    approved = [record for record in proposals if record.get("outcome") == "approved"]
+    rejected = [record for record in proposals if record.get("outcome") == "rejected"]
+    measured = [record for record in approved if record.get("impact_status") in {"hit", "miss", "partial"}]
+    return {
+        "proposal_yield": len(proposals),
+        "accepted": len(approved),
+        "rejected": len(rejected),
+        "evidence_sufficient": sum(record.get("impact_status") != "unmeasured" for record in proposals),
+        "projects_represented": snapshot.get("denominators", {}).get("reachable_projects", 0),
+        "collection_failures": snapshot.get("collection_failures", 0),
+        "time_to_proposal_s": [record.get("time_to_proposal_s") for record in proposals if isinstance(record.get("time_to_proposal_s"), (int, float))],
+        "recurrence_after_release": [record.get("recurrence_after_release") for record in measured],
+        "target_metric_improved": sum(record.get("impact_status") == "hit" for record in measured),
+        "target_metric_regressed": sum(record.get("impact_status") == "miss" for record in measured),
+    }
+
 try:
     import yaml
 except ImportError:

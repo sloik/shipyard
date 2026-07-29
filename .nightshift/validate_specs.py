@@ -116,6 +116,93 @@ except ImportError:
 _NFRS_REQUIRED_TYPES = frozenset({"feature", "bugfix", "refactor"})
 
 
+# SPEC-163: material decision briefs live in the existing QUESTIONS spec.  This
+# validator deliberately checks only the mechanical contract; evidence quality
+# and recommendation logic are reviewed by an independent role in the skill.
+_DECISION_BRIEF_REQUIRED_FIELDS = (
+    "Question",
+    "Measured facts",
+    "Reproduction",
+    "Evidence",
+    "Options",
+    "Consequences",
+    "Recommendation",
+    "Assumptions",
+    "Neighbouring questions",
+    "Evidence timestamp",
+    "Proposed authority",
+)
+_DECISION_BRIEF_HEADING = re.compile(r"^##\s+Decision Brief\s*$", re.MULTILINE)
+_BRIEF_FIELD = re.compile(r"^\*\*(.+?):\*\*\s*(.+)$", re.MULTILINE)
+_EVIDENCE_REFERENCE = re.compile(r"\[[^\]]+\]\(([^)]+)\)|`([^`]+)`")
+
+
+def validate_decision_briefs(content: str, project_root: Path) -> list[str]:
+    """Return mechanical findings for every `## Decision Brief` block.
+
+    The block terminates at the next level-two heading.  A missing block is
+    valid: ordinary questions retain the lightweight address-issues flow.
+    """
+    findings: list[str] = []
+    starts = list(_DECISION_BRIEF_HEADING.finditer(content))
+    for number, start in enumerate(starts, start=1):
+        next_heading = re.search(r"^##\s+", content[start.end():], re.MULTILINE)
+        end = start.end() + next_heading.start() if next_heading else len(content)
+        block = content[start.end():end]
+        fields = {match.group(1).strip(): match.group(2).strip() for match in _BRIEF_FIELD.finditer(block)}
+        prefix = f"decision brief {number}"
+        for field in _DECISION_BRIEF_REQUIRED_FIELDS:
+            if not fields.get(field):
+                findings.append(f"{prefix}: missing required field: {field}")
+
+        reproduction = fields.get("Reproduction", "")
+        if reproduction and not re.search(r"`[^`]+`|\b(?:python3?|pytest|rg|git|find|ls)\b", reproduction):
+            findings.append(f"{prefix}: Reproduction must include a reproducible command or query")
+
+        timestamp = fields.get("Evidence timestamp", "")
+        if timestamp:
+            try:
+                from datetime import datetime
+                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                findings.append(f"{prefix}: Evidence timestamp must be ISO-8601")
+
+        evidence = fields.get("Evidence", "")
+        if evidence:
+            references = [a or b for a, b in _EVIDENCE_REFERENCE.findall(evidence)]
+            if not references:
+                findings.append(f"{prefix}: Evidence must include a resolvable artifact reference")
+            for reference in references:
+                candidate = project_root / reference
+                if reference.startswith(("http://", "https://")):
+                    continue
+                if not candidate.is_file():
+                    findings.append(f"{prefix}: unresolvable evidence reference: {reference}")
+    return findings
+
+
+def validate_reuse_gate(content: str) -> list[str]:
+    """Reject unsubstantiated parallel command/store plans (SPEC-163 R12)."""
+    plan_match = re.search(r"^##\s+Implementation Plan\s*$([\s\S]*?)(?=^##\s+|\Z)", content, re.MULTILINE)
+    if not plan_match:
+        return []
+    lowered = plan_match.group(1).lower()
+    introduces_parallel = bool(
+        re.search(r"(?:new|separate|parallel)\s+(?:\w+\s+){0,2}(?:command|ledger|store)", lowered)
+    )
+    if not introduces_parallel:
+        return []
+    required = ("measurable gap", "reuse", "acceptance criteria")
+    missing = [item for item in required if item not in lowered]
+    if missing:
+        return [
+            "reuse gate: parallel command/store requires measurable gap evidence, "
+            "a smaller reuse-based alternative, and an acceptance criterion; missing "
+            + ", ".join(missing)
+        ]
+    return []
+
+
 # ──────────────────────────────────────────────────────────────────────
 # SPEC-071: portable path-variable validation (R9)
 # ──────────────────────────────────────────────────────────────────────
@@ -347,6 +434,14 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
             "first body H1 is 'Block Reason', so the board title will be wrong; "
             "put the real spec title first and use '## Block Reason' for blocker details"
         )
+
+    # SPEC-163: a full brief is opt-in for material REVIEW cases.  It is stored
+    # in the existing QUESTIONS document, while the source spec only keeps the
+    # resolved constraint and a backlink.
+    if str(fm.get("type", "")).lower() == "questions" or _DECISION_BRIEF_HEADING.search(body):
+        project_root = spec_file.parent.parent if spec_file.parent.name == "specs" else spec_file.parent
+        errors.extend(validate_decision_briefs(body, project_root))
+    errors.extend(validate_reuse_gate(body))
 
     # Required fields
     if "id" not in fm:

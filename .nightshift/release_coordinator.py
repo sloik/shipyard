@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -56,6 +57,9 @@ class RepositoryPlan:
     root: Path
     installs: list[Path]
     allowed_paths: set[str]
+    committed_kit_policy: str | None
+    policy_sources: tuple[str, ...]
+    hook_policies: tuple[tuple[str, str], ...]
 
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
@@ -94,12 +98,78 @@ def _schema_version(install: Path) -> str:
     config = install / "config.yaml"
     if not config.is_file():
         return "missing"
-    import re
-
     match = re.search(
         r'^schema_version:\s*["\']?([^"\'\s#]+)', config.read_text(), re.MULTILINE
     )
     return match.group(1) if match else "missing"
+
+
+def _committed_kit_policy(install: Path) -> tuple[str | None, str]:
+    config = install / "config.yaml"
+    source = str(config)
+    if not config.is_file():
+        return None, source
+    section = re.search(
+        r"(?ms)^release_policy:\s*(?:#.*)?\n(?P<body>(?:^[ \t]+.*(?:\n|$))*)",
+        config.read_text(),
+    )
+    if section is None:
+        return None, source
+    value = re.search(
+        r'(?m)^[ \t]+committed_kit:\s*["\']?([^"\'\s#]+)',
+        section.group("body"),
+    )
+    return (value.group(1) if value else "invalid:missing"), source
+
+
+def _commit_hook_policies(repo: Path) -> tuple[tuple[str, str], ...]:
+    hooks_result = _run(["git", "rev-parse", "--git-path", "hooks"], cwd=repo)
+    if hooks_result.returncode:
+        return ()
+    hooks = Path(hooks_result.stdout.strip())
+    if not hooks.is_absolute():
+        hooks = repo / hooks
+    policies: list[tuple[str, str]] = []
+    for name in ("pre-commit", "prepare-commit-msg", "commit-msg"):
+        hook = hooks / name
+        if not hook.is_file() or not hook.stat().st_mode & 0o111:
+            continue
+        marker = re.search(
+            r"(?m)^\s*#\s*nightshift-release-policy:\s*"
+            r"committed-kit=(allow|opt_out)\s*$",
+            hook.read_text(errors="replace"),
+        )
+        if marker:
+            policies.append((marker.group(1), str(hook.resolve())))
+    return tuple(policies)
+
+
+def _release_policy_errors(plan: RepositoryPlan) -> list[str]:
+    errors: list[str] = []
+    if plan.committed_kit_policy and plan.committed_kit_policy.startswith("invalid:"):
+        errors.append(
+            "invalid committed-kit release policy in " + ", ".join(plan.policy_sources)
+        )
+    hook_values = {value for value, _source in plan.hook_policies}
+    hook_sources = [source for _value, source in plan.hook_policies]
+    if len(hook_values) > 1:
+        errors.append("conflicting commit-hook policies: " + ", ".join(hook_sources))
+    elif hook_values:
+        hook_policy = next(iter(hook_values))
+        if plan.committed_kit_policy is None:
+            errors.append(
+                f"commit-hook policy {hook_policy} requires a project declaration; "
+                f"hook source: {hook_sources[0]}; policy sources: "
+                + ", ".join(plan.policy_sources)
+            )
+        elif plan.committed_kit_policy != hook_policy:
+            errors.append(
+                f"committed-kit policy {plan.committed_kit_policy} conflicts with "
+                f"commit-hook policy {hook_policy}; policy sources: "
+                + ", ".join(plan.policy_sources)
+                + f"; hook source: {hook_sources[0]}"
+            )
+    return errors
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -145,9 +215,24 @@ def plan_repositories(
     plans = []
     for repo, repo_installs in sorted(grouped.items(), key=lambda item: str(item[0])):
         allowed: set[str] = set()
+        declarations = [_committed_kit_policy(install) for install in repo_installs]
+        declared_values = {value for value, _source in declarations if value is not None}
+        if len(declared_values) > 1:
+            policy = "invalid:conflicting"
+        else:
+            policy = next(iter(declared_values), None)
         for install in repo_installs:
             allowed.update(_install_allowlist(repo, install, manifest))
-        plans.append(RepositoryPlan(repo, repo_installs, allowed))
+        plans.append(
+            RepositoryPlan(
+                repo,
+                repo_installs,
+                allowed,
+                policy,
+                tuple(source for _value, source in declarations),
+                _commit_hook_policies(repo),
+            )
+        )
     return plans, skipped
 
 
@@ -348,6 +433,17 @@ def coordinate_release(
         "planned_repositories": len(plans),
         "eligible_installs": [],
         "verified_installs": [],
+        "release_policies": {
+            str(plan.root): {
+                "committed_kit": plan.committed_kit_policy or "undeclared",
+                "policy_sources": list(plan.policy_sources),
+                "hook_policies": [
+                    {"committed_kit": policy, "source": source}
+                    for policy, source in plan.hook_policies
+                ],
+            }
+            for plan in plans
+        },
         "skipped": initial_skips,
         "untouched": [],
         "repository_commits": [],
@@ -423,6 +519,29 @@ def coordinate_release(
                     }
                 )
             break
+
+        policy_errors = _release_policy_errors(plan)
+        if policy_errors:
+            entry = {
+                "repository": str(plan.root),
+                "installs": [str(item) for item in plan.installs],
+                "classification": "release_policy_conflict",
+                "reason": "; ".join(policy_errors),
+            }
+            result["skipped"].append(entry)
+            result["conflicts"].append(entry)
+            continue
+        if plan.committed_kit_policy == "opt_out":
+            result["skipped"].append(
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                    "classification": "committed_kit_opt_out",
+                    "reason": "project release policy opts out of committed managed-kit payloads",
+                    "policy_sources": list(plan.policy_sources),
+                }
+            )
+            continue
 
         preflight_errors = preflight_repository(plan, manifest)
         if preflight_errors:

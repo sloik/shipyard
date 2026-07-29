@@ -411,6 +411,31 @@ Walk me through what a real user does, step by step."
 
 **Agent's Task:** Present the complete spec, validate it against a checklist, and save it.
 
+### Material REVIEW decisions and reuse gate
+
+An unresolved item is not automatically `blocked`. If intrinsic readiness returns
+`REVIEW`, use the existing `/nightshift address-issues` QUESTIONS flow. A full evidence
+brief is required only when the explicit question can materially change requirements,
+ACs, architecture, execution authority, safety, or meaningful cost. Ordinary dependency
+waiting, deliberately `planned` work, deterministic repairs, and advisory questions use
+the lightweight question path.
+
+For a material decision, the QUESTIONS entry must retain a timestamped decision brief:
+one precise question; measured facts; reproducible commands/queries and resolvable
+evidence; viable options (including newly measured ones); consequences/cost/risk/
+reversibility; recommendation and reasoning; assumptions/unknowns; neighbouring
+questions not decided; and proposed authority. A deterministic gate validates this shape;
+an independent reviewer assesses relevance, sufficiency, completeness, and inference.
+The coordinator owns reconciliation, authority routing, and serial writeback; evidence
+workers are bounded/read-only and run agents receive only the compact resolved packet.
+
+Before proposing a new command, ledger, store, autonomy rule, validator, or packet
+mechanism, inventory the existing `address-issues`, QUESTIONS, validation, autonomy, and
+instruction-packet primitives. A new mechanism needs a named measurable gap, a smaller
+reuse-based alternative considered, and an AC that proves the addition closes that gap
+without duplicating authority or storage. Do not propose a parallel decision command or
+store merely to make a brief easier to describe.
+
 **Steps:**
 
 1. **Present the complete spec to the user:**

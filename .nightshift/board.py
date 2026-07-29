@@ -5800,6 +5800,7 @@ if __name__ == "__main__":
     if status_store is not None:
         print(f"  status store: {status_store.db_path}")
     print(f"  http://localhost:{port}")
+    print("  stop: Ctrl+C")
 
     if args.open_browser:
         import threading
