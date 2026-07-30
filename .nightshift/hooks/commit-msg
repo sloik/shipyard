@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Nightshift Kit — Commit message hook
-# Validates that every commit message starts with [SPEC-ID] prefix.
+# Validates ordinary spec commits and parent lifecycle transitions.
 # Policy source of truth: .nightshift/GIT.md
 #
-# Format: [SPEC-NNN] type: subject
+# Ordinary format: [SPEC-ID] type: subject
+# Lifecycle format: chore: mark SPEC-ID done|blocked
 # Examples:
 #   [SPEC-033] feat: handler registry with pluggable domains
 #   [SPEC-004-002] test: add NFR hierarchy tests
-#   [SPEC-033] chore: mark in_progress
+#   chore: mark SPEC-033 done
 #
 # Install: cp .nightshift/hooks/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
 # Disable: set git.commit_prefix: "none" in config.yaml
@@ -22,14 +23,19 @@ if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
     exit 0
 fi
 
-# Check for [SPEC-ID] prefix
-if ! echo "$FIRST_LINE" | grep -qE "^\[SPEC-[0-9]+(-[0-9]+)?\]"; then
+# Lifecycle commits are emitted by the parent and consumed by record_metrics.py.
+if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|blocked)$'; then
+    exit 0
+fi
+
+# Ordinary commits require a spec prefix, separator, and non-empty subject.
+if ! echo "$FIRST_LINE" | grep -qE '^\[SPEC-([A-Z0-9]+-)*[0-9]+\] .+'; then
     echo ""
-    echo "[nightshift commit-msg] ERROR: Commit message must start with [SPEC-ID] prefix."
+    echo "[nightshift commit-msg] ERROR: Commit message must use a Nightshift subject."
     echo ""
     echo "  Got:      $FIRST_LINE"
-    echo "  Expected: [SPEC-NNN] type: description"
-    echo "  Example:  [SPEC-033] feat: handler registry with pluggable domains"
+    echo "  Ordinary: [SPEC-ID] type: description"
+    echo "  Lifecycle: chore: mark SPEC-ID done|blocked"
     echo ""
     echo "  This ensures every commit is traceable to its spec."
     echo "  To bypass (not recommended): git commit --no-verify"

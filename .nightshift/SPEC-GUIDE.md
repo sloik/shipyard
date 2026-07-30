@@ -436,6 +436,28 @@ reuse-based alternative considered, and an AC that proves the addition closes th
 without duplicating authority or storage. Do not propose a parallel decision command or
 store merely to make a brief easier to describe.
 
+### Record R/AC contract friction
+
+When Phase 9 examines requirements or acceptance criteria, add a
+`contract_review` payload to the existing lifecycle-classification event even if
+no item needs revision. Set `requirements_reviewed` and
+`acceptance_criteria_reviewed` to the numbers actually examined and list each
+flagged item once with its canonical ID and every applicable controlled reason:
+
+- `ambiguous_or_unbounded` — multiple reasonable implementations or no limiting bound
+- `delegated_material_decision` — the R/AC leaves a consequential choice to the run agent
+- `non_testable_or_tautological` — no falsifiable behavior or independent check
+- `stale_or_unverified_baseline` — a premise or expected value was not freshly verified
+- `dependency_drift` — the contract assumes an outdated or unresolved dependency state
+- `environment_unreproducible` — the stated check cannot run in the documented environment
+- `scope_overload` — one item bundles independently decidable outcomes
+- `missing_oracle` — the check names an action but not how success is determined
+
+This is an operational measure of avoidable contract revision, not a writing-style
+or task-difficulty score. Do not include R/AC prose, author identity, notes, or
+subjective tone in telemetry. The coordinator serializes the event write after
+reconciling any bounded read-only review.
+
 **Steps:**
 
 1. **Present the complete spec to the user:**
