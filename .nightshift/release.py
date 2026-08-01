@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -41,6 +42,42 @@ def manifest_files(canonical: Path, names: list[str]) -> list[dict]:
             }
         )
     return entries
+
+
+def managed_import_gaps(canonical: Path, names: list[str]) -> list[str]:
+    """Report managed Python files whose local imports are absent from the release set.
+
+    Only imports that resolve to a sibling module in ``canonical`` are relevant:
+    standard-library and third-party dependencies are supplied by the target project,
+    whereas a sibling module must be copied by the kit release itself.  ``ast.walk``
+    deliberately visits imports in function bodies as well as module scope.
+    """
+    managed = set(names)
+    gaps: list[str] = []
+    for name in sorted(managed):
+        if not name.endswith(".py"):
+            continue
+        source = canonical / name
+        try:
+            tree = ast.parse(source.read_text(), filename=str(source))
+        except SyntaxError as exc:
+            gaps.append(f"managed Python file cannot be parsed: {name}: {exc.msg}")
+            continue
+        for node in ast.walk(tree):
+            modules = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module]
+                if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
+                else []
+            )
+            for module in modules:
+                local = Path(*module.split(".")).with_suffix(".py")
+                if (canonical / local).is_file() and str(local) not in managed:
+                    gaps.append(
+                        f"managed import missing from release set: {name} imports {local}"
+                    )
+    return sorted(set(gaps))
 
 
 def build_manifest(
@@ -113,6 +150,7 @@ def validate_manifest(
         for command in manifest["smoke_checks"]
     ):
         errors.append("manifest smoke-check metadata is invalid")
+    errors.extend(managed_import_gaps(canonical, names))
     return not errors, errors, manifest
 
 

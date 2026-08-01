@@ -766,6 +766,9 @@ Before entering the loop, check for any incomplete specs from previous runs:
 **If `runner.mode: orchestrator`** (or unset and multiple specs are ready):
 - **Read:** `.nightshift/ORCHESTRATOR.md`
 - Follow the orchestrator protocol — delegate each spec to a fresh sub-agent
+- A code-writing worker uses the `nightshift-worker` agent type by default.
+  Select a different `.claude/agents/` type only when the spec records a
+  written justification for its different capability surface.
 - Each sub-agent reads LOOP.md and executes one spec with a clean context window
 - The orchestrator stays thin: it manages the queue, not the code
 

@@ -2526,7 +2526,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
 
 <div id="header">
   <div class="header-row1">
-    <span class="logo">▸ NIGHTSHIFT BOARD <span class="logo-project">/ __PROJECT__</span></span>
+    <span class="logo">▸ __PROJECT__</span>
     <div class="spacer"></div>
     <button class="btn" id="btn-refresh" onclick="doRefresh()">⟳ REFRESH</button>
     <button class="btn" id="btn-deps" onclick="toggleDeps()">⌥ DEPS</button>
@@ -2648,13 +2648,14 @@ function allowedStatusIdsForSpec(spec) {
 }
 
 // Status progression order — used to pick the "most progressive" status when
-// main and a worktree disagree. The board treats the highest-rank state as
-// the spec's effective status, so a spec marked in_progress in a worktree
-// shows up in the IN_PROGRESS column even when main still says ready.
+// main and a worktree disagree. A terminal main status is an explicit lifecycle
+// decision and must remain authoritative over stale retained-worktree progress.
 const PROGRESS_RANK = Object.fromEntries(STATUS_IDS.map((s, i) => [s, i]));
+const TERMINAL_MAIN_STATUSES = new Set(['blocked', 'done', 'superseded', 'retired']);
 
 function effectiveStatusFor(spec, wtStatus) {
   const mainStatus = spec.status || 'draft';
+  if (TERMINAL_MAIN_STATUSES.has(mainStatus)) return mainStatus;
   const wts = (wtStatus || {})[spec.id] || [];
   if (!wts.length) return mainStatus;
   let best = mainStatus;

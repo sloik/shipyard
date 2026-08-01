@@ -11,6 +11,16 @@
 
 ---
 
+## 2.60.1 (2026-08-01)
+
+### Board lifecycle authority and contract-review metrics
+
+- A terminal lifecycle decision on main (`blocked`, `done`, `superseded`, or
+  `retired`) now remains in its canonical board column even when a retained
+  worktree still reports `in_progress`.
+- Lifecycle classification events can record bounded, prose-free R/AC contract
+  friction telemetry and calibration metrics.
+
 ## 2.60.0 (2026-07-29)
 
 ### Completed release, lifecycle, and board reliability work
