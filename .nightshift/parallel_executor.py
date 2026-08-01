@@ -17,6 +17,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
+from worktree_paths import (
+    WorktreePathError,
+    assert_managed_worktree_path,
+    assert_worktree_owner,
+    worktree_path,
+)
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -383,6 +390,14 @@ class SerializedIntegrationQueue:
         accepted_declared: Set[str] = set()
         for handle in sorted((h for h in handles if h.status == "completed"), key=lambda h: h.spec_id):
             before = self._head()
+            try:
+                _assert_handle_ownership_if_present(handle, self.repo_root)
+            except WorktreePathError as exc:
+                result.held.append(handle.spec_id)
+                result.decisions.append(
+                    QueueDecision(handle.spec_id, "held", before, before, reason=str(exc))
+                )
+                continue
             observed = self._changed_files(handle.branch_name)
             declared = set(handle.declared_touches)
             overlap = sorted(accepted_files & set(observed))
@@ -796,7 +811,7 @@ def fan_out(
     """
     handles: List[WorktreeHandle] = []
     for spec_id in sorted(layer.spec_ids):
-        worktree_path = repo_root / ".nightshift" / "worktrees" / spec_id
+        worktree_path = worktree_path_for_spec(repo_root, spec_id)
         branch_name = f"{branch_prefix}/{spec_id}"
         events_dir = worktree_path / ".nightshift" / "runs" / spec_id / "events"
         checkpoint_dir = worktree_path / ".nightshift" / "runs" / spec_id / "checkpoints"
@@ -835,7 +850,9 @@ def prepare_worktrees(
         try:
             # Clean up existing worktree if present
             wt_path_str = str(handle.worktree_path)
+            assert_managed_worktree_path(repo_root, handle.worktree_path)
             if handle.worktree_path.exists():
+                assert_worktree_owner(repo_root, handle.worktree_path)
                 subprocess.run(
                     ["git", "worktree", "remove", "--force", wt_path_str],
                     cwd=str(repo_root),
@@ -861,12 +878,13 @@ def prepare_worktrees(
             if result.returncode != 0:
                 handle.status = "failed"
                 continue
+            assert_worktree_owner(repo_root, handle.worktree_path)
 
             # Create events and checkpoint directories
             handle.events_dir.mkdir(parents=True, exist_ok=True)
             handle.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        except Exception:
+        except (OSError, subprocess.SubprocessError, WorktreePathError):
             handle.status = "failed"
 
     return handles
@@ -946,6 +964,19 @@ def fan_in(
 
     # Sort alphabetically for deterministic merge order
     merge_candidates = sorted(completed, key=lambda h: h.spec_id)
+    for handle in merge_candidates:
+        try:
+            _assert_handle_ownership_if_present(handle, repo_root)
+        except WorktreePathError as exc:
+            return MergeResult(
+                status="failed",
+                merged=[],
+                conflicted=[],
+                pending=[h.spec_id for h in handles],
+                conflicts_detail=file_conflicts,
+                merge_order=[],
+                error=str(exc),
+            )
     merge_order = [h.spec_id for h in merge_candidates]
 
     merged: List[str] = []
@@ -1063,6 +1094,9 @@ def _cleanup_single_worktree(handle: WorktreeHandle, repo_root: Path) -> bool:
     """Remove a single worktree and its branch. Returns True on success."""
     try:
         wt_path_str = str(handle.worktree_path)
+        assert_managed_worktree_path(repo_root, handle.worktree_path)
+        if handle.worktree_path.exists():
+            assert_worktree_owner(repo_root, handle.worktree_path)
         subprocess.run(
             ["git", "worktree", "remove", "--force", wt_path_str],
             cwd=str(repo_root),
@@ -1076,7 +1110,7 @@ def _cleanup_single_worktree(handle: WorktreeHandle, repo_root: Path) -> bool:
             check=False,
         )
         return True
-    except Exception:
+    except (OSError, subprocess.SubprocessError, WorktreePathError):
         return False
 
 
@@ -1110,21 +1144,18 @@ def cleanup_worktrees(
         if not force and handle.status in keep_statuses:
             continue
 
-        wt_path_str = str(handle.worktree_path)
-        # Remove worktree (tolerates missing)
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", wt_path_str],
-            cwd=str(repo_root),
-            capture_output=True,
-            check=False,
-        )
-        # Remove branch (tolerates missing)
-        subprocess.run(
-            ["git", "branch", "-D", handle.branch_name],
-            cwd=str(repo_root),
-            capture_output=True,
-            check=False,
-        )
-        cleaned.append(handle.spec_id)
+        if _cleanup_single_worktree(handle, repo_root):
+            cleaned.append(handle.spec_id)
 
     return cleaned
+
+
+def worktree_path_for_spec(repo_root: Path, spec_id: str) -> Path:
+    """Compatibility seam for tests and callers computing a worktree handle."""
+    return worktree_path(repo_root, spec_id)
+
+
+def _assert_handle_ownership_if_present(handle: WorktreeHandle, repo_root: Path) -> None:
+    assert_managed_worktree_path(repo_root, handle.worktree_path)
+    if handle.worktree_path.exists():
+        assert_worktree_owner(repo_root, handle.worktree_path)

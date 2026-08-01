@@ -6,6 +6,14 @@
 Bootstrap discovers git defaults, writes config fields, installs hooks, and follows
 that policy when git state changes.
 
+During configuration, ask whether Nightshift control state is intentionally part
+of repository history. Write `nightshift_state.policy: commit-backed` unless the
+operator explicitly opts into `private-local`; never infer the latter from an
+ignored directory or public remote. For private-local, require `.nightshift/` (or
+the configured private roots) to be ignored and run `private_state.py
+privacy-check` before accepting the configuration. Existing installs need no
+migration and remain commit-backed.
+
 **Overview:** Bootstrap has five phases:
 1. **Auto-Discovery** — scan project for stack indicators and existing tools
 2. **Interactive Configuration** — present findings, ask human to confirm/correct

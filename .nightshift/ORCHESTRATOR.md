@@ -25,6 +25,28 @@ orchestrator sequencing and references that policy.
 
 ## Kickoff Parent Progress Contract
 
+## Kickoff Spec-Ownership Claims (SPEC-178)
+
+The parent kickoff coordinator, not its worker, owns one advisory exact-path
+claim for the selected spec file. Before it mutates lifecycle state, creates a
+branch/worktree, or launches a worker, it resolves the spec path to an absolute
+path and checks `local_session_list_claims`. A live matching claim held by a
+different session stops the kickoff and names the owner session ID, label, and
+claim age; the same coordinator session reuses its claim and may resume.
+
+The parent starts or retains a local session labelled `nightshift-<SPEC-ID>`,
+claims the path with a purpose containing the run and spec ID, and renews the
+30-minute claim on the existing heartbeat cadence. It releases the claim after
+either terminal `done` or `blocked` resolution. Claims are advisory: any local
+coordinator outage is a recorded warning, never a launch blocker. The run report
+records whether the claim was acquired, reused, or skipped.
+
+For the operational question “who owns this `in_progress` spec?”, provide one
+bounded verdict: a live matching claim gives owner session ID/label/age; with no
+claim, no matching branch, and no verified worktree, say **unowned** explicitly.
+Coordinator unavailability is **unknown**, never unowned. Ignore `_`-prefixed
+spec templates when enumerating specs.
+
 An orchestrator may be launched by a parent kickoff agent, for example through a
 board-copied `/nightshift kickoff <SPEC-ID>` prompt. In that mode, the parent
 agent does not implement or validate the spec directly. It launches the
@@ -484,20 +506,28 @@ trailer degrades to `model: unknown` (the row still emits).
 #### b. Launch Sub-Agent
 - **Mark spec as `status: in_progress`** through the shared status checkpoint
   layer before launching. The board reads this durable layer first, so the state
-  is visible across worktrees before merge. Until mark-commit metrics fully move
-  off frontmatter, also keep the main-branch spec frontmatter in sync for the
-  canonical lifecycle commit.
-  Commit with the canonical format `chore: mark <spec-id> in_progress` (NOT `[<id>] chore: mark
-  in_progress` — the metrics hook derives `started_at` from the matching in_progress commit by
-  this exact subject; a non-standard subject loses the run span).
+  is visible across worktrees before merge. Resolve `nightshift_state.policy`
+  before mutation. For default `commit-backed`, also keep main frontmatter in sync
+  and commit exactly `chore: mark <spec-id> in_progress`; its SHA is the run ID.
+  For explicit `private-local`, the coordinator uses `private_state.py` to update
+  ignored frontmatter plus `StatusStore`; the durable event supplies the run ID
+  and no private path may be staged or committed.
 - Before the first concurrent launch, run the startup janitor from
   `worktree_janitor.py`. It reconciles stale linked worktrees, keeps any branch
   with unmerged commits as `unmerged — manual`, and only deletes resolved
   worktrees through the shared cleanup primitive. See `GIT.md` § Worktree
   Cleanup and Retention.
-- Use Agent tool with isolation: "worktree"
+- Use Agent tool with isolation: "worktree". If the harness requires manual
+  creation, compute the path with `worktree_paths.py plan` and pass
+  `worktree_paths.py verify` before launch. Never create a project sibling or
+  an in-repository `.nightshift/worktrees/` checkout; see `GIT.md` § Worktree
+  Cleanup and Retention.
 - Pass the brief and all context
 - Sub-agent runs in a clean git worktree with isolated context window
+- In `private-local`, run the privacy gate, then hydrate the verified worktree
+  through the explicit projection allowlist. Before integration, return only
+  contract-declared evidence and rerun the gate against tracked/staged paths and
+  the application branch diff. A violation preserves the worktree and refuses merge.
 - See `GIT.md` § Spec Status Commits and § Branches and Worktrees.
 
 #### c. Wait & Receive

@@ -635,6 +635,18 @@ The audit matches non-done specs by:
 
 ### NFR reconciliation transition gate
 
+### Kickoff ownership transition gate (SPEC-178)
+
+For a `/nightshift kickoff` transition into `in_progress`, the parent coordinator
+must resolve the selected spec file to an absolute path and acquire or reuse its
+advisory `local_session_claim_path` lease before status, branch/worktree, or
+worker mutation. Its `purpose` names the run and spec ID; its local-session label
+is `nightshift-<SPEC-ID>`. A live lease held by another session refuses the
+kickoff with that session's ID, label, and age. The claim is renewed on the
+existing heartbeat and released on either `done` or `blocked`. Coordinator
+unavailability is a recorded warning, not a gate failure. See `ORCHESTRATOR.md`
+for the bounded owned/unowned/unknown ownership query and report evidence.
+
 | Transition | Mandatory preconditions |
 |---|---|
 | `draft → planned` / `draft → ready` | The same intrinsic PASS gate: `nfrs:` present, every active-NFR mechanical match bound or waived, declared `after:` references valid. `planned` is intentionally future; `ready` is current priority. |

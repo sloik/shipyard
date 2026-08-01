@@ -11,6 +11,38 @@
 
 ---
 
+## 2.63.0 (2026-08-01)
+
+### Visible spec ownership in Nightshift Control (SPEC-178, SPEC-179)
+
+- Public project boards can keep Nightshift state private while retaining an
+  explicit, auditable ownership record for each active spec.
+- Nightshift Control overlays live session ownership on in-progress specs,
+  distinguishing owned, unowned, unknown, and claim-conflict states.
+
+## 2.62.0 (2026-08-01)
+
+### Private-local Nightshift state (SPEC-181)
+
+- Added explicit `nightshift_state.policy` selection. Existing and missing policy
+  remain `commit-backed`; projects may opt into `private-local` without putting
+  their Nightshift control plane in application Git history.
+- Added coordinator-owned durable local lifecycle/run IDs, ignored allowlisted
+  worktree projection and evidence return, and pre-launch/pre-merge privacy gates.
+- Updated kickoff, loop, orchestrator, bootstrap, Git, sync, release, and migration
+  guidance. Application branches, evidence gates, merges, and cleanup are unchanged.
+
+## 2.61.0 (2026-08-01)
+
+### Project-owned local worktree paths (SPEC-180)
+
+- All generated worktree paths now resolve below a deterministic local temporary
+  namespace keyed by repository path, never beside or inside a Dropbox project.
+- Creation, integration, and cleanup verify both the managed namespace and Git
+  common-directory ownership before acting on an existing worktree.
+- Kickoff, orchestrator, Git, and primary-branch guidance use the same resolver;
+  `worktree_paths.py` is part of the managed release surface.
+
 ## 2.60.1 (2026-08-01)
 
 ### Board lifecycle authority and contract-review metrics

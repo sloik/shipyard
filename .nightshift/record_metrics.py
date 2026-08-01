@@ -565,6 +565,65 @@ def derive_resolution(
     }
 
 
+def derive_local_resolution(
+    store,
+    spec_id: str,
+    run_id: str,
+    *,
+    evidence_gate: dict[str, str] | None = None,
+) -> dict:
+    """Derive kickoff resolution from one durable private-local lifecycle event.
+
+    This is the local-event counterpart to :func:`derive_resolution`. It intentionally
+    accepts an existing ``StatusStore`` instance so attribution never consults Git history.
+    """
+    events = [
+        event
+        for event in store.get_run_history(spec_id, run_id)
+        if event.get("source") == "private-local-coordinator"
+    ]
+    if not events:
+        raise ValueError(f"no durable lifecycle events for {spec_id} run {run_id}")
+    started = next((event for event in events if event.get("status") == "in_progress"), None)
+    terminal = next(
+        (event for event in reversed(events) if event.get("status") in {"done", "blocked"}),
+        None,
+    )
+    if started is None:
+        raise ValueError(f"run {run_id} has no durable in_progress event")
+    if terminal is None:
+        raise ValueError(f"run {run_id} has not reached a terminal state")
+    final_outcome = str(terminal["status"])
+    payload = terminal.get("payload") or {}
+    default_evidence = "pass" if final_outcome == "done" else "unknown"
+    supplied = evidence_gate or payload.get("evidence_gate") or {}
+    evidence = {
+        key: supplied.get(key, default_evidence)
+        if supplied.get(key, default_evidence) in EVIDENCE_RESULT_ENUM
+        else default_evidence
+        for key in ("report_exists", "tests_passed", "code_changed", "acs_covered")
+    }
+    started_at = datetime.fromisoformat(str(started["created_at"]).replace("Z", "+00:00"))
+    completed_at = datetime.fromisoformat(str(terminal["created_at"]).replace("Z", "+00:00"))
+    unblock_attempts = _bounded_int(str(payload.get("unblock_attempts", 0)))
+    unblock_limit = _bounded_int(str(payload.get("unblock_limit", 0)))
+    return {
+        "run_id": run_id,
+        "stage": str(payload.get("stage") or "kickoff_gate"),
+        "attempt": _bounded_int(str(payload.get("attempt", 1)), default=1),
+        "prior_outcome": str(payload.get("prior_outcome") or "none"),
+        "final_outcome": final_outcome,
+        "evidence_gate": evidence,
+        "blocker_class": str(payload.get("blocker_class") or ("none" if final_outcome == "done" else "unknown")),
+        "blocker_scope": str(payload.get("blocker_scope") or ("none" if final_outcome == "done" else "unknown")),
+        "unblock_attempts": unblock_attempts,
+        "unblock_limit": unblock_limit,
+        "automatic_unblock_succeeded": final_outcome == "done" and unblock_attempts > 0,
+        "later_session_required": str(payload.get("stage") or "kickoff_gate") == "recovery",
+        "resolution_latency_s": max(0.0, (completed_at - started_at).total_seconds()),
+    }
+
+
 def derive_git_span(repo: Path, base: str, head: str, scope: str = "") -> dict:
     """Like derive_git() but diffs base..head (the real spec work span), optionally
     scoped to a directory, and reads the commit identity from `head` rather than HEAD.

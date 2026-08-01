@@ -28,6 +28,10 @@ Nightshift reads git behavior from `config.yaml` -> `git`:
 Config files document fields and defaults. This file documents how those fields
 are used by the loop, orchestrator, hooks, and human review.
 
+Nightshift control-state persistence is selected separately by
+`nightshift_state.policy`. Missing means `commit-backed`; `private-local` must be
+explicit. Invalid values stop before any lifecycle mutation or worker launch.
+
 ## Baseline and Dirty Tree
 
 Before selecting a spec, the loop verifies the git working tree is clean.
@@ -42,6 +46,12 @@ Before selecting a spec, the loop verifies the git working tree is clean.
 
 Spec status changes are committed immediately so the board, orchestrator, and
 future sessions agree on ownership.
+
+These commits apply to the default `commit-backed` policy. In `private-local`
+mode the coordinator instead calls `private_state.transition_private_state` to
+write the selected ignored spec frontmatter and append the matching checkpoint
+to the existing `StatusStore`. The durable local event supplies the stable run
+ID. Workers cannot transition state, and terminal transitions are idempotent.
 
 - When a spec is selected: set `status: in_progress` and commit
   `[<spec-id>] chore: mark in_progress`.
@@ -137,7 +147,40 @@ the coordinator must still compare actual changed files, serialize integration,
 and validate fresh `main` after every accepted branch. Never start more workers
 than the repository's CPU/RAM and isolated test resources can support.
 
+### Private-local projection and evidence
+
+After worktree path and owner verification, private-local mode projects only the
+selected spec, installed runtime/protocol, project config, and explicitly required
+knowledge into the ignored worktree `.nightshift/`. `private_state.py` rejects
+symlink escapes, foreign or unsafe worktrees, tracked destinations, and partial
+copy on failed validation. Other specs, reports, metrics, credentials, and ledgers
+are never implicit inputs. On return, only report, metric, verification, and
+heartbeat paths named by the run contract may be copied to main's private state.
+
+Run `private_state.py privacy-check` against every configured private path before
+launch and again against the worker branch diff before merge. Any tracked, staged,
+or changed private path refuses integration and leaves the worktree for inspection.
+Application-only commits follow the normal serialized merge path.
+
 ## Worktree Cleanup and Retention
+
+All Nightshift-created worktrees MUST use the canonical resolver; never place them
+beside a project (`../run-*`, `<project>-nightshift-*`) or below the checkout's
+`.nightshift/` directory. Both locations are commonly synchronized by Dropbox and
+can be mistaken for real projects.
+
+```bash
+WT=$(python3 .nightshift/worktree_paths.py plan --repo "$PROJECT_ROOT" --spec "$SPEC_ID")
+git -C "$PROJECT_ROOT" worktree add -b "nightshift/$SPEC_ID" "$WT"
+python3 "$PROJECT_ROOT/.nightshift/worktree_paths.py" verify \
+  --repo "$PROJECT_ROOT" --worktree "$WT"
+```
+
+The resolver uses a deterministic local temporary namespace containing a hash of
+the repository path. The verify step compares Git common directories, so an equal
+project basename, branch name, or path prefix cannot redirect a merge or cleanup to
+another repository. `NIGHTSHIFT_WORKTREE_ROOT` may override the temporary base, but
+the resolver rejects overrides inside the repository or its synchronized ancestor.
 
 Nightshift runs a mechanical startup janitor before concurrent execution starts.
 The janitor enumerates `git worktree list --porcelain`, maps linked worktrees

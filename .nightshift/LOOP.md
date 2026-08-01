@@ -1,6 +1,6 @@
 # Autonomous Execution Loop
 
-**Kit Version:** 2.56.0 | **Date:** 2026-07-27
+**Kit Version:** 2.62.0 | **Date:** 2026-08-01
 **Purpose:** The heart of the Nightshift Kit. This document describes the full 16-step autonomous cycle that an agent follows to complete a single spec and move to the next one.
 
 ---
@@ -494,6 +494,17 @@ This protocol applies whenever running `commands.test`, both in Step 1 (Pre-Flig
 
 ### 2. Task Selection
 
+#### Parent kickoff ownership boundary (SPEC-178)
+
+When this loop is reached through `/nightshift kickoff`, lifecycle ownership is
+mechanically coordinated by the parent: it claims the selected spec's absolute
+path before the `in_progress` transition, renews that advisory claim on the
+heartbeat, and releases it on either terminal outcome. Workers do not claim,
+renew, release, or answer ownership queries. A different live claim stops the
+parent before any status, branch, worktree, or agent mutation; a same-session
+resume reuses the claim. Coordinator failures warn and continue because the
+claim is advisory, and the report records acquired/reused/skipped state.
+
 **What to do:**
 1. Read `specs/` and collect all specs with `status: ready`
 2. Apply the **Task Selection Algorithm** (see below)
@@ -501,9 +512,15 @@ This protocol applies whenever running `commands.test`, both in Step 1 (Pre-Flig
 4. If no spec passes → check for `blocked` specs:
    - If any are blocked → write summary report, stop loop
    - If all are done → write final report, stop loop
-5. **Mark the selected spec as `status: in_progress`** in its frontmatter (update the spec file)
-6. Commit: `[<spec-id>] chore: mark in_progress`
-   - See `GIT.md` § Spec Status Commits
+5. **Mark the selected spec as `status: in_progress`.** Resolve
+   `nightshift_state.policy` first; invalid values stop before mutation. In the
+   default `commit-backed` mode update frontmatter and commit as before. In
+   explicit `private-local` mode the sole coordinator updates ignored frontmatter
+   plus the existing durable status store through `private_state.py`; do not stage
+   or commit a configured private path.
+6. Capture the stable run ID: lifecycle commit SHA for `commit-backed`, durable
+   local lifecycle event ID for `private-local`.
+   - See `GIT.md` § Spec Status Commits and § Private-local projection and evidence
 7. **Capture the production-resource start snapshot (SPEC-157).** If the selected
    spec declares `production_resources: [<absolute path>, ...]`, call the helper
    below automatically. It uses only `os.stat` against each declared resource;

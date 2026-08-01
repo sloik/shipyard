@@ -206,6 +206,21 @@ class StatusStore:
             rows = conn.execute(sql, params).fetchall()
         return [_checkpoint_from_row(row).to_dict() for row in rows]
 
+    def get_run_history(self, spec_id: str, run_id: str) -> list[dict[str, Any]]:
+        """Return one run's checkpoints oldest-first for restart-safe attribution."""
+        if not run_id:
+            raise ValueError("run_id required")
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM status_checkpoints
+                WHERE spec_id = ? AND run_id = ?
+                ORDER BY id ASC
+                """,
+                (spec_id, run_id),
+            ).fetchall()
+        return [_checkpoint_from_row(row).to_dict() for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
