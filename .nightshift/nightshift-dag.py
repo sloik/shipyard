@@ -30,6 +30,7 @@ if str(CANONICAL_DIR) not in sys.path:
     sys.path.insert(0, str(CANONICAL_DIR))
 
 from model_stylesheet import resolve_model
+from dependency_registry import DependencyRegistryResolver
 from parallel_executor import (
     AdmissionSpec,
     plan_dynamic_admission,
@@ -254,6 +255,8 @@ class DAGBuilder:
     def __init__(self, specs_dir: Path):
         self.specs_dir = specs_dir
         self.specs: Dict[str, SpecFrontmatter] = {}
+        self.local_spec_ids: Set[str] = set()
+        self.dependency_resolution = None
 
     def load_specs(self) -> Dict[str, SpecFrontmatter]:
         """
@@ -273,6 +276,31 @@ class DAGBuilder:
                     self.specs[frontmatter.id] = frontmatter
             except ValueError as e:
                 raise ValueError(f"Error parsing {spec_file.name}: {e}")
+        self.local_spec_ids = set(self.specs)
+        local_specs = {
+            spec_id: {"id": spec_id, "status": spec.status}
+            for spec_id, spec in self.specs.items()
+        }
+        dependency_ids = {
+            dependency
+            for spec in self.specs.values()
+            for dependency in spec.after
+        }
+        self.dependency_resolution = DependencyRegistryResolver(self.specs_dir).resolve(
+            dependency_ids,
+            local_specs=local_specs,
+        )
+        if self.dependency_resolution.errors:
+            raise ValueError("; ".join(self.dependency_resolution.errors.values()))
+        for spec_id, record in self.dependency_resolution.resolved.items():
+            if spec_id in self.specs:
+                continue
+            self.specs[spec_id] = SpecFrontmatter(
+                id=spec_id,
+                status=record.status,
+                type=str(record.frontmatter.get("type") or "external"),
+                priority=int(record.frontmatter.get("priority") or 1),
+            )
         return self.specs
 
     def _parse_frontmatter(self, filepath: Path) -> Optional[SpecFrontmatter]:
@@ -877,8 +905,9 @@ def resolve_model_command(args) -> int:
 def admission(args) -> int:
     """Write a current-frontier admission plan from durable spec state."""
     specs_dir = Path(args.specs_dir) if args.specs_dir else CANONICAL_DIR / "specs"
+    builder = DAGBuilder(specs_dir)
     try:
-        specs = DAGBuilder(specs_dir).load_specs()
+        specs = builder.load_specs()
     except (OSError, ValueError) as exc:
         print(f"Error loading specs: {exc}", file=sys.stderr)
         return 2
@@ -908,13 +937,21 @@ def admission(args) -> int:
             touches=tuple(spec.touches),
             priority=spec.priority,
         )
-        for spec in specs.values()
+        for spec_id in sorted(builder.local_spec_ids)
+        for spec in [specs[spec_id]]
         if spec.type not in ("main", "nfr")
     ]
+    resolution = builder.dependency_resolution
     plan = plan_dynamic_admission(
         runnable_specs,
         worker_limit,
         missing_touches_policy=missing_touches_policy,
+        dependency_statuses={
+            spec_id: record.status
+            for spec_id, record in (resolution.resolved if resolution else {}).items()
+            if spec_id not in builder.local_spec_ids
+        },
+        dependency_errors=resolution.errors if resolution else {},
     )
     json_path, markdown_path = write_admission_plan(plan, specs_dir)
     print(f"admission plan written: {json_path}")
@@ -1354,10 +1391,16 @@ def next_command(args) -> int:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
-    specs = DAGBuilder(specs_dir).load_specs()
+    builder = DAGBuilder(specs_dir)
+    try:
+        specs = builder.load_specs()
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     metadata = build_stack_metadata(specs)
     ready = []
-    for spec in specs.values():
+    for spec_id in sorted(builder.local_spec_ids):
+        spec = specs[spec_id]
         if spec.status != "ready":
             continue
         unmet = [dep for dep in spec.after if dep not in specs or specs[dep].status != "done"]

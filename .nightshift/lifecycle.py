@@ -166,7 +166,10 @@ def intrinsic_readiness(frontmatter: Mapping[str, Any], body: str) -> ReadinessR
 
 
 def derive_admission(
-    frontmatter: Mapping[str, Any], body: str, specs: Mapping[str, Mapping[str, Any]] | None = None,
+    frontmatter: Mapping[str, Any],
+    body: str,
+    specs: Mapping[str, Mapping[str, Any]] | None = None,
+    dependency_errors: Mapping[str, str] | None = None,
 ) -> AdmissionResult:
     """Derive an observable run state without changing ``frontmatter['status']``."""
     readiness = intrinsic_readiness(frontmatter, body)
@@ -184,6 +187,13 @@ def derive_admission(
                        ("gap_spec", "waiting_gap_spec")):
         if frontmatter.get(key):
             return AdmissionResult(state, f"declared {key}", readiness)
+    resolution_failures = [
+        dependency_errors[dep]
+        for dep in frontmatter.get("after", [])
+        if dependency_errors and dep in dependency_errors
+    ]
+    if resolution_failures:
+        return AdmissionResult("validation_failed", "; ".join(resolution_failures), readiness)
     if specs is not None:
         unmet = [dep for dep in frontmatter.get("after", [])
                  if dep not in specs or specs[dep].get("status") != "done"]

@@ -13,9 +13,11 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 import yaml
+
+from dependency_registry import DependencyRegistryResolver
 
 from worktree_paths import (
     WorktreePathError,
@@ -180,6 +182,9 @@ class BoundedWorktreeDispatcher:
         self.prepare = prepare
         self.run_id = uuid.uuid4().hex
         self.active: Dict[str, DispatchedWorker] = {}
+        self._dependency_resolver = DependencyRegistryResolver(self.specs_dir)
+        self._dependency_statuses: Dict[str, str] = {}
+        self._dependency_errors: Dict[str, str] = {}
 
     @property
     def enabled(self) -> bool:
@@ -204,6 +209,8 @@ class BoundedWorktreeDispatcher:
             limit,
             active_specs=[self._admission_spec_for_active(item) for item in self.active.values()],
             missing_touches_policy=settings.get("missing_touches_policy", "exclusive"),
+            dependency_statuses=self._dependency_statuses,
+            dependency_errors=self._dependency_errors,
         )
         launched: List[DispatchedWorker] = []
         by_id = {spec.spec_id: spec for spec in specs}
@@ -235,6 +242,20 @@ class BoundedWorktreeDispatcher:
                 touches=tuple(data.get("touches") or ()),
                 priority=int(data.get("priority", 1)),
             ))
+        local_specs = {
+            spec.spec_id: {"id": spec.spec_id, "status": spec.status}
+            for spec in specs
+        }
+        resolution = self._dependency_resolver.resolve(
+            (dependency for spec in specs for dependency in spec.after),
+            local_specs=local_specs,
+        )
+        self._dependency_statuses = {
+            spec_id: record.status
+            for spec_id, record in resolution.resolved.items()
+            if spec_id not in local_specs
+        }
+        self._dependency_errors = dict(resolution.errors)
         return specs
 
     def _admission_spec_for_active(self, worker: DispatchedWorker) -> AdmissionSpec:
@@ -612,6 +633,8 @@ def plan_dynamic_admission(
     *,
     active_specs: Iterable[AdmissionSpec] = (),
     missing_touches_policy: str = "exclusive",
+    dependency_statuses: Mapping[str, str] | None = None,
+    dependency_errors: Mapping[str, str] | None = None,
 ) -> AdmissionPlan:
     """Build a pure, deterministic admission plan for the current DAG frontier.
 
@@ -626,6 +649,11 @@ def plan_dynamic_admission(
         raise ValueError("missing_touches_policy must be 'exclusive' or 'allow'")
 
     spec_by_id = {spec.spec_id: spec for spec in specs}
+    external_statuses = {
+        str(spec_id): str(status).lower()
+        for spec_id, status in (dependency_statuses or {}).items()
+    }
+    resolution_errors = dict(dependency_errors or {})
     active_by_id = {spec.spec_id: spec for spec in active_specs}
     active_by_id.update({
         spec.spec_id: spec
@@ -637,7 +665,11 @@ def plan_dynamic_admission(
     invalid = {
         spec_id
         for spec_id, dependencies in graph.items()
-        if any(dependency not in spec_by_id for dependency in dependencies)
+        if any(
+            dependency in resolution_errors
+            or (dependency not in spec_by_id and dependency not in external_statuses)
+            for dependency in dependencies
+        )
     }
     cycle_members = {
         spec_id
@@ -670,6 +702,9 @@ def plan_dynamic_admission(
                 if ancestor:
                     blocked_cache[spec_id] = ancestor
                     return ancestor
+            elif external_statuses.get(dependency) in _TERMINAL_BLOCKING_STATUSES:
+                blocked_cache[spec_id] = dependency
+                return dependency
         blocked_cache[spec_id] = None
         return None
 
@@ -681,8 +716,12 @@ def plan_dynamic_admission(
                 spec.spec_id, "not_ready", "already_active", "already occupies a worker slot"
             )
         elif spec.spec_id in invalid:
+            failures = [resolution_errors[dep] for dep in spec.after if dep in resolution_errors]
             decisions[spec.spec_id] = AdmissionDecision(
-                spec.spec_id, "invalid", "invalid_dependency", "references a missing dependency"
+                spec.spec_id,
+                "invalid",
+                "dependency_resolution_failed" if failures else "invalid_dependency",
+                "; ".join(failures) if failures else "references a missing dependency",
             )
         elif spec.spec_id in cycle_members:
             decisions[spec.spec_id] = AdmissionDecision(
@@ -706,7 +745,10 @@ def plan_dynamic_admission(
                 decisions[spec.spec_id] = AdmissionDecision(
                     spec.spec_id, "not_ready", "status_not_ready", f"status is {spec.status}"
                 )
-            elif all(spec_by_id[dependency].status == "done" for dependency in spec.after):
+            elif all(
+                (spec_by_id[dependency].status if dependency in spec_by_id else external_statuses.get(dependency)) == "done"
+                for dependency in spec.after
+            ):
                 frontier.append(spec)
             else:
                 decisions[spec.spec_id] = AdmissionDecision(

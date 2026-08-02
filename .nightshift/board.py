@@ -42,6 +42,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
+from dependency_registry import DependencyRegistryResolver, DependencyResolution
+
 try:
     from status_store import StatusStore
 except Exception:
@@ -136,6 +138,8 @@ class SpecCache:
         self._status_store = status_store
         self._dir_mtime: float = 0.0
         self._entries: dict[str, CacheEntry] = {}  # keyed by spec id
+        self._dependency_resolver = DependencyRegistryResolver(specs_dir)
+        self._dependency_resolution = DependencyResolution()
 
     # ------------------------------------------------------------------
     # Public API
@@ -175,6 +179,17 @@ class SpecCache:
         # and admission evidence. Stored lifecycle status remains untouched.
         public = [self._public_fm(e.frontmatter, e.mtime) for e in self._entries.values()]
         by_id = {str(item.get("id")): item for item in public if item.get("id")}
+        dependency_ids = {
+            str(dep)
+            for item in public
+            for dep in (item.get("after") or [])
+            if dep
+        }
+        self._dependency_resolution = self._dependency_resolver.resolve(
+            dependency_ids,
+            local_specs=by_id,
+        )
+        admission_specs = self._dependency_resolution.combined_specs(by_id)
         help_text = _registry_field_help()
         try:
             from lifecycle import derive_admission
@@ -185,7 +200,12 @@ class SpecCache:
                 if item.get("status") in {"done", "superseded", "active", "retired"}:
                     continue
                 body = self.get_body(str(item.get("id"))) or ""
-                admission = derive_admission(item, body, by_id)
+                admission = derive_admission(
+                    item,
+                    body,
+                    admission_specs,
+                    self._dependency_resolution.errors,
+                )
                 item["readiness"] = admission.readiness.level.value
                 item["readiness_evidence"] = list(admission.readiness.findings)
                 item["readiness_dimensions"] = [
@@ -318,6 +338,7 @@ class SpecCache:
         """Wipe cache and re-warm all frontmatter from disk."""
         self._entries.clear()
         self._dir_mtime = 0.0
+        self._dependency_resolver.invalidate()
         self.warm()
 
     # ------------------------------------------------------------------
@@ -1020,54 +1041,7 @@ async def search(q: str = "") -> list[dict]:
 @app.get("/api/graph")
 async def graph() -> dict:
     specs = cache.get_all_frontmatter()
-    nodes = []
-    for s in specs:
-        sid = s.get("id")
-        if not sid:
-            continue
-        title = s.get("_title", sid)
-        graph_title = _graph_display_title(sid, title)
-        short_title = graph_title[:20] if len(graph_title) > 20 else graph_title
-        nodes.append({
-            "id": sid,
-            "label": f"{sid}\n{short_title}",
-            "status": s.get("status", "draft"),
-            "group": s.get("status", "draft"),
-            "provides": s.get("provides") or [],
-            "requires": s.get("requires") or [],
-            "touches": s.get("touches") or [],
-            "parent": s.get("parent"),
-            # `type` rides server-side so the client can shape grouping/non-runnable
-            # nodes (type in {main, nfr} — the nightshift-dag executable predicate)
-            # without joining against the separately-fetched /api/specs list.
-            "type": s.get("type"),
-            "unlocks": [],
-        })
-    edges = []
-    unlocks: dict[str, list[str]] = {node["id"]: [] for node in nodes}
-    for s in specs:
-        sid = s.get("id")
-        if not sid:
-            continue
-        # Arrow direction follows execution order: prerequisite → dependent.
-        # If sid has `after: [dep]`, then `dep` unblocks `sid` — draw `dep → sid`.
-        for dep in (s.get("after") or []):
-            edges.append({"from": dep, "to": sid, "arrows": "to"})
-            unlocks.setdefault(dep, []).append(sid)
-    for node in nodes:
-        node["unlocks"] = sorted(unlocks.get(node["id"], []))
-    # Parent (grouping-membership) edges — a SEPARATE list from `after:` edges so
-    # dependency-graph semantics stay clean. Emitted parent → child, and only when
-    # the parent resolves to an existing node (dangling parents are omitted;
-    # nightshift-dag already flags them). Rendered dashed/no-arrow on the client.
-    node_ids = {node["id"] for node in nodes}
-    parent_edges = []
-    for s in specs:
-        sid = s.get("id")
-        pid = s.get("parent")
-        if sid and pid and pid in node_ids:
-            parent_edges.append({"from": pid, "to": sid, "kind": "parent", "dashes": True})
-    return {"nodes": nodes, "edges": edges, "parent_edges": parent_edges}
+    return _build_graph_data(specs, cache._dependency_resolution)
 
 
 @app.post("/api/refresh")
@@ -3818,6 +3792,8 @@ async function showGraph(selectId) {
       // item you can kick off". Runnable specs keep the dot.
       shape: GROUPING_NODE_TYPES.has(n.type) ? 'diamond' : 'dot',
       size: 14,
+      borderWidth: n.external ? 3 : 1,
+      shapeProperties: n.external ? { borderDashes: [5, 4] } : {},
       x, y,
       // No `fixed` property → user can drag the node freely in any direction
     };
@@ -3916,7 +3892,12 @@ async function showGraph(selectId) {
     if (params.nodes.length > 0) {
       const nodeId = params.nodes[0];
       highlightNode(nodeId);
-      openPanel(nodeId);  // open the same right slide-in detail panel as a card click
+      const graphNode = (graphData.nodes || []).find(node => node.id === nodeId);
+      if (graphNode && graphNode.external && graphNode.port) {
+        window.open(`http://127.0.0.1:${graphNode.port}/?spec=${encodeURIComponent(nodeId)}`, '_blank');
+      } else {
+        openPanel(nodeId);  // open the same right slide-in detail panel as a card click
+      }
     } else {
       restoreAllEdges();
       clearInfoBar();
@@ -5300,7 +5281,10 @@ def _default_lib_fetcher(url: str) -> bytes:
         ) from exc
 
 
-def _build_graph_data(specs: list[dict]) -> dict:
+def _build_graph_data(
+    specs: list[dict],
+    dependency_resolution: DependencyResolution | None = None,
+) -> dict:
     """Build the /api/graph payload from a list of frontmatter dicts."""
     nodes = []
     for s in specs:
@@ -5321,7 +5305,37 @@ def _build_graph_data(specs: list[dict]) -> dict:
             "parent": s.get("parent"),
             "type": s.get("type"),
             "unlocks": [],
+            "external": False,
         })
+    local_ids = {str(node["id"]) for node in nodes}
+    if dependency_resolution is not None:
+        referenced = {
+            str(dep)
+            for spec in specs
+            for dep in (spec.get("after") or [])
+            if dep and str(dep) not in local_ids
+        }
+        for spec_id in sorted(referenced):
+            record = dependency_resolution.resolved.get(spec_id)
+            if record is None:
+                continue
+            nodes.append({
+                "id": spec_id,
+                "label": f"{spec_id}\n{record.project.name} · external",
+                "status": record.status,
+                "group": record.status,
+                "provides": record.frontmatter.get("provides") or [],
+                "requires": record.frontmatter.get("requires") or [],
+                "touches": record.frontmatter.get("touches") or [],
+                "parent": record.frontmatter.get("parent"),
+                "type": record.frontmatter.get("type"),
+                "unlocks": [],
+                "external": True,
+                "project": record.project.name,
+                "project_path": str(record.project.path),
+                "spec_path": str(record.spec_path),
+                "port": record.project.port,
+            })
     edges = []
     unlocks: dict[str, list[str]] = {n["id"]: [] for n in nodes}
     for s in specs:

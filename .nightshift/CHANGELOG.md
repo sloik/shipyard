@@ -11,6 +11,18 @@
 
 ---
 
+## 2.63.1 (2026-08-02)
+
+### Cross-project dependency consistency (SPEC-182)
+
+- Boards, the DAG CLI, the parallel executor, and Nightshift Control now resolve
+  exact dependency IDs from registered physical spec files, even when peer boards
+  are stopped.
+- Completed external prerequisites admit dependents; pending prerequisites wait;
+  missing or duplicate IDs fail explicitly instead of becoming indefinite waits.
+- Individual project graphs retain external prerequisite nodes and open their exact
+  owning board/spec.
+
 ## 2.63.0 (2026-08-01)
 
 ### Visible spec ownership in Nightshift Control (SPEC-178, SPEC-179)
