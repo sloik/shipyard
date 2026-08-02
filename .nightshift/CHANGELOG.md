@@ -11,6 +11,15 @@
 
 ---
 
+## 2.63.2 (2026-08-02)
+
+### Bounded stopped-board refresh fanout (SPEC-182)
+
+- Nightshift Control limits concurrent stopped-board summary subprocesses to four,
+  preventing fleet-wide registry scans from exhausting the fixed per-board timeout.
+- Project cards and dependency graphs remain available together after a Control restart
+  across the full registered fleet.
+
 ## 2.63.1 (2026-08-02)
 
 ### Cross-project dependency consistency (SPEC-182)
