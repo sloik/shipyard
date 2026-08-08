@@ -157,8 +157,69 @@ func TestRun_ShipyardUnavailableReturnsError(t *testing.T) {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	errObj := resp["error"].(map[string]interface{})
-	if !strings.Contains(errObj["message"].(string), "Shipyard is not running or unreachable") {
+	if !strings.Contains(errObj["message"].(string), "shipyard is not running or unreachable") {
 		t.Fatalf("unexpected error message: %v", errObj["message"])
+	}
+}
+
+func TestFetchServers(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/servers" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]shipyardServer{{Name: "child", Status: "running", ToolCount: 2}})
+	}))
+	defer api.Close()
+
+	srv := newMCPServer(api.URL, api.Client(), api.Client())
+	servers, err := srv.fetchServers(context.Background())
+	if err != nil {
+		t.Fatalf("fetchServers: %v", err)
+	}
+	if len(servers) != 1 || servers[0].Name != "child" || servers[0].ToolCount != 2 {
+		t.Fatalf("unexpected servers: %+v", servers)
+	}
+}
+
+func TestInvokeTool_UsesLongerToolCallTimeoutThanMetadata(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tools/call" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		time.Sleep(50 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"result": map[string]string{"status": "ok"}})
+	}))
+	defer api.Close()
+
+	srv := newMCPServer(api.URL, &http.Client{Timeout: 10 * time.Millisecond}, &http.Client{Timeout: 200 * time.Millisecond})
+	result, err := srv.invokeTool(context.Background(), "lmac-run", "yt_dlp", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("invokeTool: %v", err)
+	}
+	if string(result.Result) != `{"status":"ok"}` {
+		t.Fatalf("unexpected result: %s", result.Result)
+	}
+}
+
+func TestInvokeTool_ReportsToolCallTimeout(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tools/call" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer api.Close()
+
+	srv := newMCPServer(api.URL, &http.Client{Timeout: time.Second}, &http.Client{Timeout: 10 * time.Millisecond})
+	_, err := srv.invokeTool(context.Background(), "lmac-run", "yt_dlp", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected tool call timeout")
+	}
+	if !strings.Contains(err.Error(), "shipyard tool call timed out") {
+		t.Fatalf("expected timeout-specific error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("timeout must not be reported as unreachable: %v", err)
 	}
 }
 
@@ -293,7 +354,7 @@ func contains(items []string, want string) bool {
 // TestSPEC029_BridgeInitializeListChanged verifies AC 8 (bridge path):
 // The shipyard-mcp bridge's initialize response declares listChanged: true.
 func TestSPEC029_BridgeInitializeListChanged(t *testing.T) {
-	srv := newMCPServer("http://127.0.0.1:9999", nil)
+	srv := newMCPServer("http://127.0.0.1:9999", nil, nil)
 	req := rpcRequest{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`1`),
@@ -344,7 +405,7 @@ func TestSPEC029_PolicyWatcherSendsNotification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv := newMCPServer(api.URL, &http.Client{Timeout: 2 * time.Second})
+	srv := newMCPServer(api.URL, &http.Client{Timeout: 2 * time.Second}, &http.Client{Timeout: 2 * time.Second})
 	var out lockedBuffer
 	notifReceived := make(chan struct{})
 

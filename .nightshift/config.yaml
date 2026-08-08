@@ -12,11 +12,12 @@ project:
 
 commands:
   build: "go build ./..."
-  test: "go test ./..."
+  test: "go test -race -count=1 -timeout 5m ./..."
   test_timeout_s: 600
-  lint: "go vet ./..."
-  type_check: "go test ./..."
-  format: ""
+  lint: "make lint"
+  type_check: "make type-check"
+  format: "make format-check"
+  quality: "make quality"
   format_fix: "gofmt -w $(find . -name '*.go' -not -path './.git/*' -not -path './.nightshift/*')"
 
 conventions:

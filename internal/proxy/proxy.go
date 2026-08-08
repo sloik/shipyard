@@ -331,8 +331,8 @@ func (p *Proxy) proxyClientInput(ctx context.Context, inputWriter *childInputWri
 	scanner.Buffer(buf, 10*1024*1024)
 
 	for scanner.Scan() {
-			line := append([]byte(nil), scanner.Bytes()...)
-			if err := proxyInputWriteLine(inputWriter, ctx, line); err != nil {
+		line := append([]byte(nil), scanner.Bytes()...)
+		if err := proxyInputWriteLine(inputWriter, ctx, line); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
 				return nil
 			}

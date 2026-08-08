@@ -413,9 +413,9 @@ func TestRunChild_StartError(t *testing.T) {
 
 func TestRunChild_PipeFailures(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		patch func()
-		want string
+		want  string
 	}{
 		{
 			name: "stdin pipe",

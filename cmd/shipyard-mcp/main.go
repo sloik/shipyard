@@ -39,18 +39,23 @@ func run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args []
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	srv := newMCPServer(strings.TrimRight(*apiBase, "/"), &http.Client{Timeout: 2 * time.Second})
+	srv := newMCPServer(
+		strings.TrimRight(*apiBase, "/"),
+		&http.Client{Timeout: 2 * time.Second},
+		&http.Client{Timeout: 5 * time.Minute},
+	)
 	return srv.serve(ctx, stdin, stdout, stderr)
 }
 
 type mcpServer struct {
-	apiBase    string
-	httpClient *http.Client
-	writeMu    sync.Mutex
+	apiBase        string
+	metadataClient *http.Client
+	toolCallClient *http.Client
+	writeMu        sync.Mutex
 }
 
-func newMCPServer(apiBase string, httpClient *http.Client) *mcpServer {
-	return &mcpServer{apiBase: apiBase, httpClient: httpClient}
+func newMCPServer(apiBase string, metadataClient, toolCallClient *http.Client) *mcpServer {
+	return &mcpServer{apiBase: apiBase, metadataClient: metadataClient, toolCallClient: toolCallClient}
 }
 
 type rpcRequest struct {
@@ -203,7 +208,7 @@ func (s *mcpServer) fetchPolicyRaw(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.metadataClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -335,13 +340,13 @@ func (s *mcpServer) fetchServers(ctx context.Context) ([]shipyardServer, error) 
 	if err != nil {
 		return nil, fmt.Errorf("build servers request: %w", err)
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.metadataClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Shipyard is not running or unreachable at %s", s.apiBase)
+		return nil, fmt.Errorf("shipyard is not running or unreachable at %s", s.apiBase)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Shipyard returned %d from /api/servers", resp.StatusCode)
+		return nil, fmt.Errorf("shipyard returned %d from /api/servers", resp.StatusCode)
 	}
 	var servers []shipyardServer
 	if err := json.NewDecoder(resp.Body).Decode(&servers); err != nil {
@@ -355,9 +360,9 @@ func (s *mcpServer) fetchGatewayTools(ctx context.Context) (*toolsEnvelope, erro
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.metadataClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Shipyard is not running or unreachable at %s", s.apiBase)
+		return nil, fmt.Errorf("shipyard is not running or unreachable at %s", s.apiBase)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -383,14 +388,17 @@ func (s *mcpServer) invokeTool(ctx context.Context, server, tool string, args js
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.toolCallClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Shipyard is not running or unreachable at %s", s.apiBase)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("shipyard tool call timed out after %s", s.toolCallClient.Timeout)
+		}
+		return nil, fmt.Errorf("shipyard is not running or unreachable at %s", s.apiBase)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("Shipyard tool call failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, fmt.Errorf("shipyard tool call failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	var result toolCallResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

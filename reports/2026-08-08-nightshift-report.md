@@ -1,63 +1,76 @@
-# Nightshift Human Review — SPEC-BUG-157
+# Nightshift Report — SPEC-BUG-158
 
-**Run:** `nightshift/SPEC-BUG-157-20260808R1`
-**Worktree:** `/private/tmp/nightshift-bug157/shipyard-0e3a9e14b3bd/SPEC-BUG-157`
-**Status:** complete
+- Date: 2026-08-08
+- Status: implementation complete; awaiting parent-owned integration and lifecycle finalization
+- Branch: `nightshift/SPEC-BUG-158-unblock-20260808T1200Z`
 
 ## Summary
 
-Recovered the Nightshift control plane on a fresh worktree from `main`. The
-configuration is one YAML mapping; the four exact duplicate historical IDs now
-have unique canonical replacements; and validation checks duplicate IDs plus
-the four structured graph-reference fields. The required Go race suite is
-green.
+Established `make quality` as Shipyard's single blocking quality contract for
+local development, Nightshift, and CI. The target checks canonical Go
+formatting, pinned Staticcheck, `go vet`, GitHub Actions workflow syntax,
+standalone and inline JavaScript syntax, zsh parseability, build, ordinary
+tests, and the configured race suite.
+
+The user-authorized bridge timeout/client refactor was reproduced unchanged
+before this work. Its metadata and tool-call clients retain their distinct
+timeouts, and its timeout-specific behavior is covered by tests. The five
+pre-existing `shipyard-mcp` Staticcheck error-string findings were repaired to
+lowercase; the bridge's new error strings follow the same Go convention.
 
 ## Changes
 
-- Converted the malformed second YAML document boundary to a comment while
-  retaining the multi-stack guidance.
-- Repaired the four duplicate IDs and their structured graph edges; the
-  permanent old-to-new record is `.nightshift/reports/spec-id-migration.md`.
-- Extended `validate_specs.py` to surface exact duplicate IDs and unresolved
-  `after`, `parent`, `children`, and `implementation_order` references.
-- Updated preflight config handling to reject a non-mapping config explicitly.
-
-## Validation
-
-| Check | Result |
-| --- | --- |
-| YAML safe-load to one mapping | PASS |
-| Exact graph audit (207 non-template specs) | PASS — 0 findings |
-| `preflight.py --spec-id SPEC-BUG-157` | PASS |
-| `go test -race -count=1 -timeout 5m ./...` | PASS |
-| `validate_specs.py .nightshift/specs` | EXPECTED LEGACY FINDINGS — 99 historical unchecked-checkbox/status errors; no config, exact-ID, or graph-reference errors |
-| `check_followup_spec.py --scan-all` | EXPECTED OUT-OF-SCOPE FINDINGS — semantic near-duplicates, not exact ID duplicates |
-| `git diff --check main...HEAD` | PASS |
-
-The Go link step emitted macOS deployment-target warnings but exited 0 and all
-packages passed.
+- Added a repository-owned pinned tools module for Staticcheck and actionlint.
+- Added `format-check`, `lint`, `type-check`, `script-check`, `race`, `quality`,
+  and `quality-self-test` Make targets.
+- Updated CI to invoke only `make quality`; aligned Nightshift's meaningful
+  lint/type/format/test gates and race contract.
+- Added deterministic JavaScript/inline-script extraction and syntax checking,
+  plus controlled invalid fixtures for Staticcheck, actionlint, JavaScript, and
+  zsh.
+- Ran `gofmt` over tracked Go sources and repaired Staticcheck findings without
+  blanket rule or directory exclusions. `.staticcheck.conf` enables `all` and
+  documents the narrow-suppression policy; it has no exceptions.
+- Kept the bridge refactor's long tool-call timeout and timeout diagnostic,
+  with regression tests for longer tool calls, deadline diagnostics, and server
+  metadata decoding.
 
 ## Acceptance Criteria
 
-- [x] AC1 — YAML safe-load succeeds and returns a mapping.
-- [x] AC2 — exact-ID scan has zero duplicates.
-- [x] AC3 — all four structured references resolve once.
-- [x] AC4 — migration map records IDs, files, and rewritten references.
-- [x] AC5 — config/duplicate errors are gone; legacy content findings are explicit.
-- [x] AC6 — preflight reaches and passes validation without composer failure.
-- [x] AC7 — review diff changes only IDs/references, config handling, and validator mechanics.
-- [x] AC8 — race suite passes.
+- [x] AC1 — `make quality` runs formatting, analyzers, workflow/script syntax,
+  build, ordinary tests, and `go test -race -count=1 -timeout 5m ./...`.
+- [x] AC2 — `test -z "$(gofmt -l $(git ls-files '*.go'))"` passes.
+- [x] AC3 — pinned Staticcheck runs clean on `./...`; its controlled bad
+  fixture exits nonzero.
+- [x] AC4 — actionlint, JavaScript/inline-script syntax, and `zsh -n` are
+  blocking and their negative fixtures exit nonzero.
+- [x] AC5 — Nightshift `lint`, `type_check`, `format`, and `test` are distinct,
+  meaningful commands; `test` contains the race/count/timeout contract.
+- [x] AC6 — CI invokes `make quality` rather than duplicating a divergent list.
+- [x] AC7 — no blanket analyzer disable or whole-directory exclusion was added.
+- [x] AC8 — module tidy/verify, ordinary tests, and the full race suite pass.
 
-## Discoveries
+## Validation Evidence
 
-The legacy semantic duplicate scanner is intentionally broader than this
-identity repair: it reports content/title similarity even with unique IDs. The
-remaining 99 validator findings are historical `done` specs with unchecked
-checkboxes; they were neither hidden nor changed by this run.
+All commands completed successfully in the isolated worktree:
+
+```text
+make quality
+make quality-self-test
+test -z "$(gofmt -l $(git ls-files '*.go'))"
+go mod tidy -diff
+go mod verify
+(cd tools && go mod tidy -diff && go mod verify)
+git diff --check
+```
+
+`make quality-self-test` confirmed that Staticcheck, actionlint, JavaScript
+syntax, and zsh parsing each reject their committed invalid fixture. The Go
+build/test commands emitted existing macOS linker deployment-target warnings,
+but exited successfully; no test or race failure occurred.
 
 ## Suggested Follow-up Specs
 
-- Audit and repair historical checkbox/status consistency if maintaining a
-  globally green `validate_specs.py` result becomes a desired invariant.
-- Define a separate policy for semantic near-duplicate consolidation; do not
-  conflate it with canonical exact-ID identity.
+None. The spec's explicitly out-of-scope security scanning and coverage work
+already have follow-up specs (`SPEC-BUG-159` and `SPEC-BUG-160`), which this run
+did not modify.

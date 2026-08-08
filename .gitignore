@@ -16,6 +16,7 @@ dist/
 
 # SPEC-BUG-149 smoke harness deps (playwright-core; drives system Chrome — no browser download committed)
 /node_modules/
+/.tools/
 
 # Wails build output
 cmd/shipyard/build/
