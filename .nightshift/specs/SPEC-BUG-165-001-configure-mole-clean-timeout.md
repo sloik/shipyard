@@ -3,14 +3,25 @@ id: SPEC-BUG-165-001
 priority: 1
 layer: 1
 type: bugfix
-status: in_progress
+status: blocked
 after: [SPEC-BUG-164-001]
 nfrs: [SPEC-NFR-001]
 technologies: [json]
 created: 2026-08-08
+blocker_class: 'unknown_critical_failure'
+block_reason: 'Live Mole dry-run still times out at 30s because launchd runs a stale Shipyard binary without SPEC-BUG-164-001 per-tool timeout support. One focused unblock pass completed; deploy current binary, restart launchd, rerun dry-run.'
+blocked_since: '2026-08-08T09:16:33Z'
+unblock_condition: 'unknown; classification review required'
+blocker_scope: 'unknown'
+blocker_evidence: 'failure_persistence'
 ---
 
 # Configure Mole cleanup's Shipyard response timeout
+
+## Block Reason
+
+Live Mole dry-run still times out at 30s because launchd runs a stale Shipyard binary without SPEC-BUG-164-001 per-tool timeout support. One focused unblock pass completed; deploy current binary, restart launchd, rerun dry-run.
+
 
 ## Problem
 
