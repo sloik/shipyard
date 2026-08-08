@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 1
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-157, SPEC-BUG-158, SPEC-012]
 provides: [tested-access-log-contract, drainable-audit-writes]
 requires: [nightshift-valid-control-plane, canonical-quality-command]
