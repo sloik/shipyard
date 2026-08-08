@@ -1,7 +1,7 @@
 ---
 id: SHIPYARD-QUESTIONS-001
 type: questions
-status: draft
+status: done
 created: 2026-08-08
 wave: 2026-08-08 Nightshift report review
 sources: []
