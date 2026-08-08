@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: ready
+status: in_progress
 after: []
 provides: [nightshift-valid-control-plane, unique-spec-identities]
 requires: []
