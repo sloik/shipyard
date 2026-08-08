@@ -1,13 +1,13 @@
 # Nightshift Report — SPEC-BUG-164-001
 
-**Status:** blocked
+**Status:** implementation complete; held for parent evidence-gate decision
 
 ## Outcome
 
-No implementation work was performed. The run stopped before code edits because
-the required Serena Go language server could not initialize.
+The Serena transport recovery succeeded. The worker implemented and committed
+per-tool managed-child response timeouts in `f017b6d`.
 
-## Environment Repair / Focused Unblock Pass
+## Serena Recovery
 
 The parent authorized installation of the standard Go language server. The
 following completed successfully:
@@ -23,32 +23,41 @@ golang.org/x/tools/gopls v0.23.0
 `/opt/homebrew/bin/gopls` is a symlink to the Go toolchain-installed binary at
 `/Users/ed/go/bin/gopls`, so it is on the normal terminal PATH.
 
-After reactivating the isolated worktree, Serena correctly detected Go, but its
-language-server manager still failed every symbolic request with:
+After the parent refreshed the Serena transport, the worker called the Serena
+initial-instructions and project-activation tools. A symbolic overview of
+`internal/proxy/manager.go` succeeded, confirming the Go language server is
+available for this run.
 
-```text
-The language server manager is not initialized, indicating a problem during project initialisation.
-Failed to start 1 language server(s):
-go: Found a Go version but gopls is not installed.
-```
+## Implementation
 
-This is inconsistent with the verified terminal installation and indicates stale
-Serena/MCP tool discovery. Serena explicitly requires stopping rather than
-using a non-symbolic workaround.
+- `ToolConfig` accepts optional `response_timeout_seconds` values.
+- Configured positive durations are copied into the managed child at registration,
+  so request-time reads are immutable and race-safe.
+- Only a valid `tools/call` parameter object with a configured `name` uses the
+  override. Other methods, malformed/missing names, missing tools, and
+  non-positive values use the 30-second default.
+- Timeout errors retain the selected effective duration.
 
-## Required Work Not Performed
+## Validation
 
-- No source, test, configuration, or runtime files were changed.
-- No validation commands were run, because the blocked precondition occurred
-  before implementation.
-- The current branch remains at the lifecycle commit that marked the spec
-  `in_progress`; this report is the only run artifact committed by the worker.
+| Gate | Result |
+| --- | --- |
+| `go test ./internal/proxy` | pass |
+| `go test -race -count=1 ./internal/proxy` | pass |
+| focused config timeout test | pass |
+| `go vet ./...` | pass |
+| `go build ./...` | pass |
+| `go test ./...` | fail: existing `cmd/shipyard` `TestMain_ConfigMissingCommand` expects exit code 1, got 0 |
+| `go test -race -count=1 ./...` | same existing failure; no race reported |
 
-## Unblock
+The full-suite failure was reproduced before and after implementation and is
+outside this spec's timeout behavior. No unrelated test was changed or skipped.
 
-Restart or otherwise refresh the Serena/MCP process so its Go language-server
-manager discovers the verified `gopls` binary, then rerun this spec in its
-isolated worktree.
+## Parent Action
+
+The worktree is clean at implementation commit `f017b6d`. The parent should
+apply the evidence gate and decide whether to merge while separately triaging
+the existing `TestMain_ConfigMissingCommand` failure.
 
 ## Suggested Follow-up Specs
 
