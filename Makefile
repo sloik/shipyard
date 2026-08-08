@@ -107,6 +107,7 @@ script-check: tools
 	"$(ACTIONLINT)" .github/workflows/*.yml
 	node scripts/check-js-syntax.mjs internal/web/ui/ds.js internal/web/ui/index.html
 	zsh -n scripts/*.sh
+	zsh scripts/deploy-canonical-runtime.test
 
 # Static workflow policy is local and deterministic; scans remain a separate
 # explicit target because their vulnerability databases are intentionally fresh.
