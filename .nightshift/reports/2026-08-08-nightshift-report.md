@@ -51,6 +51,17 @@ the candidate, (3) migrate and prove launchd's `program` is
 managed child has a `tool_count`, and only then (5) archive executable legacy
 binaries. A failed service or child-count check exits before archival.
 
+## Focused unblock pass #2
+
+Live evidence showed launchd rejects a rebuilt executable under the existing
+`com.argo.shipyard.app` label with `Input/output error`. The migration now
+creates `com.argo.shipyard.app.canonical` from the old plist, preserving the
+same runtime options but using a fresh label for `bin/shipyard`. It boots out
+the old service only immediately before starting the new one; a failed
+canonical-program assertion boots the old plist back up and leaves all legacy
+executables in place. Successful child-count evidence is still required before
+archival.
+
 ## Suggested Follow-up Specs
 
 None.
