@@ -359,6 +359,16 @@ func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
 		return
 	}
 
+	// Validate all servers have commands
+	for _, name := range cfg.ServerOrder {
+		srv := cfg.Servers[name]
+		if srv.Command == "" {
+			slog.Error("config server is missing command", "server", name, "path", configPath)
+			exitFn(1)
+			return
+		}
+	}
+
 	if !headless {
 		releaseLock, err := acquireDesktopInstanceLockFn(dataDirFn())
 		if err != nil {
@@ -376,16 +386,6 @@ func runConfig(configPath string, schemaPoll time.Duration, headless bool) {
 	port := cfg.Web.Port
 	if port == 0 {
 		port = 9417
-	}
-
-	// Validate all servers have commands
-	for _, name := range cfg.ServerOrder {
-		srv := cfg.Servers[name]
-		if srv.Command == "" {
-			slog.Error("config server is missing command", "server", name, "path", configPath)
-			exitFn(1)
-			return
-		}
 	}
 
 	runMultiServerFn(cfg, port, schemaPoll, headless)

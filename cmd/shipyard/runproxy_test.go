@@ -189,6 +189,33 @@ func TestRunConfig_SecondServerMissingCommand(t *testing.T) {
 	}
 }
 
+func TestRunConfig_MissingCommandExitsBeforeDesktopLock(t *testing.T) {
+	origExit := exitFn
+	origLock := acquireDesktopInstanceLockFn
+	t.Cleanup(func() {
+		exitFn = origExit
+		acquireDesktopInstanceLockFn = origLock
+	})
+
+	var exitCode int
+	exitFn = func(c int) { exitCode = c }
+	acquireDesktopInstanceLockFn = func(string) (func(), error) {
+		t.Fatal("invalid config must be rejected before desktop lock acquisition")
+		return nil, nil
+	}
+
+	path := filepath.Join(t.TempDir(), "servers.json")
+	if err := os.WriteFile(path, []byte(`{"servers":{"alpha":{}}}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runConfig(path, 60*time.Second, false)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+}
+
 func TestRunConfig_LoadFailureExits(t *testing.T) {
 	origExit := exitFn
 	defer func() { exitFn = origExit }()
