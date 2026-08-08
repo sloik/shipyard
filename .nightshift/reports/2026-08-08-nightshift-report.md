@@ -1,66 +1,54 @@
-# Nightshift Report — SPEC-BUG-166
+# Nightshift Report — SPEC-BUG-164-001
 
-## Summary
+**Status:** blocked
 
-Implemented one canonical runtime path. Smoke executables now build below the
-ignored `build/smoke/` directory, while `bin/shipyard` is reserved as the only
-launchd runtime executable. Added a guarded `make deploy-runtime` migration
-that smoke-tests first, verifies launchd's active program path, and archives
-legacy executables only after that proof.
+## Outcome
 
-## Changes
+No implementation work was performed. The run stopped before code edits because
+the required Serena Go language server could not initialize.
 
-- `Makefile`: smoke output path and `deploy-runtime` target.
-- `.gitignore`: retain only `bin/shipyard`; ignore smoke output.
-- `scripts/deploy-canonical-runtime.sh`: safe launchd migration and recovery.
-- `README.md`: canonical build, smoke, and deployment documentation.
+## Environment Repair / Focused Unblock Pass
 
-## Verification
+The parent authorized installation of the standard Go language server. The
+following completed successfully:
 
-- `npm ci && make smoke-full` — PASS (Tool Browser and Servers browser smoke).
-- `go test ./...` — PASS.
-- `go vet ./...` — PASS.
-- `go build ./...` — PASS.
-- `go test -race -count=1 ./...` — PASS.
-- `zsh -n scripts/deploy-canonical-runtime.sh` — PASS.
-- All Go linker warnings only note the host SDK deployment-target mismatch.
+```text
+go install golang.org/x/tools/gopls@latest
+command -v gopls
+/opt/homebrew/bin/gopls
+gopls version
+golang.org/x/tools/gopls v0.23.0
+```
 
-## Acceptance Criteria
+`/opt/homebrew/bin/gopls` is a symlink to the Go toolchain-installed binary at
+`/Users/ed/go/bin/gopls`, so it is on the normal terminal PATH.
 
-- [x] AC-1: migration command leaves only executable `bin/shipyard`.
-- [x] AC-2: both smoke targets passed with executables in `build/smoke/`.
-- [ ] AC-3: requires post-merge canonical-checkout deployment; the isolated
-  worktree must not replace the live service.
-- [ ] AC-4: requires the same live post-merge deployment verification.
-- [x] AC-5: required Go verification suite passed.
+After reactivating the isolated worktree, Serena correctly detected Go, but its
+language-server manager still failed every symbolic request with:
 
-## Blockers / discoveries
+```text
+The language server manager is not initialized, indicating a problem during project initialisation.
+Failed to start 1 language server(s):
+go: Found a Go version but gopls is not installed.
+```
 
-The current live LaunchAgent points to `bin/shipyard-fixed`. Its migration is
-intentionally deferred until this worktree's commit is merged into the canonical
-checkout, because installing from an isolated worktree would violate the
-runtime's canonical-path requirement.
+This is inconsistent with the verified terminal installation and indicates stale
+Serena/MCP tool discovery. Serena explicitly requires stopping rather than
+using a non-symbolic workaround.
 
-## Focused unblock pass
+## Required Work Not Performed
 
-The deployment command now provides the missing evidence gate itself. After the
-parent merges this branch, run `make deploy-runtime` from the canonical main
-checkout. It will: (1) pass browser smoke before changing launchd, (2) build
-the candidate, (3) migrate and prove launchd's `program` is
-`bin/shipyard`, (4) poll `http://127.0.0.1:9417/api/servers` until every
-managed child has a `tool_count`, and only then (5) archive executable legacy
-binaries. A failed service or child-count check exits before archival.
+- No source, test, configuration, or runtime files were changed.
+- No validation commands were run, because the blocked precondition occurred
+  before implementation.
+- The current branch remains at the lifecycle commit that marked the spec
+  `in_progress`; this report is the only run artifact committed by the worker.
 
-## Focused unblock pass #2
+## Unblock
 
-Live evidence showed launchd rejects a rebuilt executable under the existing
-`com.argo.shipyard.app` label with `Input/output error`. The migration now
-creates `com.argo.shipyard.app.canonical` from the old plist, preserving the
-same runtime options but using a fresh label for `bin/shipyard`. It boots out
-the old service only immediately before starting the new one; a failed
-canonical-program assertion boots the old plist back up and leaves all legacy
-executables in place. Successful child-count evidence is still required before
-archival.
+Restart or otherwise refresh the Serena/MCP process so its Go language-server
+manager discovers the verified `gopls` binary, then rerun this spec in its
+isolated worktree.
 
 ## Suggested Follow-up Specs
 
