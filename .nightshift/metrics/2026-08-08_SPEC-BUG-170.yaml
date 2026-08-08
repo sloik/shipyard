@@ -1,0 +1,72 @@
+task_id: SPEC-BUG-170
+spec_file: .nightshift/specs/SPEC-BUG-170-record-first-ci-security-gate-evidence.md
+started_at: '2026-08-08T17:53:00Z'
+completed_at: '2026-08-08T17:57:00Z'
+status: blocked
+outcome: evidence_gap
+domain: code
+loop_version: 2.62.0
+model: gpt-5.6
+harness: codex
+review_mode: self
+phases:
+  execution_mode: sequential
+  preflight:
+    config_parse: pass
+    nfr_audit: pass
+  context_load:
+    devkb_files_read: [go.md, testing.md, git.md, shell.md, architecture.md]
+    files_read: 9
+    knowledge_entries_used: 0
+  test_planning:
+    duration_s: 0
+    note: evidence-only spec; acceptance is GitHub Actions metadata rather than a new test
+  test_writing:
+    tests_written: 0
+    tests_failing: 0
+    duration_s: 0
+  implementation:
+    ci_run_dispatched: 31270602549
+    raw_logs_accessed: false
+  validation:
+    build_pass: true
+    build_errors: 0
+    test_pass_rate: 1.0
+    tests_total: 1
+    tests_passed: 1
+    lint_errors: 0
+    type_errors: 0
+    security_config_check: pass
+    ci_run_conclusion: success
+    ci_security_step_executed: false
+    acceptance_criteria_met: false
+  review:
+    cycles: 1
+    issues_found: []
+  completion_verification:
+    acceptance_criteria_met: false
+    no_regression: true
+satisfaction:
+  overall_score: 0.33
+  classification: low
+  dimensions:
+    tests: {score: 1.0, weight: 1}
+    lint: {score: 1.0, weight: 1}
+    type_check: {score: 1.0, weight: 1}
+    build: {score: 1.0, weight: 1}
+    completion_verification: {score: 0.0, weight: 4}
+    review: {score: 1.0, weight: 1}
+warnings:
+  - 'Remote main SHA 0a9627d predates local SPEC-BUG-159 workflow hardening commit 05e58c5; the dispatched run cannot demonstrate the security gate.'
+artifacts:
+  - reports/2026-08-08-nightshift-report-SPEC-BUG-170.md
+  - https://github.com/sloik/shipyard/actions/runs/31270602549
+commit:
+  hash: pending-parent-integration
+  message: '[SPEC-BUG-170] docs: record blocked CI security evidence'
+failure:
+  phase: completion_verification
+  error_type: evidence_gap
+  description: 'The only dispatched CI run completed successfully without a security-gate step.'
+  root_cause: 'Remote main SHA 0a9627d predates the local SPEC-BUG-159 workflow hardening commit 05e58c5.'
+  suggestion: 'Publish the revision containing SPEC-BUG-159, then dispatch CI on that SHA and retain metadata-only evidence.'
