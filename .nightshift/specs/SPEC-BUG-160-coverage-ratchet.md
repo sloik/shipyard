@@ -4,7 +4,7 @@ template_version: 7
 priority: 4
 layer: 0
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-157, SPEC-BUG-158]
 provides: [coverage-ratchet, stable-coverage-run]
 requires: [nightshift-valid-control-plane, canonical-quality-command]
