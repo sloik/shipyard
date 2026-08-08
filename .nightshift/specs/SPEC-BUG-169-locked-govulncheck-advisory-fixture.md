@@ -4,13 +4,13 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: draft
+status: ready
 after: [SPEC-BUG-159]
 provides: [offline-govulncheck-negative-fixture]
 requires: [vulnerability-gate]
 touches: [Makefile, scripts, test/security-fixtures]
 prior_attempts: []
-nfrs: []
+nfrs: [SPEC-NFR-001]
 parent: SPEC-BUG-159
 created: 2026-08-08
 stack: go
