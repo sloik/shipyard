@@ -3,10 +3,7 @@ id: SPEC-001
 priority: 1
 type: main
 status: done
-children:
-  - SPEC-001-001
-  - SPEC-001-002
-  - SPEC-001-003
+children: []
 created: 2026-04-04
 ---
 

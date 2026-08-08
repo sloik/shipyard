@@ -1,0 +1,45 @@
+task_id: SPEC-BUG-157
+spec_file: .nightshift/specs/SPEC-BUG-157-nightshift-control-plane-integrity.md
+started_at: '2026-08-08T09:20:51Z'
+completed_at: '2026-08-08T09:24:00Z'
+status: completed
+outcome: passed
+domain: code
+loop_version: 2.62.0
+model: gpt-5.6
+harness: codex
+review_mode: self
+phases:
+  execution_mode: sequential
+  preflight:
+    config_parse: pass
+    spec_graph: pass
+    baseline_tests_pass: true
+  context_load:
+    devkb_files_read: [python.md, go.md, architecture.md, git.md]
+  implementation:
+    config_documents_repaired: 1
+    duplicate_ids_repaired: 4
+    structured_references_updated: 5
+  review:
+    cycles: 1
+    issues_found: []
+  validation:
+    config_mapping: pass
+    duplicate_id_scan: pass
+    graph_reference_scan: pass
+    build: pass
+    lint: pass
+    race_test: pass
+    legacy_validator_errors: 99
+    semantic_near_duplicate_findings: 66
+    acceptance_criteria_met: true
+warnings:
+  - 'validate_specs.py retains 99 unrelated historical checkbox/status-content findings; config, exact-ID, and structured-reference findings are zero.'
+  - 'check_followup_spec.py --scan-all reports semantic near-duplicates, which this identity-repair spec explicitly leaves out of scope.'
+artifacts:
+  - .nightshift/reports/spec-id-migration.md
+  - reports/2026-08-08-nightshift-report.md
+commit:
+  hash: 9545d9a8d558c7bf29d7db7bee8a1926c79a9a3c
+  message: '[SPEC-BUG-157] fix: restore Nightshift control-plane integrity'

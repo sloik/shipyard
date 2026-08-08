@@ -1,5 +1,5 @@
 ---
-id: SPEC-008
+id: SPEC-006-006
 priority: 8
 type: feature
 status: done

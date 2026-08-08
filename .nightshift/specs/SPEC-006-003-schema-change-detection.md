@@ -5,7 +5,7 @@ priority: 3
 layer: 2
 type: feature
 status: done
-parent: SPEC-006
+parent: SPEC-006-004
 after: [SPEC-004]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []

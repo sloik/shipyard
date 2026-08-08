@@ -4,7 +4,7 @@ priority: 1
 layer: 1
 type: bugfix
 status: done
-after: [SPEC-BUG-164]
+after: []
 nfrs: [SPEC-NFR-001]
 technologies: [go]
 created: 2026-08-08

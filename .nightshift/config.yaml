@@ -1,0 +1,162 @@
+schema_version: "3.0.0"
+kit_version: "2.60.0"
+
+project:
+  name: "shipyard"
+  description: "Go/Wails MCP proxy and tool browser"
+  language:
+    - go
+    - javascript
+    - html
+    - css
+
+commands:
+  build: "go build ./..."
+  test: "go test ./..."
+  test_timeout_s: 600
+  lint: "go vet ./..."
+  type_check: "go test ./..."
+  format: ""
+  format_fix: "gofmt -w $(find . -name '*.go' -not -path './.git/*' -not -path './.nightshift/*')"
+
+conventions:
+  - "Go tests live next to source files as *_test.go."
+  - "HTTP handlers are tested with httptest and real lightweight dependencies."
+  - "Use stdlib-first Go patterns unless the project already has a dependency."
+  - "Global server/tool policy lives in backend state, not in individual bridge processes."
+  - "Validate runtime/API behavior with real endpoints when the spec concerns Tool Browser or gateway behavior."
+
+review:
+  mode: "self"
+  enabled: [architect, security, performance, domain, quality, user]
+  extra_criteria:
+    - "Do not break existing child-server proxy routing."
+    - "Do not introduce data races; SPEC-NFR-001 remains active."
+
+knowledge:
+  injection: true
+  max_patterns: 5
+  match_strategy: "domain+tags"
+
+devkb:
+  path: "/Users/ed/Dropbox/Argo/DevKB"
+  writeback: true
+  mappings:
+    go: ["go.md", "testing.md"]
+    javascript: ["frontend.md", "testing.md"]
+    html: ["frontend.md"]
+    css: ["frontend.md"]
+  always_include: ["git.md", "architecture.md", "shell.md"]
+
+metrics:
+  enabled: true
+  track: [duration, test_results, review_cycles, build_errors, files_changed]
+
+circuit_breaker:
+  max_same_error: 3
+  max_review_cycles: 5
+  max_spec_duration_min: 120
+  phase_duration_multiplier: 3
+
+runner:
+  mode: "inline"
+  domain: "code"
+  model_selection: "auto"
+  harness: "codex"
+  tiers:
+    tier-1:
+      model: ""
+      harness: "codex"
+    tier-2:
+      model: ""
+      harness: "codex"
+    tier-3:
+      model: ""
+      harness: "codex"
+
+comparison:
+  enabled: false
+  models: []
+# ---
+
+## Multi-Stack Configuration (v3.0.0+ — OPTIONAL)
+#
+# The `stacks:` section defines per-stack build/test/lint commands, file scope,
+# environment setup, and DevKB mappings for projects that mix multiple languages
+# or toolchains.
+#
+# WHEN TO USE:
+#   - Project has multiple languages with separate test/lint/build commands
+#     (e.g., Python API + Swift app + shell scripts in one repo).
+#   - You want per-stack DevKB injection and preflight binary checks.
+#
+# WHEN NOT TO USE:
+#   - Single-stack projects — leave the entire block commented out. Behavior
+#     falls back to the flat `commands:` section above (full v2.2.1 semantics).
+#
+# ACTIVATION:
+#   1. Uncomment the `stacks:` block below.
+#   2. Keep `schema_version: "3.0.0"` (above) — required when `stacks:` is present.
+#   3. Define at least one stack with `scope` and at least one non-empty command.
+#
+# FULL SCHEMA REFERENCE:
+#   See `config-reference.yaml` in the canonical Nightshift kit for every
+#   field, valid values, and examples across Python / Swift / Shell stacks.
+#
+# stacks:
+#   python-api:
+#     scope:
+#       dirs: ["src/api/", "tests/api/"]
+#       extensions: [".py"]
+#     commands:
+#       build: ""
+#       test: "pytest tests/api/ -v"
+#       test_timeout_s: 300
+#       lint: "ruff check src/api/"
+#       type_check: "mypy src/api/"
+#       format: "ruff format --check src/api/"
+#       format_fix: "ruff format src/api/"
+#     devkb: ["python.md"]
+#     env:
+#       activate: "source .venv/bin/activate"
+#       requires: ["python3", "ruff", "mypy"]
+#     conventions: "Use type hints on all function signatures. Follow PEP 8."
+#     domain: "code"
+#
+#   swift-app:
+#     scope:
+#       dirs: ["Sources/", "Tests/"]
+#       extensions: [".swift"]
+#     commands:
+#       build: "swift build"
+#       test: "swift test"
+#       test_timeout_s: 600
+#       lint: "swiftlint lint --strict"
+#       type_check: ""
+#       format: ""
+#       format_fix: ""
+#     devkb: ["swift.md", "xcode.md"]
+#     env:
+#       activate: ""
+#       requires: ["swift", "swiftlint"]
+#     conventions: "Follow Swift API Design Guidelines. @Observable @MainActor for ViewModels."
+#     domain: "code"
+#
+#   shell:
+#     scope:
+#       dirs: ["scripts/"]
+#       extensions: [".sh", ".bash"]
+#     commands:
+#       build: ""
+#       test: ""
+#       test_timeout_s: 60
+#       lint: "shellcheck scripts/*.sh"
+#       type_check: ""
+#       format: ""
+#       format_fix: ""
+#     devkb: ["shell.md"]
+#     env:
+#       activate: ""
+#       requires: ["shellcheck"]
+#     conventions: "Use set -euo pipefail in all scripts."
+#     domain: "code"
