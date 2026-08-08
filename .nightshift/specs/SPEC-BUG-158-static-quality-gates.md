@@ -4,7 +4,7 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-157, SPEC-015]
 provides: [canonical-quality-command, blocking-static-analysis]
 requires: [nightshift-valid-control-plane]
