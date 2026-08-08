@@ -41,6 +41,16 @@ intentionally deferred until this worktree's commit is merged into the canonical
 checkout, because installing from an isolated worktree would violate the
 runtime's canonical-path requirement.
 
+## Focused unblock pass
+
+The deployment command now provides the missing evidence gate itself. After the
+parent merges this branch, run `make deploy-runtime` from the canonical main
+checkout. It will: (1) pass browser smoke before changing launchd, (2) build
+the candidate, (3) migrate and prove launchd's `program` is
+`bin/shipyard`, (4) poll `http://127.0.0.1:9417/api/servers` until every
+managed child has a `tool_count`, and only then (5) archive executable legacy
+binaries. A failed service or child-count check exits before archival.
+
 ## Suggested Follow-up Specs
 
 None.

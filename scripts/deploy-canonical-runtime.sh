@@ -9,10 +9,12 @@ archive_dir="$repo_root/archive/runtime/$(date -u +%Y%m%dT%H%M%SZ)"
 plist="$HOME/Library/LaunchAgents/com.argo.shipyard.app.plist"
 label="com.argo.shipyard.app"
 service="gui/$(id -u)/$label"
+health_url="http://127.0.0.1:9417/api/servers"
 candidate="$(mktemp "${TMPDIR:-/tmp}/shipyard-runtime.XXXXXX")"
 prior_runtime="$(mktemp "${TMPDIR:-/tmp}/shipyard-prior.XXXXXX")"
+live_payload="$(mktemp "${TMPDIR:-/tmp}/shipyard-servers.XXXXXX")"
 
-cleanup() { rm -f "$candidate" "$prior_runtime"; }
+cleanup() { rm -f "$candidate" "$prior_runtime" "$live_payload"; }
 trap cleanup EXIT
 
 cd "$repo_root"
@@ -41,6 +43,43 @@ launchctl kickstart -k "$service"
 if ! launchctl print "$service" | grep -Fq "program = $canonical_bin"; then
   [[ -s "$prior_runtime" ]] && mv "$prior_runtime" "$canonical_bin"
   print -u2 "launchd did not adopt $canonical_bin; restored prior runtime and retained legacy binaries"
+  exit 1
+fi
+
+# AC-4 is an application-level assertion, not merely a supervisor assertion.
+# Wait briefly for child MCP discovery, then require each managed child to
+# publish a tool_count field before anything is archived.
+for _ in {1..15}; do
+  if curl --fail --silent --show-error "$health_url" > "$live_payload"; then
+    if python3 - "$live_payload" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
+children = [server for server in servers if not server.get("is_self")]
+if children and all("tool_count" in server for server in children):
+    print(f"live child tool counts verified for {len(children)} managed servers")
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      break
+    fi
+  fi
+  sleep 1
+done
+if ! python3 - "$live_payload" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
+children = [server for server in servers if not server.get("is_self")]
+raise SystemExit(0 if children and all("tool_count" in server for server in children) else 1)
+PY
+then
+  print -u2 "Shipyard did not expose populated managed-child tool counts; legacy binaries retained"
   exit 1
 fi
 
