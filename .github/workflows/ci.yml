@@ -27,7 +27,8 @@ jobs:
             libgtk-4-dev \
             libwebkitgtk-6.0-dev \
             libglib2.0-dev \
-            libsoup-3.0-dev
+            libsoup-3.0-dev \
+            zsh
       - name: Run canonical quality gate
         run: make quality
       - name: Run reachable vulnerability and Go security analysis
