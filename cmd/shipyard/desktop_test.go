@@ -72,7 +72,7 @@ func TestWaitForServer_DelayedStart(t *testing.T) {
 	ln.Close() // release so we can re-bind after delay
 
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 		delayed, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			return // port was reused — test will fail on the assertion

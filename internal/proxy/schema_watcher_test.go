@@ -381,7 +381,7 @@ func TestSchemaWatcher_StopsOnContextCancel(t *testing.T) {
 		m.StartSchemaWatcher(ctx, store, 10*time.Minute)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-time.After(50 * time.Millisecond)
 	cancel()
 
 	select {

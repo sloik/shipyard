@@ -496,7 +496,7 @@ func TestManagerSendRequest_ContextCanceledWhileWaiting(t *testing.T) {
 		errCh <- err
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	<-time.After(20 * time.Millisecond)
 	cancel()
 
 	select {
@@ -906,7 +906,7 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for first request write")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	go send("tools/call", json.RawMessage(`{"kind":"call"}`))
@@ -916,7 +916,7 @@ func TestManagerSendRequest_ConcurrentResponsesOutOfOrder(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for second request write")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	lines := strings.Split(strings.TrimSpace(sink.String()), "\n")

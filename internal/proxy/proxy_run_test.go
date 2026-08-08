@@ -207,7 +207,7 @@ func waitForFile(t *testing.T, path string) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for file %s", path)
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 }
 

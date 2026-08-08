@@ -186,7 +186,7 @@ func TestInvokeTool_UsesLongerToolCallTimeoutThanMetadata(t *testing.T) {
 		if r.URL.Path != "/api/tools/call" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		time.Sleep(50 * time.Millisecond)
+		<-time.After(50 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"result": map[string]string{"status": "ok"}})
 	}))
 	defer api.Close()
@@ -206,7 +206,7 @@ func TestInvokeTool_ReportsToolCallTimeout(t *testing.T) {
 		if r.URL.Path != "/api/tools/call" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		time.Sleep(100 * time.Millisecond)
+		<-time.After(100 * time.Millisecond)
 	}))
 	defer api.Close()
 
@@ -421,7 +421,7 @@ func TestSPEC029_PolicyWatcherSendsNotification(t *testing.T) {
 		if n >= 1 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	// Change the policy so the next poll detects a difference.
@@ -440,7 +440,7 @@ func TestSPEC029_PolicyWatcherSendsNotification(t *testing.T) {
 				close(notifReceived)
 				return
 			}
-			time.Sleep(50 * time.Millisecond)
+			<-time.After(50 * time.Millisecond)
 		}
 	}()
 

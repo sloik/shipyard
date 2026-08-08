@@ -138,7 +138,7 @@ func TestServerStart_ShutsDownCleanlyOnContextCancel(t *testing.T) {
 		done <- srv.Start(ctx)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-time.After(50 * time.Millisecond)
 	cancel()
 
 	select {
@@ -320,7 +320,7 @@ func TestHandleWebSocket_HandshakeBroadcastAndClose(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client registration")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	want := []byte(`{"event":"broadcast"}`)
@@ -355,7 +355,7 @@ func TestHandleWebSocket_HandshakeBroadcastAndClose(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client unregister")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 }
 
@@ -389,7 +389,7 @@ func TestHandleWebSocket_WriterStopsOnContextDone(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client registration")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	cancel()
@@ -436,7 +436,7 @@ func TestHandleWebSocket_WriterStopsOnWriteFailure(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client registration")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	srv.hub.Broadcast([]byte(`{"event":"broadcast"}`))
@@ -484,7 +484,7 @@ func TestHandleWebSocket_WriteFailureOnClosedConnection(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client registration")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	if err := conn.Close(websocket.StatusNormalClosure, "bye"); err != nil {
@@ -503,7 +503,7 @@ func TestHandleWebSocket_WriteFailureOnClosedConnection(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client unregister after write failure")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 }
 
@@ -535,7 +535,7 @@ func TestHandleWebSocket_ClientCloseEventuallyUnregisters(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client registration")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	if err := conn.Close(websocket.StatusNormalClosure, "bye"); err != nil {
@@ -553,6 +553,6 @@ func TestHandleWebSocket_ClientCloseEventuallyUnregisters(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for websocket client unregister after server-side close")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 }
