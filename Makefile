@@ -1,4 +1,4 @@
-.PHONY: build test smoke smoke-build smoke-full snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 build:
 	go build ./cmd/shipyard/
@@ -14,7 +14,7 @@ build:
 # Skips gracefully (exit 0): node missing -> guarded here; Chrome or
 # playwright-core missing -> guarded inside lib/harness.mjs.
 # First run: `npm install` (pulls playwright-core; no browser download).
-SMOKE_BIN_DIR := $(CURDIR)/bin
+SMOKE_BIN_DIR := $(CURDIR)/build/smoke
 
 # Shared: build the binaries the harness drives. Used by both smoke targets.
 smoke-build:
@@ -41,6 +41,12 @@ smoke-full:
 	SHIPYARD_BIN="$(SMOKE_BIN_DIR)/shipyard-smoke" \
 	STUBCHILD_BIN="$(SMOKE_BIN_DIR)/stubchild-smoke" \
 	node test/smoke/servers_smoke.mjs
+
+# Builds, smoke-tests, and then atomically promotes the sole launchd runtime.
+# The script refuses to archive legacy binaries until launchd proves the
+# canonical runtime is live.
+deploy-runtime:
+	scripts/deploy-canonical-runtime.sh
 
 # Build and install the MCP bridge (used by Claude Code CLI / Desktop)
 # Requires ad-hoc signing so macOS will allow Claude Code to spawn it.
