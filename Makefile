@@ -1,4 +1,4 @@
-.PHONY: build test race format-check lint type-check script-check quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 TOOLS_BIN := $(CURDIR)/.tools/bin
 STATICCHECK := $(TOOLS_BIN)/staticcheck
@@ -77,6 +77,20 @@ test:
 
 race:
 	go test -race -count=1 -timeout 5m ./...
+
+# The checked-in baseline is a floor, never an automatically rewritten target.
+# `coverage` emits a fresh, deterministic report; `coverage-check` makes that
+# report blocking for both CI and Nightshift.
+coverage:
+	python3 scripts/coverage_ratchet.py collect
+
+coverage-check: coverage
+	python3 scripts/coverage_ratchet.py check
+
+# A controlled regression fixture proves the ratchet rejects both a lower total
+# and a lower package floor. It succeeds only when the check rejects it.
+coverage-check-probe:
+	@! python3 scripts/coverage_ratchet.py check --report .nightshift/coverage-fixtures/regressed.json
 
 format-check:
 	@unformatted="$$(git ls-files '*.go' | xargs gofmt -l)"; test -z "$$unformatted" || { echo "Go files require gofmt:"; printf '%s\n' "$$unformatted"; exit 1; }

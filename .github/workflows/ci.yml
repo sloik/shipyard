@@ -27,3 +27,12 @@ jobs:
             libsoup-3.0-dev
       - name: Run canonical quality gate
         run: make quality
+      - name: Enforce coverage ratchet
+        run: |
+          make coverage-check | tee coverage-summary.txt
+          {
+            echo "## Coverage"
+            echo '```text'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

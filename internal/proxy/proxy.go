@@ -45,6 +45,10 @@ type Proxy struct {
 	store   *capture.Store
 	hub     *web.Hub
 	managed *managedProxy // set when running under a Manager
+	// output is an optional destination for child stdout. Production retains
+	// os.Stdout; tests can supply an isolated writer without mutating process
+	// global state.
+	output io.Writer
 
 	// sessionIDFn returns the active recording session ID for this proxy's
 	// server, or 0 if no recording is active. Set by Manager.Register.
@@ -392,7 +396,11 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.pipeAndTap(ctx, childStdout, os.Stdout, capture.DirectionServerToClient)
+		output := p.output
+		if output == nil {
+			output = os.Stdout
+		}
+		p.pipeAndTap(ctx, childStdout, output, capture.DirectionServerToClient)
 	}()
 
 	err = cmd.Wait()

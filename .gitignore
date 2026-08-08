@@ -11,6 +11,7 @@ credentials.json
 /bin/*
 !/bin/shipyard
 /build/smoke/
+/build/coverage/
 *.exe
 dist/
 
