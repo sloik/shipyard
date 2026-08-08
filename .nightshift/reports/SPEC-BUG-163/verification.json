@@ -1,0 +1,21 @@
+{
+  "spec_id": "SPEC-BUG-163",
+  "verdict": "pass",
+  "completeness": "pass",
+  "correctness": "pass",
+  "coherence": "pass",
+  "critical_issues": [],
+  "warnings": [
+    "macOS linker emitted existing deployment-target warnings during Go link steps; all commands exited successfully."
+  ],
+  "evidence": {
+    "ordinary_tests": "make quality",
+    "race_tests": "go test -race -count=1 -timeout 5m ./...",
+    "focused_fuzz": [
+      "FuzzConfigDecodeRoundTrip",
+      "FuzzJSONRPCRequestEnvelope",
+      "FuzzMatchScopeDenyByDefault",
+      "FuzzTrafficQueryFilter"
+    ]
+  }
+}

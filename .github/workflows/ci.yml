@@ -27,6 +27,8 @@ jobs:
             libsoup-3.0-dev
       - name: Run canonical quality gate
         run: make quality
+      - name: Run parser fuzz regression seed corpora
+        run: go test ./cmd/shipyard ./cmd/shipyard-mcp ./internal/auth ./internal/web
       - name: Enforce coverage ratchet
         run: |
           make coverage-check | tee coverage-summary.txt

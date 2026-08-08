@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"servers\":{\"alpha\":{\"command\":\"echo\",\"args\":[\"hello\"]}},\"web\":{\"port\":9417}}")

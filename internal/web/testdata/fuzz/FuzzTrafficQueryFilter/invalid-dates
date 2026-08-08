@@ -1,0 +1,2 @@
+go test fuzz v1
+string("from_ts=invalid&to_ts=-1&server=%E6%9C%8D%E5%8A%A1%E5%99%A8")

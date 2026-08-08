@@ -86,7 +86,7 @@ func (m *mockProxyManager) RPCPerformanceSnapshot() []performance.RPCSample {
 }
 
 // newTestServer creates a Server with a real Store for testing HTTP handlers.
-func newTestServer(t *testing.T) *Server {
+func newTestServer(t testing.TB) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := capture.NewStore(
