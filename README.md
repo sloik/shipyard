@@ -341,7 +341,7 @@ npm install   # first run only — pulls playwright-core (no browser download)
 make smoke
 ```
 
-`make smoke` builds the binaries, launches a throwaway Shipyard on an ephemeral
+`make smoke` builds its throwaway binaries under `build/smoke/`, launches a throwaway Shipyard on an ephemeral
 port, and drives the system Google Chrome via `playwright-core`. It is
 intentionally **not** part of `make test`, so a missing browser never blocks the
 Go suite. It skips gracefully (exit 0) when `node` or Chrome is unavailable.
@@ -372,6 +372,21 @@ right-click menu items `Show Dashboard` and `Quit`, close-to-tray behavior, and
 detaching a panel tab with `Open in New Window`.
 
 ### macOS Packaging and Release
+
+### Canonical launchd runtime
+
+`bin/shipyard` is the sole launchd-managed runtime binary. Smoke-harness
+binaries are intentionally kept in ignored `build/smoke/` and never appear as
+runtime choices. To replace the running service safely, run this from the
+canonical checkout after its tests have passed:
+
+```bash
+make deploy-runtime
+```
+
+The deployment script runs the full browser smoke first, builds a temporary
+replacement, migrates the LaunchAgent, verifies its active program path, and
+only then archives former binaries under `archive/runtime/`.
 
 Shipyard uses Wails v3 packaging tasks for the desktop `.app` and GoReleaser for
 the cross-platform headless CLI binaries.

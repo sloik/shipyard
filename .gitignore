@@ -8,7 +8,9 @@ credentials.json
 /shipyard
 /shipyard-mcp
 /shipyard-v2
-/bin/
+/bin/*
+!/bin/shipyard
+/build/smoke/
 *.exe
 dist/
 
