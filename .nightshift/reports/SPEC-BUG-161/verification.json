@@ -1,0 +1,10 @@
+{
+  "spec_id": "SPEC-BUG-161",
+  "verdict": "pass",
+  "completeness": {"status": "pass", "evidence": "All eight acceptance criteria have focused test evidence."},
+  "correctness": {"status": "pass", "evidence": "Focused race/shuffle tests, full race suite, and make quality passed."},
+  "coherence": {"status": "pass", "evidence": "The asynchronous admission, drain, failure signal, and shutdown contracts are exercised together."},
+  "critical": [],
+  "warnings": [],
+  "suggestions": []
+}

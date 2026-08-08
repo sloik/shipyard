@@ -343,7 +343,7 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 	if len(token.Scopes) > 0 {
 		if !MatchScope(token.Scopes, serverName, toolName) {
 			if h.captureLog != nil {
-				go h.captureLog.RecordAccess(capture.AccessLogEntry{
+				_ = h.captureLog.RecordAccessAsync(capture.AccessLogEntry{
 					Timestamp:  time.Now(),
 					TokenName:  token.Name,
 					ServerName: serverName,
@@ -399,7 +399,7 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 			} else {
 				entry.Status = "ok"
 			}
-			go h.captureLog.RecordAccess(entry)
+			_ = h.captureLog.RecordAccessAsync(entry)
 		}
 		if err != nil {
 			writeRPCError(w, id, -32603, err.Error())
@@ -456,7 +456,7 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, r *http.Request, tok
 		if entry.LogLevel == "full" || entry.LogLevel == "args_only" {
 			entry.ArgsJSON = string(p.Arguments)
 		}
-		go h.captureLog.RecordAccess(entry)
+		_ = h.captureLog.RecordAccessAsync(entry)
 	}
 
 	if err != nil {

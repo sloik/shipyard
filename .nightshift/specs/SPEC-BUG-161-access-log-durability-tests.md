@@ -41,14 +41,14 @@ was reproduced during this review; this spec closes a high-impact correctness bl
 
 ## Acceptance Criteria
 
-- [ ] AC1 (R1): Tests enter through the authenticated JSON-RPC handler and assert persisted rows for successful, denied, failed, and configured log-level calls.
-- [ ] AC2 (R2): `handleAccessLog` tests cover server/tool/status/time filters, stable pagination, empty results, malformed dates, and invalid page sizes.
-- [ ] AC3 (R2): `handleAccessLogStats` tests assert totals and groupings from the same production-path fixture data; both handlers show non-zero coverage.
-- [ ] AC4 (R3): After N accepted audit writes, drain/close returns only after all N are persisted or returns an explicit error; a deterministic repeated test observes zero silent loss.
-- [ ] AC5 (R4): An injected database failure increments/logs a bounded observable error signal while the original JSON-RPC response preserves its defined success/error shape.
-- [ ] AC6 (R4): No token plaintext, secret reference value, or full sensitive params are emitted by the new error signal.
-- [ ] AC7 (R5): New tests use channels, wait groups, conditions, or explicit callbacks; no bare `time.Sleep` is their pass/fail oracle.
-- [ ] AC8: `go test -race -shuffle=on -count=20 -timeout 10m ./internal/auth ./internal/capture ./internal/web` passes with no goroutine leak or race warning.
+- [x] AC1 (R1): Tests enter through the authenticated JSON-RPC handler and assert persisted rows for successful, denied, failed, and configured log-level calls.
+- [x] AC2 (R2): `handleAccessLog` tests cover server/tool/status/time filters, stable pagination, empty results, malformed dates, and invalid page sizes.
+- [x] AC3 (R2): `handleAccessLogStats` tests assert totals and groupings from the same production-path fixture data; both handlers show non-zero coverage.
+- [x] AC4 (R3): After N accepted audit writes, drain/close returns only after all N are persisted or returns an explicit error; a deterministic repeated test observes zero silent loss.
+- [x] AC5 (R4): An injected database failure increments/logs a bounded observable error signal while the original JSON-RPC response preserves its defined success/error shape.
+- [x] AC6 (R4): No token plaintext, secret reference value, or full sensitive params are emitted by the new error signal.
+- [x] AC7 (R5): New tests use channels, wait groups, conditions, or explicit callbacks; no bare `time.Sleep` is their pass/fail oracle.
+- [x] AC8: `go test -race -shuffle=on -count=20 -timeout 10m ./internal/auth ./internal/capture ./internal/web` passes with no goroutine leak or race warning.
 
 ## Live Execution Checklist
 
