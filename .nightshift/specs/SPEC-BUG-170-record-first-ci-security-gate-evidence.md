@@ -4,7 +4,7 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: in_progress
+status: blocked
 after: [SPEC-BUG-159]
 provides: [first-ci-security-gate-evidence]
 requires: [vulnerability-gate]
@@ -16,9 +16,20 @@ created: 2026-08-08
 stack: go
 domain: code
 output_type: evidence
+blocker_class: 'critical_external_constraint'
+block_reason: 'CI evidence unavailable: origin/main predates SPEC-BUG-159 security-gate workflow; publish that revision, dispatch CI on it, and record metadata-only security-step evidence.'
+blocked_since: '2026-08-08T17:59:46Z'
+unblock_condition: 'Publish the revision containing SPEC-BUG-159 to origin/main (or open a PR), dispatch CI on that SHA, and retain metadata-only security-step evidence.'
+blocker_scope: 'out_of_scope'
+blocker_evidence: 'reports/2026-08-08-nightshift-report-SPEC-BUG-170.md'
 ---
 
 # Record First CI Security-Gate Evidence
+
+## Block Reason
+
+CI evidence unavailable: origin/main predates SPEC-BUG-159 security-gate workflow; publish that revision, dispatch CI on it, and record metadata-only security-step evidence.
+
 
 ## Problem
 
