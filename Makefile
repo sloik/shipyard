@@ -1,10 +1,12 @@
-.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools security-run security-govulncheck security-gosec security-self-test quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools security-run security-govulncheck security-govulncheck-offline-fixture security-gosec security-self-test quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 TOOLS_BIN := $(CURDIR)/.tools/bin
 STATICCHECK := $(TOOLS_BIN)/staticcheck
 ACTIONLINT := $(TOOLS_BIN)/actionlint
 GOVULNCHECK := $(TOOLS_BIN)/govulncheck
 GOSEC := $(TOOLS_BIN)/gosec
+GOVULNCHECK_OFFLINE_FIXTURE := $(CURDIR)/test/security-fixtures/govulncheck-offline
+GOVULNCHECK_OFFLINE_DB := file://$(GOVULNCHECK_OFFLINE_FIXTURE)/vulndb
 
 # The tool versions are pinned in tools/go.mod and tools/go.sum. Keeping the
 # bootstrap in-repo makes local and CI analyzer behavior identical.
@@ -124,6 +126,12 @@ security-tools:
 # rule, exact location, rationale, owner, and revisit condition in the policy.
 security-govulncheck:
 	"$(GOVULNCHECK)" ./...
+
+# This is deliberately separate from the production scanner target above. It
+# proves the pinned govulncheck release can consume the checked-in advisory
+# fixture over file:// while Go module and checksum lookups are disabled.
+security-govulncheck-offline-fixture:
+	GOPROXY=off GOSUMDB=off GOVCS='*:off' "$(GOVULNCHECK)" -C "$(GOVULNCHECK_OFFLINE_FIXTURE)" -db "$(GOVULNCHECK_OFFLINE_DB)" ./...
 
 security-gosec:
 	"$(GOSEC)" -exclude-generated -severity high ./...
