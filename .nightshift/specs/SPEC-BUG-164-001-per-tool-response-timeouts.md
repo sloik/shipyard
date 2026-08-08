@@ -3,17 +3,11 @@ id: SPEC-BUG-164-001
 priority: 1
 layer: 1
 type: bugfix
-status: blocked
+status: in_progress
 after: [SPEC-BUG-164]
 nfrs: [SPEC-NFR-001]
 technologies: [go]
 created: 2026-08-08
-blocker_class: evidence_unavailable
-block_reason: "Serena retains a cached gopls-not-installed initialization failure after gopls was installed and verified; the required symbolic tooling cannot produce implementation evidence."
-blocked_since: 2026-08-08
-unblock_condition: "Restart or refresh Serena's language-server manager so it recognizes /opt/homebrew/bin/gopls, then re-run the isolated kickoff."
-blocker_scope: in_scope
-blocker_evidence: "Worker heartbeat and report in the preserved SPEC-BUG-164-001 worktree; gopls v0.23.0 verified after installation."
 ---
 
 # Per-tool managed-child response timeouts
@@ -57,12 +51,8 @@ make unrelated tool failures slower to detect.
 - Changing Bridge HTTP client timeouts (SPEC-BUG-164).
 - Retries or timeout changes for arbitrary JSON-RPC methods.
 
-## Critical Blocker
+## Unblocked
 
-**Blocker class:** evidence_unavailable
-
-The standard `gopls` tool was installed successfully and linked on PATH, but
-Serena's already-running language-server manager retained its cached failed
-discovery result. The worker is explicitly prohibited from bypassing that
-symbolic-tooling requirement. Restarting or refreshing Serena is the smallest
-reversible unblock action.
+On 2026-08-08, Serena successfully started `gopls` after the environment
+repair and initialized the Shipyard workspace. Resume the preserved isolated
+kickoff worktree with the normal evidence gate.
