@@ -4,7 +4,7 @@ template_version: 7
 priority: 3
 layer: 1
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-158]
 provides: [parser-fuzz-regressions]
 requires: [canonical-quality-command]
