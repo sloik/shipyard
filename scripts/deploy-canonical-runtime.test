@@ -1,0 +1,124 @@
+#!/usr/bin/env zsh
+# Shell fixtures for the canonical launchd deployment state machine.
+set -euo pipefail
+
+repo_root="${0:A:h:h}"
+script="$repo_root/scripts/deploy-canonical-runtime.sh"
+
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/shipyard-deploy-test.XXXXXX")"
+trap 'rm -rf "$test_root"' EXIT
+
+fail() { print -u2 "FAIL: $*"; exit 1; }
+assert_file_contains() { grep -Fq "$2" "$1" || fail "expected $1 to contain: $2"; }
+
+write_fixture_commands() {
+  local fixture_root="$1"
+  mkdir -p "$fixture_root/bin"
+
+  cat > "$fixture_root/bin/launchctl" <<'EOF'
+#!/usr/bin/env zsh
+set -euo pipefail
+state="$SHIPYARD_TEST_STATE"
+log="$SHIPYARD_TEST_LOG"
+label="com.argo.shipyard.app.canonical"
+print -- "$*" >> "$log"
+case "$1" in
+  print)
+    [[ "$(<"$state")" == loaded ]] || exit 1
+    print "program = $SHIPYARD_TEST_CANONICAL_BIN"
+    print "pid = $(<"${state}.pid")"
+    ;;
+  bootout)
+    print unloaded > "$state"
+    ;;
+  bootstrap)
+    [[ "$(<"$state")" != loaded ]] || { print -u2 "Bootstrap failed: 5: Input/output error"; exit 5; }
+    print loaded > "$state"
+    ;;
+  kickstart)
+    [[ "$(<"$state")" == loaded ]] || exit 1
+    print $(( $(<"${state}.pid") + 1 )) > "${state}.pid"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  cat > "$fixture_root/bin/PlistBuddy" <<'EOF'
+#!/usr/bin/env zsh
+exit 0
+EOF
+  cat > "$fixture_root/bin/plutil" <<'EOF'
+#!/usr/bin/env zsh
+exit 0
+EOF
+  cat > "$fixture_root/bin/make" <<'EOF'
+#!/usr/bin/env zsh
+[[ "$1" == smoke-full ]]
+EOF
+  cat > "$fixture_root/bin/go" <<'EOF'
+#!/usr/bin/env zsh
+[[ "$1" == build && "$2" == -o ]]
+print new-runtime > "$3"
+EOF
+  cat > "$fixture_root/bin/curl" <<'EOF'
+#!/usr/bin/env zsh
+if [[ "${SHIPYARD_TEST_HEALTH:-ok}" == ok ]]; then
+  print '{"servers":[{"name":"child","tool_count":2}]}'
+else
+  print '{"servers":[{"name":"child","tool_count":0}]}'
+fi
+EOF
+  cat > "$fixture_root/bin/sleep" <<'EOF'
+#!/usr/bin/env zsh
+exit 0
+EOF
+  chmod +x "$fixture_root/bin/"*
+}
+
+run_fixture() {
+  local name="$1"
+  local initial_state="$2"
+  local health="$3"
+  local fixture_root="$test_root/$name"
+  mkdir -p "$fixture_root/repo/scripts" "$fixture_root/home/Library/LaunchAgents" "$fixture_root/repo/bin"
+  cp "$script" "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
+  chmod +x "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
+  print legacy-plist > "$fixture_root/home/Library/LaunchAgents/com.argo.shipyard.app.plist"
+  print "$initial_state" > "$fixture_root/state"
+  print 100 > "$fixture_root/state.pid"
+  [[ "$initial_state" == loaded ]] && print prior-runtime > "$fixture_root/repo/bin/shipyard"
+  write_fixture_commands "$fixture_root"
+  SHIPYARD_REPO_ROOT="$fixture_root/repo" \
+  SHIPYARD_HOME="$fixture_root/home" \
+  SHIPYARD_LAUNCHD_UID=501 \
+  SHIPYARD_LAUNCHCTL="$fixture_root/bin/launchctl" \
+  SHIPYARD_PLISTBUDDY="$fixture_root/bin/PlistBuddy" \
+  SHIPYARD_PLUTIL="$fixture_root/bin/plutil" \
+  SHIPYARD_MAKE="$fixture_root/bin/make" \
+  SHIPYARD_GO="$fixture_root/bin/go" \
+  SHIPYARD_CURL="$fixture_root/bin/curl" \
+  SHIPYARD_SLEEP="$fixture_root/bin/sleep" \
+  SHIPYARD_HEALTH_ATTEMPTS=1 \
+  SHIPYARD_TEST_STATE="$fixture_root/state" \
+  SHIPYARD_TEST_LOG="$fixture_root/launchctl.log" \
+  SHIPYARD_TEST_CANONICAL_BIN="$fixture_root/repo/bin/shipyard" \
+  SHIPYARD_TEST_HEALTH="$health" \
+  "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
+}
+
+run_fixture first-install unloaded ok
+[[ "$(<"$test_root/first-install/state")" == loaded ]] || fail "first install did not load canonical service"
+assert_file_contains "$test_root/first-install/launchctl.log" "bootstrap gui/501"
+assert_file_contains "$test_root/first-install/launchctl.log" "kickstart -k gui/501/com.argo.shipyard.app.canonical"
+
+run_fixture repeated-deploy loaded ok
+[[ "$(<"$test_root/repeated-deploy/state.pid")" == 101 ]] || fail "repeated deploy did not change live PID"
+assert_file_contains "$test_root/repeated-deploy/launchctl.log" "bootout gui/501/com.argo.shipyard.app.canonical"
+
+if run_fixture rollback loaded failing; then
+  fail "health-check failure unexpectedly passed"
+fi
+[[ "$(<"$test_root/rollback/repo/bin/shipyard")" == prior-runtime ]] || fail "rollback did not restore prior runtime"
+[[ "$(<"$test_root/rollback/state")" == loaded ]] || fail "rollback did not restore prior canonical service"
+[[ "$(<"$test_root/rollback/state.pid")" == 102 ]] || fail "rollback did not restart prior service"
+
+print "canonical deployment shell fixtures passed"

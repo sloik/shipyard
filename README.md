@@ -428,9 +428,11 @@ make deploy-runtime
 The deployment script runs the full browser smoke first, builds a temporary
 replacement, migrates the LaunchAgent to the fresh
 `com.argo.shipyard.app.canonical` label (avoiding the old label's code-hash
-cache), verifies its active program path and child tool counts, and only then
-archives former binaries under `archive/runtime/`. On failure it reboots the
-previous `com.argo.shipyard.app` service and retains legacy binaries.
+cache), and safely replaces an already-loaded canonical label. It verifies the
+active program path, a changed live PID, and non-zero child tool counts before
+archiving former binaries under `archive/runtime/`. On failure it restores the
+prior canonical runtime and service (or the legacy service during a failed
+first install) and retains the prior binaries.
 
 Shipyard uses Wails v3 packaging tasks for the desktop `.app` and GoReleaser for
 the cross-platform headless CLI binaries.
