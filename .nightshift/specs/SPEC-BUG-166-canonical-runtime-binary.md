@@ -3,7 +3,7 @@ id: SPEC-BUG-166
 priority: 2
 layer: 1
 type: refactor
-status: ready
+status: done
 after: []
 nfrs: [SPEC-NFR-001]
 technologies: [go, shell]
@@ -21,27 +21,27 @@ and obscures which binary launchd actually runs.
 
 ## Requirements
 
-- [ ] R1: `bin/shipyard` is the only executable retained in `bin/` and is the
+- [x] R1: `bin/shipyard` is the only executable retained in `bin/` and is the
   documented, launchd-managed runtime artifact.
-- [ ] R2: Smoke harness output is built in a separate ignored directory outside
+- [x] R2: Smoke harness output is built in a separate ignored directory outside
   `bin/` (for example `build/smoke/`) and never appears as a runtime choice.
-- [ ] R3: The active launchd service is migrated to `bin/shipyard` only after a
+- [x] R3: The active launchd service is migrated to `bin/shipyard` only after a
   replacement binary passes its smoke/health checks.
-- [ ] R4: Legacy binaries are moved to a recoverable archive location only after
+- [x] R4: Legacy binaries are moved to a recoverable archive location only after
   launchd and Shipyard health prove the canonical binary is live.
-- [ ] R5: Build, smoke, and deployment documentation name the same canonical
+- [x] R5: Build, smoke, and deployment documentation name the same canonical
   runtime path.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `bin/` contains exactly one executable: `shipyard`.
-- [ ] AC-2: `make smoke` and `make smoke-full` pass while writing no executable
+- [x] AC-1: `bin/` contains exactly one executable: `shipyard`.
+- [x] AC-2: `make smoke` and `make smoke-full` pass while writing no executable
   under `bin/`.
-- [ ] AC-3: `launchctl print` shows the active Shipyard service executing
+- [x] AC-3: `launchctl print` shows the active Shipyard service executing
   `bin/shipyard`.
-- [ ] AC-4: Shipyard is online and its managed child tool counts are populated
+- [x] AC-4: Shipyard is online and its managed child tool counts are populated
   after migration.
-- [ ] AC-5: `go test ./...`, `go vet ./...`, `go build ./...`, and
+- [x] AC-5: `go test ./...`, `go vet ./...`, `go build ./...`, and
   `go test -race -count=1 ./...` pass.
 
 ## Context
