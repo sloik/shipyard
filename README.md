@@ -382,6 +382,16 @@ invalid fixture. Staticcheck has no exclusions. Any future narrow exception
 must identify the rule and exact location, explain why it is safe, and state
 when it will be reviewed or removed in `.staticcheck.conf`.
 
+### Dependency and workflow security
+
+Run the deterministic local workflow-policy check with `make security-config-check`.
+The CI security target additionally runs reachable-vulnerability analysis and
+high-severity Go security analysis; it is scheduled weekly and runs for pull
+requests. Dependency Review blocks pull requests that introduce a vulnerable
+dependency at moderate severity or above. Scanner output is never uploaded as
+an artifact. There are no approved gosec suppressions; any future suppression
+must record its rule, exact location, rationale, owner, and revisit condition.
+
 ### macOS Wails GUI Smoke
 
 After native desktop changes, run the repeatable macOS Wails v3 smoke:

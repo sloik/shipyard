@@ -1,8 +1,10 @@
-.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 TOOLS_BIN := $(CURDIR)/.tools/bin
 STATICCHECK := $(TOOLS_BIN)/staticcheck
 ACTIONLINT := $(TOOLS_BIN)/actionlint
+GOVULNCHECK := $(TOOLS_BIN)/govulncheck
+GOSEC := $(TOOLS_BIN)/gosec
 
 # The tool versions are pinned in tools/go.mod and tools/go.sum. Keeping the
 # bootstrap in-repo makes local and CI analyzer behavior identical.
@@ -106,9 +108,26 @@ script-check: tools
 	node scripts/check-js-syntax.mjs internal/web/ui/ds.js internal/web/ui/index.html
 	zsh -n scripts/*.sh
 
+# Static workflow policy is local and deterministic; scans remain a separate
+# explicit target because their vulnerability databases are intentionally fresh.
+security-config-check:
+	scripts/check-security-config.sh
+
+security-tools:
+	@mkdir -p "$(TOOLS_BIN)"
+	GOBIN="$(TOOLS_BIN)" go install golang.org/x/vuln/cmd/govulncheck@v1.4.0
+	GOBIN="$(TOOLS_BIN)" go install github.com/securego/gosec/v2/cmd/gosec@v2.22.10
+
+# No scanner output is uploaded or echoed through an environment expansion.
+# There are currently no gosec suppressions; any future exception must carry
+# rule, exact location, rationale, owner, and revisit condition in the policy.
+security: security-tools security-config-check
+	"$(GOVULNCHECK)" ./...
+	"$(GOSEC)" -exclude-generated -severity high ./...
+
 # The canonical blocking quality contract. CI and local development must call
 # this target rather than duplicating a subset of its checks.
-quality: format-check lint type-check script-check build test race
+quality: format-check lint type-check script-check security-config-check build test race
 
 # Negative probes prove that each static gate is capable of rejecting malformed
 # input. They are intentionally separate from the normal quality target.
@@ -121,7 +140,7 @@ snapshot:
 release:
 	goreleaser release --clean
 
-# Desktop app targets (requires: go install github.com/wailsapp/wails/v3/cmd/wails3@latest)
+# Desktop app targets require Wails v3.0.0-alpha2.117, matching go.mod.
 wails-dev:
 	wails3 dev
 

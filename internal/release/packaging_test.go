@@ -98,7 +98,7 @@ func TestSPECBUG130_DesktopWorkflowUsesWailsV3PackagePath(t *testing.T) {
 		t.Fatal("SPEC-BUG-130 FAIL: desktop workflow must not use Wails v2 build commands")
 	}
 	for _, needle := range []string{
-		"github.com/wailsapp/wails/v3/cmd/wails3@latest",
+		"github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.117",
 		"wails3 task build",
 		"wails3 task darwin:package",
 		"bin/Shipyard.app",
