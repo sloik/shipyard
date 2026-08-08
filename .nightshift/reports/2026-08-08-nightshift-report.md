@@ -1,66 +1,63 @@
-# Nightshift Report — SPEC-BUG-166
+# Nightshift Report — SPEC-BUG-164-001
 
-## Summary
+**Status:** implementation complete; held for parent evidence-gate decision
 
-Implemented one canonical runtime path. Smoke executables now build below the
-ignored `build/smoke/` directory, while `bin/shipyard` is reserved as the only
-launchd runtime executable. Added a guarded `make deploy-runtime` migration
-that smoke-tests first, verifies launchd's active program path, and archives
-legacy executables only after that proof.
+## Outcome
 
-## Changes
+The Serena transport recovery succeeded. The worker implemented and committed
+per-tool managed-child response timeouts in `f017b6d`.
 
-- `Makefile`: smoke output path and `deploy-runtime` target.
-- `.gitignore`: retain only `bin/shipyard`; ignore smoke output.
-- `scripts/deploy-canonical-runtime.sh`: safe launchd migration and recovery.
-- `README.md`: canonical build, smoke, and deployment documentation.
+## Serena Recovery
 
-## Verification
+The parent authorized installation of the standard Go language server. The
+following completed successfully:
 
-- `npm ci && make smoke-full` — PASS (Tool Browser and Servers browser smoke).
-- `go test ./...` — PASS.
-- `go vet ./...` — PASS.
-- `go build ./...` — PASS.
-- `go test -race -count=1 ./...` — PASS.
-- `zsh -n scripts/deploy-canonical-runtime.sh` — PASS.
-- All Go linker warnings only note the host SDK deployment-target mismatch.
+```text
+go install golang.org/x/tools/gopls@latest
+command -v gopls
+/opt/homebrew/bin/gopls
+gopls version
+golang.org/x/tools/gopls v0.23.0
+```
 
-## Acceptance Criteria
+`/opt/homebrew/bin/gopls` is a symlink to the Go toolchain-installed binary at
+`/Users/ed/go/bin/gopls`, so it is on the normal terminal PATH.
 
-- [x] AC-1: migration command leaves only executable `bin/shipyard`.
-- [x] AC-2: both smoke targets passed with executables in `build/smoke/`.
-- [ ] AC-3: requires post-merge canonical-checkout deployment; the isolated
-  worktree must not replace the live service.
-- [ ] AC-4: requires the same live post-merge deployment verification.
-- [x] AC-5: required Go verification suite passed.
+After the parent refreshed the Serena transport, the worker called the Serena
+initial-instructions and project-activation tools. A symbolic overview of
+`internal/proxy/manager.go` succeeded, confirming the Go language server is
+available for this run.
 
-## Blockers / discoveries
+## Implementation
 
-The current live LaunchAgent points to `bin/shipyard-fixed`. Its migration is
-intentionally deferred until this worktree's commit is merged into the canonical
-checkout, because installing from an isolated worktree would violate the
-runtime's canonical-path requirement.
+- `ToolConfig` accepts optional `response_timeout_seconds` values.
+- Configured positive durations are copied into the managed child at registration,
+  so request-time reads are immutable and race-safe.
+- Only a valid `tools/call` parameter object with a configured `name` uses the
+  override. Other methods, malformed/missing names, missing tools, and
+  non-positive values use the 30-second default.
+- Timeout errors retain the selected effective duration.
 
-## Focused unblock pass
+## Validation
 
-The deployment command now provides the missing evidence gate itself. After the
-parent merges this branch, run `make deploy-runtime` from the canonical main
-checkout. It will: (1) pass browser smoke before changing launchd, (2) build
-the candidate, (3) migrate and prove launchd's `program` is
-`bin/shipyard`, (4) poll `http://127.0.0.1:9417/api/servers` until every
-managed child has a `tool_count`, and only then (5) archive executable legacy
-binaries. A failed service or child-count check exits before archival.
+| Gate | Result |
+| --- | --- |
+| `go test ./internal/proxy` | pass |
+| `go test -race -count=1 ./internal/proxy` | pass |
+| focused config timeout test | pass |
+| `go vet ./...` | pass |
+| `go build ./...` | pass |
+| `go test ./...` | fail: existing `cmd/shipyard` `TestMain_ConfigMissingCommand` expects exit code 1, got 0 |
+| `go test -race -count=1 ./...` | same existing failure; no race reported |
 
-## Focused unblock pass #2
+The full-suite failure was reproduced before and after implementation and is
+outside this spec's timeout behavior. No unrelated test was changed or skipped.
 
-Live evidence showed launchd rejects a rebuilt executable under the existing
-`com.argo.shipyard.app` label with `Input/output error`. The migration now
-creates `com.argo.shipyard.app.canonical` from the old plist, preserving the
-same runtime options but using a fresh label for `bin/shipyard`. It boots out
-the old service only immediately before starting the new one; a failed
-canonical-program assertion boots the old plist back up and leaves all legacy
-executables in place. Successful child-count evidence is still required before
-archival.
+## Parent Action
+
+The worktree is clean at implementation commit `f017b6d`. The parent should
+apply the evidence gate and decide whether to merge while separately triaging
+the existing `TestMain_ConfigMissingCommand` failure.
 
 ## Suggested Follow-up Specs
 

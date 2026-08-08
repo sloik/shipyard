@@ -532,6 +532,65 @@ func TestManagerSendRequest_Timeout(t *testing.T) {
 	}
 }
 
+func TestManagedProxyResponseTimeout_OnlyConfiguredToolCallUsesOverride(t *testing.T) {
+	origTimeout := requestTimeout
+	requestTimeout = 30 * time.Second
+	t.Cleanup(func() { requestTimeout = origTimeout })
+
+	mp := &managedProxy{responseTimeouts: map[string]time.Duration{"slow": 81 * time.Second, "invalid": 0}}
+	if got := mp.responseTimeout("tools/call", json.RawMessage(`{"name":"slow"}`)); got != 81*time.Second {
+		t.Fatalf("slow tool timeout = %s, want 1m21s", got)
+	}
+	for _, test := range []struct {
+		name   string
+		method string
+		params json.RawMessage
+	}{
+		{name: "unconfigured tool", method: "tools/call", params: json.RawMessage(`{"name":"fast"}`)},
+		{name: "missing tool name", method: "tools/call", params: json.RawMessage(`{}`)},
+		{name: "malformed params", method: "tools/call", params: json.RawMessage(`{`)},
+		{name: "non-tool method", method: "tools/list", params: json.RawMessage(`{"name":"slow"}`)},
+		{name: "non-positive timeout", method: "tools/call", params: json.RawMessage(`{"name":"invalid"}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mp.responseTimeout(test.method, test.params); got != requestTimeout {
+				t.Fatalf("timeout = %s, want default %s", got, requestTimeout)
+			}
+		})
+	}
+}
+
+func TestManagerRegister_CopiesToolResponseTimeouts(t *testing.T) {
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	configured := map[string]time.Duration{"slow": 81 * time.Second}
+	mp := m.Register("alpha", p, configured)
+	configured["slow"] = time.Second
+
+	if got := mp.responseTimeout("tools/call", json.RawMessage(`{"name":"slow"}`)); got != 81*time.Second {
+		t.Fatalf("registered timeout = %s, want immutable 1m21s copy", got)
+	}
+}
+
+func TestManagerSendRequest_TimeoutNamesConfiguredDuration(t *testing.T) {
+	origTimeout := requestTimeout
+	requestTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = origTimeout })
+
+	m := NewManager()
+	p, _ := newTestProxy(t)
+	mp := m.Register("alpha", p, map[string]time.Duration{"slow": 25 * time.Millisecond})
+	cw := newChildInputWriter()
+	cw.attach(&trackedWriteCloser{})
+	mp.SetInputWriter(cw)
+	mp.initReady = true
+
+	_, err := m.SendRequest(context.Background(), "alpha", "tools/call", json.RawMessage(`{"name":"slow"}`))
+	if err == nil || !strings.Contains(err.Error(), "25ms") {
+		t.Fatalf("expected configured timeout error naming 25ms, got %v", err)
+	}
+}
+
 func TestManagerSendRequest_MarshalFailure(t *testing.T) {
 	origMarshal := marshalRequest
 	marshalRequest = func(v any) ([]byte, error) {

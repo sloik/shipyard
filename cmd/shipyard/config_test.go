@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigUnmarshal_SingleServer(t *testing.T) {
@@ -36,6 +37,22 @@ func TestConfigUnmarshal_SingleServer(t *testing.T) {
 	}
 	if len(srv.Args) != 1 || srv.Args[0] != "server.js" {
 		t.Fatalf("expected args ['server.js'], got %v", srv.Args)
+	}
+}
+
+func TestConfigUnmarshal_ToolResponseTimeouts(t *testing.T) {
+	data := `{"servers":{"lmac-run":{"command":"lmac-run","tools":{"mole_clean":{"response_timeout_seconds":81},"invalid":{"response_timeout_seconds":0}}}}}`
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	timeouts := toolResponseTimeouts(cfg.Servers["lmac-run"].Tools)
+	if got := timeouts["mole_clean"]; got != 81*time.Second {
+		t.Fatalf("mole_clean timeout = %s, want 1m21s", got)
+	}
+	if _, ok := timeouts["invalid"]; ok {
+		t.Fatal("non-positive timeout must not be configured")
 	}
 }
 
