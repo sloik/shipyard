@@ -3,6 +3,7 @@ package capture
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -77,6 +78,56 @@ type TokenCallCount struct {
 // RecordAccess writes an access log entry synchronously.
 // Callers that want non-blocking behaviour should call this in a goroutine.
 func (s *Store) RecordAccess(entry AccessLogEntry) {
+	_ = s.recordAccess(entry)
+}
+
+// RecordAccessAsync accepts an audit event for asynchronous persistence. Accepted
+// events are included in DrainAccessLog and Close, so shutdown cannot silently
+// abandon them.
+func (s *Store) RecordAccessAsync(entry AccessLogEntry) error {
+	s.accessMu.Lock()
+	defer s.accessMu.Unlock()
+	if s.accessClosing {
+		return fmt.Errorf("access log is closing")
+	}
+	s.accessWG.Add(1)
+	go func() {
+		defer s.accessWG.Done()
+		if err := s.recordAccess(entry); err != nil {
+			s.recordAccessFailure(err)
+		}
+	}()
+	return nil
+}
+
+// DrainAccessLog waits for every accepted asynchronous audit write. It returns a
+// bounded error signal if any write failed, without exposing the entry payload.
+func (s *Store) DrainAccessLog() error {
+	s.accessWG.Wait()
+	s.accessMu.Lock()
+	defer s.accessMu.Unlock()
+	return s.accessErr
+}
+
+// AccessLogFailureCount reports the number of persistence failures observed by
+// this store. It is intended for operators and tests, not for RPC callers.
+func (s *Store) AccessLogFailureCount() uint64 {
+	return s.accessFailures.Load()
+}
+
+func (s *Store) recordAccessFailure(err error) {
+	s.accessMu.Lock()
+	if s.accessErr == nil {
+		s.accessErr = fmt.Errorf("access log persistence failed")
+	}
+	s.accessMu.Unlock()
+	s.accessFailures.Add(1)
+	// Do not attach entry fields: arguments, tokens, and upstream errors may be sensitive.
+	slog.Error("access log persistence failed")
+	_ = err
+}
+
+func (s *Store) recordAccess(entry AccessLogEntry) error {
 	logLevel := entry.LogLevel
 	if logLevel == "" {
 		logLevel = "full"
@@ -85,7 +136,7 @@ func (s *Store) RecordAccess(entry AccessLogEntry) {
 	// "none" skips insert unless it's a security event
 	if logLevel == "none" {
 		if entry.Status != "denied" && entry.Status != "rate_limited" {
-			return
+			return nil
 		}
 		// Security events are always logged even at log_level none
 	}
@@ -141,9 +192,9 @@ func (s *Store) RecordAccess(entry AccessLogEntry) {
 		logLevel,
 	)
 	if err != nil {
-		// Non-fatal: log but don't crash
-		_ = err
+		return fmt.Errorf("insert access log: %w", err)
 	}
+	return nil
 }
 
 // GetAccessLog returns a paginated list of access log entries matching the filter.

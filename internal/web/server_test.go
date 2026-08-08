@@ -3246,6 +3246,54 @@ func TestHandleSchemaUnackCount_WithChanges(t *testing.T) {
 	}
 }
 
+func TestHandleAccessLogAndStats_FilterPaginationAndInvalidParameters(t *testing.T) {
+	srv := newTestServer(t)
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	entries := []capture.AccessLogEntry{
+		{Timestamp: base, TokenName: "alice", ServerName: "alpha", ToolName: "read", Status: "ok", LogLevel: "full"},
+		{Timestamp: base.Add(time.Minute), TokenName: "alice", ServerName: "alpha", ToolName: "write", Status: "error", LogLevel: "status_only"},
+		{Timestamp: base.Add(2 * time.Minute), TokenName: "bob", ServerName: "beta", ToolName: "read", Status: "denied", LogLevel: "full"},
+	}
+	for _, entry := range entries {
+		srv.store.RecordAccess(entry)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/access-log?server_name=alpha&from=2026-01-02T03:04:30Z&to=2026-01-02T03:06:00Z&limit=1&offset=0", nil)
+	w := httptest.NewRecorder()
+	srv.handleAccessLog(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("access log status = %d: %s", w.Code, w.Body.String())
+	}
+	var page capture.AccessLogPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode page: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Items) != 1 || page.Items[0].ToolName != "write" {
+		t.Fatalf("unexpected filtered page: %+v", page)
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/api/access-log?from=not-a-date&limit=-1", nil)
+	invalidW := httptest.NewRecorder()
+	srv.handleAccessLog(invalidW, invalidReq)
+	if invalidW.Code != http.StatusOK {
+		t.Fatalf("invalid parameters should preserve safe defaults, got %d", invalidW.Code)
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/access-log/stats", nil)
+	statsW := httptest.NewRecorder()
+	srv.handleAccessLogStats(statsW, statsReq)
+	if statsW.Code != http.StatusOK {
+		t.Fatalf("stats status = %d: %s", statsW.Code, statsW.Body.String())
+	}
+	var stats capture.AccessLogStats
+	if err := json.Unmarshal(statsW.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if stats.TotalCalls != 3 || stats.ErrorRate != 2.0/3.0 || len(stats.TopTools) == 0 || len(stats.PerToken) != 2 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
 // --- Token Admin API ---
 
 func newTestServerWithAuth(t *testing.T) (*Server, *auth.Store) {

@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,6 +41,50 @@ func TestRecordAccess_Smoke(t *testing.T) {
 	}
 	if row.Status != "ok" {
 		t.Errorf("expected status=ok, got %q", row.Status)
+	}
+}
+
+func TestRecordAccessAsync_DrainPersistsAcceptedWrites(t *testing.T) {
+	s := newTestStore(t)
+	const writes = 64
+	for i := 0; i < writes; i++ {
+		if err := s.RecordAccessAsync(AccessLogEntry{TokenName: "drain", ServerName: "fs", ToolName: "read", Status: "ok", LogLevel: "full"}); err != nil {
+			t.Fatalf("RecordAccessAsync(%d): %v", i, err)
+		}
+	}
+	if err := s.DrainAccessLog(); err != nil {
+		t.Fatalf("DrainAccessLog: %v", err)
+	}
+	page, err := s.GetAccessLog(AccessLogFilter{TokenName: "drain"})
+	if err != nil {
+		t.Fatalf("GetAccessLog: %v", err)
+	}
+	if page.TotalCount != writes {
+		t.Fatalf("persisted writes = %d, want %d", page.TotalCount, writes)
+	}
+}
+
+func TestRecordAccessAsync_PersistenceFailureIsBoundedAndRedacted(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close DB: %v", err)
+	}
+	secret := "super-secret-token-value"
+	if err := s.RecordAccessAsync(AccessLogEntry{TokenName: secret, ServerName: "fs", ToolName: "write", Status: "ok", ArgsJSON: `{"password":"` + secret + `"}`, LogLevel: "full"}); err != nil {
+		t.Fatalf("RecordAccessAsync: %v", err)
+	}
+	err := s.DrainAccessLog()
+	if err == nil {
+		t.Fatal("DrainAccessLog should report the failed persistence")
+	}
+	if err.Error() != "access log persistence failed" {
+		t.Fatalf("unexpected error signal: %q", err)
+	}
+	if s.AccessLogFailureCount() != 1 {
+		t.Fatalf("failure count = %d, want 1", s.AccessLogFailureCount())
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("failure signal leaked secret: %q", err)
 	}
 }
 

@@ -3,13 +3,14 @@ package auth
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sloik/shipyard/internal/capture"
 )
@@ -447,9 +448,9 @@ func TestHandleToolsCall_LogsDenied(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cortex__cortex_search","arguments":{}}}`
 	mcpPOST(t, h, body, plaintext)
 
-	// RecordAccess is called in a goroutine; give it a moment to complete
-	// We use a small sleep here since RecordAccess is async via goroutine in the handler
-	time.Sleep(20 * time.Millisecond)
+	if err := cs.DrainAccessLog(); err != nil {
+		t.Fatalf("DrainAccessLog: %v", err)
+	}
 
 	page, err := cs.GetAccessLog(capture.AccessLogFilter{Status: "denied"})
 	if err != nil {
@@ -498,8 +499,9 @@ func TestHandleToolsCall_LogsSuccess(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{"path":"/tmp/x"}}}`
 	mcpPOST(t, h, body, plaintext)
 
-	// RecordAccess is called in a goroutine; give it a moment to complete
-	time.Sleep(20 * time.Millisecond)
+	if err := cs.DrainAccessLog(); err != nil {
+		t.Fatalf("DrainAccessLog: %v", err)
+	}
 
 	page, err := cs.GetAccessLog(capture.AccessLogFilter{Status: "ok"})
 	if err != nil {
@@ -516,6 +518,89 @@ func TestHandleToolsCall_LogsSuccess(t *testing.T) {
 		if row.ToolName != "read_file" {
 			t.Errorf("expected tool_name=read_file, got %q", row.ToolName)
 		}
+	}
+}
+
+func TestHandleToolsCall_LogsFailureAtConfiguredLevel(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+	plaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	cs := newTestCaptureStore(t)
+	h := NewMCPHandler(authStore, NewRateLimiter(), &mockProxy{servers: []string{"filesystem"}, sendFunc: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, fmt.Errorf("upstream unavailable")
+	}})
+	h.SetCaptureStore(cs)
+	h.SetToolLogLevels(map[string]map[string]string{"filesystem": {"read_file": "status_only"}})
+
+	w := mcpPOST(t, h, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{"secret":"never-persist"}}}`, plaintext)
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := response["error"]; !ok {
+		t.Fatalf("expected original upstream RPC error, got %s", w.Body.String())
+	}
+	if err := cs.DrainAccessLog(); err != nil {
+		t.Fatalf("DrainAccessLog: %v", err)
+	}
+	page, err := cs.GetAccessLog(capture.AccessLogFilter{Status: "error"})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("GetAccessLog error entries: page=%+v err=%v", page, err)
+	}
+	if page.Items[0].LogLevel != "status_only" || page.Items[0].ArgsJSON != "" || page.Items[0].ErrorMsg != "" {
+		t.Fatalf("configured log-level was not redacted: %+v", page.Items[0])
+	}
+}
+
+func TestHandleToolsCall_PersistenceFailureDoesNotChangeRPCResponse(t *testing.T) {
+	dir := t.TempDir()
+	authStore, err := NewStore(filepath.Join(dir, "auth.db"), "bootstrap")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer authStore.Close()
+	plaintext, _, err := authStore.GenerateToken("admin", 0, []string{"*:*"})
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	captureDBPath := filepath.Join(dir, "capture.db")
+	cs, err := capture.NewStore(captureDBPath, filepath.Join(dir, "capture.jsonl"))
+	if err != nil {
+		t.Fatalf("NewCaptureStore: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	adminDB, err := sql.Open("sqlite3", captureDBPath)
+	if err != nil {
+		t.Fatalf("open capture DB for failure injection: %v", err)
+	}
+	if _, err := adminDB.Exec("DROP TABLE access_log"); err != nil {
+		t.Fatalf("drop access_log: %v", err)
+	}
+	if err := adminDB.Close(); err != nil {
+		t.Fatalf("close injected DB: %v", err)
+	}
+	h := NewMCPHandler(authStore, NewRateLimiter(), &mockProxy{servers: []string{"filesystem"}, sendFunc: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`), nil
+	}})
+	h.SetCaptureStore(cs)
+
+	w := mcpPOST(t, h, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"filesystem__read_file","arguments":{}}}`, plaintext)
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := response["result"]; !ok {
+		t.Fatalf("persistence failure changed RPC result: %s", w.Body.String())
+	}
+	if err := cs.DrainAccessLog(); err == nil || cs.AccessLogFailureCount() != 1 {
+		t.Fatalf("expected one observable persistence failure, err=%v count=%d", err, cs.AccessLogFailureCount())
 	}
 }
 

@@ -3,10 +3,12 @@ package capture
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -286,6 +288,12 @@ type Store struct {
 	jsonlF  *os.File
 	mu      sync.Mutex
 	pending map[string]pendingRequest // keyed by message_id
+
+	accessMu       sync.Mutex
+	accessWG       sync.WaitGroup
+	accessClosing  bool
+	accessFailures atomic.Uint64
+	accessErr      error
 }
 
 type PerformanceStats struct {
@@ -1526,6 +1534,11 @@ func sortProfiles(profiles []ToolProfile, sortBy, order string) {
 
 // Close shuts down the store.
 func (s *Store) Close() error {
-	s.jsonlF.Close()
-	return s.db.Close()
+	s.accessMu.Lock()
+	s.accessClosing = true
+	s.accessMu.Unlock()
+	drainErr := s.DrainAccessLog()
+	jsonlErr := s.jsonlF.Close()
+	dbErr := s.db.Close()
+	return errors.Join(drainErr, jsonlErr, dbErr)
 }
