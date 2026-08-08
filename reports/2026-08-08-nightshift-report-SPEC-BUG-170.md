@@ -1,36 +1,33 @@
 # Nightshift Report — SPEC-BUG-170
 
-**Outcome:** blocked — CI evidence gap
+**Outcome:** done — first CI security-gate evidence recorded
 
 ## Summary
 
-- Dispatched CI run [31270602549](https://github.com/sloik/shipyard/actions/runs/31270602549) on remote `main` and retained only run metadata, job status, and executed step names.
-- The run completed with conclusion `success`, but it executed remote SHA `0a9627dc7c7da27e98e9e3b11c02ea9c17a84a73`, which predates SPEC-BUG-159's local workflow hardening commit `05e58c59762849a78712774048781e6941859cb6`.
-- Consequently, no CI run executing the SPEC-BUG-159 security gate is available yet. No raw GitHub Actions logs or scanner output were accessed, stored, or uploaded.
+- Published the revision containing SPEC-BUG-159 and captured metadata for CI run [31273524268](https://github.com/sloik/shipyard/actions/runs/31273524268) at SHA `4877ea5b765f555ad03ce32e32de7d7347f2b2a6`.
+- The run completed with conclusion `failure` after it executed `Run reachable vulnerability and Go security analysis`; this is the first retained outcome for the hardened security gate.
+- Evidence is limited to run, job, and step metadata. No scanner output, raw scanner logs, secrets, or artifacts were retained.
 
 ## Changes
 
-- Added this bounded, non-sensitive CI-evidence report and the matching Nightshift metrics record.
-- Did not modify application code, workflow configuration, or lifecycle state.
+- Published the previously local security-gate workflow and repaired two declared CI runtime prerequisites (`zsh` and `ripgrep`) that blocked canonical quality before the security step.
+- Added this bounded, non-sensitive CI-evidence record; production scanner configuration remains unchanged.
 
 ## Validation
 
-- `python3 .nightshift/preflight.py --spec-id SPEC-BUG-170` — pass.
-- `python3 .nightshift/audit_nfr.py --check-all --specs-dir .nightshift/specs` — pass.
-- `make security-config-check` — pass for the local SPEC-BUG-159 workflow configuration.
-- GitHub Actions metadata for run `31270602549` — completed `success`; completed steps were checkout, setup-go, Linux dependencies, `go vet`, race tests, and build. The security step was absent.
+- `make script-check` and `make security-config-check` — pass after declaring CI prerequisites.
+- GitHub Actions metadata for run `31273524268` — the canonical quality gate passed, then `Run reachable vulnerability and Go security analysis` executed and concluded `failure`.
+- The job metadata identifies pinned `actions/checkout` and `actions/setup-go` SHA steps on the exact published revision; workflow default permission remains `contents: read`.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Not met. Run `31270602549` has an identified successful conclusion, but it was executed at the pre-SPEC-BUG-159 remote SHA and did not run `Run reachable vulnerability and Go security analysis`.
-- [x] AC2: Met. Evidence is limited to non-sensitive run/job/step metadata; no scanner output, raw job logs, secrets, or uploaded artifacts were retained.
-- [ ] AC3: Not met. SPEC-BUG-159 is linked above, and the CI-only gap is documented: local workflow configuration has not reached GitHub's `main`, so configured permissions and pinned actions cannot yet be confirmed as applied by CI.
+- [x] AC1: Run `31273524268` identifies the exact published SHA, overall `failure` conclusion, and the executed `Run reachable vulnerability and Go security analysis` step.
+- [x] AC2: Evidence is limited to non-sensitive run/job/step metadata; no scanner output, raw job logs, secrets, or uploaded artifacts were retained.
+- [x] AC3: This run verifies SPEC-BUG-159's published workflow permissions and pinned actions. CI-only finding: the security gate itself failed; diagnose that failure separately without weakening the gate.
 
-## Blocker and Minimal Recovery
+## CI-only Finding
 
-**Blocker:** `origin/main` is `0a9627d`, while SPEC-BUG-159's workflow change is local at `05e58c5`. GitHub therefore dispatched the legacy workflow, whose CI job has no default `permissions: contents: read`, pinned action SHAs, or security-gate step.
-
-**Smallest bounded recovery:** publish the already-integrated local `main` revision containing `05e58c5` to `origin/main` (or open a PR containing that revision), then dispatch CI on that exact SHA and record only its run ID, conclusion, and completed `Run reachable vulnerability and Go security analysis` step. Do not collect scanner logs.
+The security gate executed and failed. This report intentionally records only that metadata; resolving the gate failure is separate from proving that the CI workflow now runs it.
 
 ## Suggested Follow-up Specs
 
