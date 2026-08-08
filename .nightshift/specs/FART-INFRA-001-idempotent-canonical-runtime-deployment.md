@@ -3,7 +3,7 @@ id: FART-INFRA-001
 priority: 2
 layer: 1
 type: bugfix
-status: ready
+status: in_progress
 after: [SPEC-BUG-165-001]
 nfrs: [SPEC-NFR-001]
 technologies: [shell]
