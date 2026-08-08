@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-159]
 provides: [offline-govulncheck-negative-fixture]
 requires: [vulnerability-gate]
