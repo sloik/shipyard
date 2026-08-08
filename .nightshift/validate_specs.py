@@ -114,6 +114,29 @@ except ImportError:
 
 
 _NFRS_REQUIRED_TYPES = frozenset({"feature", "bugfix", "refactor"})
+_HISTORICAL_CHECKBOX_DISPOSITIONS = "historical-checkbox-status-dispositions.json"
+
+
+def _historical_checkbox_disposition(spec_file: Path, findings: list[dict]) -> str | None:
+    """Return a documented historical disposition only for the exact inventory.
+
+    The inventory deliberately records unchecked text rather than changing it.
+    A stale or malformed entry never suppresses a terminal-state error.
+    """
+    inventory = spec_file.parent.parent / _HISTORICAL_CHECKBOX_DISPOSITIONS
+    try:
+        payload = json.loads(inventory.read_text(encoding="utf-8"))
+        entry = payload["entries"][spec_file.name]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if entry.get("disposition") not in {
+        "intentional_historical_record", "unresolved_evidence_gap"
+    }:
+        return None
+    expected = entry.get("findings")
+    if not isinstance(expected, list) or expected != findings:
+        return None
+    return str(entry["disposition"])
 
 
 # SPEC-163: material decision briefs live in the existing QUESTIONS spec.  This
@@ -524,13 +547,28 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
             "## Acceptance Criteria": "Acceptance Criteria",
         }
         _current_section = None
+        _unchecked_findings = []
         for line_number, line in enumerate(lines[end_idx + 1:], start=end_idx + 2):
             if line.startswith("## "):
                 _current_section = _checked_sections.get(line.strip())
             elif _current_section and re.match(r"^\s*- \[ \]", line):
+                _unchecked_findings.append({
+                    "line": line_number,
+                    "section": _current_section,
+                    "text": line.strip(),
+                })
+        _disposition = _historical_checkbox_disposition(spec_file, _unchecked_findings)
+        if _disposition:
+            errors.append(
+                "WARNING: historical checkbox/status residual documented in "
+                f"{_HISTORICAL_CHECKBOX_DISPOSITIONS}: {_disposition} "
+                f"({len(_unchecked_findings)} unchecked item(s)); implementation status is not inferred"
+            )
+        else:
+            for _finding in _unchecked_findings:
                 errors.append(
-                    f"{spec_file}:{line_number}: status is 'done' but has an unchecked "
-                    f"checkbox in {_current_section}: {line.strip()}"
+                    f"{spec_file}:{_finding['line']}: status is 'done' but has an unchecked "
+                    f"checkbox in {_finding['section']}: {_finding['text']}"
                 )
 
     attachments = fm.get("attachments")

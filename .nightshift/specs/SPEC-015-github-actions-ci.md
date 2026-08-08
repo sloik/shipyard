@@ -2,7 +2,7 @@
 id: SPEC-015
 priority: 15
 type: nfr
-status: done
+status: retired
 after: [SPEC-014]
 created: 2026-04-06
 ---

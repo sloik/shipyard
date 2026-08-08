@@ -29,25 +29,25 @@ decision for each historical inconsistency.
 
 ## Requirements
 
-- [ ] R1: Inventory every remaining checkbox/status consistency finding emitted
+- [x] R1: Inventory every remaining checkbox/status consistency finding emitted
   by `.nightshift/validate_specs.py`.
-- [ ] R2: Classify each finding as metadata repair, intentional historical
+- [x] R2: Classify each finding as metadata repair, intentional historical
   record, or unresolved evidence gap without inferring implementation status.
-- [ ] R3: Apply only justified metadata repairs and retain an audit record for
+- [x] R3: Apply only justified metadata repairs and retain an audit record for
   every changed spec.
-- [ ] R4: Make the validator's remaining findings, if any, explicit and
+- [x] R4: Make the validator's remaining findings, if any, explicit and
   actionable.
 
 ## Acceptance Criteria
 
-- [ ] AC1: The full validation output is inventoried with one disposition per
+- [x] AC1: The full validation output is inventoried with one disposition per
   historical finding.
-- [ ] AC2: Every changed historical spec has an auditable rationale and no
+- [x] AC2: Every changed historical spec has an auditable rationale and no
   requirement or acceptance-criterion prose is rewritten solely to satisfy the
   validator.
-- [ ] AC3: `python3 .nightshift/validate_specs.py .nightshift/specs` reports
+- [x] AC3: `python3 .nightshift/validate_specs.py .nightshift/specs` reports
   only explicitly documented residual findings, or exits clean.
-- [ ] AC4: The change record distinguishes historical evidence repair from any
+- [x] AC4: The change record distinguishes historical evidence repair from any
   implementation-status claim.
 
 ## Context
