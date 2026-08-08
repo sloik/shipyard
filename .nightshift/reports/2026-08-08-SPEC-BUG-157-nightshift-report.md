@@ -1,7 +1,7 @@
 # Nightshift Report — SPEC-BUG-157
 
 **Date:** 2026-08-08
-**Branch:** `nightshift/SPEC-BUG-157-C4A9FD7D`
+**Branch:** `nightshift/SPEC-BUG-157-20260808R1`
 
 ## Summary
 
@@ -26,13 +26,12 @@ references. No product Go code or historical completion state changed.
   `after`/`parent`/`children`/`implementation_order` references.
 - PASS — `python3 -m py_compile .nightshift/validate_specs.py .nightshift/preflight.py`.
 - EXPECTED LEGACY FINDINGS — `python3 .nightshift/validate_specs.py .nightshift/specs`
-  still exits 1 with 98 historical checkbox/status-content errors; no config-load,
+  still exits 1 with 99 historical checkbox/status-content errors; no config-load,
   duplicate-ID, or graph-reference errors remain.
-- BLOCKED BASELINE — preflight reaches config/spec validation without a YAML
-  composer error, then fails because the worktree is intentionally dirty and
-  `go test ./...` has an unrelated existing `cmd/shipyard` failure.
-- BLOCKED — `go test -race -count=1 -timeout 5m ./...` fails only at
-  `TestMain_ConfigMissingCommand` (expected exit code 1, got 0).
+- PASS — `python3 .nightshift/preflight.py --spec-id SPEC-BUG-157` completes
+  successfully without a YAML composer error.
+- PASS — `go test -race -count=1 -timeout 5m ./...` exits 0; linker deployment
+  target warnings are non-failing environment warnings.
 
 ## Acceptance criteria
 
@@ -43,7 +42,7 @@ references. No product Go code or historical completion state changed.
 - [x] AC5 (legacy findings itemized)
 - [x] AC6 (composer error eliminated)
 - [x] AC7
-- [ ] AC8 — blocked by the unrelated baseline test failure above.
+- [x] AC8
 
 ## Review
 

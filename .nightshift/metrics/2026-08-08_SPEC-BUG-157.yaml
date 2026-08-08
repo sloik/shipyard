@@ -1,9 +1,9 @@
 task_id: SPEC-BUG-157
 spec_file: .nightshift/specs/SPEC-BUG-157-nightshift-control-plane-integrity.md
-started_at: '2026-08-08T07:00:00Z'
-completed_at: '2026-08-08T07:10:00Z'
-status: completed_with_baseline_failure
-outcome: blocked_external
+started_at: '2026-08-08T09:20:51Z'
+completed_at: '2026-08-08T09:24:00Z'
+status: completed
+outcome: passed
 domain: code
 loop_version: 2.62.0
 model: gpt-5.6
@@ -14,7 +14,7 @@ phases:
   preflight:
     config_parse: pass
     spec_graph: pass
-    baseline_tests_pass: false
+    baseline_tests_pass: true
   context_load:
     devkb_files_read: [python.md, go.md, architecture.md, git.md]
   implementation:
@@ -30,14 +30,16 @@ phases:
     graph_reference_scan: pass
     build: pass
     lint: pass
-    race_test: fail_unrelated
-    legacy_validator_errors: 98
-    acceptance_criteria_met: false
-blockers:
-  - 'cmd/shipyard TestMain_ConfigMissingCommand expected exit code 1, got 0; unrelated to this metadata/config repair.'
+    race_test: pass
+    legacy_validator_errors: 99
+    semantic_near_duplicate_findings: 66
+    acceptance_criteria_met: true
+warnings:
+  - 'validate_specs.py retains 99 unrelated historical checkbox/status-content findings; config, exact-ID, and structured-reference findings are zero.'
+  - 'check_followup_spec.py --scan-all reports semantic near-duplicates, which this identity-repair spec explicitly leaves out of scope.'
 artifacts:
   - .nightshift/reports/spec-id-migration.md
-  - .nightshift/reports/2026-08-08-nightshift-report.md
+  - reports/2026-08-08-nightshift-report.md
 commit:
-  hash: pending
+  hash: 9545d9a8d558c7bf29d7db7bee8a1926c79a9a3c
   message: '[SPEC-BUG-157] fix: restore Nightshift control-plane integrity'
