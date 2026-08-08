@@ -4,7 +4,7 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: in_progress
+status: blocked
 after: [SPEC-BUG-157, SPEC-015]
 provides: [canonical-quality-command, blocking-static-analysis]
 requires: [nightshift-valid-control-plane]
@@ -18,9 +18,20 @@ output_type: config
 devkb_required: [go.md, testing.md, shell.md, git.md]
 cortex_cites: []
 karpathy_checklist: [simple, surgical, goal]
+blocker_class: 'unknown_critical_failure'
+block_reason: 'Required repository-wide Staticcheck repairs overlap user-owned uncommitted changes in cmd/shipyard-mcp/main.go; no safe in-scope merge or analyzer exclusion is available.'
+blocked_since: '2026-08-08T09:38:55Z'
+unblock_condition: 'unknown; classification review required'
+blocker_scope: 'unknown'
+blocker_evidence: 'failure_persistence'
 ---
 
 # Enforce Formatting and Comprehensive Static Analysis
+
+## Block Reason
+
+Required repository-wide Staticcheck repairs overlap user-owned uncommitted changes in cmd/shipyard-mcp/main.go; no safe in-scope merge or analyzer exclusion is available.
+
 
 ## Problem
 
