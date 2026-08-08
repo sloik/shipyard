@@ -4,13 +4,13 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: draft
+status: ready
 after: [SPEC-BUG-157]
 provides: [historical-spec-status-consistency]
 requires: [nightshift-valid-control-plane]
 touches: [.nightshift/specs, .nightshift/validate_specs.py]
 prior_attempts: []
-nfrs: []
+nfrs: [SPEC-NFR-001]
 parent: SPEC-BUG-157
 created: 2026-08-08
 stack: nightshift
