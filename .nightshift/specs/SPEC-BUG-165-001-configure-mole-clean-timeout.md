@@ -19,16 +19,16 @@ other lmac-run tools should keep the normal deadline.
 
 ## Requirements
 
-- [ ] R1: Configure only `servers.lmac-run.tools.mole_clean` with
+- [x] R1: Configure only `servers.lmac-run.tools.mole_clean` with
   `response_timeout_seconds: 81` in `~/servers.json`.
-- [ ] R2: Do not alter any server-level or global timeout setting.
+- [x] R2: Do not alter any server-level or global timeout setting.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Shipyard starts with the updated configuration.
-- [ ] AC-2: A `mole_clean` dry-run can complete through Shipyard without its
+- [x] AC-1: Shipyard starts with the updated configuration.
+- [x] AC-2: A `mole_clean` dry-run can complete through Shipyard without its
   former 30-second gateway timeout.
-- [ ] AC-3: Another lmac-run tool retains the 30-second default.
+- [x] AC-3: Another lmac-run tool retains the 30-second default.
 
 ## Context
 

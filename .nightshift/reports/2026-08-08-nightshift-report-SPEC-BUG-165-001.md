@@ -2,9 +2,10 @@
 
 ## Outcome
 
-Blocked at runtime. The requested per-tool setting is present in the active
-untracked runtime configuration, but the launchd-managed Shipyard binary still
-applies the former 30-second default to `mole_clean`.
+Completed after a parent takeover recovery. The requested per-tool setting is
+present in the active untracked runtime configuration, and the launchd-managed
+Shipyard process now applies the 81-second override to `mole_clean` while the
+unconfigured-tool boundary retains the 30-second default.
 
 ## Change
 
@@ -64,3 +65,23 @@ Deploy the current Shipyard binary containing SPEC-BUG-164-001's per-tool
 response-timeout support, then restart the canonical launchd service and rerun
 the `mole_clean` dry-run. No Shipyard source change or Mole policy change is
 needed for this spec.
+
+## Parent takeover recovery
+
+- `make deploy-runtime` passed both browser smoke suites and built/replaced
+  `bin/shipyard`, but its unconditional `launchctl bootstrap` failed with error
+  5 because `com.argo.shipyard.app.canonical` was already loaded.
+- The existing canonical label was restarted with `launchctl kickstart -k`; its
+  PID changed from `73869` to `81012`, proving a new process loaded the binary.
+- The exact live `mole_clean` dry-run returned HTTP 200 in 77.363 seconds with
+  return code 0. This exceeds the former 30-second ceiling and is inside the
+  configured 81-second timeout, satisfying AC-1 and AC-2.
+- `TestManagedProxyResponseTimeout_OnlyConfiguredToolCallUsesOverride` passed
+  and includes the unconfigured-tool 30-second control, satisfying AC-3.
+- Runtime config backup remains at
+  `/Users/ed/.argo-runtime-config-backups/servers.json.SPEC-BUG-165-001.20260808T085914Z.bak`.
+
+## Suggested Follow-up Specs
+
+- Make canonical runtime deployment idempotent when the canonical launchd
+  label is already loaded, while preserving rollback behavior.
