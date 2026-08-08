@@ -40,6 +40,23 @@ Shipyard is a traffic-inspecting proxy and web dashboard for the [Model Context 
 
 ## Quick Start
 
+## Parser fuzzing
+
+Ordinary `go test ./...` and CI execute every checked-in `testdata/fuzz` seed as a
+deterministic regression. If a focused fuzz run finds a crash or invariant failure,
+minimize it, place the resulting corpus file under that target's
+`testdata/fuzz/Fuzz.../` directory, and add a conventional deterministic test when
+the behavior needs a clearer explanation.
+
+Run each focused parser target locally for 30 seconds:
+
+```bash
+go test -run=^$ -fuzz=FuzzConfigDecodeRoundTrip -fuzztime=30s ./cmd/shipyard
+go test -run=^$ -fuzz=FuzzJSONRPCRequestEnvelope -fuzztime=30s ./cmd/shipyard-mcp
+go test -run=^$ -fuzz=FuzzMatchScopeDenyByDefault -fuzztime=30s ./internal/auth
+go test -run=^$ -fuzz=FuzzTrafficQueryFilter -fuzztime=30s ./internal/web
+```
+
 ### Wrap a single server
 
 ```bash
