@@ -1,0 +1,43 @@
+task_id: SPEC-BUG-157
+spec_file: .nightshift/specs/SPEC-BUG-157-nightshift-control-plane-integrity.md
+started_at: '2026-08-08T07:00:00Z'
+completed_at: '2026-08-08T07:10:00Z'
+status: completed_with_baseline_failure
+outcome: blocked_external
+domain: code
+loop_version: 2.62.0
+model: gpt-5.6
+harness: codex
+review_mode: self
+phases:
+  execution_mode: sequential
+  preflight:
+    config_parse: pass
+    spec_graph: pass
+    baseline_tests_pass: false
+  context_load:
+    devkb_files_read: [python.md, go.md, architecture.md, git.md]
+  implementation:
+    config_documents_repaired: 1
+    duplicate_ids_repaired: 4
+    structured_references_updated: 5
+  review:
+    cycles: 1
+    issues_found: []
+  validation:
+    config_mapping: pass
+    duplicate_id_scan: pass
+    graph_reference_scan: pass
+    build: pass
+    lint: pass
+    race_test: fail_unrelated
+    legacy_validator_errors: 98
+    acceptance_criteria_met: false
+blockers:
+  - 'cmd/shipyard TestMain_ConfigMissingCommand expected exit code 1, got 0; unrelated to this metadata/config repair.'
+artifacts:
+  - .nightshift/reports/spec-id-migration.md
+  - .nightshift/reports/2026-08-08-nightshift-report.md
+commit:
+  hash: pending
+  message: '[SPEC-BUG-157] fix: restore Nightshift control-plane integrity'

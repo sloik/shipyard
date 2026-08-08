@@ -370,8 +370,54 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
         except (OSError, yaml.YAMLError):
             continue
         if isinstance(parsed, dict) and parsed.get("id"):
+            parsed["_path"] = path
             loaded.append(parsed)
     return loaded
+
+
+_REFERENCE_FIELDS = ("after", "parent", "children", "implementation_order")
+
+
+def validate_spec_graph(all_specs: list[dict]) -> dict[Path, list[str]]:
+    """Return exact-ID and structured-reference findings keyed by spec path.
+
+    Templates are excluded by the caller.  Each reference must resolve to one
+    and only one frontmatter ID; this deliberately does not infer intent from
+    filenames or prose when historical IDs collide.
+    """
+    findings: dict[Path, list[str]] = {}
+    ids: dict[str, list[dict]] = {}
+    for spec in all_specs:
+        spec_id = spec.get("id")
+        if isinstance(spec_id, str) and spec_id:
+            ids.setdefault(spec_id, []).append(spec)
+
+    for spec_id, matches in ids.items():
+        if len(matches) < 2:
+            continue
+        paths = ", ".join(str(spec["_path"].name) for spec in matches)
+        for spec in matches:
+            findings.setdefault(spec["_path"], []).append(
+                f"duplicate exact ID {spec_id!r}; conflicts: {paths}"
+            )
+
+    for spec in all_specs:
+        path = spec["_path"]
+        for field in _REFERENCE_FIELDS:
+            raw = spec.get(field)
+            if raw in (None, ""):
+                continue
+            values = raw if isinstance(raw, list) else [raw]
+            for value in values:
+                ref = str(value)
+                matches = ids.get(ref, [])
+                if len(matches) == 1:
+                    continue
+                resolved = ", ".join(str(match["_path"].name) for match in matches) or "none"
+                findings.setdefault(path, []).append(
+                    f"{field} reference {ref!r} resolves to {len(matches)} spec(s): {resolved}"
+                )
+    return findings
 
 
 def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None) -> list:
@@ -657,11 +703,11 @@ def validate_config_file(config_path: Path) -> list:
         raw = config_path.read_text(encoding="utf-8")
         cfg = yaml.safe_load(raw) or {}
     except Exception as exc:
-        findings.append(f"WARNING: could not read config.yaml: {exc}")
+        findings.append(f"could not read config.yaml as one YAML document: {exc}")
         return findings
 
     if not isinstance(cfg, dict):
-        return findings  # not a mapping — other validators handle this
+        return ["config.yaml must contain one YAML mapping"]
 
     override = cfg.get("board_column_defaults")
     if override is None:
@@ -685,6 +731,9 @@ def validate_directory(specs_dir: Path) -> dict:
         if spec_file.name.startswith("_"):
             continue  # skip template files
         results[spec_file.name] = validate_file(spec_file, all_specs=all_specs)
+
+    for path, findings in validate_spec_graph(all_specs).items():
+        results.setdefault(path.name, []).extend(findings)
 
     # SPEC-071 R9a: validate the sibling projects-registry.json when present
     # (specs_dir is typically `.nightshift/specs`; the registry is its sibling).

@@ -1,5 +1,5 @@
 ---
-id: SPEC-006
+id: SPEC-006-004
 template_version: 2
 priority: 6
 layer: 2

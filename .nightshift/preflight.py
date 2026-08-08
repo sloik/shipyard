@@ -128,14 +128,14 @@ def check_guard_liveness(repo: Path, registry_path: Path) -> list[str]:
 
 
 def load_commands(config_path: Path) -> dict[str, Any]:
-    """Extract the commands block from a possibly multi-document config.yaml."""
+    """Extract the commands block from the required single-document config.yaml."""
     cfg: dict[str, Any] = {}
     if not config_path.is_file():
         return {}
     try:
-        for doc in yaml.safe_load_all(config_path.read_text(encoding="utf-8")):
-            if isinstance(doc, dict):
-                cfg.update(doc)
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            cfg = loaded
     except yaml.YAMLError:
         return {}
     commands = cfg.get("commands", {})
