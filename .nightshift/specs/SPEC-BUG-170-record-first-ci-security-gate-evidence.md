@@ -4,13 +4,13 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: draft
+status: ready
 after: [SPEC-BUG-159]
 provides: [first-ci-security-gate-evidence]
 requires: [vulnerability-gate]
 touches: [.github/workflows, reports]
 prior_attempts: []
-nfrs: []
+nfrs: [SPEC-NFR-001]
 parent: SPEC-BUG-159
 created: 2026-08-08
 stack: go
