@@ -4,13 +4,13 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: draft
+status: ready
 after: [SPEC-BUG-157]
 provides: [semantic-duplicate-consolidation-policy]
 requires: [nightshift-valid-control-plane]
 touches: [.nightshift/check_followup_spec.py, .nightshift/specs, .nightshift/reports]
 prior_attempts: []
-nfrs: []
+nfrs: [SPEC-NFR-001]
 parent: SPEC-BUG-157
 created: 2026-08-08
 stack: nightshift
