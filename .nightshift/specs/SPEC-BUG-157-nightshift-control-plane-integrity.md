@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: blocked
+status: ready
 after: []
 provides: [nightshift-valid-control-plane, unique-spec-identities]
 requires: []
@@ -18,19 +18,16 @@ output_type: config
 devkb_required: [python.md, architecture.md, git.md]
 cortex_cites: []
 karpathy_checklist: [think, surgical, goal]
-blocker_class: 'baseline_regression'
-block_reason: 'AC8 evidence gate failed after one focused unblock pass: go test -race -count=1 -timeout 5m ./... fails identically on base 0a3aab7 and worker branch at TestMain_ConfigMissingCommand (expected exit 1, got 0); confirmed baseline production CLI test defect outside this control-plane spec.'
-blocked_since: '2026-08-08T08:36:11Z'
-unblock_condition: 'Repair TestMain_ConfigMissingCommand in a dedicated Go bugfix spec, then re-run the full race gate.'
-blocker_scope: 'out_of_scope'
-blocker_evidence: 'failure_persistence'
 ---
 
 # Restore Nightshift Control-Plane Integrity
 
-## Block Reason
+## Prior Blocker Resolved
 
-AC8 evidence gate failed after one focused unblock pass: go test -race -count=1 -timeout 5m ./... fails identically on base 0a3aab7 and worker branch at TestMain_ConfigMissingCommand (expected exit 1, got 0); confirmed baseline production CLI test defect outside this control-plane spec.
+AC8's baseline failure was repaired by SPEC-BUG-157-001. On 2026-08-08,
+`go test -race -count=1 -timeout 5m ./...` passed on main. This spec is ready
+for its own recovery run and evidence gate; that recovery remains separate from
+the unblock repair.
 
 
 ## Problem
