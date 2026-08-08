@@ -4,7 +4,7 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: ready
+status: in_progress
 after: [SPEC-BUG-159]
 provides: [first-ci-security-gate-evidence]
 requires: [vulnerability-gate]
