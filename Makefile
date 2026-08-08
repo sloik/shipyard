@@ -1,4 +1,20 @@
-.PHONY: build test smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race format-check lint type-check script-check quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+
+TOOLS_BIN := $(CURDIR)/.tools/bin
+STATICCHECK := $(TOOLS_BIN)/staticcheck
+ACTIONLINT := $(TOOLS_BIN)/actionlint
+
+# The tool versions are pinned in tools/go.mod and tools/go.sum. Keeping the
+# bootstrap in-repo makes local and CI analyzer behavior identical.
+tools: $(STATICCHECK) $(ACTIONLINT)
+
+$(STATICCHECK): tools/go.mod tools/go.sum
+	@mkdir -p "$(TOOLS_BIN)"
+	cd tools && go build -mod=readonly -o "$@" honnef.co/go/tools/cmd/staticcheck
+
+$(ACTIONLINT): tools/go.mod tools/go.sum
+	@mkdir -p "$(TOOLS_BIN)"
+	cd tools && go build -mod=readonly -o "$@" github.com/rhysd/actionlint/cmd/actionlint
 
 build:
 	go build ./cmd/shipyard/
@@ -57,7 +73,33 @@ build-mcp:
 install-mcp: build-mcp
 
 test:
-	go test ./...
+	go test -count=1 ./...
+
+race:
+	go test -race -count=1 -timeout 5m ./...
+
+format-check:
+	@unformatted="$$(git ls-files '*.go' | xargs gofmt -l)"; test -z "$$unformatted" || { echo "Go files require gofmt:"; printf '%s\n' "$$unformatted"; exit 1; }
+
+lint: tools
+	"$(STATICCHECK)" ./...
+
+type-check:
+	go vet ./...
+
+script-check: tools
+	"$(ACTIONLINT)" .github/workflows/*.yml
+	node scripts/check-js-syntax.mjs internal/web/ui/ds.js internal/web/ui/index.html
+	zsh -n scripts/*.sh
+
+# The canonical blocking quality contract. CI and local development must call
+# this target rather than duplicating a subset of its checks.
+quality: format-check lint type-check script-check build test race
+
+# Negative probes prove that each static gate is capable of rejecting malformed
+# input. They are intentionally separate from the normal quality target.
+quality-self-test: tools
+	scripts/quality-negative-tests.sh "$(STATICCHECK)" "$(ACTIONLINT)"
 
 snapshot:
 	goreleaser release --snapshot --clean

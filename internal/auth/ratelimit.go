@@ -14,7 +14,7 @@ type RateLimiter struct {
 }
 
 type tokenWindow struct {
-	count     int
+	count       int
 	windowStart time.Time
 }
 

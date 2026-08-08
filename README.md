@@ -350,8 +350,20 @@ Override the browser path with `CHROME_BIN=/path/to/chrome make smoke`.
 ### Lint
 
 ```bash
-go vet ./...
+make quality
 ```
+
+`make quality` is the repository's blocking local and CI contract: canonical
+Go formatting, pinned Staticcheck analysis, `go vet`, GitHub Actions workflow
+validation, JavaScript (including inline UI scripts) and zsh syntax checks,
+builds, ordinary tests, and the race suite. The analyzer binaries are built
+into `.tools/bin/` from exact versions recorded in `tools/go.mod` and
+`tools/go.sum`; no global installation is required.
+
+Run `make quality-self-test` to prove every static gate rejects its committed
+invalid fixture. Staticcheck has no exclusions. Any future narrow exception
+must identify the rule and exact location, explain why it is safe, and state
+when it will be reviewed or removed in `.staticcheck.conf`.
 
 ### macOS Wails GUI Smoke
 

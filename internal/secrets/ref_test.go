@@ -12,11 +12,11 @@ func TestParseSecretRef(t *testing.T) {
 		{"${MY_VAR}", refEnv},
 		{"plain-value", refPlain},
 		{"", refPlain},
-		{"${}", refEnv},                       // minimal env ref
-		{"${NESTED", refPlain},                // missing closing brace → plain
-		{"op://", refOP},                      // minimal op ref
-		{"@keychain:", refKeychain},           // minimal keychain ref
-		{"https://example.com", refPlain},     // URL is plain
+		{"${}", refEnv},                   // minimal env ref
+		{"${NESTED", refPlain},            // missing closing brace → plain
+		{"op://", refOP},                  // minimal op ref
+		{"@keychain:", refKeychain},       // minimal keychain ref
+		{"https://example.com", refPlain}, // URL is plain
 	}
 
 	for _, tc := range cases {

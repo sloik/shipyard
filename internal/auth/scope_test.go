@@ -4,11 +4,11 @@ import "testing"
 
 func TestMatchScope(t *testing.T) {
 	tests := []struct {
-		name    string
-		scopes  []string
-		server  string
-		tool    string
-		want    bool
+		name   string
+		scopes []string
+		server string
+		tool   string
+		want   bool
 	}{
 		// AC-3: filesystem:* allows filesystem:read_file but not cortex:cortex_search
 		{

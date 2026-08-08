@@ -54,7 +54,7 @@ type MCPHandler struct {
 	selfDispatch  SelfDispatcher // optional — if set, routes shipyard__ tools internally
 	captureLog    *capture.Store
 	toolLogLevels map[string]map[string]string // server → tool → log_level
-	gatewayPolicy GatewayPolicy               // optional — if set, filters disabled tools (SPEC-028)
+	gatewayPolicy GatewayPolicy                // optional — if set, filters disabled tools (SPEC-028)
 }
 
 // NewMCPHandler creates a new MCPHandler.

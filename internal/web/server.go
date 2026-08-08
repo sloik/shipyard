@@ -1754,11 +1754,7 @@ func (s *Server) selfToolsResult() (json.RawMessage, error) {
 
 	result := toolsResult{Tools: make([]toolInfo, len(shipyardTools))}
 	for i, tool := range shipyardTools {
-		result.Tools[i] = toolInfo{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: tool.InputSchema,
-		}
+		result.Tools[i] = toolInfo(tool)
 	}
 
 	return json.Marshal(map[string]interface{}{

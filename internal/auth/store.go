@@ -12,26 +12,25 @@ import (
 	"time"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // Store manages token persistence in SQLite.
 type Store struct {
-	db              *sql.DB
-	mu              sync.Mutex
-	bootstrapUsed   bool // set to true after first admin token is created
-	bootstrapToken  string
+	db             *sql.DB
+	mu             sync.Mutex
+	bootstrapUsed  bool // set to true after first admin token is created
+	bootstrapToken string
 }
 
 // TokenRecord holds token metadata (never the plaintext or hash).
 type TokenRecord struct {
-	ID               int64      `json:"id"`
-	Name             string     `json:"name"`
-	CreatedAt        time.Time  `json:"created_at"`
-	LastUsedAt       *time.Time `json:"last_used_at,omitempty"`
-	RateLimitPerMin  int        `json:"rate_limit_per_minute,omitempty"`
-	Scopes           []string   `json:"scopes"`
-	Revoked          bool       `json:"revoked"`
+	ID              int64      `json:"id"`
+	Name            string     `json:"name"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
+	RateLimitPerMin int        `json:"rate_limit_per_minute,omitempty"`
+	Scopes          []string   `json:"scopes"`
+	Revoked         bool       `json:"revoked"`
 }
 
 // openAuthDB can be overridden in tests.
