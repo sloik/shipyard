@@ -385,6 +385,8 @@ when it will be reviewed or removed in `.staticcheck.conf`.
 ### Dependency and workflow security
 
 Run the deterministic local workflow-policy check with `make security-config-check`.
+Run `make security-self-test` to verify both configured scanner command paths
+propagate controlled known-bad findings without a live advisory lookup.
 The CI security target additionally runs reachable-vulnerability analysis and
 high-severity Go security analysis; it is scheduled weekly and runs for pull
 requests. Dependency Review blocks pull requests that introduce a vulnerable

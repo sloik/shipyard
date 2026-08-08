@@ -1,4 +1,4 @@
-.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools security-run security-govulncheck security-gosec security-self-test quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 TOOLS_BIN := $(CURDIR)/.tools/bin
 STATICCHECK := $(TOOLS_BIN)/staticcheck
@@ -121,9 +121,20 @@ security-tools:
 # No scanner output is uploaded or echoed through an environment expansion.
 # There are currently no gosec suppressions; any future exception must carry
 # rule, exact location, rationale, owner, and revisit condition in the policy.
-security: security-tools security-config-check
+security-govulncheck:
 	"$(GOVULNCHECK)" ./...
+
+security-gosec:
 	"$(GOSEC)" -exclude-generated -severity high ./...
+
+security-run: security-config-check security-govulncheck security-gosec
+
+security: security-tools security-run
+
+# Hermetic wrappers prove both command paths propagate a scanner finding without
+# requiring a live vulnerability database or weakening production configuration.
+security-self-test:
+	scripts/security-negative-tests.sh "$(MAKE)" "$(CURDIR)"
 
 # The canonical blocking quality contract. CI and local development must call
 # this target rather than duplicating a subset of its checks.
