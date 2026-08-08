@@ -76,7 +76,7 @@ func waitForHTTP(t *testing.T, url string, check func(*http.Response, []byte) bo
 		} else {
 			lastErr = err
 		}
-		time.Sleep(50 * time.Millisecond)
+		<-time.After(50 * time.Millisecond)
 	}
 
 	t.Fatalf("timed out waiting for %s: %v", url, lastErr)

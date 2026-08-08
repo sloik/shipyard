@@ -70,7 +70,7 @@ func waitForStoreCount(t *testing.T, store *capture.Store, want int) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %d events, got %d", want, page.TotalCount)
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestManagerSendRequest(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatal("timed out waiting for request to be written")
 			}
-			time.Sleep(10 * time.Millisecond)
+			<-time.After(10 * time.Millisecond)
 		}
 
 		var req map[string]json.RawMessage

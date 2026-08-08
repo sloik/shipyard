@@ -201,7 +201,7 @@ func TestWaitForWriter_WaitsUntilAttached(t *testing.T) {
 		done <- writer
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	<-time.After(20 * time.Millisecond)
 	cw.attach(sink)
 
 	select {
@@ -224,7 +224,7 @@ func TestWaitForWriter_ContextCanceledAfterWake(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	<-time.After(20 * time.Millisecond)
 	cancel()
 	cw.close()
 
