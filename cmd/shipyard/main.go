@@ -148,7 +148,18 @@ type Config struct {
 
 // ToolConfig holds per-tool configuration within a server config.
 type ToolConfig struct {
-	LogLevel string `json:"log_level"`
+	LogLevel               string `json:"log_level"`
+	ResponseTimeoutSeconds int    `json:"response_timeout_seconds"`
+}
+
+func toolResponseTimeouts(tools map[string]ToolConfig) map[string]time.Duration {
+	timeouts := make(map[string]time.Duration)
+	for toolName, config := range tools {
+		if config.ResponseTimeoutSeconds > 0 {
+			timeouts[toolName] = time.Duration(config.ResponseTimeoutSeconds) * time.Second
+		}
+	}
+	return timeouts
 }
 
 type ServerConfig struct {
@@ -402,7 +413,7 @@ func seedConfiguredServers(ctx context.Context, cfg *Config, mgr *proxy.Manager,
 		server := cfg.Servers[name]
 		resolvedEnv := resolveEnv(ctx, server.Env, reg)
 		p := proxy.NewProxy(name, server.Command, server.Args, resolvedEnv, server.Cwd, store, hub)
-		mgr.Register(name, p)
+		mgr.Register(name, p, toolResponseTimeouts(server.Tools))
 		mgr.SetStatus(name, "starting", "")
 	}
 }
@@ -652,7 +663,7 @@ func runServerWithRestart(parentCtx context.Context, mgr *proxy.Manager, name st
 		proxyCtx, proxyCancel := context.WithCancel(parentCtx)
 
 		p := proxy.NewProxy(name, server.Command, server.Args, resolvedEnv, server.Cwd, store, hub)
-		mp := mgr.Register(name, p)
+		mp := mgr.Register(name, p, toolResponseTimeouts(server.Tools))
 		p.SetManaged(mp)
 		mgr.SetCancelFn(name, proxyCancel)
 		mgr.SetStatus(name, "online", "")

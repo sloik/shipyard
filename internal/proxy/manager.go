@@ -27,20 +27,21 @@ type Manager struct {
 }
 
 type managedProxy struct {
-	proxy        *Proxy
-	inputWriter  *childInputWriter
-	responses    *responseTracker
-	status       string             // "online", "crashed", "stopped", "restarting"
-	command      string             // the command string for display
-	startedAt    time.Time          // when the proxy was last started
-	restartCount int                // how many times it has been restarted
-	toolCount    int                // cached tool count
-	errorMessage string             // last error message if crashed
-	cancelFn     context.CancelFunc // cancel function for stopping the proxy
-	initMu       sync.Mutex
-	initReady    bool
-	initRunning  bool
-	initWait     chan struct{}
+	proxy            *Proxy
+	inputWriter      *childInputWriter
+	responses        *responseTracker
+	status           string             // "online", "crashed", "stopped", "restarting"
+	command          string             // the command string for display
+	startedAt        time.Time          // when the proxy was last started
+	restartCount     int                // how many times it has been restarted
+	toolCount        int                // cached tool count
+	errorMessage     string             // last error message if crashed
+	cancelFn         context.CancelFunc // cancel function for stopping the proxy
+	initMu           sync.Mutex
+	initReady        bool
+	initRunning      bool
+	initWait         chan struct{}
+	responseTimeouts map[string]time.Duration
 }
 
 // responseTracker correlates JSON-RPC request IDs to response channels.
@@ -105,7 +106,7 @@ func (m *Manager) SetHub(hub *web.Hub) {
 }
 
 // Register adds a proxy to the manager. Must be called before the proxy's Run.
-func (m *Manager) Register(name string, p *Proxy) *managedProxy {
+func (m *Manager) Register(name string, p *Proxy, configuredTimeouts ...map[string]time.Duration) *managedProxy {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -120,6 +121,9 @@ func (m *Manager) Register(name string, p *Proxy) *managedProxy {
 		status:    "online",
 		command:   cmd,
 		startedAt: time.Now(),
+	}
+	if len(configuredTimeouts) > 0 {
+		mp.responseTimeouts = copyPositiveTimeouts(configuredTimeouts[0])
 	}
 	if _, exists := m.proxies[name]; !exists {
 		m.order = append(m.order, name)
@@ -311,6 +315,38 @@ func (m *Manager) ActiveSessionID(server string) int64 {
 
 var requestIDCounter int64
 var requestTimeout = 30 * time.Second
+
+func copyPositiveTimeouts(timeouts map[string]time.Duration) map[string]time.Duration {
+	if len(timeouts) == 0 {
+		return nil
+	}
+
+	copy := make(map[string]time.Duration, len(timeouts))
+	for toolName, timeout := range timeouts {
+		if timeout > 0 {
+			copy[toolName] = timeout
+		}
+	}
+	return copy
+}
+
+func (mp *managedProxy) responseTimeout(method string, params json.RawMessage) time.Duration {
+	if method != "tools/call" || len(mp.responseTimeouts) == 0 {
+		return requestTimeout
+	}
+
+	var toolCall struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &toolCall); err != nil || toolCall.Name == "" {
+		return requestTimeout
+	}
+	if timeout := mp.responseTimeouts[toolCall.Name]; timeout > 0 {
+		return timeout
+	}
+	return requestTimeout
+}
+
 var marshalRequest = json.Marshal
 
 const managedChildProtocolVersion = "2025-03-26"
@@ -422,7 +458,7 @@ func (m *Manager) sendRequestRaw(ctx context.Context, serverName string, mp *man
 	}
 
 	// Wait for response with timeout
-	timeout := requestTimeout
+	timeout := mp.responseTimeout(method, params)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
