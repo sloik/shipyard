@@ -3,17 +3,11 @@ id: SPEC-BUG-166
 priority: 2
 layer: 1
 type: refactor
-status: blocked
+status: ready
 after: []
 nfrs: [SPEC-NFR-001]
 technologies: [go, shell]
 created: 2026-08-08
-blocker_class: evidence_unavailable
-block_reason: "The required live launchd and managed-child evidence cannot be produced from the isolated worktree, and parent-side validation was explicitly prohibited for this kickoff."
-blocked_since: 2026-08-08
-unblock_condition: "An authorized operator runs make deploy-runtime from main and records the launchd/API evidence."
-blocker_scope: in_scope
-blocker_evidence: ".nightshift/reports/2026-08-08-nightshift-report.md on branch nightshift/SPEC-BUG-166-20260808, commit 0d84cf3"
 ---
 
 # One canonical Shipyard runtime binary
@@ -63,9 +57,10 @@ and obscures which binary launchd actually runs.
 - Changing Shipyard functionality or child-MCP configuration.
 - Deleting backups before the replacement has live evidence.
 
-## Critical Blocker
+## Resolved Blocker
 
-**Blocker class:** evidence_unavailable
+**Resolution:** Łukasz authorized the parent operator on 2026-08-08 to merge the
+worker branch and run the canonical live deployment/evidence gate from `main`.
 
 The worker completed its implementation and focused unblock pass in the isolated
 worktree. The remaining acceptance criteria require an authorized live deployment
