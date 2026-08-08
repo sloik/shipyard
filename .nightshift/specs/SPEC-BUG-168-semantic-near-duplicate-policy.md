@@ -4,7 +4,7 @@ template_version: 7
 priority: 2
 layer: 0
 type: refactor
-status: in_progress
+status: done
 after: [SPEC-BUG-157]
 provides: [semantic-duplicate-consolidation-policy]
 requires: [nightshift-valid-control-plane]
