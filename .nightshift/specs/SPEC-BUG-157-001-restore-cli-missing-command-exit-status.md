@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: bugfix
-status: in_progress
+status: done
 parent: SPEC-BUG-157
 after: []
 provides: [cli-config-validation-exit-contract]
