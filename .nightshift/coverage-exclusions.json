@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "exclusions": [
+    {
+      "package": "github.com/sloik/shipyard/internal/teststubchild",
+      "rationale": "Test-only helper executable used by proxy integration tests; it is not shipped production code."
+    }
+  ]
+}

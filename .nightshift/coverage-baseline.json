@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-08",
+  "command": "go test -count=1 -coverprofile=<profile> ./...",
+  "total": 75.1,
+  "packages": {
+    "github.com/sloik/shipyard/cmd/shipyard": 57.1,
+    "github.com/sloik/shipyard/cmd/shipyard-mcp": 74.2,
+    "github.com/sloik/shipyard/internal/auth": 68.3,
+    "github.com/sloik/shipyard/internal/capture": 82.7,
+    "github.com/sloik/shipyard/internal/gateway": 68.1,
+    "github.com/sloik/shipyard/internal/performance": 63.0,
+    "github.com/sloik/shipyard/internal/proxy": 92.1,
+    "github.com/sloik/shipyard/internal/release": 0.0,
+    "github.com/sloik/shipyard/internal/secrets": 82.6,
+    "github.com/sloik/shipyard/internal/secrets/env": 100.0,
+    "github.com/sloik/shipyard/internal/secrets/keychain": 69.2,
+    "github.com/sloik/shipyard/internal/secrets/op": 28.6,
+    "github.com/sloik/shipyard/internal/web": 74.5
+  }
+}

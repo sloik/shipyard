@@ -1,0 +1,23 @@
+task_id: "SPEC-BUG-160"
+spec_file: ".nightshift/specs/SPEC-BUG-160-coverage-ratchet.md"
+started_at: "2026-08-08T11:05:20Z"
+completed_at: "2026-08-08T11:12:00Z"
+status: "completed"
+loop_version: "2.60.0"
+model: "gpt-5.6"
+harness: "codex"
+review_mode: "self"
+phases:
+  execution_mode: "orchestrator-worker"
+  preflight: {clean_tree: true, initial_tests_pass: true, duration_s: 30}
+  context_load: {files_read: 10, knowledge_entries_used: 3, duration_s: 90}
+  test_planning: {duration_s: 30}
+  test_writing: {tests_written: 0, tests_failing: 0, duration_s: 20}
+  implementation: {files_changed: 10, duration_s: 120}
+  review: {cycles: 1, issues_found: 1, issues_fixed: 1, duration_s: 30}
+  validation: {tests_passed: 8, tests_failed: 0, duration_s: 150}
+  completion_verification: {acceptance_criteria_total: 8, acceptance_criteria_met: 8, duration_s: 20}
+knowledge:
+  pattern_written: false
+  entries_created: 0
+commit: {hash: "pending-parent-integration", message: "feat(SPEC-BUG-160): add coverage ratchet"}

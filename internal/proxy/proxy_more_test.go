@@ -349,29 +349,15 @@ func TestRunChild_SuccessCapturesOutput(t *testing.T) {
 	ctx := context.Background()
 	inputWriter := newChildInputWriter()
 
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = w
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = r.Close()
-		_ = w.Close()
-	})
+	var output bytes.Buffer
+	p.output = &output
 
 	if err := p.runChild(ctx, inputWriter); err != nil {
 		t.Fatalf("runChild: %v", err)
 	}
 
-	_ = w.Close()
-	output, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	if !strings.Contains(string(output), `{"jsonrpc":"2.0","method":"tools/list","id":1}`) {
-		t.Fatalf("expected child stdout to be forwarded, got %q", string(output))
+	if !strings.Contains(output.String(), `{"jsonrpc":"2.0","method":"tools/list","id":1}`) {
+		t.Fatalf("expected child stdout to be forwarded, got %q", output.String())
 	}
 
 	waitForStoreCount(t, store, 1)
