@@ -40,7 +40,7 @@ knowledge:
   match_strategy: "domain+tags"
 
 devkb:
-  path: "/Users/ed/Dropbox/Argo/DevKB"
+  path: "/Users/ed/Dropbox/Developer/ManagedProjects/DevKB"
   writeback: true
   mappings:
     go: ["go.md", "testing.md"]
