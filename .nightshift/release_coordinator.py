@@ -21,6 +21,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import release
+import release_handoff
+import managed_payload_provenance as provenance
+from observability_enroll import release_disposition
 
 
 @dataclass(frozen=True)
@@ -63,7 +66,7 @@ class RepositoryPlan:
 
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
-SuiteRunner = Callable[[str, Path], subprocess.CompletedProcess[str]]
+SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 
 
 def _run(
@@ -194,6 +197,80 @@ def _install_allowlist(repo: Path, install: Path, manifest: dict) -> set[str]:
     return paths
 
 
+def _suite_argv(metadata: dict, phase: str) -> list[str]:
+    """Build the declared dependency-capable suite command without a shell."""
+    if metadata.get("runner") != "uv":
+        raise ValueError("canonical suite runner must be uv")
+    dependencies = metadata.get("dependencies")
+    command = metadata.get(phase)
+    if not isinstance(dependencies, list) or not dependencies or not all(
+        isinstance(item, str) and item.strip() for item in dependencies
+    ):
+        raise ValueError("canonical suite dependencies must be non-empty strings")
+    if not isinstance(command, list) or not command or not all(
+        isinstance(item, str) and item.strip() for item in command
+    ):
+        raise ValueError(f"canonical suite {phase} must be a non-empty argv list")
+    argv = ["uv", "run"]
+    for dependency in dependencies:
+        argv.extend(("--with", dependency))
+    return argv + command
+
+
+def _project_owned_managed_path(path: str) -> bool:
+    """Keep generated project evidence private while admitting the schema."""
+    parts = Path(path).parts
+    if path == "metrics/_SCHEMA.md":
+        return False
+    return bool({"specs", "metrics", "knowledge"}.intersection(parts))
+
+
+def _managed_relative(plan: RepositoryPlan, repo_path: str) -> str:
+    """Strip the most-specific install prefix for repositories with nesting."""
+    prefixes = sorted(
+        (_relative(plan.root, install).rstrip("/") for install in plan.installs),
+        key=len,
+        reverse=True,
+    )
+    for prefix in prefixes:
+        if repo_path.startswith(prefix + "/"):
+            return repo_path.removeprefix(prefix + "/")
+    return repo_path
+
+
+def validate_release_ownership(plans: Iterable[RepositoryPlan], manifest: dict) -> list[str]:
+    """Prove copy/stage/commit ownership for every repo before first write."""
+    errors: list[str] = []
+    managed = {entry["path"] for entry in manifest["files"]}
+    conflicts = sorted(path for path in managed if _project_owned_managed_path(path))
+    if conflicts:
+        errors.append(
+            "manifest-managed paths are project-owned: " + ", ".join(conflicts)
+        )
+    for plan in plans:
+        copy_paths = {
+            _relative(plan.root, install / entry["path"])
+            for install in plan.installs
+            for entry in manifest["files"]
+        }
+        marker_paths = {
+            _relative(plan.root, install / release.MARKER) for install in plan.installs
+        }
+        migration_paths = {
+            _relative(plan.root, install / "config.yaml")
+            for install in plan.installs
+            if _migration_needed(install, manifest["schema_version"])
+        }
+        expected = copy_paths | marker_paths | migration_paths
+        if plan.allowed_paths != expected:
+            errors.append(f"release allowlist mismatch for repository: {plan.root}")
+        for repo_path in sorted(copy_paths):
+            relative = _managed_relative(plan, repo_path)
+            if _project_owned_managed_path(relative):
+                errors.append(f"project-owned path entered release allowlist: {repo_path}")
+    return sorted(set(errors))
+
+
 def plan_repositories(
     installs: Iterable[Path], manifest: dict
 ) -> tuple[list[RepositoryPlan], list[dict]]:
@@ -255,13 +332,34 @@ def _porcelain_paths(repo: Path) -> tuple[set[str], set[str]]:
     return staged, dirty
 
 
-def preflight_repository(plan: RepositoryPlan, manifest: dict) -> list[str]:
+def preflight_repository(
+    plan: RepositoryPlan,
+    manifest: dict,
+    *,
+    canonical: Path | None = None,
+    adopt_unresolved_managed: bool = False,
+) -> list[str]:
     staged, dirty = _porcelain_paths(plan.root)
     errors = []
     unrelated_staged = sorted(staged - plan.allowed_paths)
     dirty_managed = sorted(dirty & plan.allowed_paths)
     if unrelated_staged:
         errors.append("unrelated pre-staged paths: " + ", ".join(unrelated_staged))
+    if adopt_unresolved_managed:
+        adoptable = {
+            _relative(plan.root, install / entry["path"])
+            for install in plan.installs
+            for entry in manifest["files"]
+        } | {
+            _relative(plan.root, install / release.MARKER)
+            for install in plan.installs
+        }
+        forbidden_adoption = sorted(set(dirty_managed) - adoptable)
+        if forbidden_adoption:
+            errors.append(
+                "operator adoption cannot replace non-payload paths: "
+                + ", ".join(forbidden_adoption)
+            )
     if dirty_managed:
         # A prior coordinator attempt may have copied and staged the exact
         # release before a commit hook stopped it. It is safely resumable when
@@ -279,8 +377,69 @@ def preflight_repository(plan: RepositoryPlan, manifest: dict) -> list[str]:
             <= staged
             for install in plan.installs
         )
-        if not exact_release and not complete_staged_release:
-            errors.append("dirty managed paths: " + ", ".join(dirty_managed))
+        provenance_rows: list[provenance.PathProvenance] = []
+        provenance_errors: list[str] = []
+        for install in plan.installs:
+            try:
+                retained_override = None
+                if canonical is not None:
+                    try:
+                        retained_override = provenance.recover_exact_installed_manifest(
+                            install, canonical, current_manifest=manifest
+                        )
+                    except provenance.MetadataError:
+                        try:
+                            retained_override = provenance.recover_exact_canonical_snapshot(
+                                install, canonical, current_manifest=manifest
+                            )
+                        except provenance.MetadataError:
+                            try:
+                                provenance.retained_manifest(install)
+                            except provenance.MetadataError:
+                                retained_override = provenance.recover_historical_manifest(
+                                    install, canonical
+                                )
+                provenance_rows.extend(
+                    provenance.audit_git_install(
+                        install,
+                        current_manifest=manifest,
+                        retained_override=retained_override,
+                    )
+                )
+            except provenance.MetadataError as exc:
+                provenance_errors.append(str(exc))
+        if provenance_errors and not adopt_unresolved_managed:
+            errors.append(
+                "managed payload provenance unavailable: "
+                + "; ".join(sorted(set(provenance_errors)))
+                + ". Preserve project deltas and review them through a canonical Nightshift spec."
+            )
+        unresolved = [
+            row
+            for row in provenance_rows
+            if row.classification == provenance.UNRESOLVED_DIVERGENCE
+        ]
+        # A complete prior coordinator stage is already bounded by the exact
+        # allowlist and marker-last contract; preserving it is safer than
+        # stranding a resumable release. Individual/manual prior-file stages do
+        # not receive this exemption.
+        if unresolved and not complete_staged_release and not adopt_unresolved_managed:
+            errors.append(
+                "dirty managed payload provenance:\n" + provenance.format_rows(unresolved)
+                + "\nPreserve project deltas and review them through a canonical Nightshift spec."
+            )
+        if (
+            not provenance_errors
+            and (not unresolved or complete_staged_release)
+            and not exact_release
+            and not complete_staged_release
+        ):
+            classifications = {row.classification for row in provenance_rows}
+            if not adopt_unresolved_managed and classifications - {
+                provenance.EXACT_CURRENT,
+                provenance.RETAINED_PRIOR_RELEASE,
+            }:
+                errors.append("dirty managed paths: " + ", ".join(dirty_managed))
     return errors
 
 
@@ -358,9 +517,9 @@ def _verify_staged(plan: RepositoryPlan, manifest: dict) -> tuple[set[str], list
         errors.append("staged path outside release allowlist: " + ", ".join(outside))
     if any(path.endswith("projects-registry.json") for path in staged):
         errors.append("generated registry entered release commit")
-    forbidden_parts = {"specs", "metrics", "knowledge"}
     for path in staged:
-        if forbidden_parts.intersection(Path(path).parts):
+        relative = _managed_relative(plan, path)
+        if _project_owned_managed_path(relative):
             errors.append(f"project-owned path entered release commit: {path}")
 
     for install in plan.installs:
@@ -421,6 +580,8 @@ def coordinate_release(
     canonical_suite_runner: SuiteRunner | None = None,
     inject_unexpected_after_commits: int | None = None,
     smoke_timeout_s: int = 60,
+    adopt_unresolved_managed: bool = False,
+    include_opt_out: bool = False,
 ) -> dict:
     """Coordinate one exact release with known-failure isolation and stop semantics."""
     started = time.monotonic()
@@ -429,6 +590,8 @@ def coordinate_release(
         "release_version": manifest["kit_version"],
         "release_fingerprint": manifest["fingerprint"],
         "dry_run": dry_run,
+        "adopt_unresolved_managed": adopt_unresolved_managed,
+        "include_opt_out": include_opt_out,
         "planned_installs": sum(len(plan.installs) for plan in plans),
         "planned_repositories": len(plans),
         "eligible_installs": [],
@@ -454,10 +617,12 @@ def coordinate_release(
         "rollback_attempted": False,
         "push_attempted": False,
         "canonical_suite_runs": 0,
+        "canonical_suite_probe": "not_run",
         "smoke_checks_run": 0,
         "producer_session_evidence": {},
         "old_fingerprints": {},
         "post_commit_rebuild_time_s": None,
+        "release_handoffs_completed": [],
         "rerun_command": (
             f"python3 {canonical / 'release_coordinator.py'}"
             f" --root {canonical.parents[2]} --apply"
@@ -473,18 +638,50 @@ def coordinate_release(
                 old = None
             result["old_fingerprints"][str(install)] = old
 
+    ownership_errors = validate_release_ownership(plans, manifest)
+    if ownership_errors:
+        result["failure_class"] = "canonical_preflight"
+        result["unexpected_failure"] = "; ".join(ownership_errors)
+        result["untouched"] = [
+            {"repository": str(plan.root), "installs": [str(item) for item in plan.installs]}
+            for plan in plans
+        ]
+        result["duration_s"] = round(time.monotonic() - started, 3)
+        result["completed_at"] = datetime.now(UTC).isoformat()
+        result["exit_code"] = 1
+        return result
+
     if not dry_run:
-        command = manifest["canonical_suite"]
-        if canonical_suite_runner is None:
-            suite_result = subprocess.run(
-                shlex.split(command),
-                cwd=canonical,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+        try:
+            probe_argv = _suite_argv(manifest["canonical_suite"], "probe")
+            suite_argv = _suite_argv(manifest["canonical_suite"], "command")
+        except (KeyError, ValueError) as exc:
+            probe_result = subprocess.CompletedProcess([], 2, "", str(exc))
+            suite_argv = []
         else:
-            suite_result = canonical_suite_runner(command, canonical)
+            runner = canonical_suite_runner or (
+                lambda argv, cwd: subprocess.run(
+                    argv, cwd=cwd, text=True, capture_output=True, check=False
+                )
+            )
+            probe_result = runner(probe_argv, canonical)
+        result["canonical_suite_probe"] = (
+            "passed" if probe_result.returncode == 0 else "failed"
+        )
+        if probe_result.returncode:
+            result["failure_class"] = "canonical_preflight"
+            result["unexpected_failure"] = (
+                probe_result.stdout + "\n" + probe_result.stderr
+            ).strip()[-2000:]
+            result["untouched"] = [
+                {"repository": str(plan.root), "installs": [str(item) for item in plan.installs]}
+                for plan in plans
+            ]
+            result["duration_s"] = round(time.monotonic() - started, 3)
+            result["completed_at"] = datetime.now(UTC).isoformat()
+            result["exit_code"] = 1
+            return result
+        suite_result = runner(suite_argv, canonical)
         result["canonical_suite_runs"] = 1
         if suite_result.returncode:
             result["failure_class"] = "canonical_preflight"
@@ -531,7 +728,7 @@ def coordinate_release(
             result["skipped"].append(entry)
             result["conflicts"].append(entry)
             continue
-        if plan.committed_kit_policy == "opt_out":
+        if plan.committed_kit_policy == "opt_out" and not include_opt_out:
             result["skipped"].append(
                 {
                     "repository": str(plan.root),
@@ -543,7 +740,29 @@ def coordinate_release(
             )
             continue
 
-        preflight_errors = preflight_repository(plan, manifest)
+        migration_skips = [
+            disposition
+            for install in plan.installs
+            if (disposition := release_disposition(install)) is not None
+        ]
+        if migration_skips:
+            result["skipped"].append(
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                    "classification": "tracked_private_artifacts_unresolved",
+                    "reason": migration_skips[0]["reason"],
+                    "migration_reference": migration_skips[0]["migration_reference"],
+                }
+            )
+            continue
+
+        preflight_errors = preflight_repository(
+            plan,
+            manifest,
+            canonical=canonical,
+            adopt_unresolved_managed=adopt_unresolved_managed,
+        )
         if preflight_errors:
             entry = {
                 "repository": str(plan.root),
@@ -660,6 +879,10 @@ def coordinate_release(
                 if (Path(install) / "reflexion_producer.py").is_file()
             },
         }
+    if not result["skipped"] and not result["unexpected_failure"] and not dry_run:
+        result["release_handoffs_completed"] = release_handoff.complete_pending_handoffs(
+            canonical, manifest, "coordinator-release-report"
+        )
     result["duration_s"] = round(time.monotonic() - started, 3)
     result["completed_at"] = datetime.now(UTC).isoformat()
     result["exit_code"] = 1 if result["skipped"] or result["unexpected_failure"] else 0
@@ -678,6 +901,19 @@ def main() -> int:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--metrics-out", type=Path)
+    parser.add_argument(
+        "--adopt-unresolved-managed",
+        action="store_true",
+        help=(
+            "operator-authorized replacement of provenance-unresolved files "
+            "inside the exact managed release allowlist"
+        ),
+    )
+    parser.add_argument(
+        "--include-opt-out",
+        action="store_true",
+        help="operator-authorized one-release override of committed_kit: opt_out",
+    )
     args = parser.parse_args()
 
     canonical = Path(__file__).resolve().parent
@@ -703,10 +939,19 @@ def main() -> int:
         for path in sync.find_nightshift_dirs(args.root.resolve())
         if path.resolve() != canonical.resolve()
     ]
-    result = coordinate_release(canonical, installs, manifest, dry_run=args.dry_run)
+    result = coordinate_release(
+        canonical,
+        installs,
+        manifest,
+        dry_run=args.dry_run,
+        adopt_unresolved_managed=args.adopt_unresolved_managed,
+        include_opt_out=args.include_opt_out,
+    )
     result["rerun_command"] = (
         f"python3 {canonical / 'release_coordinator.py'}"
         f" --root {args.root.resolve()} --apply"
+        + (" --adopt-unresolved-managed" if args.adopt_unresolved_managed else "")
+        + (" --include-opt-out" if args.include_opt_out else "")
     )
     output = args.metrics_out or canonical / "reports" / "_wip" / (
         f"release-{manifest['kit_version']}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"

@@ -58,6 +58,8 @@ except ImportError:  # pragma: no cover - environment guard
     print("Error: PyYAML is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+from loop_events import PHASE_IDS, PHASE_MEASUREMENT_STATES, load_events
+
 # status enum accepted by analyze_metrics.py / validate_metrics.py
 STATUS_ENUM = {"completed", "failed", "blocked", "discarded", "partial"}
 # additive controlled vocabulary for reports + cross-run mining
@@ -74,6 +76,8 @@ BLOCKER_CLASS_ENUM = {
     "unknown",
 }
 BLOCKER_SCOPE_ENUM = {"none", "in_scope", "out_of_scope", "mixed", "unknown"}
+ORDINARY_WAIT_CATEGORY_ENUM = {"test_runtime", "api_runtime"}
+MISSING_CAPABILITY_ENUM = {"browser_runtime", "api_runtime", "test_runtime"}
 
 # SPEC-130: emission-time vocabulary normalization. VOCABULARY.md is the
 # instruction; this table is the mechanism. Synonyms observed in the
@@ -167,6 +171,77 @@ WEIGHTS = {
     "completion_verification": 3,
     "review": 2,
 }
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def derive_phase_measurements(events, run_id: str, spec_id: str) -> dict:
+    """Pair controlled phase boundaries for one run without inventing a finish.
+
+    A retry creates another measured interval for the same phase; the emitted
+    duration is their sum. Overlapping starts are rejected as unavailable,
+    preventing double-counting of nested/retried events.
+    """
+    result = {phase: {"duration_s": 0, "measurement_state": "unavailable"} for phase in PHASE_IDS}
+    starts: dict[str, datetime] = {}
+    totals = {phase: 0.0 for phase in PHASE_IDS}
+    states: dict[str, str] = {}
+    invalid: set[str] = set()
+    for event in events:
+        if event.get("run_id") != run_id or event.get("spec_id") != spec_id:
+            continue
+        phase = event.get("phase")
+        if phase not in PHASE_IDS:
+            continue
+        event_type = event.get("event")
+        ts = _parse_timestamp(event.get("ts"))
+        if event_type == "phase_started":
+            if ts is None or phase in starts:
+                invalid.add(phase)
+            else:
+                starts[phase] = ts
+        elif event_type == "phase_finished":
+            state = event.get("measurement_state")
+            if state not in PHASE_MEASUREMENT_STATES:
+                invalid.add(phase)
+                continue
+            if state == "measured":
+                start = starts.pop(phase, None)
+                if start is None or ts is None or ts < start:
+                    invalid.add(phase)
+                else:
+                    totals[phase] += (ts - start).total_seconds()
+                    states[phase] = "measured"
+            else:
+                starts.pop(phase, None)
+                states[phase] = state
+    for phase in starts:
+        states[phase] = "interrupted"
+    for phase in PHASE_IDS:
+        state = "unavailable" if phase in invalid else states.get(phase, "unavailable")
+        result[phase] = {"duration_s": totals[phase] if state == "measured" else 0, "measurement_state": state}
+    return result
+
+
+def apply_phase_measurements(metrics: dict, measurements: dict, run_id: str) -> None:
+    """Project event timing onto schema phase objects, retaining coordinator phases."""
+    phases = metrics["phases"]
+    for phase, timing in measurements.items():
+        phases.setdefault(phase, {}).update(timing)
+    metrics["run_id"] = run_id
+    metrics["spec_duration_s"] = sum(
+        timing["duration_s"] for timing in measurements.values()
+        if timing["measurement_state"] == "measured"
+    )
+    metrics["spec_duration_state"] = (
+        "measured" if any(t["measurement_state"] == "measured" for t in measurements.values())
+        else "unavailable"
+    )
 
 
 def _run_git(repo: Path, args: list[str]) -> str:
@@ -309,26 +384,26 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
         "review_mode": cfg["review_mode"],
         "phases": {
             "execution_mode": args.execution_mode,
-            "preflight": {"clean_tree": True, "initial_tests_pass": True, "duration_s": 0},
+            "preflight": {"clean_tree": True, "initial_tests_pass": True, "duration_s": 0, "measurement_state": "unavailable"},
             "context_load": {
                 "files_read": args.files_read,
                 "knowledge_entries_used": args.knowledge_used,
-                "duration_s": 0,
+                "duration_s": 0, "measurement_state": "unavailable",
             },
-            "test_planning": {"duration_s": 0},
+            "test_planning": {"duration_s": 0, "measurement_state": "unavailable"},
             "test_writing": {
                 "tests_written": args.tests_total,
                 "tests_failing": max(0, args.tests_total - args.tests_passed),
-                "duration_s": 0,
+                "duration_s": 0, "measurement_state": "unavailable",
             },
             "implementation": {
                 "files_created": 0,
                 "files_modified": git["files_changed"],
                 "lines_added": git["lines_added"],
                 "lines_removed": git["lines_removed"],
-                "duration_s": 0,
+                "duration_s": 0, "measurement_state": "unavailable",
             },
-            "review": {"cycles": args.review_cycles, "issues_found": []},
+            "review": {"cycles": args.review_cycles, "issues_found": [], "duration_s": 0, "measurement_state": "unavailable"},
             "validation": {
                 "build_pass": args.build_pass,
                 "build_errors": 0,
@@ -337,11 +412,12 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
                 "tests_passed": args.tests_passed,
                 "lint_errors": args.lint_errors,
                 "type_errors": args.type_errors,
-                "duration_s": 0,
+                "duration_s": 0, "measurement_state": "unavailable",
             },
             "completion_verification": {
                 "acceptance_criteria_met": status == "completed",
                 "no_regression": True,
+                "duration_s": 0, "measurement_state": "unavailable",
             },
         },
         "satisfaction": compute_satisfaction(
@@ -379,6 +455,35 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
             or _ROOT_CAUSE_BY_ERROR_TYPE.get(args.error_type, generic_cause),
             "suggestion": args.error_suggestion
             or _SUGGESTION_BY_ERROR_TYPE.get(args.error_type, generic_fix),
+        }
+    ordinary_wait_category = getattr(args, "ordinary_wait_category", "")
+    if ordinary_wait_category:
+        missing_capability = args.missing_capability
+        metrics["resolution"] = {
+            "run_id": f"ordinary-wait:{args.spec_id}:{args.started_at}",
+            "stage": "kickoff_gate",
+            "attempt": 1,
+            "prior_outcome": "none",
+            "final_outcome": "waiting_external_input",
+            "evidence_gate": {
+                "report_exists": "unknown",
+                "tests_passed": "fail" if args.tests_total > args.tests_passed else "unknown",
+                "code_changed": "unknown",
+                "acs_covered": "unknown",
+            },
+            "blocker_class": "none",
+            "blocker_scope": "none",
+            "unblock_attempts": 0,
+            "unblock_limit": 1,
+            "automatic_unblock_succeeded": False,
+            "later_session_required": False,
+            "resolution_latency_s": 0,
+            "ordinary_wait": {
+                "category": ordinary_wait_category,
+                "missing_capability": missing_capability,
+                "resolution_state": "awaiting_capability",
+                "next_action": f"provide {missing_capability} and rerun the evidence gate",
+            },
         }
     return metrics
 
@@ -709,6 +814,8 @@ def main_mark_commit(argv) -> int:
     p = argparse.ArgumentParser(description="Emit metrics from a mark-done/blocked commit.")
     p.add_argument("--mark-commit", required=True, help="commit SHA (e.g. HEAD)")
     p.add_argument("--repo", default=".")
+    p.add_argument("--events-file", default="", help="Run events JSONL used for measured phase timing")
+    p.add_argument("--run-id", default="", help="Stable run id required with --events-file")
     p.add_argument("--model", default="")
     p.add_argument("--harness", default="")
     p.add_argument("--dry-run", action="store_true")
@@ -861,9 +968,13 @@ def parse_args(argv=None):
     p.add_argument("--error-desc", default="")
     p.add_argument("--error-root-cause", default="")
     p.add_argument("--error-suggestion", default="")
+    p.add_argument("--ordinary-wait-category", choices=sorted(ORDINARY_WAIT_CATEGORY_ENUM))
+    p.add_argument("--missing-capability", choices=sorted(MISSING_CAPABILITY_ENUM))
     p.add_argument("--metrics-dir", default=".nightshift/metrics")
     p.add_argument("--config", default=".nightshift/config.yaml")
     p.add_argument("--repo", default=".")
+    p.add_argument("--events-file", default="", help="Run events JSONL used for measured phase timing")
+    p.add_argument("--run-id", default="", help="Stable run id required with --events-file")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
 
@@ -877,6 +988,11 @@ def main(argv=None) -> int:
     args.build_pass = args.build_pass == "true"
     # SPEC-130: normalize once at entry; build_metrics picks up status_raw.
     args.status, args.status_raw = normalize_status(args.status)
+
+    if bool(args.ordinary_wait_category) != bool(args.missing_capability):
+        p_error = "ordinary evidence waits require both --ordinary-wait-category and --missing-capability"
+        print(f"Error: {p_error}", file=sys.stderr)
+        return 2
 
     if args.status != "completed" and not (args.error_type and args.error_desc):
         print(
@@ -892,6 +1008,13 @@ def main(argv=None) -> int:
     git = derive_git(Path(args.repo))
     cfg = derive_config(Path(args.config), model_override=args.model, harness_override=args.harness)
     metrics = build_metrics(args, git, cfg)
+    if args.events_file or args.run_id:
+        if not (args.events_file and args.run_id):
+            print("Error: --events-file and --run-id must be supplied together", file=sys.stderr)
+            return 2
+        apply_phase_measurements(
+            metrics, derive_phase_measurements(load_events(Path(args.events_file)), args.run_id, args.spec_id), args.run_id
+        )
 
     metrics_dir = Path(args.metrics_dir)
     seq = next_sequence(metrics_dir, date)

@@ -26,6 +26,10 @@ class StatusStoreError(RuntimeError):
     """Raised when the durable status store cannot be used safely."""
 
 
+class LifecyclePersistenceError(StatusStoreError):
+    """A coordinator transition could not durably establish its checkpoint."""
+
+
 @dataclass(frozen=True)
 class StatusCheckpoint:
     checkpoint_id: int
@@ -189,6 +193,39 @@ class StatusStore:
         if row is None:
             raise StatusStoreError("status checkpoint insert was not readable")
         return _checkpoint_from_row(row).to_dict()
+
+    def transition_commit_backed(self, spec_path: Path, status: str, *, run_id: str,
+                                source: str = "coordinator", note: str | None = None) -> dict[str, Any]:
+        """Write the coordinator checkpoint before tracked frontmatter.
+
+        This ordering prevents a store outage from producing a false terminal
+        frontmatter result. A subsequent file-write failure retains a precise,
+        append-only recovery checkpoint instead of silently claiming success.
+        """
+        from spec_frontmatter import parse_spec_file, write_spec_frontmatter
+
+        path = Path(spec_path).resolve()
+        spec_id = str(parse_spec_file(path).frontmatter.get("id") or "")
+        if not spec_id:
+            raise LifecyclePersistenceError(f"spec id missing from {path.name}")
+        try:
+            checkpoint = self.update_state(
+                spec_id, status, run_id=run_id, source=source, note=note,
+                payload={"spec_path": str(path), "canonical_spec_path": str(path)},
+            )
+        except Exception as exc:
+            raise LifecyclePersistenceError(
+                f"durable lifecycle checkpoint failed; frontmatter unchanged; "
+                f"recovery: rerun coordinator transition for {spec_id}"
+            ) from exc
+        try:
+            write_spec_frontmatter(path, lambda fm: {**fm, "status": status})
+        except Exception as exc:
+            raise LifecyclePersistenceError(
+                f"checkpoint {checkpoint['checkpoint_id']} persisted but frontmatter write failed; "
+                f"recovery: reconcile {path.name} to {status}"
+            ) from exc
+        return checkpoint
 
     def get_state_history(self, spec_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         sql = """

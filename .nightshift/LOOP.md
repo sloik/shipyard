@@ -505,6 +505,26 @@ parent before any status, branch, worktree, or agent mutation; a same-session
 resume reuses the claim. Coordinator failures warn and continue because the
 claim is advisory, and the report records acquired/reused/skipped state.
 
+When a kickoff worker completion event arrives, the parent immediately begins its
+evidence gate and terminal-resolution clock. `awaiting parent integration` may
+describe only that in-process gate; it cannot persist after the completion event
+or require a human status ping to advance. The parent resolves to `done` after a
+passing gate, or follows the controller-backed one bounded unblock pass and
+then resolves to `done` or `blocked`, recording the terminal state and elapsed
+time in parent progress before it is idle.
+
+Before the worker writes `heartbeat_state: worker-started`, a completion with a
+launch/harness error is instead a `launch_failure`: record its timestamp,
+sanitized evidence, launch result, and heartbeat state immediately rather than
+waiting for the 20/40-minute stale-heartbeat ladder. The parent may dispatch one
+and only one narrowed, isolated retry if the error is retryable and requires no
+human input or unsafe action. A second pre-start failure, or an ineligible first
+failure, uses the existing controller-backed blocked-resolution contract with
+`blocker_class: launch_failure`, preserved evidence, and the next safe action;
+it launches no further worker. A retry that reaches `worker-started` returns to
+ordinary heartbeat and evidence-gate handling while its final report retains the
+initial failure.
+
 **What to do:**
 1. Read `specs/` and collect all specs with `status: ready`
 2. Apply the **Task Selection Algorithm** (see below)
@@ -1797,11 +1817,13 @@ events_logger.emit(
 )
 ```
 
-**Durations:** you do not capture or compute per-phase durations by hand.
-`record_metrics.py` records run-level `started_at` / `completed_at` from
-`$LOOP_START` / `$LOOP_END` and sets per-phase `duration_s` to `0` (the loop does
-not collect per-phase wall-clock timing). The only timestamps you provide are the
-two run-level shell values above.
+**Durations:** do not estimate durations. The coordinator emits
+`phase_started`/`phase_finished` events at each controlled boundary (admission,
+preflight, context load, test planning/writing, implementation, review,
+validation, evidence gate, recovery, merge, terminal recording). Pass the event
+file and stable run ID to `record_metrics.py`; it derives durations mechanically.
+Use `skipped`, `interrupted`, or `unavailable` when a phase has no completed
+measurement. A zero duration means only a measured zero-length phase.
 
 **Never fabricate timestamps.** A `duration_s: 0` is more honest than a
 `duration_s: 900` that was never measured — which is exactly why the script writes
@@ -1839,7 +1861,8 @@ the richer fields; the hook already emits the row at mark-done. NOT a required s
      comparison metrics exist for. The override wins over config.
    - Other fields you don't pass are **derived** (harness / loop_version / review_mode
      from `config.yaml`; files / lines / commit hash+message from git) or default to
-     zero. Never fabricate values — `duration_s: 0` is more honest than an estimate.
+     zero. Never fabricate values — pass `--events-file` and `--run-id` to obtain
+     automatic timing; old rows without those inputs remain explicitly unavailable.
    - The script writes `metrics/YYYY-MM-DD_NNN_<spec-id>.yaml` in the schema
      `validate_metrics.py` consumes. Do not also hand-write a YAML.
 2. Commit: `metrics: log SPEC-XXX completion`
@@ -2120,11 +2143,14 @@ When any stall signal triggers:
 5. **Log metrics** with `status: discarded` and full failure details
 6. **Mark spec as `status: blocked`** in its frontmatter (update the spec file).
    Parent kickoff exception: when this run was launched by the board-copied
-   `/nightshift kickoff <SPEC-ID>` prompt, the parent kickoff agent must
-   coordinate one focused unblock pass before committing a blocked status unless
-   the blocker requires human/external input, the unblock task is not actionable,
-   or continuing would be unsafe. If the spec is still blocked afterward, the
-   Block Reason must include the unblock attempt or why it was skipped.
+   `/nightshift kickoff <SPEC-ID>` prompt, the parent kickoff agent owns the
+   controller-backed unblock protocol: `unblock_spec.py prepare`,
+   `record_attempt`, and `finalize`. The worker never changes lifecycle state or
+   merges. Ineligible external, unsafe, destructive, scope-changing, or ambiguous
+   cases are recorded as controlled skips; verified recovery moves only
+   `blocked -> ready`. The Block Reason/report includes the attempt artifact,
+   evidence references, human-action flag, and causal confidence; say
+   `not_established` when before/after evidence does not prove why it worked.
    Exception: NFR-family specs (`id: NFR-*` or `type: nfr`) are never blocked.
    Keep or normalize them to `status: active` (unless already `retired`) and
    record the pending/failure state under `## Active Run State`, `## Pending

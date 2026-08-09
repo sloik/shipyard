@@ -760,12 +760,18 @@ def compute_trends(metrics, lookback=DEFAULT_LOOKBACK):
     # Average spec duration
     spec_durations = []
     for metric in recent:
-        # Sum all phase durations
+        # Event-derived total is authoritative. Legacy all-zero rows are absent,
+        # not evidence of a fast run.
+        if metric.get("spec_duration_state") == "measured":
+            spec_durations.append(metric.get("spec_duration_s", 0))
+            continue
+        # Backwards-compatible fallback for historical measured rows.
         phases = metric.get("phases", {})
         duration = 0
         for phase_name, phase_data in phases.items():
             if isinstance(phase_data, dict):
-                duration += phase_data.get("duration_s", 0)
+                if phase_data.get("measurement_state") in (None, "measured"):
+                    duration += phase_data.get("duration_s", 0)
         if duration > 0:
             spec_durations.append(duration)
 
@@ -856,7 +862,8 @@ def compute_phase_breakdown(metrics):
                 continue
 
             duration = phase_data.get("duration_s")
-            if duration is None:
+            state = phase_data.get("measurement_state")
+            if duration is None or state not in (None, "measured"):
                 continue
 
             if phase_name not in phase_durations:
@@ -868,17 +875,25 @@ def compute_phase_breakdown(metrics):
     phases_ranked = []
     for phase_name, durations in phase_durations.items():
         avg_duration = sum(durations) / len(durations)
+        durations.sort()
+        count = len(durations)
+        p90 = durations[max(0, int((count - 1) * 0.9))] if count >= 2 else "N/A"
         phases_ranked.append({
             "name": phase_name,
             "average_duration_s": avg_duration,
-            "runs": len(durations),
+            "runs": count,
+            "median_duration_s": durations[count // 2] if count % 2 else (durations[count // 2 - 1] + durations[count // 2]) / 2,
+            "p90_duration_s": p90,
         })
 
     phases_ranked.sort(key=lambda p: p["average_duration_s"], reverse=True)
 
+    total_average = sum(p["average_duration_s"] for p in phases_ranked)
+    for phase in phases_ranked:
+        phase["share"] = phase["average_duration_s"] / total_average if total_average else "N/A"
     return {
         "phases": phases_ranked,
-        "total_average_s": sum(p["average_duration_s"] for p in phases_ranked),
+        "total_average_s": total_average,
     }
 
 
@@ -1260,6 +1275,11 @@ def compute_resolution_analytics(metrics):
     deferred_recoveries = 0
     blocker_classes = Counter()
     final_latencies = []
+    captured = []
+    capability_eligible = capability_failures = recovery_eligible = recovery_successes = 0
+    fresh_worker_eligible = fresh_worker_successes = premature_blocks = 0
+    ordinary_wait_categories = Counter()
+    ordinary_wait_states = Counter()
 
     for rows in runs.values():
         rows.sort(key=lambda item: item.get("attempt", 0))
@@ -1286,9 +1306,28 @@ def compute_resolution_analytics(metrics):
         )
         if blocker:
             blocker_classes[blocker] += 1
+        ordinary_wait = next(
+            (row.get("ordinary_wait") for row in rows if isinstance(row.get("ordinary_wait"), dict)),
+            None,
+        )
+        if ordinary_wait is not None:
+            ordinary_wait_categories[ordinary_wait.get("category", "unknown")] += 1
+            ordinary_wait_states[ordinary_wait.get("resolution_state", "unknown")] += 1
         latency = rows[-1].get("resolution_latency_s")
         if isinstance(latency, (int, float)) and not isinstance(latency, bool):
             final_latencies.append(float(latency))
+        captured.extend(row for row in rows if row.get("attempt_result"))
+        recovery = rows[-1].get("recovery") or {}
+        if recovery.get("capability_eligible") is True:
+            capability_eligible += 1
+            capability_failures += recovery.get("capability_failed") is True
+        if recovery.get("automatic_recovery_eligible") is True:
+            recovery_eligible += 1
+            recovery_successes += recovery.get("automatic_recovery_succeeded") is True
+        if recovery.get("fresh_worker_eligible") is True:
+            fresh_worker_eligible += 1
+            fresh_worker_successes += recovery.get("fresh_worker_rescued") is True
+        premature_blocks += recovery.get("premature_block_overturned") is True
 
     run_count = len(runs)
     final_latencies.sort()
@@ -1318,8 +1357,31 @@ def compute_resolution_analytics(metrics):
             deferred_recoveries / run_count if run_count else 0.0
         ),
         "blocker_classes": dict(sorted(blocker_classes.items())),
+        "ordinary_wait_count": sum(ordinary_wait_categories.values()),
+        "ordinary_wait_category_counts": dict(sorted(ordinary_wait_categories.items())),
+        "ordinary_wait_resolution_states": dict(sorted(ordinary_wait_states.items())),
+        "ordinary_wait_rate": (
+            sum(ordinary_wait_categories.values()) / run_count if run_count else "N/A"
+        ),
         "median_resolution_latency_s": median_latency,
+        # Attempt fields are absent from historical rows; N/A makes that
+        # distinction explicit instead of presenting an invented zero rate.
+        "attempt_capture_rate": (len(captured) / run_count if run_count else "N/A"),
+        "causal_confidence_distribution": dict(Counter(
+            row.get("causal_confidence") for row in captured
+        )),
+        "capability_failure_rate": _ratio_metric(capability_failures, capability_eligible),
+        "automatic_recovery_success_rate": _ratio_metric(recovery_successes, recovery_eligible),
+        "fresh_worker_rescue_rate": _ratio_metric(fresh_worker_successes, fresh_worker_eligible),
+        "premature_block_rate": _ratio_metric(premature_blocks, run_count),
     }
+
+
+def _ratio_metric(numerator, denominator):
+    """Return a rate with an explicit zero-sample state."""
+    if not denominator:
+        return {"numerator": numerator, "denominator": 0, "value": "N/A", "sample_state": "no_samples"}
+    return {"numerator": numerator, "denominator": denominator, "value": numerator / denominator, "sample_state": "observed"}
 
 
 def generate_markdown_report(
@@ -1422,6 +1484,13 @@ def generate_markdown_report(
                 for name, count in resolution["blocker_classes"].items()
             )
             lines.append(f"- **Blocker classes:** {counts}")
+        lines.append(f"- **Ordinary evidence waits:** {resolution['ordinary_wait_count']}")
+        if resolution["ordinary_wait_category_counts"]:
+            counts = ", ".join(
+                f"{name}={count}"
+                for name, count in resolution["ordinary_wait_category_counts"].items()
+            )
+            lines.append(f"- **Ordinary wait categories:** {counts}")
         lines.append("")
 
     # Model comparison

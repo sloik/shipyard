@@ -12,6 +12,24 @@ from pathlib import Path
 
 MARKER = "release-marker.json"
 
+CANONICAL_SUITE = {
+    "runner": "uv",
+    "dependencies": [
+        "pytest",
+        "pyyaml",
+        "fastapi",
+        "uvicorn[standard]",
+        "httpx",
+        "playwright",
+    ],
+    "probe": [
+        "python",
+        "-c",
+        "import fastapi,httpx,playwright,pytest,uvicorn,yaml",
+    ],
+    "command": ["python", "-m", "pytest", "-q", "tests"],
+}
+
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -95,7 +113,11 @@ def build_manifest(
                 "('board.py','release.py','reflexion_producer.py')]\""
             )
         ],
-        "canonical_suite": "python3 -m pytest -q tests",
+        # The coordinator materializes this declaration as one `uv run`
+        # environment for both the capability probe and suite.  Never replace
+        # it with ambient `python3`: launchd and fresh shells may resolve a
+        # Python that lacks the board/test dependencies.
+        "canonical_suite": CANONICAL_SUITE,
         "migration_checks": ["python3 validate_specs.py specs/"],
     }
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -170,6 +192,8 @@ def verify_install(install: Path, manifest: dict) -> tuple[bool, list[str]]:
         if (
             marker_data.get("fingerprint") != manifest["fingerprint"]
             or marker_data.get("kit_version") != manifest["kit_version"]
+            or marker_data.get("schema_version") != manifest["schema_version"]
+            or marker_data.get("release_manifest") != manifest
         ):
             errors.append("release marker is not exact")
     return not errors, errors
@@ -196,6 +220,10 @@ def apply_install(
                 "kit_version": manifest["kit_version"],
                 "fingerprint": manifest["fingerprint"],
                 "schema_version": manifest["schema_version"],
+                # Retain the complete, fingerprint-bound per-file evidence.  An
+                # aggregate release fingerprint alone cannot prove whether one
+                # later project delta is an older canonical copy.
+                "release_manifest": manifest,
             },
             sort_keys=True,
         )

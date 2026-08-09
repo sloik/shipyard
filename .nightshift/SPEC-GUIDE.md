@@ -8,6 +8,54 @@
 
 **Reference:** For the complete spec template and all sections, see `_TEMPLATE.md`. This guide references the template but does not duplicate its content.
 
+**Public-project artifact migration (SPEC-191):** Treat tracked reports,
+metrics, knowledge, checkpoints, and run artifacts as a migration concern, not
+a release-copy concern. Run `observability_enroll.py audit` first, review its
+path classifications, then migrate the hash-verified private copy before
+explicitly approving any future-index cleanup. Never infer authority for a
+history rewrite: `history-remediation` is a separate dry-run-first operator
+operation with ref inventory and post-rewrite leak evidence.
+
+**Release handoff (SPEC-189):** When a spec changes a managed canonical protocol,
+runtime helper, schema, hook, config reference, or synced skill, add
+`release_handoff: {impact: required}` and create the matching portable
+`release-handoffs/<SPEC-ID>.json` artifact. Documentation-only or non-managed
+work must instead record `impact: exempt` with a reason. A release-impact spec
+cannot become `done` until the artifact validates; only `/nightshift release`
+can fulfil its pending handoff after the full managed-kit rollout.
+
+**Historical checkbox dispositions (SPEC-204):** A project that has deliberately
+preserved unchecked Requirements or Acceptance Criteria in historical `done`
+specs may keep an optional project-owned evidence file at
+`.nightshift/historical-checkbox-status-dispositions.json`. It is not part of the
+managed kit or release manifest. Its schema is:
+
+```json
+{
+  "entries": {
+    "SPEC-001-example.md": {
+      "disposition": "intentional_historical_record",
+      "findings": [
+        {
+          "line": 42,
+          "section": "Requirements",
+          "text": "- [ ] Historical requirement text"
+        }
+      ]
+    }
+  }
+}
+```
+
+The only dispositions are `intentional_historical_record` and
+`unresolved_evidence_gap`. The filename key and the ordered `findings` list must
+exactly match every current unchecked item by line, section, and checkbox text.
+An exact match emits a visible warning, including the disposition and count; it
+never checks an item or claims implementation. An absent, malformed, partial,
+stale, reordered, or unknown-disposition entry retains the ordinary errors.
+Finding drift therefore requires a fresh explicit review and disposition. Tools
+must not generate, renew, or silently rebaseline this evidence.
+
 **Template v4 rules (2026-04-16):** New specs must follow three quality rules codified via EVOLVE-007/008/009:
 1. **`devkb_required:`** frontmatter is REQUIRED for `type: feature/bugfix/refactor` when stack is code. List the DevKB filenames the agent must read (e.g., `[python.md, architecture.md]`).
 2. **Live Execution Checklist** section is REQUIRED for `type: feature` unless the change is a single-file CSS/text fix. Specs must trace the live execution path, not claim done on build + unit tests alone.

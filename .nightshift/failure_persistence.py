@@ -46,6 +46,12 @@ try:
 except Exception:  # pragma: no cover - deployed copies may not include SPEC-CTX-CORE-017 yet
     record_failure_reflexion = None
 
+try:
+    from lifecycle import classify_ordinary_evidence_wait
+except Exception:  # pragma: no cover - deployed copies may omit SPEC-206
+    def classify_ordinary_evidence_wait(error_type: str) -> dict[str, str] | None:
+        return None
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write text atomically to destination path."""
@@ -276,6 +282,49 @@ def mark_spec_blocked(spec_path: Path, reason: str) -> bool:
     return True
 
 
+def mark_spec_waiting_external_input(spec_path: Path, wait: Dict[str, str]) -> bool:
+    """Record a safe, actionable ordinary wait without changing lifecycle status."""
+    if not spec_path.exists():
+        return False
+    original = spec_path.read_text(encoding="utf-8")
+    if not original.startswith("---\n"):
+        return False
+    end = original.find("\n---\n", 4)
+    if end == -1:
+        return False
+    frontmatter, body = original[4:end], original[end + 5:]
+    fm = _parse_frontmatter(frontmatter, spec_path)
+    if is_eval_fixture(fm, spec_path):
+        return False
+    lines = frontmatter.splitlines()
+    external_line = f"external_input: {wait['missing_capability']}"
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*external_input\s*:", line):
+            lines[index] = external_line
+            break
+    else:
+        lines.append(external_line)
+    section = (
+        "## Waiting for External Input\n\n"
+        f"- Category: `{wait['category']}`\n"
+        f"- Missing capability: `{wait['missing_capability']}`\n"
+        f"- Next action: {wait['next_action']}\n\n"
+    )
+    if "## Waiting for External Input" not in body:
+        title = re.search(r"(?m)^# .*$", body)
+        if title:
+            insert_at = body.find("\n", title.end())
+            body = body[:insert_at + 1] + "\n" + section + body[insert_at + 1:]
+        else:
+            body = "\n" + section + body.lstrip()
+    updated_frontmatter = "\n".join(lines)
+    content = f"---\n{updated_frontmatter}\n---\n{body}"
+    if content == original:
+        return False
+    _atomic_write_text(spec_path, content)
+    return True
+
+
 def persist_failure(
     project_root: Path,
     source_file: str,
@@ -296,6 +345,7 @@ def persist_failure(
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     source_stem = Path(source_file).stem
 
+    ordinary_wait = classify_ordinary_evidence_wait(error_type)
     event = {
         "timestamp": ts,
         "status": status,
@@ -306,6 +356,8 @@ def persist_failure(
         "details": details or {},
         "spec_file": spec_file,
     }
+    if ordinary_wait is not None:
+        event["ordinary_wait"] = ordinary_wait
 
     # 1) durable per-event artifact
     report_path = project_root / "reports" / "failures" / f"{ts}-{source_stem}.json"
@@ -338,19 +390,24 @@ def persist_failure(
         except TraceExportError as exc:
             trace_export_error = str(exc)
 
-    # 3) best-effort spec block update
+    # 3) best-effort lifecycle update. Expected missing evidence capabilities
+    # are ordinary waits; they must not consume the critical unblock path.
     spec_update = "skipped"
     if spec_file:
         spec_path = (project_root / spec_file).resolve()
         if spec_path.exists():
-            reason = (
-                "Automatically blocked due to persisted failure.\n\n"
-                f"- Error type: `{error_type}`\n"
-                f"- Source: `{source_file}`\n"
-                f"- Description: {description}\n"
-            )
-            updated = mark_spec_blocked(spec_path, reason)
-            spec_update = "updated" if updated else "unchanged"
+            if ordinary_wait is not None:
+                updated = mark_spec_waiting_external_input(spec_path, ordinary_wait)
+                spec_update = "waiting_external_input" if updated else "unchanged"
+            else:
+                reason = (
+                    "Automatically blocked due to persisted failure.\n\n"
+                    f"- Error type: `{error_type}`\n"
+                    f"- Source: `{source_file}`\n"
+                    f"- Description: {description}\n"
+                )
+                updated = mark_spec_blocked(spec_path, reason)
+                spec_update = "updated" if updated else "unchanged"
         else:
             spec_update = "not_found"
 

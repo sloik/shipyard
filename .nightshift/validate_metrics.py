@@ -119,6 +119,19 @@ def validate_phases(data):
         errors.append("'phases' must be a dictionary")
         return errors
 
+    controlled_states = {"measured", "skipped", "interrupted", "unavailable"}
+    for phase_name, phase in phases.items():
+        if phase_name == "execution_mode" or not isinstance(phase, dict):
+            continue
+        duration = phase.get("duration_s")
+        state = phase.get("measurement_state")
+        if state is not None and state not in controlled_states:
+            errors.append(f"'phases.{phase_name}.measurement_state' is invalid")
+        if state in {"skipped", "interrupted", "unavailable"} and duration not in (None, 0):
+            errors.append(f"'phases.{phase_name}' may only have duration_s 0 when not measured")
+        if state == "measured" and duration is None:
+            errors.append(f"'phases.{phase_name}.duration_s' is required when measured")
+
     # Required phase names
     required_phases = [
         "execution_mode",
@@ -490,7 +503,7 @@ def validate_resolution(data):
     enums = {
         "stage": {"kickoff_gate", "recovery"},
         "prior_outcome": {"none", "done", "blocked"},
-        "final_outcome": {"done", "blocked"},
+        "final_outcome": {"done", "blocked", "waiting_external_input"},
         "blocker_class": {
             "none",
             "implementation",
@@ -543,6 +556,58 @@ def validate_resolution(data):
                 errors.append(
                     f"'resolution.evidence_gate.{field}' must be pass, fail, or unknown"
                 )
+    ordinary_wait = resolution.get("ordinary_wait")
+    if ordinary_wait is not None:
+        if not isinstance(ordinary_wait, dict):
+            errors.append("resolution.ordinary_wait must be a dictionary")
+        else:
+            expected = {
+                "category": {"test_runtime", "api_runtime"},
+                "missing_capability": {"browser_runtime", "api_runtime", "test_runtime"},
+                "resolution_state": {"awaiting_capability", "resolved"},
+            }
+            for field, allowed in expected.items():
+                if ordinary_wait.get(field) not in allowed:
+                    errors.append(f"invalid resolution.ordinary_wait.{field}")
+            if not isinstance(ordinary_wait.get("next_action"), str) or not ordinary_wait["next_action"].strip():
+                errors.append("resolution.ordinary_wait.next_action is required")
+        if resolution.get("final_outcome") != "waiting_external_input":
+            errors.append("ordinary_wait requires final_outcome waiting_external_input")
+        if resolution.get("unblock_attempts") != 0:
+            errors.append("ordinary_wait cannot consume unblock attempts")
+    elif resolution.get("final_outcome") == "waiting_external_input":
+        errors.append("waiting_external_input requires resolution.ordinary_wait")
+    # SPEC-185 fields are deliberately optional so historical trailer-only rows
+    # remain valid.  When an attempt is captured, its contract is complete.
+    attempt_fields = {
+        "attempt_result": {"succeeded", "failed", "skipped"},
+        "attempt_evidence_verified": {True, False},
+        "causal_confidence": {"demonstrated", "supported", "hypothesis", "not_established"},
+    }
+    if any(field in resolution for field in attempt_fields):
+        for field, allowed in attempt_fields.items():
+            if field not in resolution:
+                errors.append(f"Missing required resolution field: {field}")
+            elif resolution[field] not in allowed:
+                errors.append(f"invalid resolution.{field}")
+        duration = resolution.get("attempt_duration_s")
+        if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
+            errors.append("resolution.attempt_duration_s must be non-negative numeric")
+        if not resolution.get("attempt_artifact"):
+            errors.append("resolution.attempt_artifact is required for captured attempts")
+    recovery = resolution.get("recovery")
+    if recovery is not None:
+        if not isinstance(recovery, dict):
+            errors.append("resolution.recovery must be a dictionary")
+        else:
+            for field in (
+                "capability_eligible", "capability_failed",
+                "automatic_recovery_eligible", "automatic_recovery_succeeded",
+                "fresh_worker_eligible", "fresh_worker_rescued",
+                "premature_block_overturned",
+            ):
+                if field in recovery and not isinstance(recovery[field], bool):
+                    errors.append(f"resolution.recovery.{field} must be boolean")
     return errors
 
 

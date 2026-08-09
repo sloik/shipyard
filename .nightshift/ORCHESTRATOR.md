@@ -23,6 +23,15 @@ ignored 3 of 4 Phase 8 improvements.)
 commit format, merge strategy, and post-merge validation. This document describes
 orchestrator sequencing and references that policy.
 
+## Versioned release handoff (SPEC-189)
+
+Before recording a release-impact canonical spec as `done`, the parent verifies
+its `release_handoff` declaration and artifact against the current manifest.
+The worker never fulfils the artifact and never runs an ad-hoc sync. A pending
+handoff is fulfilled only by the serialized `/nightshift release` coordinator
+after its canonical preflight, whole-kit rollout, verification, and durable
+release report. Dirty and opted-out installs are visible safe skips.
+
 ## Kickoff Parent Progress Contract
 
 ## Kickoff Spec-Ownership Claims (SPEC-178)
@@ -64,6 +73,19 @@ inspectable:
    - Medium/large/risky spec: update at least every 10-15 minutes or after each
      major phase, whichever comes first.
 2. Write live progress to `reports/_wip/orchestrator-progress-<SPEC-ID>.md`.
+   Under worktree isolation, create the update in that worktree first and copy
+   it to the parent-provided absolute path with `/bin/cp`:
+   ```bash
+   HEARTBEAT_LOCAL="$PWD/reports/_wip/orchestrator-progress-<SPEC-ID>.md"
+   # Write the complete update locally, including `heartbeat_state: worker-started`.
+   /bin/cp "$HEARTBEAT_LOCAL" "<main-repo-abs>/reports/_wip/orchestrator-progress-<SPEC-ID>.md"
+   ```
+   The `Write` tool and direct shell redirection (`>`) to the main-checkout
+   path do not work under worktree isolation. `/bin/cp` from a worktree-local
+   file is the supported cross-worktree write path. The first successful copy
+   must replace the parent's `heartbeat_state: parent-seeded` marker with
+   `heartbeat_state: worker-started`; its absence means the heartbeat never
+   started, while a stale file containing it means the worker later stalled.
 3. Update that file with:
    - current phase,
    - last completed action,
@@ -75,13 +97,36 @@ inspectable:
    progress file and then continue the run.
 5. If the orchestrator believes the spec is blocked or cannot proceed, report
    the exact blocker, what has already been tried, latest evidence paths, and
-   the smallest focused unblock task that should be attempted next. The parent
-   kickoff agent will coordinate one unblock pass before any blocked status is
-   committed unless the blocker requires human/external input or continuing is
-   unsafe.
+   the smallest bounded recovery task. The parent applies the controller-backed
+   unblock protocol (`unblock_spec.py prepare`, `record_attempt`, `finalize`)
+   before terminal resolution. The worker supplies evidence only: the parent
+   retains lifecycle, merge, metrics, and cleanup ownership.
 
 `reports/_wip/` is intentionally used for this live progress artifact because it
 is already gitignored and reserved for in-flight run scratch state.
+
+### Immediate launch-failure recovery (SPEC-194)
+
+The stale-heartbeat ladder applies only after a worker has written
+`heartbeat_state: worker-started`. A harness rejection, or a completion before
+that marker carrying a launch/harness error, is an observable `launch_failure`,
+not a 20/40-minute stall. The parent records the timestamp, sanitized error,
+launch result, and heartbeat state in the progress artifact and run report, then
+decides before arming or waiting on the watchdog.
+
+For a retryable error that needs no human input or unsafe action, the parent makes
+exactly one focused retry: same spec/run ownership and isolation, narrowed brief
+limited to the launch blocker and one deterministic verification step. Record
+`launch_retry: 1` before dispatch. The retry worker reports evidence only and
+never changes lifecycle state or merges. If the retry reaches `worker-started`,
+ordinary liveness and evidence-gate handling resumes; the final report retains
+the initial launch-failure evidence.
+
+An ineligible first failure, or a second pre-start launch/harness failure, ends
+dispatch. The parent uses the existing controller-backed blocked-resolution
+contract with `blocker_class: launch_failure`, preserved evidence, and its next
+safe action. It performs no extra worker launch and never recasts this outcome
+as a stale heartbeat.
 
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)
@@ -135,6 +180,15 @@ Completed workers enter one coordinator-owned queue; dispatch completion does
 not mean `done`. The queue sorts candidates deterministically, compares both
 `touches:` and actual `main...branch` changed files against already accepted
 work, then rebases/reconciles each candidate onto the current main branch.
+
+The parent addresses this queue only through the integration broker. At dispatch
+the broker leases declared `touches:` plus configured release hotspots, queues
+an overlap rather than racing it, and checks main is clean and index-safe before
+each integration. A dirty main is recorded as `main_dirty_external` without
+stashing, staging, or changing user files. CHANGELOG/version/release-handoff
+surfaces are parent-owned: workers provide relative-path intents, never direct
+edits. A rebase conflict receives one bounded packet containing only conflict
+paths and refs; its terminal result is durable and never left in progress.
 
 For each accepted merge it runs the configured build/test gate from main and
 records separate evidence. A conflict or overlap holds only that candidate and
@@ -545,6 +599,20 @@ After receiving sub-agent results:
 2. Note the current timestamp (ISO 8601, e.g., `2026-03-18T14:30:00Z`) for use with `--since` filtering later
 3. Continue immediately to step 3d (Assess Result) and then to the next spec
 
+For a kickoff-parent completion notification, this continuation is mandatory and
+immediate: update parent progress with `terminal_resolution:
+evidence_gate_running` and a start timestamp, then run the evidence gate. A
+completed worker must not remain `awaiting parent integration` while the parent
+waits for a human status ping. The parent records `terminal_resolution: done` or
+`terminal_resolution: blocked` plus elapsed resolution time before it becomes
+idle. Before any failed-evidence lifecycle mutation, classify an expected
+browser/API/test-runtime absence as `waiting_external_input`: record its
+allowlisted capability category and next action in the parent resolution
+artifact, preserve `unblock_attempts: 0`, and wait for that capability. Only a
+critical, evidenced failure uses the existing controller-backed protocol for
+exactly one bounded unblock pass; every such critical outcome reaches terminal
+resolution.
+
 **Why async?** The reflection runs in the background while you work on the next spec. Insights from spec 1's reflection may be available to specs 2 and 3 in the same run, improving decision-making. See the `a2` step below for how to check for completed reflections.
 
 #### d. Assess Result
@@ -859,7 +927,7 @@ Read LOOP-DOMAIN-MAP.md and apply the `{EFFECTIVE_DOMAIN}` column for steps 1, 4
 
 4. **Write metrics to `.nightshift/metrics/`:**
    - File name: `YYYY-MM-DD_NNN_{SPEC_ID}.yaml`
-   - **METRICS FORMAT:** Your metrics YAML MUST match `metrics/_SCHEMA.md` exactly. All phase sections with `duration_s` fields are required. Do not use alternative formats (acceptance criteria checklists, freeform notes). The orchestrator will validate your metrics after completion and flag non-compliance.
+   - **METRICS FORMAT:** Your metrics YAML MUST match `metrics/_SCHEMA.md` exactly. The coordinator records controlled phase start/finish boundaries and supplies the stable run ID/event stream to `record_metrics.py`; workers never estimate timing or lifecycle/merge duration. A phase is `measured`, `skipped`, `interrupted`, or `unavailable`, never silently unknown `0`.
    - CRITICAL: Include these runtime fields from config.yaml:
      ```yaml
      loop_version: "{from config.yaml runtime.loop_version}"
@@ -915,10 +983,22 @@ Sub-agent signals failure via:
 ### Orchestrator Escalation Logic
 
 When running under `## Kickoff Parent Context`, treat a blocked/stuck result as
-an escalation to the parent kickoff agent, not as permission for the parent to
-immediately mark main blocked. Include the exact blocker, what was tried, latest
-evidence paths, and one focused unblock task. The parent kickoff agent owns the
-unblock-before-block pass.
+an escalation to the parent kickoff agent, not as permission for the worker to
+change lifecycle state or merge. Include the exact blocker, what was tried,
+latest evidence paths, and one bounded recovery task. The parent owns the
+controller-backed unblock protocol: it runs `unblock_spec.py prepare`, records
+the result with `record_attempt`, and calls `finalize` only after verified
+success. Ineligible cases are controlled skips with human escalation; a success
+is `blocked -> ready`, never a direct return to `in_progress`.
+
+For an agent-local mandatory tool failure, the parent records controlled
+recovery events through the existing run log and follows one bounded ladder:
+probe; smallest safe repair; post-repair probe; then one fresh-worker or
+transport-rebind probe if the original worker is stale. The replacement worker
+cannot mutate lifecycle state or merge. A terminal `evidence_gap` requires that
+viable alternatives were recorded as ineligible, unsafe, externally-authorized,
+or exhausted; a single cached tool failure is not a true block. Private
+projection transport may be `awaiting_sync` without changing this decision.
 
 ```python
 if sub_agent_status == "completed":

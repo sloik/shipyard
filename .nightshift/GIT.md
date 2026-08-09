@@ -66,6 +66,31 @@ source-of-truth writes must be reconciled before overwriting frontmatter.
 
 ## Commit Format
 
+### Documentation exemption (SPEC-183)
+
+`git.unprefixed_paths` lists path prefixes whose commits may use a plain
+conventional-commit subject with **no** spec ID:
+
+```yaml
+git:
+  unprefixed_paths:
+    - "Wiedza/"
+```
+
+The exemption fires only when **every** staged path is under one of those prefixes.
+A commit mixing exempt and non-exempt paths still requires `[SPEC-ID]`. The list is
+empty by default, so behaviour is unchanged unless a project opts in.
+
+**Why:** a knowledge corpus has no specs. Requiring one forces either a fabricated
+ID or `--no-verify`, and `--no-verify` also skips the secret/PII scan — so the
+strict rule was pushing operators toward the *less* safe path. In one repo it left
+an entire vault untracked for months.
+
+**Scope it to documentation trees.** Do not list source directories; spec
+traceability for code is the entire point of `commit_prefix`.
+
+### Spec-prefixed commits
+
 When `git.commit_prefix: "spec-id"`, every non-merge, non-revert commit must start
 with a spec prefix:
 
@@ -100,7 +125,12 @@ Nightshift ships two git hooks:
   is present, then runs configured `lint` and `type_check` commands from
   `.nightshift/config.yaml`.
 - `hooks/commit-msg`: enforces the `[SPEC-ID]` prefix when
-  `git.commit_prefix: "spec-id"`.
+  `git.commit_prefix: "spec-id"`, subject to `git.unprefixed_paths` (below).
+
+The scanner does not report an email address on an IETF-reserved documentation
+domain (for example, `person@example.com`). That closed RFC-derived set is owned
+by canonical `scanner.py`, including subdomains, and is not project-configurable;
+all other email domains remain subject to the PII gate.
 
 Install hooks during bootstrap:
 
@@ -111,10 +141,147 @@ cp .nightshift/hooks/commit-msg .git/hooks/commit-msg
 chmod +x .git/hooks/commit-msg
 ```
 
+### Managed install payloads are release-owned (SPEC-203)
+
+Project installs may customize `config.yaml`, specs, reports, metrics, knowledge,
+run state, and declared migration outputs. Files named by the release manifest are
+immutable release payloads: the installed pre-commit path calls the managed
+provenance helper through `scanner.py` and rejects a staged divergent payload.
+
+The read-only audit reports only relative paths and hashes, using exactly three
+evidence classes:
+
+- `exact-current` — bytes match the current canonical release manifest;
+- `retained-prior-release` — bytes match a complete, fingerprint-validated
+  per-file manifest retained in the install's earlier release marker;
+- `unresolved-divergence` — neither proof applies.
+
+An aggregate fingerprint, modification time, Git status label, or similarity is
+never per-file provenance. Missing or corrupt metadata fails closed for the
+managed path while leaving application-only commits available. Preserve an
+unresolved project delta in place, create or update a canonical Nightshift spec,
+and ship it through the guarded whole-kit release. Doctor and release preflight
+use the same audit and never rewrite the dirty worktree or index.
+
 Hooks are enforcement implementations. If this policy changes, update this file
 first, then update hooks and drift checks to match.
 
+### The kit's own detector fixtures (SPEC-197)
+
+A secret/PII detector's test suite has to contain secret-shaped and PII-shaped inputs, or
+it tests nothing — and the scanner scans its own tests. So the kit's fixture file is
+excluded from blocking, but **only** where two independent conditions agree:
+
+1. the location matches a kit-owned fixture path anchor (a closed list in `scanner.py`), and
+2. the digest of the **exact matched value** is listed in `tests/fixture_digests.txt`.
+
+Failing either leaves the finding blocking. That is what stops this being a path allowlist:
+
+- A **live credential** dropped into a file at the anchor path still blocks — its digest is
+  not registered.
+- A **registered fixture value copied into `scanner.py`, a spec, `CHANGELOG.md` or a commit
+  message** still blocks — none of those is a fixture path. This is how the SPEC-183
+  convention (literal trigger examples belong in the test file and nowhere else) became a
+  mechanism instead of a request.
+
+The registry stores digests, never values: a file full of literal fixture strings would
+trip the gate it exists to satisfy. Excluded findings are still **printed** on every run,
+marked `[kit fixture]`, so a fixture that has quietly become something else stays visible.
+
+**It is canonical-owned and not project-configurable** — no `git:` key, no environment
+variable, no CLI flag. `nightshift-sync.py` never delivers `tests/` to a project install, so
+an install has no registry, excludes nothing, and cannot widen its own gate by editing a
+vendored file. A missing registry is normal, not an error.
+
+**To add a fixture:** stage it, run the hook, and copy the digest from the blocking line the
+scanner prints. Do not compute it by hand — the digest covers the exact substring the rule
+matched, which routinely includes a trailing quote.
+
+### Order of remedies, when the gate fires
+
+1. **Is the finding wrong?** Fix the pattern's precision (SPEC-183, SPEC-198). Best outcome:
+   nobody has to remember anything.
+2. **Is it a kit detector fixture?** It is already handled by the mechanism above.
+3. **Is it real PII you have reviewed and judged safe to commit?** Acknowledge that one
+   value (below). Scoped, expiring, and a tracked diff.
+4. **Is it a secret you have confirmed is not a live credential?** Argo Home's
+   `ARGO_ALLOW_SECRET_PII_COMMIT` override, below — broader, and the only route
+   acknowledgements deliberately refuse.
+5. **`--no-verify`** — effectively never. It does not skip the finding; it skips every gate
+   in the kit at once, and it leaves no trace in the repository.
+
+### What the scanner deliberately does not report (SPEC-198)
+
+An email address on a domain reserved for documentation produces **no finding**, because
+no mail exchanger for such a domain can exist, so the address cannot receive mail and
+cannot identify a person. The reserved set is exactly what the RFCs reserve:
+
+- **RFC 2606 §2** — the `.test`, `.example`, `.invalid` and `.localhost` top-level domains.
+- **RFC 2606 §3** / **RFC 6761** — `example.com`, `example.net`, `example.org`.
+
+Subdomains count: `user@mail.example.com` is as reserved as its parent.
+
+If you expected a finding on `…@example.com` and got none, that is this rule. Every other
+domain still blocks, including names that merely contain a reserved label
+(`example.com.co`, `notexample.com`, `example.community`). `.local` is mDNS and `.internal`
+is ICANN's private-use name — a private network really does deliver mail there — so neither
+is reserved here and both still block.
+
+The set is a closed list in `scanner.py`, owned by canonical. There is no project key, no
+environment variable and no CLI flag for it; a project that wants its own domain treated as
+documentation is asking for the allowlist SPEC-192 rejected on the merits.
+
+### Accepting a reviewed PII finding (SPEC-192)
+
+`--no-verify` is not the way to land a commit over a PII finding. It does not skip
+that finding — it skips the whole pre-commit hook: the secret scan, spec validation,
+lint, type check, and the `commit-msg` spec-ID check. A one-line exception should not
+cost every gate in the kit.
+
+When a finding is real but reviewed and safe to commit:
+
+```bash
+python3 .nightshift/scanner.py --staged --acknowledge-template
+```
+
+That prints one stanza per blocking PII finding — the location, the rule class, and a
+SHA-256 digest of the matched value. It never prints the value itself. Paste the
+stanza under `git:` in `.nightshift/config.yaml` and **fill in `expires` and `reason`
+yourself**; the stanza is deliberately invalid until you do, so an unedited paste
+still blocks.
+
+```yaml
+git:
+  pii_acknowledgements:
+    - sha256: "<digest from the template>"
+      class: home_address
+      expires: 2026-11-05                     # mandatory, at most 365 days ahead
+      reason: "Reviewed 2026-08-08: ..."      # mandatory, >= 10 characters
+```
+
+What this deliberately does not do:
+
+- It does not accept a file, a directory, or a rule — only that one exact value. A
+  different address, or one edited character, blocks again.
+- It does not last. `expires` is mandatory and bounded; leave an acknowledgement
+  alone and the gate closes again on its own. A far-future date is invalid, not a
+  permanent pass.
+- It does not apply to secrets. Bearer tokens and API keys can never be
+  acknowledged. Remove or redact them.
+- It does not hide anything. An acknowledged finding is still printed on every
+  commit, marked `[acknowledged]`, with its reason and expiry.
+
+Adding an acknowledgement is a tracked change to `config.yaml`, so it shows up in
+review. `--no-verify` leaves no trace anywhere — that is the difference.
+
 ### Argo Home secret/PII override
+
+**Reach for the acknowledgement above first.** This override is broader: it is a
+whole-commit, unreviewed, unrecorded pass that leaves nothing behind in the repository.
+It remains the only route for the one case acknowledgements deliberately refuse — a
+**secret** finding you have confirmed is not a live credential (a fixture key in a test,
+for example). For PII, prefer `pii_acknowledgements`: it is scoped to one value, it
+expires, and it is visible in review.
 
 Argo Home's tracked `hooks/install-branch-guard.sh` also installs the
 `SPEC-158 secret-pii-scan` shim. It fails closed if the tracked scanner cannot

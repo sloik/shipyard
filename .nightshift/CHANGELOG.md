@@ -11,6 +11,235 @@
 
 ---
 
+## 2.67.2 (2026-08-09)
+
+### Explicit legacy managed-payload adoption (SPEC-190-001-001)
+
+- The release coordinator has an operator-authorized adoption mode for legacy
+  file-only-sync payloads whose per-file provenance was never retained.
+- The override remains bounded to the exact manifest payload and release
+  marker. Project config, specs, generated metrics, knowledge, application
+  code, unrelated staged paths, opt-out policy, and pushes remain protected.
+
+**Migration:** none. Use `--adopt-unresolved-managed` only after an operator
+explicitly authorizes replacement of unresolved canonical managed files.
+
+## 2.67.1 (2026-08-09)
+
+### Pre-copy release ownership and deterministic recovery (SPEC-207)
+
+- Fleet release now proves copy, marker, migration, staging, and commit
+  ownership before the first project write. The canonical
+  `metrics/_SCHEMA.md` is managed while generated project metrics remain
+  excluded.
+- Canonical-suite metadata declares a dependency-capable `uv` environment and
+  import probe; the probe and suite run through the same environment.
+- Partial applies have a read-only exact-current / retained-prior / unresolved
+  classifier, and controller unblock paths resolve relative specs against the
+  explicit project root.
+
+**Migration:** none. Existing installations update through the guarded whole-kit
+release; preserved partial applies require an evidence-backed disposition first.
+
+## 2.67.0 (2026-08-09)
+
+### Measured phase duration observability (SPEC-196)
+
+- Canonical runs can emit controlled phase boundaries keyed by stable run ID;
+  metrics derives duration mechanically and distinguishes measured, skipped,
+  interrupted, and unavailable work.
+- Analytics excludes unavailable legacy zero rows from bottleneck rankings and
+  includes median, p90, and share for measured phase samples.
+
+**Migration:** none. Existing zero-duration rows remain valid and are labelled
+unavailable by analytics.
+
+## 2.66.0 (2026-08-08)
+
+### Exact historical-checkbox disposition evidence (SPEC-204)
+
+- `validate_specs.py` retains the normal error for every unchecked Requirement
+  or Acceptance Criterion on a `done` spec, unless the project owns an exact
+  ordered inventory matching filename, line, section, and checkbox text.
+- Only `intentional_historical_record` and `unresolved_evidence_gap` are
+  recognized. Exact matches remain visible warnings and never become checked
+  items or implementation claims; missing, malformed, partial, stale, reordered,
+  or unknown evidence fails closed to the original errors.
+- The inventory is explicitly project-owned and absent from the managed release
+  set. Canonical ships only the generic validator and schema documentation.
+- The existing versioned release-handoff gate remains in the same terminal
+  validation path and is independently enforced when an inventory is present.
+
+**Migration:** none. Projects that intentionally retain historical unchecked
+contract items may create the documented inventory only after explicit review;
+Nightshift does not generate or rebaseline it.
+
+## 2.65.0 (2026-08-08)
+
+### Managed-install provenance and direct-edit guard (SPEC-203)
+
+- Installed commit gates reject staged changes to manifest-managed Nightshift
+  payloads unless the bytes exactly match the release being staged. Application
+  code, project configuration, specs, run evidence, and declared migration outputs
+  remain outside this gate.
+- Release markers retain the complete fingerprint-bound per-file manifest. The
+  read-only audit distinguishes an exact current copy, a proven prior release copy,
+  and unresolved divergence without using timestamps, similarity, or aggregate
+  fingerprints as per-file evidence.
+- Doctor and release preflight surface the same classifications, preserve every
+  dirty file and index entry, and refuse synchronized-release claims when required
+  metadata is missing or corrupt.
+
+**Migration:** none. A clean guarded release writes retained per-file evidence. An
+older install with dirty managed files remains a safe skip until those files are
+reviewed; the coordinator never overwrites them to manufacture provenance.
+
+## 2.64.4 (2026-08-08)
+
+### Scanner: the detector's own fixtures can be committed (SPEC-197)
+
+**Closes the known limitation recorded under 2.64.0.** A secret/PII detector's test suite
+must contain secret-shaped and PII-shaped inputs or it tests nothing, and the scanner scans
+every added line of every staged file — including its own tests. Three of the four commits
+that have ever touched `tests/test_scanner.py` could not have landed without `--no-verify`,
+which skips not just the finding but the whole pre-commit hook: the secret scan, spec
+validation, lint, type check, the canonical copy-drift guard and the `[SPEC-ID]` check.
+
+- A finding is now excluded **only when both** conditions hold: the location matches a
+  kit-owned fixture path anchor, **and** the digest of the exact matched value is in the
+  kit's fixture registry. Either alone excludes nothing.
+- **This is not a path allowlist.** A live credential dropped into a file at the anchor path
+  still blocks, because its digest is not registered. And a registered fixture value copied
+  into `scanner.py`, a spec, this changelog or a commit message still blocks, because none
+  of those is a fixture path — which makes the SPEC-183 convention a mechanism rather than a
+  request.
+- **Digests, never values.** A registry of literal fixture strings would itself trip the
+  gate it exists to satisfy.
+- **Not project-configurable, by design.** No `git:` key, no environment variable, no CLI
+  flag. The anchors are a closed list in `scanner.py`; the registry lives at
+  `tests/fixture_digests.txt`, which `nightshift-sync.py` never delivers to a project
+  install. An install therefore finds no registry and excludes nothing — the mechanism is
+  inert outside canonical, and a project cannot widen its own gate by editing a vendored
+  file. A missing registry is normal and is not an error.
+- **Excluded, not silenced.** Every excluded finding is still printed on each run, marked
+  `[kit fixture]`, with its location and class. `ScanReport` exposes them as `excluded`,
+  separately from `findings`.
+- **Fails closed.** A malformed digest, or an over-broad anchor (a bare directory, a glob,
+  an absolute path, one containing `..`, or one naming a source file, spec or config), is
+  discarded and reported, and every finding it would have covered still blocks.
+- SPEC-192 acknowledgements are unchanged and independent: the expiring mechanism still
+  covers one reviewed **real** PII value anywhere, and the non-expiring one covers only
+  synthetic kit fixtures at kit paths.
+
+**Migration:** none required. No config schema change.
+
+⚠️ **Non-synced hand-copy:** `Cortex/core/nightshift_scanner.py` was refreshed in the same
+commit, as every `scanner.py` change must be.
+
+## Unreleased
+
+### Local board performance telemetry (SPEC-199)
+
+- The local board exposes an on-demand, process-local aggregate performance
+  summary. It keeps bounded timing samples for startup, cache work, supported
+  routes, and browser paint-gated interactions; it neither exports telemetry
+  nor retains request/spec content.
+ - `board.sh` now records a board PID only after `/api/health` responds, making
+   spawned and HTTP-ready distinct operator states.
+
+## 2.64.3 (2026-08-08)
+
+### Scanner: reserved documentation domains are not PII (SPEC-198)
+
+- An email address whose domain is reserved for documentation no longer produces a finding.
+  **RFC 2606 §2** reserves the `.test`, `.example`, `.invalid` and `.localhost` top-level
+  domains; **RFC 2606 §3** reserves `example.com`, `example.net` and `example.org`; **RFC
+  6761** restates them as special-use names that resolvers must refuse to resolve. No mail
+  exchanger for one can exist, so an address there cannot receive mail and cannot identify a
+  person. Subdomains are covered by the rule that covers their parent.
+- **Recall is unchanged.** Every other domain still blocks, including lookalikes that merely
+  contain a reserved label. `.local` (mDNS) and `.internal` (ICANN private-use) are
+  deliberately *not* reserved here — a private network really does deliver mail to the
+  latter — and both still block.
+- Measured effect on the kit's own tree: findings fall from 51 across 11 files to 41 across
+  6. Five test files whose only finding was a single `git config user.email` line are now
+  clean, and `tests/test_scanner.py` drops from 24 findings to 21.
+- Every fixture in `tests/test_scanner.py` whose job is to *be detected* moved to a
+  non-reserved domain behind one constant, and an assertion pins that constant as
+  non-reserved — so reserving it later fails the suite loudly instead of silently converting
+  six recall tests into assertions that nothing was found.
+
+**Migration:** none required. No config schema change; the reserved set is canonical-owned
+and deliberately not project-configurable.
+
+⚠️ **Non-synced hand-copy:** `Cortex/core/nightshift_scanner.py` was refreshed in the same
+commit, as every `scanner.py` change must be.
+
+## 2.64.2 (2026-08-08)
+
+### Board tooltip safety during card drag (SPEC-195)
+
+- Board card reorders now hide an existing spec tooltip at drag start and
+  suppress pointer-driven tooltips until the drop or cancellation has completed.
+
+## 2.64.1 (2026-08-08)
+
+### Coordinator lifecycle authority (SPEC-191-001)
+
+- Coordinator-backed lifecycle writes now persist a linked StatusStore checkpoint before
+  tracked frontmatter, making failures explicit and recoverable rather than reporting a
+  terminal status with stale runtime state.
+- Control reconciles terminal frontmatter with the same durable status layer used by boards.
+- `board.sh` preflights FastAPI dependencies and supports `NIGHTSHIFT_BOARD_PYTHON` for
+  installed project runtimes before it records a PID.
+
+## 2.64.0 (2026-08-08)
+
+### Scanner: correct finding attribution + reviewed-PII acknowledgements (BUG-013, SPEC-192)
+
+**Config schema addition** — new optional `git.pii_acknowledgements` list. Backward compatible:
+projects without a `git:` section behave exactly as before (every finding blocks).
+
+- **BUG-013 — findings were attributed to the wrong file and to lines that cannot exist.**
+  Observed in Inwestomat: `email at DnaRynkow/.argo/README.md:127` for a 102-line file containing no
+  `@`, and line 451 of that same file. The findings were REAL — six saved HTML articles embed an
+  account address — but path and line were not. That is worse than a false positive: verifying a
+  finding meant reconstructing the scanner's own search, and a reviewer who opens the named file sees
+  nothing and learns to distrust the gate.
+- **SPEC-192 — a reviewed PII finding can now be acknowledged** instead of forcing `--no-verify`,
+  which also skips the secret scan, spec validation, lint and the spec-ID check. Acknowledgements are
+  keyed by **SHA-256 of the value**, so acknowledging PII never writes PII into config; they require
+  an **expiry (≤365 days)** and a reason; **secrets can never be acknowledged, only PII**; and
+  acknowledged findings are still **printed** on every commit, marked `[acknowledged]`.
+- Fixed a `home_address` false positive: a date followed by a capitalised newspaper name parsed as a
+  street address. `123 Main Street` still blocks — recall preserved.
+
+**Migration:** none required. To use acknowledgements, run
+`python3 scanner.py --staged --config <cfg> --acknowledge-template` and paste the stanza under a
+top-level `git:` key, filling `expires` and `reason` (an unedited stanza is invalid and keeps blocking).
+
+⚠️ **Non-synced hand-copy:** `Cortex/core/nightshift_scanner.py` is a copy that
+`Cortex/api/Dockerfile:58` builds into the production image and that `nightshift-sync.py` does not
+know about. It was refreshed in the same commit; any future scanner change must do the same or Cortex
+ingestion silently keeps the old version.
+
+⚠️ **Known limitation at the time of this release — RESOLVED in 2.64.4 (SPEC-197).** A secret
+detector's own test suite necessarily contains secret-shaped fixtures, and secrets cannot be
+acknowledged by design — so `tests/test_scanner.py` could not pass its own gate and every commit to
+it had used `--no-verify` (SPEC-183 included). SPEC-197 closed this with a fixture exclusion
+requiring both a kit-owned path anchor and the digest of the matched value; see the 2.64.4 entry.
+
+### Versioned canonical release handoffs (SPEC-189)
+
+- Release-impact specs now carry a portable, machine-validated handoff binding
+  changed managed paths, a target version, changelog, manifest fingerprint,
+  migration plan, and fleet scope.
+- A release-impact spec cannot reach `done` without a valid pending or completed
+  handoff. Only the guarded release coordinator completes matching handoffs after
+  a successful full-kit rollout; dirty and opted-out installs remain safe skips.
+
+---
+
 ## 2.63.2 (2026-08-02)
 
 ### Bounded stopped-board refresh fanout (SPEC-182)

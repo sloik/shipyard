@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -38,9 +39,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
+from collections import defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
 
@@ -82,6 +85,108 @@ _FRONTMATTER_RECONCILE_STATUSES = frozenset({
     "planned", "draft", "ready", "in_progress", "blocked",
     "active", "done", "superseded", "retired",
 })
+
+
+class PerformanceRegistry:
+    """Small process-local timing registry for the board diagnostic endpoint.
+
+    It retains only bounded duration samples and controlled metric keys; no
+    request identity, paths, payloads, or exception content enters this store.
+    """
+
+    _MAX_SAMPLES = 128
+    _MIN_SAMPLES = 5
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._samples: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=self._MAX_SAMPLES)
+        )
+        self._errors: dict[str, int] = defaultdict(int)
+        self._cancelled: dict[str, int] = defaultdict(int)
+        self._updated_at: float | None = None
+
+    def measure(self, key: str, operation) -> object:
+        start = self._clock()
+        try:
+            result = operation()
+        except Exception:
+            self.record(key, self._clock() - start, error=True)
+            raise
+        else:
+            self.record(key, self._clock() - start)
+            return result
+
+    def measure_many(self, keys: tuple[str, ...], operation) -> object:
+        """Record one bounded duration under related fixed aggregate keys."""
+        start = self._clock()
+        try:
+            result = operation()
+        except Exception:
+            for key in keys:
+                self.record(key, self._clock() - start, error=True)
+            raise
+        else:
+            for key in keys:
+                self.record(key, self._clock() - start)
+            return result
+
+    def record(
+        self, key: str, duration_s: float, *, error: bool = False, cancelled: bool = False
+    ) -> None:
+        # Callers select keys from the fixed allowlist below.
+        if key not in _PERFORMANCE_KEYS or duration_s < 0:
+            return
+        if cancelled:
+            self._cancelled[key] += 1
+            self._updated_at = self._clock()
+            return
+        self._samples[key].append(round(duration_s * 1000, 3))
+        if error:
+            self._errors[key] += 1
+        self._updated_at = self._clock()
+
+    def summary(self) -> dict:
+        metrics = {}
+        for key in sorted(_PERFORMANCE_KEYS):
+            values = sorted(self._samples[key])
+            count = len(values)
+            if not count:
+                metrics[key] = {
+                    "state": "cancelled" if self._cancelled[key] else "unavailable",
+                    "count": 0,
+                    "error_count": self._errors[key],
+                    "cancelled_count": self._cancelled[key],
+                }
+                continue
+            percentile = lambda p: values[min(count - 1, max(0, int((count - 1) * p)))]
+            metrics[key] = {
+                "state": "ok" if count >= self._MIN_SAMPLES else "insufficient_samples",
+                "count": count, "error_count": self._errors[key],
+                "cancelled_count": self._cancelled[key],
+                "min_ms": values[0], "mean_ms": round(sum(values) / count, 3),
+                "p50_ms": percentile(.50), "p95_ms": percentile(.95), "max_ms": values[-1],
+            }
+        return {"scope": "process_local", "last_updated_monotonic": self._updated_at, "metrics": metrics}
+
+
+_PERFORMANCE_KEYS = frozenset({
+    "startup.bootstrap", "startup.status_store", "startup.cache_warm", "startup.http_ready",
+    "cache.frontmatter", "cache.reconcile", "cache.body_load",
+    "cache.directory_stat", "cache.directory_scandir", "cache.frontmatter_public_assembly",
+    "cache.dependency_resolution", "cache.admission_derivation",
+    "cache.corpus_body_read", "cache.corpus_body_hit",
+    "cache.selected_body_read", "cache.selected_body_hit",
+    "server.selected_response_serialization",
+    "route.health.2xx", "route.specs.2xx", "route.graph.2xx", "route.refresh.2xx",
+    "route.spec.2xx", "route.allowed.error",
+    "browser.initial_board_ready", "browser.poll_unchanged", "browser.poll_diff",
+    "browser.poll_full", "browser.spec_panel_ready", "browser.graph_ready",
+    "browser.panel_fetch", "browser.panel_json_decode", "browser.panel_markdown_parse",
+    "browser.panel_dom_mutation", "browser.panel_title_controls_paint",
+    "browser.panel_body_paint", "browser.panel_cancelled",
+})
+performance_registry = PerformanceRegistry()
 
 
 def _checkpoint_epoch(state: dict) -> float | None:
@@ -147,37 +252,48 @@ class SpecCache:
 
     def warm(self) -> None:
         """Load all Tier 1 frontmatter at startup."""
-        self._dir_mtime = os.stat(self._specs_dir).st_mtime
-        with os.scandir(self._specs_dir) as entries:
-            for entry in entries:
-                if not entry.name.endswith(".md"):
-                    continue
-                self._load_entry(Path(entry.path), entry.stat().st_mtime)
+        def _warm() -> None:
+            self._dir_mtime = os.stat(self._specs_dir).st_mtime
+            with os.scandir(self._specs_dir) as entries:
+                for entry in entries:
+                    if entry.name.endswith(".md"):
+                        self._load_entry(Path(entry.path), entry.stat().st_mtime)
+        performance_registry.measure("startup.cache_warm", _warm)
 
     def get_all_frontmatter(self) -> list[dict]:
         """Return all frontmatter dicts, checking mtime for staleness."""
-        dir_m = os.stat(self._specs_dir).st_mtime
+        start = time.monotonic()
+        dir_m = performance_registry.measure(
+            "cache.directory_stat", lambda: os.stat(self._specs_dir).st_mtime
+        )
         if dir_m != self._dir_mtime:
-            self._reconcile(dir_m)
+            performance_registry.measure("cache.reconcile", lambda: self._reconcile(dir_m))
 
-        with os.scandir(self._specs_dir) as entries:
-            for de in entries:
-                if not de.name.endswith(".md"):
-                    continue
-                path = Path(de.path)
-                mtime = de.stat().st_mtime
-                # Find existing entry by path
-                entry = self._entry_by_path(path)
-                if entry is None:
-                    # New file appeared between reconcile and scandir
-                    self._load_entry(path, mtime)
-                elif entry.mtime != mtime:
-                    # File changed — re-parse
-                    self._reload_entry(entry, mtime)
+        def _scan_entries() -> list[os.DirEntry]:
+            with os.scandir(self._specs_dir) as iterator:
+                return list(iterator)
+
+        entries = performance_registry.measure("cache.directory_scandir", _scan_entries)
+        for de in entries:
+            if not de.name.endswith(".md"):
+                continue
+            path = Path(de.path)
+            mtime = de.stat().st_mtime
+            # Find existing entry by path
+            entry = self._entry_by_path(path)
+            if entry is None:
+                # New file appeared between reconcile and scandir
+                self._load_entry(path, mtime)
+            elif entry.mtime != mtime:
+                # File changed — re-parse
+                self._reload_entry(entry, mtime)
 
         # Return copies with internal keys stripped, plus observable readiness
         # and admission evidence. Stored lifecycle status remains untouched.
-        public = [self._public_fm(e.frontmatter, e.mtime) for e in self._entries.values()]
+        public = performance_registry.measure(
+            "cache.frontmatter_public_assembly",
+            lambda: [self._public_fm(e.frontmatter, e.mtime) for e in self._entries.values()],
+        )
         by_id = {str(item.get("id")): item for item in public if item.get("id")}
         dependency_ids = {
             str(dep)
@@ -185,9 +301,12 @@ class SpecCache:
             for dep in (item.get("after") or [])
             if dep
         }
-        self._dependency_resolution = self._dependency_resolver.resolve(
-            dependency_ids,
-            local_specs=by_id,
+        self._dependency_resolution = performance_registry.measure(
+            "cache.dependency_resolution",
+            lambda: self._dependency_resolver.resolve(
+                dependency_ids,
+                local_specs=by_id,
+            ),
         )
         admission_specs = self._dependency_resolution.combined_specs(by_id)
         help_text = _registry_field_help()
@@ -196,32 +315,36 @@ class SpecCache:
         except ImportError:
             derive_admission = None
         if derive_admission is not None:
-            for item in public:
-                if item.get("status") in {"done", "superseded", "active", "retired"}:
-                    continue
-                body = self.get_body(str(item.get("id"))) or ""
-                admission = derive_admission(
-                    item,
-                    body,
-                    admission_specs,
-                    self._dependency_resolution.errors,
-                )
-                item["readiness"] = admission.readiness.level.value
-                item["readiness_evidence"] = list(admission.readiness.findings)
-                item["readiness_dimensions"] = [
-                    {
-                        "name": dimension.name,
-                        "result": dimension.level.value,
-                        "evidence": list(dimension.evidence),
-                    }
-                    for dimension in admission.readiness.dimensions
-                ]
-                item["run_state"] = admission.state
-                item["run_state_reason"] = admission.reason
-                item["_help"] = dict(help_text)
+            def _derive_admission() -> None:
+                for item in public:
+                    if item.get("status") in {"done", "superseded", "active", "retired"}:
+                        continue
+                    body = self.get_body(str(item.get("id")), purpose="corpus") or ""
+                    admission = derive_admission(
+                        item,
+                        body,
+                        admission_specs,
+                        self._dependency_resolution.errors,
+                    )
+                    item["readiness"] = admission.readiness.level.value
+                    item["readiness_evidence"] = list(admission.readiness.findings)
+                    item["readiness_dimensions"] = [
+                        {
+                            "name": dimension.name,
+                            "result": dimension.level.value,
+                            "evidence": list(dimension.evidence),
+                        }
+                        for dimension in admission.readiness.dimensions
+                    ]
+                    item["run_state"] = admission.state
+                    item["run_state_reason"] = admission.reason
+                    item["_help"] = dict(help_text)
+
+            performance_registry.measure("cache.admission_derivation", _derive_admission)
+        performance_registry.record("cache.frontmatter", time.monotonic() - start)
         return public
 
-    def get_body(self, spec_id: str) -> Optional[str]:
+    def get_body(self, spec_id: str, *, purpose: str = "selected") -> Optional[str]:
         """Return body markdown for a spec, loading lazily."""
         entry = self._entries.get(spec_id)
         if entry is None:
@@ -229,8 +352,14 @@ class SpecCache:
         mtime = os.stat(entry.path).st_mtime
         if entry.mtime != mtime:
             self._reload_entry(entry, mtime)
+        scope = "corpus" if purpose == "corpus" else "selected"
         if entry.body_md is None:
-            entry.body_md = self._read_body(entry.path)
+            entry.body_md = performance_registry.measure_many(
+                ("cache.body_load", f"cache.{scope}_body_read"),
+                lambda: self._read_body(entry.path),
+            )
+        else:
+            performance_registry.measure(f"cache.{scope}_body_hit", lambda: entry.body_md)
         return entry.body_md
 
     def get_path(self, spec_id: str) -> Optional[Path]:
@@ -289,6 +418,16 @@ class SpecCache:
         allowed_statuses = _allowed_statuses_for_spec(entry.frontmatter)
         if status not in allowed_statuses:
             raise ValueError(_status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}")
+        if status == "done":
+            import release_handoff
+            canonical = Path(__file__).resolve().parent
+            try:
+                manifest = json.loads((canonical / "release-manifest.json").read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"release handoff validation unavailable: {exc}") from exc
+            errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
+            if errors:
+                raise ValueError("; ".join(errors))
 
         self._update_status_file(entry, status)
 
@@ -403,6 +542,13 @@ class SpecCache:
         """Return frontmatter dict without internal _body key, plus _mtime."""
         out = {k: v for k, v in fm.items() if k != "_body"}
         out["status"] = self._effective_status(fm, mtime)
+        declaration = fm.get("release_handoff")
+        if isinstance(declaration, dict) and declaration.get("impact") == "required":
+            artifact = Path(__file__).resolve().parent / "release-handoffs" / f"{fm.get('id', '')}.json"
+            try:
+                out["release_handoff_state"] = json.loads(artifact.read_text()).get("status", "missing")
+            except (OSError, json.JSONDecodeError):
+                out["release_handoff_state"] = "missing"
         if mtime:
             out["_mtime"] = mtime
         return out
@@ -502,6 +648,39 @@ def _graph_display_title(spec_id: str, title: str) -> str:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Nightshift Board")
+
+
+def _performance_route_key(path: str, status_code: int) -> str | None:
+    """Map only supported board paths to fixed, non-identifying labels."""
+    if path == "/api/health":
+        route = "health"
+    elif path == "/api/specs":
+        route = "specs"
+    elif path == "/api/graph":
+        route = "graph"
+    elif path == "/api/refresh":
+        route = "refresh"
+    elif re.fullmatch(r"/api/spec/[^/]+", path):
+        route = "spec"
+    else:
+        return None
+    return f"route.{route}.2xx" if 200 <= status_code < 300 else "route.allowed.error"
+
+
+@app.middleware("http")
+async def _measure_board_request(request: Request, call_next):
+    start = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        key = _performance_route_key(request.url.path, 500)
+        if key:
+            performance_registry.record(key, time.monotonic() - start, error=True)
+        raise
+    key = _performance_route_key(request.url.path, response.status_code)
+    if key:
+        performance_registry.record(key, time.monotonic() - start, error=response.status_code >= 400)
+    return response
 
 # --- Observability (SPEC-122) -------------------------------------------------
 # Dedicated logger with its own stderr handler + propagate=False. This emits
@@ -961,6 +1140,41 @@ def _health_payload() -> dict:
     }
 
 
+@app.get("/api/performance")
+async def get_performance() -> dict:
+    """On-demand, aggregate-only performance diagnosis for this process."""
+    return performance_registry.summary()
+
+
+_CLIENT_PERFORMANCE_OPERATIONS = frozenset({
+    "initial_board_ready", "poll_unchanged", "poll_diff", "poll_full",
+    "spec_panel_ready", "graph_ready", "panel_fetch", "panel_json_decode",
+    "panel_markdown_parse", "panel_dom_mutation", "panel_title_controls_paint",
+    "panel_body_paint", "panel_cancelled",
+})
+
+
+@app.post("/api/performance/client")
+async def record_client_performance(payload: dict) -> dict:
+    """Accept a best-effort browser duration without making UI paths depend on it."""
+    operation = payload.get("operation")
+    duration_ms = payload.get("duration_ms")
+    failed = payload.get("failed", False)
+    if (
+        operation not in _CLIENT_PERFORMANCE_OPERATIONS
+        or not isinstance(duration_ms, (int, float))
+        or not isinstance(failed, bool)
+    ):
+        raise HTTPException(status_code=400, detail="invalid performance sample")
+    performance_registry.record(
+        f"browser.{operation}",
+        float(duration_ms) / 1000,
+        error=failed,
+        cancelled=operation == "panel_cancelled",
+    )
+    return {"ok": True}
+
+
 @app.get("/api/specs")
 async def get_specs() -> list[dict]:
     return cache.get_all_frontmatter()
@@ -992,17 +1206,20 @@ async def get_loop_observability() -> dict:
 
 
 @app.get("/api/spec/{spec_id}")
-async def get_spec(spec_id: str) -> dict:
+async def get_spec(spec_id: str) -> JSONResponse:
     all_fm = cache.get_all_frontmatter()
     fm = next((f for f in all_fm if f.get("id") == spec_id), None)
     if not fm:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     body = cache.get_body(spec_id)
-    return {
+    payload = {
         "frontmatter": fm,
         "body_md": body,
         "title": fm.get("_title", spec_id),
     }
+    return performance_registry.measure(
+        "server.selected_response_serialization", lambda: JSONResponse(jsonable_encoder(payload))
+    )
 
 
 @app.put("/api/spec/{spec_id}/status")
@@ -2677,6 +2894,7 @@ let searchTimer = null;
 let graphEdgesDataset = null;
 let graphNodesDataset = null;
 let openPanelId = null;       // spec id currently shown in detail panel
+let panelRequestVersion = 0;  // monotonically rejects a late prior selection
 let openPanelMtime = null;    // _mtime snapshot of spec currently shown in panel
 let hiddenColumns = new Set(); // set of column ids hidden by user
 let columnWidths = {};         // { colId: widthPx }
@@ -3055,7 +3273,7 @@ async function fillExternalChipStatuses(root) {
 // duck-typed object — used for graph nodes which have no DOM element of their own).
 // `spec` is a frontmatter dict (must have id; may have status, _title/title, _problem).
 function showSpecTooltip(anchor, spec) {
-  if (!spec || !spec.id) return;
+  if (isDragging || !spec || !spec.id) return;
   const tt = document.getElementById('spec-tooltip');
   const statusColor = STATUS_COLOR[spec.status] || 'var(--text-muted)';
   const status = (spec.status || 'draft').toUpperCase();
@@ -3147,6 +3365,7 @@ function decorateSpecLinks(root) {
 }
 
 async function loadSpecs() {
+  const performanceStart = performanceClock();
   const r = await fetch('/api/specs');
   if (!r.ok) throw new Error('/api/specs: ' + r.status);
   const data = await r.json();
@@ -3165,6 +3384,19 @@ async function loadSpecs() {
   renderBoard();
   renderRecentBar();
   loadLoopObservability();
+  requestAnimationFrame(() => reportPerformance('initial_board_ready', performanceStart));
+}
+
+let performanceClock = () => performance.now();
+
+function reportPerformance(operation, start, { failed = false } = {}) {
+  // Diagnostic-only: capability absence or a rejected post never affects UI.
+  if (!window.performance || typeof start !== 'number') return;
+  const duration_ms = performanceClock() - start;
+  fetch('/api/performance/client', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operation, duration_ms, failed }),
+  }).catch(() => {});
 }
 
 function renderPendingWork() {
@@ -3314,7 +3546,10 @@ function renderBoard() {
       animation: 150,
       ghostClass: 'sortable-ghost',
       dragClass: 'sortable-drag',
-      onStart: () => { isDragging = true; },
+      onStart: () => {
+        isDragging = true;
+        hideSpecTooltip();
+      },
       onEnd: onCardDrop,
     });
 
@@ -3509,11 +3744,34 @@ function updateColumnCounts() {
 }
 
 async function openPanel(specId, { keepNavStack = false } = {}) {
+  const performanceStart = performanceClock();
+  const requestVersion = ++panelRequestVersion;
   if (!keepNavStack) specNavStack = [];
-  const r = await fetch(`/api/spec/${specId}`);
+  const fetchStart = performanceClock();
+  let r;
+  try {
+    r = await fetch(`/api/spec/${specId}`);
+  } catch {
+    reportPerformance('panel_fetch', fetchStart, { failed: true });
+    return;
+  }
+  reportPerformance('panel_fetch', fetchStart, { failed: !r.ok });
   if (!r.ok) return;
-  const data = await r.json();
+  const jsonStart = performanceClock();
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    reportPerformance('panel_json_decode', jsonStart, { failed: true });
+    return;
+  }
+  reportPerformance('panel_json_decode', jsonStart);
+  if (requestVersion !== panelRequestVersion) {
+    reportPerformance('panel_cancelled', performanceStart);
+    return;
+  }
 
+  const domMutationStart = performanceClock();
   // Reset to spec view
   setPanelView('spec');
 
@@ -3582,19 +3840,30 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   // SPEC-064: fill in external dep statuses from peer boards (async, best-effort)
   fillExternalChipStatuses(document.getElementById('panel-chips'));
 
+  openPanelId = specId;
+  openPanelMtime = fm._mtime || null;
+  applyActiveCard(specId);
+  document.getElementById('panel').classList.add('open');
+  reportPerformance('panel_dom_mutation', domMutationStart);
+  await new Promise(resolve => requestAnimationFrame(() => {
+    reportPerformance('panel_title_controls_paint', performanceStart);
+    resolve();
+  }));
+  if (requestVersion !== panelRequestVersion) {
+    reportPerformance('panel_cancelled', performanceStart);
+    return;
+  }
+
   // Markdown body
+  const markdownStart = performanceClock();
   const mdEl = document.getElementById('panel-md');
   if (body && typeof marked !== 'undefined') {
     mdEl.innerHTML = marked.parse(body);
   } else {
     mdEl.innerHTML = `<pre>${body}</pre>`;
   }
+  reportPerformance('panel_markdown_parse', markdownStart);
   decorateSpecLinks(mdEl);
-
-  openPanelId = specId;
-  openPanelMtime = fm._mtime || null;
-  applyActiveCard(specId);
-  document.getElementById('panel').classList.add('open');
 
   // Fetch report count for the button label (async, non-blocking)
   fetch('/api/reports').then(r => r.json()).then(reports => {
@@ -3607,6 +3876,10 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     ...recentSpecs.filter(s => s.id !== specId)].slice(0, 20);
   renderRecentBar();
   saveSettings();
+  requestAnimationFrame(() => {
+    reportPerformance('panel_body_paint', performanceStart);
+    reportPerformance('spec_panel_ready', performanceStart);
+  });
 }
 
 function applyActiveCard(specId) {
@@ -3694,6 +3967,7 @@ function toggleDeps() {
 }
 
 async function showGraph(selectId) {
+  const performanceStart = performanceClock();
   activeTab = 'graph';
   document.getElementById('board-view').style.display = 'none';
   document.getElementById('search-results').classList.remove('visible');
@@ -3875,6 +4149,7 @@ async function showGraph(selectId) {
     } else {
       network.fit();
     }
+    requestAnimationFrame(() => reportPerformance('graph_ready', performanceStart));
   });
 
   // vis.js fires `click` even after a drag finishes. Track whether a node-drag
@@ -4717,10 +4992,10 @@ function buildRunPrompt(specId, specTitle = '') {
   return [
     'Use the Nightshift kickoff command to run this spec:',
     '',
-    `/nightshift kickoff ${specLabel}`,
+    `$nightshift kickoff ${specLabel}`,
     '',
-    'This is the parent kickoff flow. Follow the /nightshift kickoff skill exactly.',
-    'Do not implement, research, validate, or code the spec yourself. Launch and coordinate the orchestrator subagent through the skill flow, monitor progress, then autonomously resolve the run as the skill specifies: verify the evidence gate and merge if sufficient; if the orchestrator reports blocked/stuck, run one focused unblock pass before marking the spec blocked; after the run report is written, process any "## Suggested Follow-up Specs" section per the skill (check_followup_spec.py conflict check).',
+    'This is the parent kickoff flow. Use the Nightshift skill exactly.',
+    'Do not implement, research, validate, or code the spec yourself. Launch and coordinate the orchestrator subagent through the skill flow, monitor progress, then autonomously resolve the run as the skill specifies: verify the evidence gate and merge if sufficient; if the orchestrator reports blocked/stuck, use the controller-backed unblock protocol. The observable packet/result must show eligibility, attempt result, causal confidence, evidence references, and whether human action is needed—never raw logs, secrets, or private-local paths. After the run report is written, process any "## Suggested Follow-up Specs" section per the skill (check_followup_spec.py conflict check).',
   ].join('\\n');
 }
 
@@ -5142,6 +5417,7 @@ async function pollSpecs() {
   if (activeTab !== 'board' && activeTab !== 'graph') return;
   if (activeTab === 'board' && document.getElementById('search').value.trim()) return;
   try {
+    const performanceStart = performanceClock();
     const prevSpecs = specs;
     const prevWorktreeStatus = worktreeStatus;
     const prevOpenMtime = openPanelMtime;
@@ -5199,6 +5475,12 @@ async function pollSpecs() {
           if (depChanged) refreshPanelDependencies();
         }
       }
+      requestAnimationFrame(() => reportPerformance(
+        specsChanged ? (graphNeedsFullRebuild(change) ? 'poll_full' : 'poll_diff') : 'poll_unchanged',
+        performanceStart,
+      ));
+    } else {
+      requestAnimationFrame(() => reportPerformance('poll_unchanged', performanceStart));
     }
   } catch {}
 }
@@ -5793,9 +6075,14 @@ if __name__ == "__main__":
     # Hash-based port: deterministic per project, range 7800-7999
     port = args.port if args.port is not None else (7800 + sum(ord(c) for c in project_name) % 200)
 
-    status_store = StatusStore.for_specs_dir(specs_dir) if StatusStore is not None else None
+    _bootstrap_start = time.monotonic()
+    status_store = performance_registry.measure(
+        "startup.status_store",
+        lambda: StatusStore.for_specs_dir(specs_dir) if StatusStore is not None else None,
+    )
     cache = SpecCache(specs_dir, status_store=status_store)
     cache.warm()
+    performance_registry.record("startup.bootstrap", time.monotonic() - _bootstrap_start)
 
     if args.summary:
         print(json.dumps(cache.get_all_frontmatter(), default=str))
@@ -5821,5 +6108,10 @@ if __name__ == "__main__":
         import threading
         import webbrowser
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+
+    @app.on_event("startup")
+    async def _record_http_ready() -> None:
+        # Binding completed; the launcher separately proves a health response.
+        performance_registry.record("startup.http_ready", 0.0)
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

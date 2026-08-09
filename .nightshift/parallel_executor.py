@@ -10,6 +10,7 @@ import enum
 import json
 import subprocess
 import uuid
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +126,9 @@ class WorktreeHandle:
     outcome: Optional[dict] = None
     files_changed: List[str] = field(default_factory=list)
     declared_touches: List[str] = field(default_factory=list)
+    # Release surfaces (CHANGELOG/version/handoff) are applied by the parent
+    # only.  A worker may describe a requested edit here but must not commit it.
+    release_intents: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -364,6 +368,13 @@ class QueueDecision:
     observed_files: List[str] = field(default_factory=list)
     reason: str = ""
     validation_output: str = ""
+    queue_wait_s: float = 0.0
+    head_drift: bool = False
+    rebase_outcome: str = "not_attempted"
+    repair_result: str = "not_needed"
+    reserved_surfaces: List[str] = field(default_factory=list)
+    overlap_kind: str = "none"
+    human_status_ping_required: bool = False
 
 
 @dataclass
@@ -394,6 +405,7 @@ class SerializedIntegrationQueue:
         dependency_graph: Optional[Dict[str, Set[str]]] = None,
         max_repair_attempts: int = 1,
         evidence_path: Optional[Path] = None,
+        protected_surfaces: Optional[Iterable[str]] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.main_branch = main_branch
@@ -403,6 +415,26 @@ class SerializedIntegrationQueue:
         self.dependency_graph = dependency_graph or {}
         self.max_repair_attempts = max(0, max_repair_attempts)
         self.evidence_path = Path(evidence_path) if evidence_path else None
+        self.protected_surfaces = set(protected_surfaces or ())
+        self._reservations: Dict[str, Set[str]] = {}
+        self._last_rebase_conflicts: List[str] = []
+
+    def reserve(self, handle: WorktreeHandle) -> List[str]:
+        """Reserve declared and release surfaces before a worker is dispatched.
+
+        The return value names existing owners that overlap.  Reservations are
+        deliberately local to one coordinator and are evidence, not a lock.
+        """
+        surfaces = set(handle.declared_touches) | self.protected_surfaces
+        conflicts = sorted({owner for owner, claimed in self._reservations.items()
+                            if owner != handle.spec_id and self._surface_overlap(surfaces, claimed)})
+        if not conflicts:
+            self._reservations[handle.spec_id] = surfaces
+        return conflicts
+
+    def release(self, spec_id: str) -> None:
+        """Release a terminal reservation without touching a worker tree."""
+        self._reservations.pop(spec_id, None)
 
     def integrate(self, handles: Iterable[WorktreeHandle]) -> IntegrationQueueResult:
         """Integrate compatible completed handles in deterministic spec-ID order."""
@@ -410,46 +442,85 @@ class SerializedIntegrationQueue:
         accepted_files: Set[str] = set()
         accepted_declared: Set[str] = set()
         for handle in sorted((h for h in handles if h.status == "completed"), key=lambda h: h.spec_id):
+            queued_at = time.monotonic()
             before = self._head()
+            dirty = self._main_is_dirty()
+            reserved = sorted(self._reservations.get(handle.spec_id, set(handle.declared_touches)))
+            if dirty:
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(
+                    handle.spec_id, "held", before, before, reason="main_dirty_external",
+                    queue_wait_s=time.monotonic() - queued_at, reserved_surfaces=reserved,
+                    human_status_ping_required=True,
+                ))
+                continue
             try:
                 _assert_handle_ownership_if_present(handle, self.repo_root)
             except WorktreePathError as exc:
                 result.held.append(handle.spec_id)
-                result.decisions.append(
-                    QueueDecision(handle.spec_id, "held", before, before, reason=str(exc))
-                )
+                result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, reason=str(exc), reserved_surfaces=reserved))
                 continue
             observed = self._changed_files(handle.branch_name)
+            protected = sorted(set(observed) & self.protected_surfaces)
+            intents = {str(intent.get("path", "")) for intent in handle.release_intents if isinstance(intent, dict)}
+            if protected and not set(protected).issubset(intents):
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(
+                    handle.spec_id, "held", before, before, observed,
+                    "protected_release_surface_without_intent: " + ", ".join(protected),
+                    reserved_surfaces=reserved, overlap_kind="protected_release_surface",
+                    human_status_ping_required=True,
+                ))
+                continue
             declared = set(handle.declared_touches)
             overlap = sorted(accepted_files & set(observed))
             declared_overlap = self._surface_overlap(declared, accepted_declared)
             if overlap or declared_overlap:
                 reason = "actual changed-file overlap: " + ", ".join(overlap or declared_overlap)
                 result.held.append(handle.spec_id)
-                result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, observed, reason))
+                result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, observed, reason, reserved_surfaces=reserved, overlap_kind="declared_or_observed"))
                 continue
 
-            if not self._rebase(handle):
+            rebased, rebase_outcome = self._rebase(handle)
+            if not rebased:
+                repaired = False
+                if self.max_repair_attempts and self.request_repair:
+                    repaired = bool(self.request_repair(handle, {
+                        "kind": "rebase_conflict",
+                        "paths": self._last_rebase_conflicts,
+                        "base_ref": self.main_branch,
+                        "worker_ref": handle.branch_name,
+                    }))
+                    if repaired:
+                        rebased, rebase_outcome = self._rebase(handle)
+                if rebased:
+                    accepted = self._merge_validate_or_revert(handle, before, observed, result, queue_wait_s=time.monotonic() - queued_at, head_drift=True, rebase_outcome=rebase_outcome, reserved_surfaces=reserved)
+                    if accepted:
+                        accepted_files.update(observed)
+                        accepted_declared.update(declared)
+                        self.release(handle.spec_id)
+                    continue
                 result.held.append(handle.spec_id)
-                result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, "reconciliation failed"))
+                result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, "reconciliation failed", reserved_surfaces=reserved, rebase_outcome=rebase_outcome, repair_result="requested" if repaired else "failed", human_status_ping_required=True))
                 continue
 
-            accepted = self._merge_validate_or_revert(handle, before, observed, result)
+            accepted = self._merge_validate_or_revert(handle, before, observed, result, queue_wait_s=time.monotonic() - queued_at, head_drift=before != self._head(), rebase_outcome=rebase_outcome, reserved_surfaces=reserved)
             if accepted:
                 accepted_files.update(observed)
                 accepted_declared.update(declared)
+                self.release(handle.spec_id)
         if self.evidence_path is not None:
             write_integration_queue_result(result, self.evidence_path)
         return result
 
-    def _merge_validate_or_revert(self, handle: WorktreeHandle, before: str, observed: List[str], result: IntegrationQueueResult) -> bool:
+    def _merge_validate_or_revert(self, handle: WorktreeHandle, before: str, observed: List[str], result: IntegrationQueueResult, **evidence: Any) -> bool:
         attempts = 0
         while True:
             merge = self._git(["merge", "--no-ff", handle.branch_name])
             if merge.returncode != 0:
                 self._git(["merge", "--abort"], check=False)
                 result.held.append(handle.spec_id)
-                result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, merge.stderr.strip() or merge.stdout.strip() or "merge failed"))
+                result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, merge.stderr.strip() or merge.stdout.strip() or "merge failed", **evidence))
                 return False
             passed, output = self.validate_main(handle)
             if passed:
@@ -458,7 +529,7 @@ class SerializedIntegrationQueue:
                 _cleanup_single_worktree(handle, self.repo_root)
                 after = self._head()
                 result.accepted.append(handle.spec_id)
-                result.decisions.append(QueueDecision(handle.spec_id, "accepted", before, after, observed, validation_output=output))
+                result.decisions.append(QueueDecision(handle.spec_id, "accepted", before, after, observed, validation_output=output, **evidence))
                 return True
 
             # Validation happened on main, so retain raw output and revert the
@@ -466,24 +537,32 @@ class SerializedIntegrationQueue:
             self._git(["revert", "-m", "1", "HEAD", "--no-edit"])
             attempts += 1
             if attempts <= self.max_repair_attempts and self.request_repair and self.request_repair(handle, output):
-                if not self._rebase(handle):
+                rebased, rebase_outcome = self._rebase(handle)
+                if not rebased:
                     result.held.append(handle.spec_id)
-                    result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, "repair rebase failed", output))
+                    repair_evidence = {**evidence, "rebase_outcome": rebase_outcome, "repair_result": "failed"}
+                    result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, "repair rebase failed", output, **repair_evidence))
                     return False
                 continue
             handle.status = "failed"
             self._set_status(handle.spec_id, "blocked", "main validation failed after bounded repair", output)
             self._block_dependents(handle.spec_id)
             result.reverted.append(handle.spec_id)
-            result.decisions.append(QueueDecision(handle.spec_id, "reverted", before, self._head(), observed, "main validation failed", output))
+            result.decisions.append(QueueDecision(handle.spec_id, "reverted", before, self._head(), observed, "main validation failed", output, repair_result="exhausted", **evidence))
             return False
 
-    def _rebase(self, handle: WorktreeHandle) -> bool:
+    def _rebase(self, handle: WorktreeHandle) -> Tuple[bool, str]:
         rebase = subprocess.run(["git", "rebase", self.main_branch], cwd=str(handle.worktree_path), capture_output=True, text=True)
         if rebase.returncode == 0:
-            return True
+            self._last_rebase_conflicts = []
+            return True, "success"
+        conflicts = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"], cwd=str(handle.worktree_path),
+            capture_output=True, text=True,
+        )
+        self._last_rebase_conflicts = sorted(path for path in conflicts.stdout.splitlines() if path and not Path(path).is_absolute())
         subprocess.run(["git", "rebase", "--abort"], cwd=str(handle.worktree_path), capture_output=True, text=True, check=False)
-        return False
+        return False, "conflict"
 
     def _changed_files(self, branch_name: str) -> List[str]:
         diff = self._git(["diff", "--name-only", f"{self.main_branch}...{branch_name}"])
@@ -495,6 +574,10 @@ class SerializedIntegrationQueue:
 
     def _head(self) -> str:
         return self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def _main_is_dirty(self) -> bool:
+        status = self._git(["status", "--porcelain"])
+        return status.returncode != 0 or bool(status.stdout.strip())
 
     def _git(self, args: List[str], *, check: bool = False) -> subprocess.CompletedProcess:
         return subprocess.run(["git", *args], cwd=str(self.repo_root), capture_output=True, text=True, check=check)
@@ -529,6 +612,32 @@ def write_integration_queue_result(result: IntegrationQueueResult, output_path: 
         "decisions": [asdict(decision) for decision in result.decisions],
     }, indent=2) + "\n", encoding="utf-8")
     return output_path
+
+
+def integration_metrics_summary(result: IntegrationQueueResult) -> Dict[str, Any]:
+    """Return redacted aggregate integration metrics with explicit N/A rates.
+
+    Queue evidence deliberately contains spec IDs and repository-relative paths
+    only.  This summary keeps reports safe to aggregate across projects.
+    """
+    decisions = result.decisions
+    denominator = len(decisions)
+
+    def rate(count: int) -> Any:
+        return "N/A" if denominator == 0 else count / denominator
+
+    conflicts = sum(item.rebase_outcome == "conflict" for item in decisions)
+    automatic = sum(item.outcome == "accepted" and item.rebase_outcome == "success" for item in decisions)
+    return {
+        "integrations": denominator,
+        "queue_wait_s_total": sum(item.queue_wait_s for item in decisions),
+        "head_drift_count": sum(item.head_drift for item in decisions),
+        "conflict_count": conflicts,
+        "conflict_rate": rate(conflicts),
+        "automatic_resolution_count": automatic,
+        "automatic_resolution_rate": rate(automatic),
+        "human_status_ping_required": sum(item.human_status_ping_required for item in decisions),
+    }
 
 
 # ---------------------------------------------------------------------------

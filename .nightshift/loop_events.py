@@ -12,6 +12,31 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
+# SPEC-196 deliberately keeps this vocabulary small.  Event payloads must use
+# these identifiers rather than arbitrary agent prose so cross-run analytics
+# stays safe to publish.
+PHASE_IDS = frozenset({
+    "admission", "preflight", "context_load", "test_planning", "test_writing",
+    "implementation", "review", "validation", "evidence_gate", "recovery",
+    "merge", "terminal_recording",
+})
+PHASE_MEASUREMENT_STATES = frozenset({"measured", "skipped", "interrupted", "unavailable"})
+
+
+def emit_phase_event(log: "RunEventLog", event: str, spec_id: str, phase: str, **payload) -> None:
+    """Emit a controlled phase boundary without accepting private run detail."""
+    if event not in {"phase_started", "phase_finished"}:
+        raise ValueError("phase event must be phase_started or phase_finished")
+    if phase not in PHASE_IDS:
+        raise ValueError("unknown phase id")
+    state = payload.get("measurement_state")
+    if event == "phase_finished" and state not in PHASE_MEASUREMENT_STATES:
+        raise ValueError("phase finish requires a controlled measurement state")
+    if set(payload) - {"measurement_state", "ts"}:
+        raise ValueError("unapproved phase event field")
+    log.emit(event, spec_id=spec_id, phase=phase, **payload)
+
+
 STEP_NAMES: Dict[int, str] = {
     1: "preflight",
     2: "task_selection",
@@ -30,6 +55,49 @@ STEP_NAMES: Dict[int, str] = {
     15: "post_run",
     16: "loop_exit",
 }
+
+# SPEC-188 recovery events are deliberately small, categorical records.  They
+# share the run event stream; this module never changes lifecycle state.
+RECOVERY_EVENT_TYPES = frozenset({
+    "capability_probe",
+    "recovery_attempt_started",
+    "recovery_attempt_finished",
+    "recovery_escalated",
+    "block_evaluated",
+    "run_resolved",
+})
+RECOVERY_OUTCOMES = frozenset({"passed", "failed", "skipped", "succeeded", "exhausted"})
+
+
+def validate_recovery_event(event_type: str, payload: Dict) -> None:
+    """Reject unbounded recovery telemetry before it enters the event stream."""
+    if event_type not in RECOVERY_EVENT_TYPES:
+        raise ValueError("not a controlled recovery event")
+    for key, value in payload.items():
+        if key in {"spec_id", "ts"}:
+            continue
+        if key not in {
+            "capability", "outcome", "eligible", "safe", "fresh_worker",
+            "duration_s", "attempt", "evidence_ref", "evidence_hash",
+            "block_reason", "sink_status", "run_sequence",
+        }:
+            raise ValueError(f"unapproved recovery field: {key}")
+        if isinstance(value, str) and ("/" in value or "\\" in value):
+            raise ValueError("recovery telemetry may not contain paths")
+        if key == "outcome" and value not in RECOVERY_OUTCOMES:
+            raise ValueError("invalid recovery outcome")
+        if key in {"eligible", "safe", "fresh_worker"} and not isinstance(value, bool):
+            raise ValueError(f"{key} must be boolean")
+        if key in {"duration_s", "attempt", "run_sequence"} and (
+            not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0
+        ):
+            raise ValueError(f"{key} must be a non-negative number")
+
+
+def emit_recovery_event(log: "RunEventLog", event_type: str, spec_id: str, **payload) -> None:
+    """Append one validated recovery observation to the existing RunEventLog."""
+    validate_recovery_event(event_type, {"spec_id": spec_id, **payload})
+    log.emit(event_type, spec_id=spec_id, **payload)
 
 
 def _iso_utc_now() -> str:

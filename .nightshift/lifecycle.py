@@ -45,6 +45,11 @@ BLOCKER_CLASSES = frozenset({
     "technical_infeasibility", "safety_constraint", "evidence_unavailable",
     "critical_external_constraint", "unknown_critical_failure",
 })
+ORDINARY_EVIDENCE_WAIT_FAILURES = {
+    "missing_browser_runtime": ("test_runtime", "browser_runtime"),
+    "missing_api_runtime": ("api_runtime", "api_runtime"),
+    "missing_test_runtime": ("test_runtime", "test_runtime"),
+}
 LIFECYCLE_TRANSITIONS = {
     "draft": frozenset({"planned", "ready", "blocked", "superseded"}),
     "planned": frozenset({"ready", "blocked", "superseded"}),
@@ -216,6 +221,25 @@ def validate_blocked(frontmatter: Mapping[str, Any]) -> list[str]:
     if any(pattern in reason for pattern in ORDINARY_BLOCKER_PATTERNS):
         errors.append("blocked reason describes an ordinary admission wait, not a critical constraint")
     return errors
+
+
+def classify_ordinary_evidence_wait(error_type: str) -> dict[str, str] | None:
+    """Classify declared expected evidence-runtime absences without parsing logs.
+
+    The vocabulary deliberately contains capability classes rather than command
+    output, paths, hosts, or credentials.  Callers must use one of these
+    explicit error types; all other failures retain the critical-block route.
+    """
+    classified = ORDINARY_EVIDENCE_WAIT_FAILURES.get(error_type)
+    if classified is None:
+        return None
+    category, missing_capability = classified
+    return {
+        "category": category,
+        "missing_capability": missing_capability,
+        "resolution_state": "awaiting_capability",
+        "next_action": f"provide {missing_capability} and rerun the evidence gate",
+    }
 
 
 def migrate_legacy_planning(frontmatter: Mapping[str, Any]) -> tuple[str | None, ReadinessResult]:

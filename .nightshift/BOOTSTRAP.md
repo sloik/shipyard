@@ -6,6 +6,13 @@
 Bootstrap discovers git defaults, writes config fields, installs hooks, and follows
 that policy when git state changes.
 
+**Blocked-run recovery:** kickoff uses the controller-backed unblock protocol,
+not ad-hoc retry prose. The parent calls `unblock_spec.py prepare`, records each
+outcome with `record_attempt`, and calls `finalize` only after deterministic
+verification. Workers return bounded evidence and never own lifecycle changes or
+merges; a verified recovery is `blocked -> ready`, while unsafe/external cases
+are controlled skips with human escalation.
+
 During configuration, ask whether Nightshift control state is intentionally part
 of repository history. Write `nightshift_state.policy: commit-backed` unless the
 operator explicitly opts into `private-local`; never infer the latter from an
@@ -500,6 +507,12 @@ sh .nightshift/hooks/install-branch-guard.sh
 Policy source: `GIT.md` § Hooks.
 
 **Pre-commit hook:** Reads `lint` and `type_check` commands from `config.yaml` and runs them before every `git commit`. If either fails, the commit is rejected.
+
+It also enforces the manifest-owned install boundary. Staged edits to managed
+`.nightshift` payloads are rejected unless they are exact bytes from the release
+being staged. Preserve any project divergence and route it through a canonical
+Nightshift spec and whole-kit release; `config.yaml`, project specs, run evidence,
+and declared migration outputs remain project-owned.
 
 **Commit-msg hook:** Accepts exactly two Nightshift subjects: ordinary work uses
 `[SPEC-ID] type: description` (e.g., `[SPEC-033] feat: handler registry`), while
