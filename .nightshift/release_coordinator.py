@@ -66,6 +66,7 @@ class RepositoryPlan:
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
 SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
+CANONICAL_SUITE_TIMEOUT_S = 300
 
 
 def _run(
@@ -83,6 +84,21 @@ def _run(
         check=check,
         timeout=timeout,
     )
+
+
+def _run_canonical_suite_step(
+    runner: SuiteRunner,
+    argv: list[str],
+    canonical: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Run one canonical-suite command without allowing release to hang forever."""
+    try:
+        return runner(argv, canonical)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        detail = f"canonical suite command exceeded {CANONICAL_SUITE_TIMEOUT_S}s: {' '.join(argv)}"
+        return subprocess.CompletedProcess(argv, 124, stdout, f"{stderr}\n{detail}".strip())
 
 
 def _git_root(path: Path) -> Path | None:
@@ -575,11 +591,11 @@ def coordinate_release(
             suite_argv = []
         else:
             runner = canonical_suite_runner or (
-                lambda argv, cwd: subprocess.run(
-                    argv, cwd=cwd, text=True, capture_output=True, check=False
+                lambda argv, cwd: _run(
+                    argv, cwd=cwd, timeout=CANONICAL_SUITE_TIMEOUT_S
                 )
             )
-            probe_result = runner(probe_argv, canonical)
+            probe_result = _run_canonical_suite_step(runner, probe_argv, canonical)
         result["canonical_suite_probe"] = (
             "passed" if probe_result.returncode == 0 else "failed"
         )
@@ -596,7 +612,7 @@ def coordinate_release(
             result["completed_at"] = datetime.now(UTC).isoformat()
             result["exit_code"] = 1
             return result
-        suite_result = runner(suite_argv, canonical)
+        suite_result = _run_canonical_suite_step(runner, suite_argv, canonical)
         result["canonical_suite_runs"] = 1
         if suite_result.returncode:
             result["failure_class"] = "canonical_preflight"

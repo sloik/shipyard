@@ -11,6 +11,31 @@
 
 ---
 
+## 3.0.1 (2026-08-09)
+
+### Bounded release gate
+
+- Board browser tests now use DOM readiness plus explicit UI assertions instead
+  of `networkidle`, which is incompatible with the board's background polling.
+- Browser operations have a ten-second default timeout, and the coordinator
+  caps each canonical-suite subprocess at five minutes. A timeout is now an
+  auditable preflight failure, never an indefinitely blocked release.
+
+**Migration:** none.
+
+## 3.0.0 (2026-08-09)
+
+### ManagedProjects relocation
+
+- Adds `argo_home.py` to the managed release payload. It is a local dependency
+  of `reflexion_producer.py`; shipping the consumer without the resolver made
+  fresh installs fail after the ManagedProjects relocation.
+- Managed projects now live under `~/Dropbox/Developer/ManagedProjects`, not
+  under Argo Home. The major version makes that topology boundary explicit.
+
+**Migration:** no config-schema migration. Existing project configuration is
+already schema 3.0.0; the canonical payload updates the runtime path resolver.
+
 ## 2.67.3 (2026-08-09)
 
 ### Canonical copy, then project config migration (SPEC-190-001-001)

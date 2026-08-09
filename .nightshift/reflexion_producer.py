@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from argo_home import cortex_root  # SPEC-ARGO-017: explicit anchor, not directory depth
 
 MAX_FIELD_CHARS = 500
 MAX_TASK_CONTEXT_CHARS = 700
@@ -32,12 +33,18 @@ PRODUCER_SESSION_PREFIX = "ns-run:"
 _STACK_LINE = re.compile(r"^\s*(Traceback\b|File \".*\", line \d+|[A-Za-z_][\w.]*Error:|log line \d+\b)")
 
 
-def _argo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
 def _default_cortex_mcp_path() -> Path:
-    return _argo_root() / "Cortex" / "mcp" / "cortex-mcp.py"
+    # SPEC-ARGO-017. Two corrections in one day, which is the point of the comment:
+    #   1. Originally ``Path(__file__).resolve().parents[3] / "Cortex" / ...`` — a
+    #      directory-depth walk that was correct only at the old nesting.
+    #   2. Then ``argo_home() / "Cortex" / ...`` — correct for a few hours, until
+    #      Cortex ALSO left Argo Home that evening.
+    # Cortex is now a peer of this kit under the managed-projects root, so address it
+    # from there. Worth remembering that both wrong versions failed the same silent
+    # way: the only caller turns the FileNotFoundError into {"captured": False, ...}
+    # and failure_persistence swallows even the import, so reflexion capture stops
+    # without any error surfacing anywhere.
+    return cortex_root() / "mcp" / "cortex-mcp.py"
 
 
 def _load_cortex_mcp_module(path: Path | None = None) -> ModuleType:
