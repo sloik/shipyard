@@ -11,6 +11,23 @@
 
 ---
 
+## 2.67.3 (2026-08-09)
+
+### Canonical copy, then project config migration (SPEC-190-001-001)
+
+- Release now treats the exact manifest and marker as canonical-owned payload
+  that is replaced deterministically. Historical provenance of an old kit copy
+  is diagnostic evidence, not an admission gate.
+- Project configuration remains project-owned. When a schema migration is
+  required, its isolated result is validated separately and applied only after
+  that install's canonical payload copy succeeds.
+- This removes the rule that stranded the 2.67.2 fleet rollout while retaining
+  staged-path, ownership-boundary, smoke, verification, commit, opt-out, and
+  no-push guards.
+
+**Migration:** none. The ordinary release command now performs the canonical
+payload replacement without `--adopt-unresolved-managed`.
+
 ## 2.67.2 (2026-08-09)
 
 ### Explicit legacy managed-payload adoption (SPEC-190-001-001)
