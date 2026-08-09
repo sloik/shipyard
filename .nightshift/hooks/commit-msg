@@ -28,6 +28,52 @@ if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|bl
     exit 0
 fi
 
+# SPEC-183: documentation-only commits under configured prefixes may use a conventional
+# subject without a spec ID. A knowledge corpus has no specs, so requiring one forces
+# either a fabricated ID or --no-verify (which also skips the secret scan). In one repo
+# this left an entire vault untracked for months. Opt-in and empty by default:
+#
+#   git:
+#     unprefixed_paths:
+#       - "Wiedza/"
+#
+# The exemption applies only when EVERY staged path is under one of those prefixes.
+# The allowlist is read by scanner.py so the kit keeps ONE config reader. A separate
+# hand-rolled parser here swallowed an inline comment and produced a garbage prefix.
+# Fails open (spec prefix still required) if python3 or scanner.py is unavailable.
+CONFIG_FILE=".nightshift/config.yaml"
+SCANNER=".nightshift/scanner.py"
+if [ -f "$CONFIG_FILE" ] && [ -f "$SCANNER" ] && command -v python3 >/dev/null 2>&1; then
+    UNPREFIXED=$(python3 "$SCANNER" --unprefixed-paths --config "$CONFIG_FILE" 2>/dev/null || true)
+
+    if [ -n "$UNPREFIXED" ]; then
+        STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+        if [ -n "$STAGED" ]; then
+            ALL_UNDER=1
+            while IFS= read -r staged_path; do
+                [ -z "$staged_path" ] && continue
+                MATCHED=0
+                while IFS= read -r prefix; do
+                    [ -z "$prefix" ] && continue
+                    case "$staged_path" in
+                        "$prefix"*) MATCHED=1; break ;;
+                    esac
+                done <<< "$UNPREFIXED"
+                if [ "$MATCHED" -eq 0 ]; then
+                    ALL_UNDER=0
+                    break
+                fi
+            done <<< "$STAGED"
+
+            # Conventional-commit subject: type(optional scope): description
+            if [ "$ALL_UNDER" -eq 1 ] && \
+               echo "$FIRST_LINE" | grep -qE '^(feat|fix|docs|chore|refactor|test|style|perf|build|ci)(\([^)]+\))?!?: .+'; then
+                exit 0
+            fi
+        fi
+    fi
+fi
+
 # Ordinary commits require a spec prefix, separator, and non-empty subject.
 if ! echo "$FIRST_LINE" | grep -qE '^\[SPEC-([A-Z0-9]+-)*[0-9]+\] .+'; then
     echo ""
