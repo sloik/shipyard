@@ -147,13 +147,21 @@ def intrinsic_readiness(frontmatter: Mapping[str, Any], body: str) -> ReadinessR
         "unresolved_markers", Readiness.REVIEW if unresolved else Readiness.PASS, tuple(unresolved)
     ))
 
-    requirement_ids = set(re.findall(r"\bR(\d+)\s*(?:\([^)\n]*\))?\s*:", body))
+    requirement_ids = set(re.findall(r"\bR(\d+)\s*(?:\([^)\n]*\))?\s*(?::|\.)", body))
     ac_ids = set(re.findall(r"\bAC(\d+)\s*(?:\([^)\n]*\))?\s*:", body))
+    ac_reference_ids = {
+        reference_id
+        for parenthetical in re.findall(r"\bAC\d+\s*\(([^)\n]*)\)\s*:", body)
+        for reference_id in re.findall(r"\bR(\d+)\b", parenthetical)
+    }
     traceability_errors: list[str] = []
     if not requirement_ids or not ac_ids:
         traceability_errors.append("requirements and acceptance criteria need stable IDs")
-    elif requirement_ids != ac_ids:
-        traceability_errors.append("requirement/acceptance-criterion IDs are not traceable one-to-one")
+    elif missing_reference_ids := sorted(ac_reference_ids - requirement_ids, key=int):
+        traceability_errors.append(
+            "acceptance criteria reference missing requirement IDs: "
+            + ", ".join(f"R{reference_id}" for reference_id in missing_reference_ids)
+        )
     dimensions.append(ReadinessDimension(
         "requirement_ac_traceability",
         Readiness.FAIL if traceability_errors else Readiness.PASS,

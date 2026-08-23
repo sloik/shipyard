@@ -461,6 +461,26 @@ Walk me through what a real user does, step by step."
 
 ### Material REVIEW decisions and reuse gate
 
+### Draft promotion gaps (SPEC-210)
+
+`draft` is not a silent holding state. A draft may declare `promotion_gap` as a
+mapping with a controlled `kind` and a non-empty `reason`. Valid kinds are
+`awaiting_upstream_spec`, `awaiting_authorization`,
+`awaiting_external_precondition`, `incomplete_content`, and
+`awaiting_decision`. A gap may be resolved (`resolved: true`) or explicitly
+waived (`waived_reason: <non-empty reason>`). For an upstream gap, include
+`upstream_spec`; the shared projects registry resolves it automatically only
+when the exact reachable spec is `done`. Unreachable references remain an
+operator-resolved promotion refusal.
+
+Apply-time restrictions such as `propose-only` are not promotion gaps: they
+belong to release/application policy and must not hold an otherwise admissible
+spec. An absent field remains an `unclassified` finding, not an implicit gap.
+Use `validate_specs.py <specs-dir> --promotion-gap-summary` for counts; every
+kind reports a numerator and the full draft denominator, and an empty corpus is
+reported as `N/A` rather than `0%`. The board status writer enforces unresolved
+declared gaps before a draft -> ready change is written.
+
 An unresolved item is not automatically `blocked`. If intrinsic readiness returns
 `REVIEW`, use the existing `/nightshift address-issues` QUESTIONS flow. A full evidence
 brief is required only when the explicit question can materially change requirements,

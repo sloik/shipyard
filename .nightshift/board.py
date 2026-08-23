@@ -46,6 +46,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
+from spec_frontmatter import promotion_transition_error
 
 try:
     from status_store import StatusStore
@@ -418,6 +419,9 @@ class SpecCache:
         allowed_statuses = _allowed_statuses_for_spec(entry.frontmatter)
         if status not in allowed_statuses:
             raise ValueError(_status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}")
+        refusal = promotion_transition_error(entry.frontmatter, status, specs_dir=self._specs_dir)
+        if refusal:
+            raise ValueError(refusal)
         if status == "done":
             import release_handoff
             canonical = Path(__file__).resolve().parent

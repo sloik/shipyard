@@ -46,7 +46,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import yaml
 
@@ -57,6 +57,18 @@ except ImportError:  # portable project-copy fallback
 
 
 DEFAULT_MAX_PRIOR_ATTEMPTS = 10
+
+# SPEC-210 — a draft's missing promotion rationale is observable, while a
+# declared rationale is a deterministic write-boundary gate.  This vocabulary
+# intentionally describes promotion readiness only; apply-time constraints
+# (for example ``propose-only``) belong to release/application policy.
+PROMOTION_GAP_KINDS = frozenset({
+    "awaiting_upstream_spec",
+    "awaiting_authorization",
+    "awaiting_external_precondition",
+    "incomplete_content",
+    "awaiting_decision",
+})
 
 _FALLBACK_SPEC_STATUSES = frozenset({
     "draft",
@@ -127,6 +139,92 @@ def status_error_for_spec(frontmatter: Dict[str, Any] | None, status: str) -> st
         valid_sorted = sorted(VALID_SPEC_STATUSES)
         return f"invalid status {status!r} — valid values: {', '.join(valid_sorted)}"
     return None
+
+
+def promotion_gap_error(
+    frontmatter: Mapping[str, Any],
+    *,
+    specs_dir: Path | None = None,
+) -> str | None:
+    """Return a promotion refusal for an unresolved declared gap.
+
+    ``None`` means no declared gap blocks the draft -> ready transition.  An
+    absent field is deliberately not treated as a gap: callers report it as an
+    unclassified draft instead.  A waiver is explicit and carries its reason.
+    """
+    gap = frontmatter.get("promotion_gap")
+    if gap is None:
+        return None
+    if not isinstance(gap, Mapping):
+        return "promotion_gap must be a mapping with kind and reason"
+    kind = gap.get("kind")
+    reason = gap.get("reason")
+    if kind not in PROMOTION_GAP_KINDS:
+        return "promotion_gap kind must be one of: " + ", ".join(sorted(PROMOTION_GAP_KINDS))
+    if not isinstance(reason, str) or not reason.strip():
+        return f"promotion_gap {kind} requires a non-empty reason"
+    waiver = gap.get("waived_reason")
+    if isinstance(waiver, str) and waiver.strip():
+        return None
+    if kind != "awaiting_upstream_spec":
+        if gap.get("resolved") is True:
+            return None
+        return f"promotion refused: unresolved promotion_gap {kind}: {reason}"
+
+    upstream = gap.get("upstream_spec")
+    if not isinstance(upstream, str) or not upstream.strip():
+        return "promotion_gap awaiting_upstream_spec requires upstream_spec"
+    if specs_dir is None:
+        return (
+            f"promotion refused: unresolved promotion_gap {kind}: {reason} "
+            "(operator-resolved: registry unavailable)"
+        )
+    # Lazy import avoids making the low-level frontmatter parser depend on a
+    # registry when it is used in portable project copies.
+    try:
+        from dependency_registry import DependencyRegistryResolver
+        resolution = DependencyRegistryResolver(specs_dir, cache_seconds=0).resolve([upstream])
+    except Exception:
+        resolution = None
+    record = resolution.resolved.get(upstream) if resolution is not None else None
+    if record is not None and record.status == "done":
+        return None
+    suffix = "operator-resolved: upstream spec is unreachable"
+    if record is not None:
+        suffix = f"upstream spec {upstream} status is {record.status}"
+    return f"promotion refused: unresolved promotion_gap {kind}: {reason} ({suffix})"
+
+
+def promotion_transition_error(
+    frontmatter: Mapping[str, Any],
+    target_status: str,
+    *,
+    specs_dir: Path | None = None,
+) -> str | None:
+    """Return the shared write-boundary refusal for a draft -> ready change."""
+    if str(frontmatter.get("status", "")).lower() != "draft" or target_status != "ready":
+        return None
+    return promotion_gap_error(frontmatter, specs_dir=specs_dir)
+
+
+def promotion_gap_summary(frontmatters: List[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return draft gap counts with a shared denominator and N/A empty rate."""
+    drafts = [fm for fm in frontmatters if str(fm.get("status", "")).lower() == "draft"]
+    denominator = len(drafts)
+    counts: dict[str, int] = {kind: 0 for kind in sorted(PROMOTION_GAP_KINDS)}
+    counts["unclassified"] = 0
+    for fm in drafts:
+        gap = fm.get("promotion_gap")
+        kind = gap.get("kind") if isinstance(gap, Mapping) else None
+        counts[kind if kind in PROMOTION_GAP_KINDS else "unclassified"] += 1
+    return {
+        "denominator": denominator,
+        "by_kind": {
+            kind: {"numerator": count, "denominator": denominator,
+                   "rate": "N/A" if not denominator else count / denominator}
+            for kind, count in counts.items()
+        },
+    }
 
 
 def touches_tokens(touches: Any) -> set[str]:
@@ -409,6 +507,17 @@ def write_spec_frontmatter(
     new_fm = mutator(dict(parsed.frontmatter))
     if not isinstance(new_fm, dict):
         raise FrontmatterError("mutator must return a dict")
+
+    # This is the write boundary shared by lifecycle and coordinator helpers.
+    # Refuse before serialisation or atomic replacement so every supported
+    # caller leaves the persisted frontmatter byte-for-byte unchanged.
+    refusal = promotion_transition_error(
+        parsed.frontmatter,
+        str(new_fm.get("status", "")),
+        specs_dir=spec_file.parent,
+    )
+    if refusal:
+        raise FrontmatterError(refusal)
 
     fm_text = _serialise_frontmatter(new_fm)
 

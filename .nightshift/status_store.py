@@ -223,6 +223,7 @@ class StatusStore:
         except Exception as exc:
             raise LifecyclePersistenceError(
                 f"checkpoint {checkpoint['checkpoint_id']} persisted but frontmatter write failed; "
+                f"refusal: {exc}; "
                 f"recovery: reconcile {path.name} to {status}"
             ) from exc
         return checkpoint

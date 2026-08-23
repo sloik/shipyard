@@ -18,6 +18,7 @@ import re
 import sys
 from pathlib import Path
 
+from dependency_registry import DependencyRegistryResolver
 from lifecycle import migrate_legacy_planning, validate_blocked
 
 try:
@@ -39,6 +40,8 @@ try:
         is_nfr_family,
         nfr_is_bound_or_waived,
         nfr_match_reasons,
+        PROMOTION_GAP_KINDS,
+        promotion_gap_summary,
     )
 except ImportError:
     # Fallback when run outside the canonical package (e.g. from a project's
@@ -68,6 +71,14 @@ except ImportError:
 
     def nfr_is_bound_or_waived(spec, nfr):
         return True
+
+    PROMOTION_GAP_KINDS = frozenset({
+        "awaiting_upstream_spec", "awaiting_authorization",
+        "awaiting_external_precondition", "incomplete_content", "awaiting_decision",
+    })
+
+    def promotion_gap_summary(frontmatters):
+        return {"denominator": 0, "by_kind": {}}
 
     def status_error_for_spec(frontmatter, status):
         if _is_nfr_family(frontmatter) and status not in NFR_FAMILY_STATUSES:
@@ -417,6 +428,54 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
     return loaded
 
 
+def fleet_uniqueness_findings(specs_dir: Path, spec_files: list[Path]) -> dict[str, list[str]]:
+    """Return warning-only fleet ID collision findings for ``spec_files``.
+
+    Fleet discovery remains owned by ``DependencyRegistryResolver``; the
+    validator only consumes its shared enumeration.
+    """
+    parsed: list[tuple[Path, str, bytes]] = []
+    for spec_file in spec_files:
+        try:
+            content = spec_file.read_bytes()
+            fm = yaml.safe_load(content.decode("utf-8").split("\n---", 1)[0][3:]) or {}
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if isinstance(fm, dict) and fm.get("id"):
+            parsed.append((spec_file.resolve(), str(fm["id"]), content))
+
+    findings = {path.name: [] for path, _, _ in parsed}
+    if not parsed:
+        return findings
+
+    resolver = DependencyRegistryResolver(specs_dir, cache_seconds=0)
+    records_by_id, registry_error = resolver.records_for(spec_id for _, spec_id, _ in parsed)
+
+    # A flat specs directory without a registry is the normal standalone form;
+    # retain its quiet behaviour. A managed .nightshift/specs directory expects
+    # a sibling registry, so make that unavailable fleet check observable.
+    registry_expected = specs_dir.parent.name == ".nightshift"
+    if registry_error and (resolver.registry_path.is_file() or registry_expected):
+        message = f"WARNING: fleet uniqueness check skipped, registry unavailable: {registry_error}"
+        for path, _, _ in parsed:
+            findings[path.name].append(message)
+        return findings
+
+    for path, spec_id, local_content in parsed:
+        for record in records_by_id.get(spec_id, ()):
+            if record.spec_path == path:
+                continue
+            try:
+                other_content = record.spec_path.read_bytes()
+            except OSError:
+                continue
+            if other_content != local_content:
+                findings[path.name].append(
+                    f"WARNING: spec id {spec_id} also exists in {record.spec_path} — not fleet-unique"
+                )
+    return findings
+
+
 def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None) -> list:
     """Return a list of error/warning strings for spec_file, or [] if valid.
 
@@ -580,6 +639,23 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     _spec_status = str(fm.get("status", "")).lower()
     _spec_id = str(fm.get("id", ""))
     _is_nfr = _spec_id.startswith("NFR-") or _spec_type == "nfr"
+
+    # SPEC-210 — absence is counted as ``unclassified`` by the derived summary,
+    # never made a validation error or an implicit promotion refusal. A declared
+    # malformed gap is surfaced early.
+    if _spec_status == "draft":
+        gap = fm.get("promotion_gap")
+        if gap is not None and not isinstance(gap, dict):
+            errors.append("promotion_gap must be a mapping with kind and reason")
+        elif isinstance(gap, dict):
+            kind = gap.get("kind")
+            reason = gap.get("reason")
+            if kind not in PROMOTION_GAP_KINDS:
+                errors.append("promotion_gap kind must be one of: " + ", ".join(sorted(PROMOTION_GAP_KINDS)))
+            if not isinstance(reason, str) or not reason.strip():
+                errors.append(f"promotion_gap {kind} requires a non-empty reason")
+            if kind == "awaiting_upstream_spec" and not str(gap.get("upstream_spec", "")).strip():
+                errors.append("promotion_gap awaiting_upstream_spec requires upstream_spec")
 
     # SPEC-140: the declaration must be truthful when a mechanically matching
     # active NFR exists. Drafts stay authorable (warning); ready+ is a gate.
@@ -756,11 +832,29 @@ def validate_directory(specs_dir: Path) -> dict:
             continue  # skip template files
         results[spec_file.name] = validate_file(spec_file, all_specs=all_specs)
 
+    fleet_findings = fleet_uniqueness_findings(
+        specs_dir,
+        [path for path in sorted(specs_dir.glob("*.md")) if not path.name.startswith("_")],
+    )
+    for name, warnings in fleet_findings.items():
+        results.setdefault(name, []).extend(warnings)
+
     # SPEC-071 R9a: validate the sibling projects-registry.json when present
     # (specs_dir is typically `.nightshift/specs`; the registry is its sibling).
     registry = specs_dir.parent / "projects-registry.json"
     if registry.is_file():
-        results[registry.name] = validate_registry_file(registry)
+        registry_findings = validate_registry_file(registry)
+        # A sibling registry is infrastructure for this directory's optional
+        # fleet signal.  Its unreadability has already been reported against
+        # each affected spec by ``fleet_uniqueness_findings`` as a warning, so
+        # do not turn that degraded validation path into a CLI failure here.
+        # Direct callers of ``validate_registry_file`` retain its strict parse
+        # error and all valid-but-unsafe registry findings stay fatal.
+        if not (
+            len(registry_findings) == 1
+            and registry_findings[0].startswith("cannot read registry: ")
+        ):
+            results[registry.name] = registry_findings
 
     # SPEC-080: validate the sibling config.yaml board_column_defaults when present.
     config_yaml = specs_dir.parent / "config.yaml"
@@ -840,22 +934,27 @@ def _render_text(
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if any(arg in {"--help", "-h"} for arg in argv):
-        print("Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text]")
+        print("Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] [--promotion-gap-summary]")
+        print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
         return 0
     if not argv:
         print(
-            "Usage: python3 validate_specs.py <file_or_directory> [--format json|text]",
+            "Usage: python3 validate_specs.py <file_or_directory> [--format json|text] [--promotion-gap-summary]",
             file=sys.stderr,
         )
         return 1
 
     fmt = "text"
+    show_promotion_gap_summary = False
     positional = []
     i = 0
     while i < len(argv):
         if argv[i] == "--format" and i + 1 < len(argv):
             fmt = argv[i + 1]
             i += 2
+        elif argv[i] == "--promotion-gap-summary":
+            show_promotion_gap_summary = True
+            i += 1
         else:
             positional.append(argv[i])
             i += 1
@@ -876,6 +975,9 @@ def main(argv: list[str] | None = None) -> int:
                 path_results = {str(path): [str(exc)]}
         elif path.is_file() and path.suffix == ".md":
             path_results = {path.name: validate_file(path)}
+            path_results[path.name].extend(
+                fleet_uniqueness_findings(path.parent, [path]).get(path.name, [])
+            )
         else:
             path_results = {
                 str(path): ["path does not exist or is not a Markdown spec file"]
@@ -898,6 +1000,18 @@ def main(argv: list[str] | None = None) -> int:
             "files_with_errors": sum(1 for e in results.values() if e),
             "results": results,
         }
+        if show_promotion_gap_summary:
+            frontmatters = []
+            for raw_path in positional:
+                path = Path(raw_path)
+                if path.is_dir():
+                    frontmatters.extend(_load_directory_frontmatters(path))
+                elif path.is_file() and path.suffix == ".md":
+                    try:
+                        frontmatters.append(parse_spec_file(path).frontmatter)
+                    except FrontmatterError:
+                        pass
+            output["promotion_gap_summary"] = promotion_gap_summary(frontmatters)
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
         print(
@@ -908,6 +1022,22 @@ def main(argv: list[str] | None = None) -> int:
                 per_path=per_path,
             )
         )
+        if show_promotion_gap_summary:
+            frontmatters = []
+            for raw_path in positional:
+                path = Path(raw_path)
+                if path.is_dir():
+                    frontmatters.extend(_load_directory_frontmatters(path))
+                elif path.is_file() and path.suffix == ".md":
+                    try:
+                        frontmatters.append(parse_spec_file(path).frontmatter)
+                    except FrontmatterError:
+                        pass
+            summary = promotion_gap_summary(frontmatters)
+            print("promotion_gap_summary:")
+            for kind, row in summary["by_kind"].items():
+                rate = row["rate"] if row["rate"] == "N/A" else f"{row['rate']:.0%}"
+                print(f"  {kind}: {row['numerator']}/{row['denominator']} ({rate})")
 
     return 1 if has_errors else 0
 

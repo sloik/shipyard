@@ -158,14 +158,26 @@ The protocol decision rules are implemented for reuse in
 `liveness_classifier.py`; the module is a testable shared model, not a standing
 watchdog process.
 
-### Independent verifier worktree boundary (SPEC-222)
+### Independent verifier read boundary (SPEC-222, SPEC-228)
 
-When a parent dispatches an independent verifier, the verifier's Git footprint
-belongs solely to the assigned run worktree. Every `git status`, tree-hash, and
-diff command used for that assertion must name the worktree under test; it must
-never read the parent/coordinator checkout for this purpose. Unrelated dirtiness
-in the parent checkout is outside the verifier footprint and cannot void an
-otherwise read-only verdict.
+When a parent dispatches an independent verifier, it first uses managed
+`verification_report.py prepare-surface` to create a standalone sanitized Git
+repository. That repository is the verifier's sole read surface. It has an
+independent object database and synthetic baseline/head refs containing all
+tracked branch content except recognized report roots and the explicit run
+report. A linked worktree, sparse checkout, or deleted checkout file is not an
+eligible substitute because it leaves excluded blobs reachable through the
+source object database. Pre-dispatch evidence must record that every report-path
+probe is unreachable and that the object database is not shared.
+
+Every `git status`, tree-hash, and diff command used for the verifier footprint
+assertion must name the standalone surface. The source run worktree and parent
+checkout are outside the verifier capability boundary and their dirtiness cannot
+void an otherwise read-only verdict. Declared suite labels are neutral and their
+commands are copied exactly from project configuration; headers must not carry
+expected totals, status claims, comments, or worker conclusions. Every verifier
+verdict includes the required `contamination` field, including when its value is
+`null`.
 
 The only generated-file exception is the exact relative path
 `graphify-out/graph.html`. Do not exclude its directory, a basename match, or
@@ -221,6 +233,25 @@ This is a parent obligation, not a worker-side assertion. The portable
 and supports regression tests without making a harness-specific task-list API a
 hard dependency. The report must distinguish all three outcomes so absent
 cleanup evidence is never misread as a successful stop.
+
+### Completion reconciliation (SPEC-234)
+
+Before any kickoff parent returns idle or answers a status request, it must run
+the durable `kickoff_reconciliation.py` reducer.  The reducer persists the
+monotonic path `worker_running` → `worker_completed` →
+`verifier_dispatching` → `verifier_dispatched`, with the completion and verifier
+dispatch idempotency keys retained in state.  A callback, terminal heartbeat, or
+polling observation supplies the same normalized completion delivery.
+
+The parent supplies the narrow `KickoffRuntimeAdapter` contract: durable state
+load/save, completion polling, idempotent verifier dispatch, and scheduled
+reconciliation.  Polling is a bounded fallback, not a reason to wait for a
+human status ping.  If a process dies after the dispatch intent was persisted,
+the next reconciliation retries with the same key; the adapter launches at most
+one independent verifier.  A verifier-launch failure enters
+`controller_resolution_required` with the sanitized reason
+`verifier_launch_failed`; the parent then uses the existing controller-backed
+terminal-resolution path and never self-verifies.
 
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)

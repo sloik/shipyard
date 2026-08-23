@@ -430,7 +430,8 @@ def main() -> None:
         "--scan-all", action="store_true",
         help=(
             "Scan the whole specs dir for near-duplicate pairs (title + requirement/AC "
-            "body) instead of checking one suggestion. Exit 1 if duplicates are found."
+            "body) instead of checking one suggestion. Exit 1 if duplicates are found. "
+            "Fleet-wide ID collisions are reported by validate_specs.py."
         ),
     )
     parser.add_argument(

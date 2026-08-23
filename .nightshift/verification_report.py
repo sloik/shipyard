@@ -7,11 +7,15 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
-from dataclasses import dataclass, field, asdict
+import sys
+import tempfile
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 SEVERITIES = {"CRITICAL", "WARNING", "SUGGESTION"}
 DIMENSIONS = {"completeness", "correctness", "coherence"}
@@ -21,6 +25,11 @@ FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
 # when asserting its read-only Git footprint.  Keep the policy exact: a broad
 # ``graphify-out/`` exclusion would hide verifier writes to other artifacts.
 VERIFIER_FOOTPRINT_EXCLUSIONS = frozenset({"graphify-out/graph.html"})
+VERIFIER_REPORT_ROOTS = ("reports/", ".nightshift/reports/", "canonical/reports/")
+VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
+    "spec_id", "branch", "baseline_commit", "head_commit", "verdict",
+    "acs", "suites", "git_footprint", "contamination",
+})
 
 
 @dataclass(frozen=True)
@@ -42,10 +51,221 @@ def _run_git(worktree: Path, *args: str) -> str:
         text=True,
         capture_output=True,
         check=False,
+        env=_git_environment(),
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout
+
+
+def _git_bytes(repository: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *args], capture_output=True, check=False,
+        env=_git_environment(),
+    )
+    if result.returncode:
+        raise RuntimeError(
+            result.stderr.decode("utf-8", "replace").strip()
+            or f"git {' '.join(args)} failed"
+        )
+    return result.stdout
+
+
+def _git_environment(**extra: str) -> dict[str, str]:
+    """Return a deterministic Git environment without ambient repository links."""
+    blocked = {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE",
+    }
+    return {**{key: value for key, value in os.environ.items() if key not in blocked}, **extra}
+
+
+def _normalise_repo_path(path: str) -> str:
+    normalised = path.replace("\\", "/")
+    while normalised.startswith("./"):
+        normalised = normalised[2:]
+    if not normalised or normalised.startswith("/") or ".." in Path(normalised).parts:
+        raise ValueError(f"unsafe repository path: {path!r}")
+    return normalised
+
+
+def is_verifier_report_path(path: str, *, explicit: Iterable[str] = ()) -> bool:
+    """Return whether a tracked path carries worker/verifier conclusions."""
+    normalised = _normalise_repo_path(path)
+    exact = {_normalise_repo_path(item) for item in explicit}
+    return normalised in exact or normalised.startswith(VERIFIER_REPORT_ROOTS)
+
+
+def _clear_snapshot(destination: Path) -> None:
+    for child in destination.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
+
+
+def _materialize_ref(
+    source_repository: Path,
+    destination: Path,
+    ref: str,
+    *,
+    report_paths: Iterable[str],
+) -> list[str]:
+    """Materialize one tracked snapshot without sharing the source object DB."""
+    _clear_snapshot(destination)
+    excluded: list[str] = []
+    entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
+    for raw in entries:
+        if not raw:
+            continue
+        metadata, raw_path = raw.split(b"\t", 1)
+        mode, kind, object_id = metadata.decode("ascii").split()
+        path = _normalise_repo_path(raw_path.decode("utf-8", "surrogateescape"))
+        if is_verifier_report_path(path, explicit=report_paths):
+            excluded.append(path)
+            continue
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise ValueError(f"unsupported tracked entry for verifier surface: {path} ({mode} {kind})")
+        target = destination / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        body = _git_bytes(source_repository, "cat-file", "blob", object_id)
+        if mode == "120000":
+            link = body.decode("utf-8", "surrogateescape")
+            resolved = (target.parent / link).resolve()
+            if Path(os.path.commonpath((destination.resolve(), resolved))) != destination.resolve():
+                raise ValueError(f"symlink escapes verifier surface: {path}")
+            target.symlink_to(link)
+        else:
+            target.write_bytes(body)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+    return sorted(excluded)
+
+
+def prepare_verifier_surface(
+    source_repository: Path,
+    destination: Path,
+    *,
+    baseline_ref: str,
+    head_ref: str,
+    report_paths: Iterable[str],
+    evidence_path: Path,
+) -> dict[str, Any]:
+    """Build the sole verifier surface as a standalone, report-free Git repo.
+
+    A linked worktree is deliberately rejected as the destination: worktrees
+    share the source object database and therefore leave excluded report blobs
+    reachable through Git even when absent from the checkout.
+    """
+    source_repository = source_repository.resolve()
+    destination = destination.resolve()
+    report_paths = tuple(report_paths)
+    if destination.exists() and any(destination.iterdir()):
+        raise ValueError("verifier surface destination must be empty")
+    destination.mkdir(parents=True, exist_ok=True)
+    source_common = Path(_run_git(source_repository, "rev-parse", "--git-common-dir").strip())
+    if not source_common.is_absolute():
+        source_common = (source_repository / source_common).resolve()
+    subprocess.run(
+        ["git", "init", "-q", str(destination)], check=True, env=_git_environment()
+    )
+    target_common = Path(_run_git(destination, "rev-parse", "--git-common-dir").strip())
+    if not target_common.is_absolute():
+        target_common = (destination / target_common).resolve()
+    if target_common.resolve() == source_common.resolve():
+        raise ValueError("verifier surface may not share the source Git object database")
+    _run_git(destination, "config", "user.name", "Nightshift verifier surface")
+    _run_git(destination, "config", "user.email", "verifier@example.invalid")
+    refs = (("baseline", baseline_ref), ("head", head_ref))
+    commits: dict[str, str] = {}
+    excluded_by_ref: dict[str, list[str]] = {}
+    fixed_env = _git_environment(
+        GIT_AUTHOR_DATE="2000-01-01T00:00:00Z",
+        GIT_COMMITTER_DATE="2000-01-01T00:00:00Z",
+    )
+    for label, ref in refs:
+        excluded_by_ref[label] = _materialize_ref(
+            source_repository, destination, ref, report_paths=report_paths
+        )
+        _run_git(destination, "add", "-A")
+        result = subprocess.run(
+            ["git", "-C", str(destination), "commit", "--allow-empty", "-qm", f"verifier {label} snapshot"],
+            env=fixed_env, capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or f"could not commit {label} snapshot")
+        commits[label] = _run_git(destination, "rev-parse", "HEAD").strip()
+        _run_git(destination, "tag", f"verifier-{label}")
+
+    probes = []
+    for path in sorted({_normalise_repo_path(item) for item in report_paths}):
+        for label in ("baseline", "head"):
+            probe = subprocess.run(
+                ["git", "-C", str(destination), "cat-file", "-e", f"verifier-{label}:{path}"],
+                capture_output=True, check=False, env=_git_environment(),
+            )
+            probes.append({"ref": label, "path": path, "unreachable": probe.returncode != 0})
+    if not probes or not all(probe["unreachable"] for probe in probes):
+        raise RuntimeError("worker report remains reachable from verifier surface")
+    evidence = {
+        "schema_version": "1.0.0",
+        "surface_kind": "standalone-sanitized-git",
+        "source_refs": {"baseline": baseline_ref, "head": head_ref},
+        "surface_commits": commits,
+        "excluded_paths": excluded_by_ref,
+        "report_reachability": probes,
+        "shared_object_database": False,
+        "head_tree": _run_git(destination, "rev-parse", "HEAD^{tree}").strip(),
+    }
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return evidence
+
+
+def validate_verifier_verdict_dict(data: dict[str, Any]) -> list[str]:
+    """Validate the independent-verifier envelope fields owned by the kit."""
+    errors = [f"missing top-level key '{key}'" for key in sorted(VERIFIER_VERDICT_REQUIRED_KEYS - data.keys())]
+    if data.get("verdict") not in {"pass", "fail", "disputes_premise"}:
+        errors.append(f"verdict not in enum: {data.get('verdict')!r}")
+    return errors
+
+
+def verifier_surface_self_test() -> dict[str, Any]:
+    """Managed release smoke contract for containment and verdict semantics."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        source, surface = root / "source", root / "surface"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        _run_git(source, "config", "user.name", "Nightshift smoke")
+        _run_git(source, "config", "user.email", "smoke@example.invalid")
+        (source / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
+        _run_git(source, "add", "code.py")
+        _run_git(source, "commit", "-qm", "baseline")
+        baseline = _run_git(source, "rev-parse", "HEAD").strip()
+        report = source / "canonical/reports/nightshift-report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("worker conclusion\n", encoding="utf-8")
+        (source / "code.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _run_git(source, "add", "-A")
+        _run_git(source, "commit", "-qm", "head")
+        head = _run_git(source, "rev-parse", "HEAD").strip()
+        evidence = prepare_verifier_surface(
+            source, surface, baseline_ref=baseline, head_ref=head,
+            report_paths=["canonical/reports/nightshift-report.md"],
+            evidence_path=root / "containment.json",
+        )
+        verdict = {
+            "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
+            "head_commit": head, "verdict": "pass", "acs": [{"id": "AC1", "status": "pass", "evidence": "smoke"}],
+            "suites": [], "git_footprint": {"tree_before": evidence["head_tree"], "tree_after": evidence["head_tree"], "porcelain": ""},
+        }
+        missing_errors = validate_verifier_verdict_dict(verdict)
+        verdict["contamination"] = None
+        if not missing_errors or validate_verifier_verdict_dict(verdict):
+            raise RuntimeError("verifier verdict contamination contract failed")
+        return evidence
 
 
 def capture_verifier_footprint(worktree: Path) -> GitFootprint:
@@ -279,19 +499,41 @@ def completion_gate(report_json: Path, *, override_reason_file: Path | None = No
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Inspect Nightshift verification reports")
-    parser.add_argument("report_json")
-    args = parser.parse_args(argv)
-    data = load_report(Path(args.report_json))
-    errors = validate_report_dict(data)
-    if errors:
-        for err in errors:
-            print(err, file=sys.stderr)
-        return 1
-    print(render_markdown(data))
-    return 0
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if raw_argv and not raw_argv[0].startswith("-") and raw_argv[0] not in {
+        "prepare-surface",
+        "verifier-self-test",
+    }:
+        data = load_report(Path(raw_argv[0]))
+        errors = validate_report_dict(data)
+        if errors:
+            for err in errors:
+                print(err, file=sys.stderr)
+            return 1
+        print(render_markdown(data))
+        return 0
+    parser = argparse.ArgumentParser(description="Nightshift verification helpers")
+    subparsers = parser.add_subparsers(dest="command")
+    prepare = subparsers.add_parser("prepare-surface")
+    prepare.add_argument("--source", required=True, type=Path)
+    prepare.add_argument("--destination", required=True, type=Path)
+    prepare.add_argument("--baseline", required=True)
+    prepare.add_argument("--head", required=True)
+    prepare.add_argument("--report-path", action="append", required=True)
+    prepare.add_argument("--evidence", required=True, type=Path)
+    subparsers.add_parser("verifier-self-test")
+    args = parser.parse_args(raw_argv)
+    if args.command == "prepare-surface":
+        prepare_verifier_surface(
+            args.source, args.destination, baseline_ref=args.baseline,
+            head_ref=args.head, report_paths=args.report_path, evidence_path=args.evidence,
+        )
+        return 0
+    if args.command == "verifier-self-test":
+        verifier_surface_self_test()
+        return 0
+    parser.error("a report path or subcommand is required")
 
 
 if __name__ == "__main__":  # pragma: no cover
-    import sys
     raise SystemExit(main())

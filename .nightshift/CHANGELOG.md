@@ -11,6 +11,40 @@
 
 ---
 
+## 3.2.0 (2026-08-23)
+
+### Structurally contained verifier read surface (SPEC-228)
+
+- Parents now materialize a standalone sanitized Git repository whose object
+  database cannot resolve the worker report at either baseline or head.
+- Pre-dispatch containment evidence is durable, verifier verdicts require the
+  contamination field, and suite headers are restricted to neutral labels plus
+  exact project-configured commands.
+- The managed verifier helper carries a release smoke self-test for containment
+  and verdict-schema rejection.
+
+**Migration:** install the whole 3.2.0 kit before the next verifier dispatch.
+No project configuration migration is required.
+
+---
+
+## 3.1.9 (2026-08-23)
+
+### Harness-agnostic kickoff completion reconciliation (SPEC-234)
+
+- Kickoff parents now persist completion and verifier-dispatch phases before
+  returning idle or status, using stable idempotency keys across duplicate and
+  interrupted deliveries.
+- Callback and bounded-polling harness adapters share one reducer. A failed
+  verifier launch is routed to controller-backed terminal resolution and is
+  never self-verified.
+
+**Migration:** install the released `ORCHESTRATOR.md` and
+`kickoff_reconciliation.py` payload. No project configuration migration is
+required.
+
+---
+
 ## 3.1.8 (2026-08-23)
 
 ### History-verified protocol archives (SPEC-217)

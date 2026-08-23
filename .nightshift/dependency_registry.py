@@ -151,6 +151,21 @@ class DependencyRegistryResolver:
                 errors[spec_id] = f"unresolved dependency {spec_id}{suffix}"
         return DependencyResolution(resolved, errors, self._registry_error)
 
+    def records_for(self, spec_ids: Iterable[str]) -> tuple[dict[str, tuple[SpecRecord, ...]], str | None]:
+        """Return the shared fleet enumeration for proactive consumers.
+
+        Consumers such as the frontmatter validator need to warn when an ID is
+        minted, before an ``after:`` reference reaches ``resolve()``. Keeping
+        this access here prevents each consumer from independently interpreting
+        the registry and its standard/flat specs-directory conventions.
+        """
+        self._refresh_if_stale()
+        requested = {str(value) for value in spec_ids if value}
+        return (
+            {spec_id: tuple(self._records.get(spec_id, ())) for spec_id in requested},
+            self._registry_error,
+        )
+
     def _refresh_if_stale(self) -> None:
         if self._loaded_at and time.monotonic() - self._loaded_at < self.cache_seconds:
             return
@@ -187,7 +202,7 @@ class DependencyRegistryResolver:
 
     def _load_projects(self) -> tuple[list[ProjectRef], str | None]:
         if not self.registry_path.is_file():
-            return [], None
+            return [], "projects-registry.json missing"
         try:
             payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

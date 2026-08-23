@@ -111,7 +111,8 @@ def build_manifest(
                 'python3 -c "import ast,pathlib; '
                 "[ast.parse(pathlib.Path(p).read_text()) for p in "
                 "('board.py','release.py','reflexion_producer.py')]\""
-            )
+            ),
+            "python3 verification_report.py verifier-self-test",
         ],
         # The coordinator materializes this declaration as one `uv run`
         # environment for both the capability probe and suite.  Never replace
