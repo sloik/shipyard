@@ -63,6 +63,8 @@ PROJECT_OWNED_NIGHTSHIFT_PREFIXES = (
     ".migrations/",
 )
 
+PROTOCOL_ARCHIVE_PREFIX = ".argo/protocol-archive/"
+
 
 def _potential_managed_stage(path: str) -> bool:
     prefix = ".nightshift/"
@@ -72,6 +74,42 @@ def _potential_managed_stage(path: str) -> bool:
     return relative not in PROJECT_OWNED_NIGHTSHIFT_EXACT and not relative.startswith(
         PROJECT_OWNED_NIGHTSHIFT_PREFIXES
     )
+
+
+def verified_archive_snapshot_paths(staged_paths: Iterable[str]) -> frozenset[str]:
+    """Return staged archive paths whose index blob is reachable from history.
+
+    Archive filenames and contents are both untrusted.  The only exemption proof is
+    that the *complete staged blob* is already reachable from a repository ref;
+    an altered byte produces a distinct object and remains subject to escalation.
+    This intentionally runs only for staged Git input, not ``--diff-file`` where
+    no index blob is available to prove the complete snapshot body.
+    """
+    candidates = sorted(path for path in staged_paths if path.startswith(PROTOCOL_ARCHIVE_PREFIX))
+    if not candidates:
+        return frozenset()
+
+    history = subprocess.run(
+        ["git", "rev-list", "--objects", "--all"], capture_output=True, check=False
+    )
+    if history.returncode:
+        return frozenset()
+    reachable = {line.split(b" ", 1)[0] for line in history.stdout.splitlines()}
+
+    verified: set[str] = set()
+    for path in candidates:
+        index_blob = subprocess.run(
+            ["git", "rev-parse", f":{path}"], capture_output=True, check=False
+        )
+        blob = index_blob.stdout.strip()
+        if index_blob.returncode or not blob or blob not in reachable:
+            continue
+        is_blob = subprocess.run(
+            ["git", "cat-file", "-e", f"{blob.decode('ascii')}^{{blob}}"], check=False
+        )
+        if is_blob.returncode == 0:
+            verified.add(path)
+    return frozenset(verified)
 
 
 @dataclass(frozen=True)
@@ -135,6 +173,8 @@ class ScanReport:
     managed_files_skipped: int = 0
     managed_files_exempted: int = 0
     managed_added_lines_exempted: int = 0
+    archive_files_exempted: int = 0
+    archive_added_lines_exempted: int = 0
 
     @property
     def blocked(self) -> bool:
@@ -285,6 +325,7 @@ def scan_diff(
     today: date | None = None,
     fixtures: FixtureRegistry | None = None,
     managed_paths: Iterable[str] = (),
+    archive_paths: Iterable[str] = (),
 ) -> ScanReport:
     """Scan added diff lines for secrets/PII and threshold-triggered escalation."""
     cfg = config or ScannerConfig()
@@ -293,6 +334,7 @@ def scan_diff(
     registry = load_fixture_registry() if fixtures is None else fixtures
     added = list(_added_lines(diff_text))
     managed = frozenset(managed_paths)
+    archive = frozenset(archive_paths)
     skipped_paths = {_location_path(location) for location, _ in added} & managed
     findings: list[Finding] = []
     acknowledged: list[AcknowledgedFinding] = []
@@ -326,9 +368,10 @@ def scan_diff(
     escalation_added = [
         (location, text)
         for location, text in added
-        if _location_path(location) not in managed
+        if _location_path(location) not in managed | archive
     ]
-    exempted_lines = len(added) - len(escalation_added)
+    managed_exempted_lines = sum(1 for location, _ in added if _location_path(location) in managed)
+    archive_exempted_lines = sum(1 for location, _ in added if _location_path(location) in archive)
     added_text = "\n".join(text for _, text in escalation_added)
     token_cost = _estimate_tokens(added_text)
     escalations = _escalations(len(escalation_added), token_cost, cfg, env)
@@ -343,7 +386,9 @@ def scan_diff(
         list(registry.discarded),
         len(skipped_paths),
         len(skipped_paths),
-        exempted_lines,
+        managed_exempted_lines,
+        len(archive),
+        archive_exempted_lines,
     )
 
 
@@ -626,19 +671,23 @@ def main(argv: list[str] | None = None) -> int:
 
     managed_payload_blocked = False
     staged_nightshift_paths: list[str] = []
+    staged_paths: list[str] = []
     managed_paths: frozenset[str] = frozenset()
-    if args.staged and Path(".nightshift").is_dir():
+    archive_paths: frozenset[str] = frozenset()
+    if args.staged:
         staged_names = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "-z"],
             capture_output=True,
             check=False,
         )
         if staged_names.returncode == 0:
-            staged_nightshift_paths = [
+            staged_paths = [
                 path.decode("utf-8", errors="surrogateescape")
                 for path in staged_names.stdout.split(b"\0")
-                if path.startswith(b".nightshift/")
+                if path
             ]
+            staged_nightshift_paths = [path for path in staged_paths if path.startswith(".nightshift/")]
+            archive_paths = verified_archive_snapshot_paths(staged_paths)
 
     potential_managed_paths = [path for path in staged_nightshift_paths if _potential_managed_stage(path)]
     if potential_managed_paths:
@@ -676,7 +725,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     diff_text = _staged_diff() if args.staged else args.diff_file.read_text(encoding="utf-8")
-    report = scan_diff(diff_text, config=load_config(args.config), managed_paths=managed_paths)
+    report = scan_diff(
+        diff_text,
+        config=load_config(args.config),
+        managed_paths=managed_paths,
+        archive_paths=archive_paths,
+    )
     if args.acknowledge_template:
         _print_acknowledge_template(diff_text, report)
         # The exit code is the gate. Printing a stanza accepts nothing, so this path must
@@ -1007,6 +1061,13 @@ def _print_report(report: ScanReport) -> None:
             f"Exempted {report.managed_files_exempted} verified managed payload "
             f"file(s) and {report.managed_added_lines_exempted} added line(s) from "
             "escalation; release-manifest hashes matched.",
+            file=sys.stderr,
+        )
+    if report.archive_files_exempted:
+        print(
+            "[nightshift scanner] "
+            f"Exempted {report.archive_files_exempted} history-verified protocol archive "
+            f"snapshot file(s) and {report.archive_added_lines_exempted} added line(s) from escalation.",
             file=sys.stderr,
         )
     if report.managed_files_skipped:

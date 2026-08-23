@@ -11,6 +11,18 @@
 
 ---
 
+## 3.1.8 (2026-08-23)
+
+### History-verified protocol archives (SPEC-217)
+
+- The escalation scanner excludes a `.argo/protocol-archive/` snapshot only
+  when its complete staged blob is reachable from repository history.
+- One-byte mutations and authored additions remain fully counted, while secret
+  and PII checks remain unchanged.
+
+**Migration:** install the released scanner payload; no configuration migration
+is required.
+
 ## 3.1.7 (2026-08-23)
 
 ### Verified kickoff watchdog cleanup (SPEC-226)
