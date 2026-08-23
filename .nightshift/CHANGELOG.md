@@ -11,6 +11,22 @@
 
 ---
 
+## 3.1.7 (2026-08-23)
+
+### Verified kickoff watchdog cleanup (SPEC-226)
+
+- Kickoff parents now record the watchdog task ID, stop that exact task, and
+  report one explicit cleanup outcome (`checked-clean`, `check-failed`, or
+  `check-not-run`) for every terminal path.
+- A managed helper and regression contract cover clean, leaked, unavailable,
+  and blocked-resolution cases; a lingering watchdog is visible evidence rather
+  than an inferred successful stop.
+
+**Migration:** install the released `ORCHESTRATOR.md` and watchdog-cleanup
+payload. No project configuration migration is required.
+
+---
+
 ## 3.1.6 (2026-08-23)
 
 ### Heartbeat-only liveness (SPEC-225)

@@ -154,6 +154,10 @@ this document are unchanged. What changes is only the signal used to decide
 "quiet" — the heartbeat file's own state and timestamp, never a supplemental
 mtime/branch-tip/commit-count probe.
 
+The protocol decision rules are implemented for reuse in
+`liveness_classifier.py`; the module is a testable shared model, not a standing
+watchdog process.
+
 ### Independent verifier worktree boundary (SPEC-222)
 
 When a parent dispatches an independent verifier, the verifier's Git footprint
@@ -191,6 +195,32 @@ dispatch. The parent uses the existing controller-backed blocked-resolution
 contract with `blocker_class: launch_failure`, preserved evidence, and its next
 safe action. It performs no extra worker launch and never recasts this outcome
 as a stale heartbeat.
+
+### Parent watchdog-task cleanup (SPEC-226)
+
+The parent that arms a kickoff liveness watchdog records its exact harness task
+identifier in the parent progress state as `watchdog_task_id`, alongside the
+claim, run ID, and heartbeat reference. A label or task-name lookup is not
+sufficient: cleanup targets the identifier returned by the arm operation.
+
+Before the parent becomes idle, every terminal route — `done`, evidence-gate
+`blocked`, confirmed hang, and pre-heartbeat launch failure — runs the same
+cleanup assertion. It stops the recorded task when one was armed, enumerates
+parent-owned running background tasks, and compares their identifiers with the
+recorded `watchdog_task_id`. Record exactly one result in the parent progress
+artifact and final run report:
+
+| Result | Meaning | Terminal handling |
+| --- | --- | --- |
+| `checked-clean` | The recorded ID is absent after the stop request. | Continue resolution. |
+| `check-failed` | Stop failed or the recorded ID remains present. | Surface the task ID and failure; do not silently swallow it. The run cannot claim a clean terminal resolution. |
+| `check-not-run` | No watchdog was armed, task listing is unavailable, or the assertion could not execute. | Record the bounded reason and whether human action is needed; never report this as clean. |
+
+This is a parent obligation, not a worker-side assertion. The portable
+`watchdog_cleanup.py` helper is the reference classifier for the three outcomes
+and supports regression tests without making a harness-specific task-list API a
+hard dependency. The report must distinguish all three outcomes so absent
+cleanup evidence is never misread as a successful stop.
 
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)
