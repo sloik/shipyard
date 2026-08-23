@@ -364,7 +364,10 @@ def _load_yaml_file(path: Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+            data = {}
+            for document in yaml.safe_load_all(fh):
+                if isinstance(document, dict):
+                    data.update(document)
         return data if isinstance(data, dict) else None
     except Exception:
         return None

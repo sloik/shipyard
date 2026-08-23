@@ -3197,7 +3197,7 @@ function renderSpecChip(specId) {
     // filled in async by fetchExternalStatus; render with placeholder for now.
     const safeId = _escHtml(specId);
     const safeName = _escHtml(ext.name);
-    return `<a class="chip spec-ref" data-spec-id="${safeId}" data-external="1" data-ext-port="${ext.port}" data-ext-name="${safeName}" data-status="external" href="http://localhost:${ext.port}/?spec=${encodeURIComponent(specId)}" target="_blank" rel="noopener" title="External · ${safeName}"><span class="chip-ext-icon">↗</span><span>${safeId}</span><span class="chip-status">…</span></a>`;
+    return `<a class="chip spec-ref" data-spec-id="${safeId}" data-external="1" data-ext-port="${ext.port}" data-ext-name="${safeName}" data-status="external" href="http://127.0.0.1:${ext.port}/?spec=${encodeURIComponent(specId)}" target="_blank" rel="noopener" title="External · ${safeName}"><span class="chip-ext-icon">↗</span><span>${safeId}</span><span class="chip-status">…</span></a>`;
   }
   const spec = specById(specId);
   const status = effectiveStatus(spec);
@@ -3753,22 +3753,27 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     r = await fetch(`/api/spec/${specId}`);
   } catch {
     reportPerformance('panel_fetch', fetchStart, { failed: true });
-    return;
+    showToast(`⚠ Could not open ${specId}`);
+    return false;
   }
   reportPerformance('panel_fetch', fetchStart, { failed: !r.ok });
-  if (!r.ok) return;
+  if (!r.ok) {
+    showToast(`⚠ ${specId} was not found on this board`);
+    return false;
+  }
   const jsonStart = performanceClock();
   let data;
   try {
     data = await r.json();
   } catch {
     reportPerformance('panel_json_decode', jsonStart, { failed: true });
-    return;
+    showToast(`⚠ Could not open ${specId}`);
+    return false;
   }
   reportPerformance('panel_json_decode', jsonStart);
   if (requestVersion !== panelRequestVersion) {
     reportPerformance('panel_cancelled', performanceStart);
-    return;
+    return false;
   }
 
   const domMutationStart = performanceClock();
@@ -3851,7 +3856,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   }));
   if (requestVersion !== panelRequestVersion) {
     reportPerformance('panel_cancelled', performanceStart);
-    return;
+    return false;
   }
 
   // Markdown body
@@ -3880,6 +3885,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     reportPerformance('panel_body_paint', performanceStart);
     reportPerformance('spec_panel_ready', performanceStart);
   });
+  return true;
 }
 
 function applyActiveCard(specId) {
@@ -5499,13 +5505,20 @@ window.addEventListener('resize', syncHeaderHeight);
 // the right state on the first paint. Don't block on it — failures degrade
 // gracefully (chips render as internal "missing spec" placeholders).
 loadProjectsRegistry();
-loadSpecs().then(() => {
-  // SPEC-064: ?spec=<id> auto-opens the panel — used by external links from
-  // peer boards. Silent no-op when the spec isn't in this project.
+loadSpecs().then(async () => {
+  // BUG-014: wait for the first spec payload, then resolve the requested ID
+  // exactly once. This shares the loopback route used by external chips and
+  // makes an unresolved deep link visible rather than a silent no-op.
   const initialSpec = new URLSearchParams(window.location.search).get('spec');
-  if (initialSpec) {
-    setTimeout(() => { openPanel(initialSpec).catch(() => {}); }, 100);
+  if (!initialSpec) return;
+  if (!specs.some(spec => spec.id === initialSpec)) {
+    clearSelection();
+    showToast(`⚠ ${initialSpec} was not found on this board`);
+    return;
   }
+  await openPanel(initialSpec);
+}).catch(() => {
+  showToast('⚠ Could not load board data');
 });
 </script>
 </body>

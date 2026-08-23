@@ -147,8 +147,8 @@ def intrinsic_readiness(frontmatter: Mapping[str, Any], body: str) -> ReadinessR
         "unresolved_markers", Readiness.REVIEW if unresolved else Readiness.PASS, tuple(unresolved)
     ))
 
-    requirement_ids = set(re.findall(r"\bR(\d+)\s*:", body))
-    ac_ids = set(re.findall(r"\bAC(\d+)\s*:", body))
+    requirement_ids = set(re.findall(r"\bR(\d+)\s*(?:\([^)\n]*\))?\s*:", body))
+    ac_ids = set(re.findall(r"\bAC(\d+)\s*(?:\([^)\n]*\))?\s*:", body))
     traceability_errors: list[str] = []
     if not requirement_ids or not ac_ids:
         traceability_errors.append("requirements and acceptance criteria need stable IDs")

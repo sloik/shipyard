@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -99,6 +101,26 @@ def _run_canonical_suite_step(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         detail = f"canonical suite command exceeded {CANONICAL_SUITE_TIMEOUT_S}s: {' '.join(argv)}"
         return subprocess.CompletedProcess(argv, 124, stdout, f"{stderr}\n{detail}".strip())
+
+
+def _run_canonical_suite(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run release preflight without leaking an operator commit authorization.
+
+    ``NIGHTSHIFT_ESCALATION_SIGNOFF`` is intentionally consumed by a managed
+    install's commit gate.  It must not change canonical test behavior, or the
+    same release can pass or fail based on an operator decision unrelated to
+    the kit under test.
+    """
+    environment = os.environ.copy()
+    environment.pop("NIGHTSHIFT_ESCALATION_SIGNOFF", None)
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=CANONICAL_SUITE_TIMEOUT_S,
+        env=environment,
+    )
 
 
 def _git_root(path: Path) -> Path | None:
@@ -366,7 +388,16 @@ def preflight_repository(
         _relative(plan.root, install / release.MARKER)
         for install in plan.installs
     }
-    dirty_project_owned = sorted((dirty & plan.allowed_paths) - payload_paths)
+    # Project-owned configuration is never canonical payload, even when its
+    # schema already needs no migration and therefore is absent from the
+    # commit allowlist.  A pre-existing edit must skip this repository before
+    # payload copy: its local hook may inspect the whole worktree.
+    project_owned_config = {
+        _relative(plan.root, install / "config.yaml") for install in plan.installs
+    }
+    dirty_project_owned = sorted(
+        ((dirty & plan.allowed_paths) - payload_paths) | (dirty & project_owned_config)
+    )
     if dirty_project_owned:
         errors.append(
             "project-owned release paths require separate configuration migration: "
@@ -461,6 +492,33 @@ def _verify_staged(plan: RepositoryPlan, manifest: dict) -> tuple[set[str], list
     return staged, errors
 
 
+def _refresh_recognized_nightshift_precommit_hooks(plan: RepositoryPlan) -> list[str]:
+    """Refresh only installed hooks that identify themselves as Nightshift.
+
+    A release commit invokes the repository's Git hook, not the just-copied
+    managed `.nightshift/hooks/pre-commit` payload.  Refreshing an explicitly
+    identified Nightshift hook closes that bootstrap gap without touching a
+    project-owned hook.
+    """
+    errors: list[str] = []
+    for install in plan.installs:
+        source = install / "hooks" / "pre-commit"
+        hooks = _run(["git", "rev-parse", "--git-path", "hooks"], cwd=plan.root)
+        if hooks.returncode or not source.is_file():
+            continue
+        directory = Path(hooks.stdout.strip())
+        if not directory.is_absolute():
+            directory = plan.root / directory
+        target = directory / "pre-commit"
+        if not target.is_file() or "Nightshift Kit — Pre-commit hook" not in target.read_text(errors="replace")[:300]:
+            continue
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            errors.append(f"could not refresh recognized Nightshift pre-commit hook: {exc}")
+    return errors
+
+
 def _commit_repository(
     plan: RepositoryPlan, manifest: dict
 ) -> tuple[str | None, list[str]]:
@@ -477,6 +535,9 @@ def _commit_repository(
         return None, errors
     if not staged:
         return None, []
+
+    if hook_errors := _refresh_recognized_nightshift_precommit_hooks(plan):
+        return None, hook_errors
 
     message = (
         f"[SPEC-156] chore: release kit {manifest['kit_version']}\n\n"
@@ -590,11 +651,7 @@ def coordinate_release(
             probe_result = subprocess.CompletedProcess([], 2, "", str(exc))
             suite_argv = []
         else:
-            runner = canonical_suite_runner or (
-                lambda argv, cwd: _run(
-                    argv, cwd=cwd, timeout=CANONICAL_SUITE_TIMEOUT_S
-                )
-            )
+            runner = canonical_suite_runner or _run_canonical_suite
             probe_result = _run_canonical_suite_step(runner, probe_argv, canonical)
         result["canonical_suite_probe"] = (
             "passed" if probe_result.returncode == 0 else "failed"
@@ -808,7 +865,10 @@ def coordinate_release(
                 if (Path(install) / "reflexion_producer.py").is_file()
             },
         }
-    if not result["skipped"] and not result["unexpected_failure"] and not dry_run:
+    # A handoff scoped to eligible installs is complete after every eligible
+    # repository verifies. Known local skips remain observable and keep the
+    # coordinator exit non-zero, but do not invalidate deliveries already made.
+    if not result["unexpected_failure"] and not dry_run:
         result["release_handoffs_completed"] = release_handoff.complete_pending_handoffs(
             canonical, manifest, "coordinator-release-report"
         )

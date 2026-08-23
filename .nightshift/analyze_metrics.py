@@ -32,11 +32,14 @@ def analyze_fleet_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """
     denominators = snapshot.get("denominators", {}) if isinstance(snapshot, dict) else {}
     observations = snapshot.get("observations", []) if isinstance(snapshot, dict) else []
+    quality = snapshot.get("evidence_quality", {}) if isinstance(snapshot, dict) else {}
     return {
         "denominators": denominators,
         "observations": observations if isinstance(observations, list) else [],
         "outcomes": snapshot.get("outcomes", {}) if isinstance(snapshot, dict) else {},
         "collection_failures": snapshot.get("collection_failures", 0) if isinstance(snapshot, dict) else 0,
+        "fleet_unknown_outcome_rate": quality.get("fleet_unknown_outcome_rate", {}),
+        "fleet_blocked_classification_rate": quality.get("fleet_blocked_classification_rate", {}),
     }
 
 
@@ -1280,6 +1283,7 @@ def compute_resolution_analytics(metrics):
     fresh_worker_eligible = fresh_worker_successes = premature_blocks = 0
     ordinary_wait_categories = Counter()
     ordinary_wait_states = Counter()
+    verifier_verdicts = Counter()
 
     for rows in runs.values():
         rows.sort(key=lambda item: item.get("attempt", 0))
@@ -1289,6 +1293,9 @@ def compute_resolution_analytics(metrics):
             for result in (row.get("evidence_gate") or {}).values()
         ):
             gate_failures += 1
+        verifier = (rows[-1].get("evidence_gate") or {}).get("verifier")
+        if verifier in {"pass", "fail", "disputes_premise", "absent"}:
+            verifier_verdicts[verifier] += 1
         if any(row.get("unblock_attempts", 0) > 0 for row in rows):
             unblock_attempted += 1
         if any(row.get("automatic_unblock_succeeded") is True for row in rows):
@@ -1346,6 +1353,7 @@ def compute_resolution_analytics(metrics):
         "evidence_gate_failure_rate": (
             gate_failures / run_count if run_count else 0.0
         ),
+        "verifier_verdict_counts": dict(sorted(verifier_verdicts.items())),
         "automatic_unblock_successes": automatic_unblock_successes,
         "automatic_unblock_success_rate": (
             automatic_unblock_successes / unblock_attempted

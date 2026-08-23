@@ -91,6 +91,10 @@ def check_guard_liveness(repo: Path, registry_path: Path) -> list[str]:
     for guard in guards:
         if not isinstance(guard, dict):
             continue
+        # Activated guards are checked by their configuration-aware health
+        # probe below. They must not warn in projects that did not opt in.
+        if guard.get("activation") == "terminal_outcomes":
+            continue
         name = str(guard.get("name", "unnamed guard"))
         scope = guard.get("scope_registry")
         if isinstance(scope, str) and scope and not _scope_applies(repo, repo / scope):
@@ -125,6 +129,32 @@ def check_guard_liveness(repo: Path, registry_path: Path) -> list[str]:
         elif mode == "executable" and not any(target.stat().st_mode & 0o111 for target in existing):
             warnings.append(f"Git guard {name!r}: target script is not executable ({', '.join(map(str, existing))}). {remedy}")
     return warnings
+
+
+def check_terminal_outcome_guard(repo: Path, config_path: Path) -> list[str]:
+    """Report a configured-but-unwired SPEC-224 boundary as installation health."""
+    commands = load_commands(config_path)  # validates the shared YAML stream shape first
+    del commands
+    try:
+        config_documents = list(yaml.safe_load_all(config_path.read_text(encoding="utf-8"))) if config_path.is_file() else []
+    except yaml.YAMLError:
+        return ["Terminal outcome record guard: configuration is unreadable."]
+    config: dict[str, Any] = {}
+    for document in config_documents:
+        if isinstance(document, dict):
+            config.update(document)
+    outcome_config = config.get("terminal_outcomes", {})
+    if not isinstance(outcome_config, dict) or not outcome_config.get("enabled", False):
+        return []
+    hooks_dir = _git_path(repo, "hooks")
+    if hooks_dir is None:
+        return ["Terminal outcome record guard: Git hooks path is unavailable."]
+    hook = hooks_dir / "commit-msg"
+    if not hook.is_file() or "# SPEC-224 terminal-outcome-record" not in hook.read_text(encoding="utf-8", errors="replace"):
+        return ["Terminal outcome record guard: configured enforcement is not wired into commit-msg; reinstall the canonical hook."]
+    if not (repo / ".nightshift" / "terminal_outcomes.py").is_file():
+        return ["Terminal outcome record guard: configured enforcement helper is missing; reinstall the canonical payload."]
+    return []
 
 
 def load_commands(config_path: Path) -> dict[str, Any]:
@@ -260,8 +290,11 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
 
     guard_registry = Path(__file__).with_name("hooks") / "guard-registry.yaml"
     guard_warnings = check_guard_liveness(repo, guard_registry)
+    terminal_guard_failures = check_terminal_outcome_guard(repo, config_path)
+    guard_warnings.extend(terminal_guard_failures)
     result["checks"]["git_guards"] = {"registry": str(guard_registry), "warnings": guard_warnings}
     result["warnings"].extend(guard_warnings)
+    result["blocking_failures"].extend(terminal_guard_failures)
 
     specs, spec_errors = _load_specs(specs_dir)
     if spec_errors:

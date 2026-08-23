@@ -11,6 +11,108 @@
 
 ---
 
+## 3.1.6 (2026-08-23)
+
+### Heartbeat-only liveness (SPEC-225)
+
+- Watchers and kickoff parents now use the active-run heartbeat as the sole
+  liveness signal. File mtimes, branch-tip movement, and commit counts are not
+  stall evidence; long read-only work declares its phase and duration, and
+  correct zero-commit work declares `no_commit_expected: true`.
+- The shared Codex Nightshift skill records the same harness-agnostic contract.
+
+**Migration:** install the released `LOOP.md`, `ORCHESTRATOR.md`, and
+`WATCHER.md` managed payload. No project configuration migration is required.
+
+## 3.1.5 (2026-08-22)
+
+### Managed payload PII scan (SPEC-213)
+
+- The staged-diff scanner derives canonical managed paths from the release
+  provenance manifest and skips PII findings for those paths only; secret
+  findings remain blocking.
+- Scan output now reports the number of managed files skipped, while
+  project-owned files continue through the existing PII gate.
+
+**Migration:** install the released scanner and managed-provenance payload; no
+project configuration changes are required.
+
+## 3.1.4 (2026-08-22)
+
+### Portable pre-commit command parsing (SPEC-212)
+
+- The pre-commit hook now reads configured lint and type-check commands through
+  PyYAML, so quoted values and trailing YAML comments work consistently on macOS
+  and other supported shells.
+- Invalid command configuration fails closed with a readable hook error before
+  any configured command is evaluated.
+
+**Migration:** install the released pre-commit hook payload; no project config
+changes are required.
+
+## 3.1.3 (2026-08-22)
+
+### Project-configured terminal outcome records (SPEC-224)
+
+- Projects can opt into a generic JSON-array or JSONL terminal-outcome adapter.
+  The released commit-message hook requires a changed matching record for every
+  terminal lifecycle commit and recognizes both insertion and in-place edits.
+- Preflight reports a configured but unwired outcome boundary as an installation
+  health failure. The contract normalizes fleet-safe fields without requiring an
+  Argo-specific ledger; Argo maps its existing `agent-outcomes.json` fields.
+
+**Migration:** add `terminal_outcomes` to the project configuration, then install
+the released `commit-msg` hook and `terminal_outcomes.py` payload. `--no-verify`
+remains an explicit Git-level bypass outside hook enforcement.
+
+## 3.1.2 (2026-08-22)
+
+### Terminal lifecycle evidence enforcement (SPEC-221)
+
+- `hooks/commit-msg` now rejects terminal `done` and `blocked` lifecycle
+  commits whose required evidence, blocker, recovery, parent-call, or resolution
+  trailers are absent or empty, regardless of whether a parent or worker authored
+  the message.
+- The managed release payload now includes the commit-message hook and its
+  regression tests, so releases deliver the enforcement mechanism and proof
+  together.
+
+**Migration:** none; install the released `hooks/commit-msg` through the normal
+canonical release flow.
+
+## 3.1.1 (2026-08-22)
+
+### Verifier gate hardening (SPEC-222)
+
+- The managed verifier payload now owns one exact generated-file footprint
+  exclusion (`graphify-out/graph.html`) and tests that no broader path is
+  ignored.
+- Verifier footprint snapshots are explicitly worktree-local, so unrelated
+  parent-checkout dirtiness cannot invalidate a clean verifier run.
+- Acceptance-criteria coverage is extracted from the current spec's
+  `## Acceptance Criteria` section only, preventing cross-spec prose mentions
+  from becoming phantom coverage requirements.
+
+**Migration:** none.
+
+## 3.1.0 (2026-08-10)
+
+### Live fleet feedback and evidence quality (SPEC-208)
+
+- The bounded fleet collector now consumes the live portable projects registry,
+  preserves duplicate display names as distinct resources, discovers only the
+  project-root metric store, and reads current release-marker provenance.
+- New canonical metrics use schema version 2 with controlled outcomes and a
+  controlled failure category for blocked terminal rows. Historical version-1
+  rows remain valid and explicitly expose unknown or unclassified evidence.
+- Fleet analysis and the safe knowledge handoff expose denominator-backed
+  unknown-outcome and blocked-classification rates for later Evolve verification.
+- Nightshift and Evolve instructions now resolve the canonical kit from its
+  relocated Developer/ManagedProjects source.
+
+**Migration:** none. Config schema remains 3.0.0; historical metrics remain
+readable, while newly emitted blocked metrics require a controlled category.
+
 ## 3.0.1 (2026-08-09)
 
 ### Bounded release gate

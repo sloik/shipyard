@@ -24,6 +24,31 @@ except ImportError:
     sys.exit(1)
 
 
+METRICS_SCHEMA_VERSION = 2
+OUTCOME_ENUM = {"done", "partial", "blocked", "noop"}
+FAILURE_CATEGORY_ENUM = {
+    "test_failure",
+    "test_hang",
+    "build_broken",
+    "build_error",
+    "type_error",
+    "lint_error",
+    "timeout",
+    "validation_failure",
+    "rerun_failed",
+    "migration_failed",
+    "managed_copy_conflict",
+    "extension_gap",
+    "implementation",
+    "test_infrastructure",
+    "fixture_drift",
+    "baseline_regression",
+    "external_input",
+    "evidence_gap",
+    "unknown",
+}
+
+
 class ValidationError(Exception):
     """Raised when validation fails."""
     pass
@@ -73,6 +98,15 @@ def validate_root_fields(data):
             errors.append(f"Missing required root field: {field}")
         elif not isinstance(data[field], expected_type):
             errors.append(f"Field '{field}' must be {expected_type.__name__}, got {type(data[field]).__name__}")
+
+    schema_version = data.get("metrics_schema_version", 1)
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version < 1:
+        errors.append("'metrics_schema_version' must be a positive integer")
+    elif schema_version >= METRICS_SCHEMA_VERSION:
+        if "outcome" not in data:
+            errors.append("Missing required root field: outcome")
+        elif data["outcome"] not in OUTCOME_ENUM:
+            errors.append(f"'outcome' must be one of {sorted(OUTCOME_ENUM)}, got {data['outcome']}")
 
     return errors
 
@@ -442,6 +476,15 @@ def validate_failure(data):
             elif not isinstance(failure[field], str):
                 errors.append(f"'failure.{field}' must be a string")
 
+        category = failure.get("category")
+        if data.get("metrics_schema_version", 1) >= METRICS_SCHEMA_VERSION and data.get("outcome") == "blocked":
+            if category is None:
+                errors.append("Missing required field: failure.category for schema v2 blocked outcome")
+            elif category not in FAILURE_CATEGORY_ENUM:
+                errors.append(f"'failure.category' must be one of {sorted(FAILURE_CATEGORY_ENUM)}, got {category}")
+        elif category is not None and category not in FAILURE_CATEGORY_ENUM:
+            errors.append(f"'failure.category' must be one of {sorted(FAILURE_CATEGORY_ENUM)}, got {category}")
+
     return errors
 
 
@@ -556,6 +599,15 @@ def validate_resolution(data):
                 errors.append(
                     f"'resolution.evidence_gate.{field}' must be pass, fail, or unknown"
                 )
+        # Legacy rows predate the verifier trailer and are deliberately not
+        # backfilled. New mark-commit rows carry this key with `absent` when no
+        # trailer was present.
+        if "verifier" in gate and gate["verifier"] not in {
+            "pass", "fail", "disputes_premise", "absent"
+        }:
+            errors.append(
+                "'resolution.evidence_gate.verifier' must be pass, fail, disputes_premise, or absent"
+            )
     ordinary_wait = resolution.get("ordinary_wait")
     if ordinary_wait is not None:
         if not isinstance(ordinary_wait, dict):

@@ -64,7 +64,33 @@ from loop_events import PHASE_IDS, PHASE_MEASUREMENT_STATES, load_events
 STATUS_ENUM = {"completed", "failed", "blocked", "discarded", "partial"}
 # additive controlled vocabulary for reports + cross-run mining
 OUTCOME_ENUM = {"done", "partial", "blocked", "noop"}
-EVIDENCE_RESULT_ENUM = {"pass", "fail", "unknown"}
+METRICS_SCHEMA_VERSION = 2
+FAILURE_CATEGORY_ENUM = {
+    "test_failure",
+    "test_hang",
+    "build_broken",
+    "build_error",
+    "type_error",
+    "lint_error",
+    "timeout",
+    "validation_failure",
+    "rerun_failed",
+    "migration_failed",
+    "managed_copy_conflict",
+    "extension_gap",
+    "implementation",
+    "test_infrastructure",
+    "fixture_drift",
+    "baseline_regression",
+    "external_input",
+    "evidence_gap",
+    "unknown",
+}
+# `unknown` remains valid for the original four gate fields on legacy blocked
+# rows. `absent` distinguishes a verifier that was never recorded from one that
+# returned `fail`; `disputes_premise` is an independent verifier outcome.
+EVIDENCE_RESULT_ENUM = {"pass", "fail", "unknown", "disputes_premise", "absent"}
+VERIFIER_EVIDENCE_RESULT_ENUM = {"pass", "fail", "disputes_premise", "absent"}
 BLOCKER_CLASS_ENUM = {
     "none",
     "implementation",
@@ -371,6 +397,7 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
     if status_raw is None:
         status_raw = getattr(args, "status_raw", None)
     metrics = {
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
         "task_id": args.spec_id,
         "spec_file": args.spec_file,
         "started_at": args.started_at,
@@ -456,6 +483,9 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
             "suggestion": args.error_suggestion
             or _SUGGESTION_BY_ERROR_TYPE.get(args.error_type, generic_fix),
         }
+        failure_category = getattr(args, "failure_category", "")
+        if failure_category:
+            metrics["failure"]["category"] = failure_category
     ordinary_wait_category = getattr(args, "ordinary_wait_category", "")
     if ordinary_wait_category:
         missing_capability = args.missing_capability
@@ -625,6 +655,14 @@ def derive_resolution(
         evidence_gate[field] = (
             value if value in EVIDENCE_RESULT_ENUM else default_evidence
         )
+    verifier_verdict = commit_trailer(
+        repo, mark_commit, "Nightshift-Evidence-Verifier"
+    ).lower()
+    evidence_gate["verifier"] = (
+        verifier_verdict
+        if verifier_verdict in VERIFIER_EVIDENCE_RESULT_ENUM
+        else "absent"
+    )
 
     blocker_class = commit_trailer(
         repo, mark_commit, "Nightshift-Blocker-Class"
@@ -708,6 +746,12 @@ def derive_local_resolution(
         else default_evidence
         for key in ("report_exists", "tests_passed", "code_changed", "acs_covered")
     }
+    verifier_verdict = supplied.get("verifier", "absent")
+    evidence["verifier"] = (
+        verifier_verdict
+        if verifier_verdict in VERIFIER_EVIDENCE_RESULT_ENUM
+        else "absent"
+    )
     started_at = datetime.fromisoformat(str(started["created_at"]).replace("Z", "+00:00"))
     completed_at = datetime.fromisoformat(str(terminal["created_at"]).replace("Z", "+00:00"))
     unblock_attempts = _bounded_int(str(payload.get("unblock_attempts", 0)))
@@ -878,6 +922,14 @@ def main_mark_commit(argv) -> int:
     ).strip()
     cfg = derive_config(config_path, model_override=args.model or model_trailer, harness_override=args.harness)
 
+    resolution = derive_resolution(
+        repo,
+        spec_id,
+        args.mark_commit,
+        in_progress_sha,
+        outcome,
+    )
+    blocker_class = str(resolution.get("blocker_class") or "unknown")
     ns = SimpleNamespace(
         spec_id=spec_id,
         spec_file=spec_rel,
@@ -904,16 +956,13 @@ def main_mark_commit(argv) -> int:
         error_desc="" if status == "completed" else (derive_block_reason(spec_path) or f"Spec {spec_id} marked blocked"),
         error_root_cause="",
         error_suggestion="",
+        failure_category="" if status == "completed" else (
+            blocker_class if blocker_class in FAILURE_CATEGORY_ENUM else "unknown"
+        ),
     )
 
     metrics = build_metrics(ns, git, cfg)
-    metrics["resolution"] = derive_resolution(
-        repo,
-        spec_id,
-        args.mark_commit,
-        in_progress_sha,
-        outcome,
-    )
+    metrics["resolution"] = resolution
     date = completed_at[:10] if len(completed_at) >= 10 else "0000-00-00"
 
     if args.dry_run:
@@ -968,6 +1017,7 @@ def parse_args(argv=None):
     p.add_argument("--error-desc", default="")
     p.add_argument("--error-root-cause", default="")
     p.add_argument("--error-suggestion", default="")
+    p.add_argument("--failure-category", choices=sorted(FAILURE_CATEGORY_ENUM), default="")
     p.add_argument("--ordinary-wait-category", choices=sorted(ORDINARY_WAIT_CATEGORY_ENUM))
     p.add_argument("--missing-capability", choices=sorted(MISSING_CAPABILITY_ENUM))
     p.add_argument("--metrics-dir", default=".nightshift/metrics")
@@ -988,6 +1038,16 @@ def main(argv=None) -> int:
     args.build_pass = args.build_pass == "true"
     # SPEC-130: normalize once at entry; build_metrics picks up status_raw.
     args.status, args.status_raw = normalize_status(args.status)
+
+    if args.outcome == "blocked" and not args.failure_category:
+        if args.error_type in FAILURE_CATEGORY_ENUM:
+            args.failure_category = args.error_type
+        else:
+            print(
+                "Error: blocked metrics require --failure-category from the controlled vocabulary",
+                file=sys.stderr,
+            )
+            return 2
 
     if bool(args.ordinary_wait_category) != bool(args.missing_capability):
         p_error = "ordinary evidence waits require both --ordinary-wait-category and --missing-capability"

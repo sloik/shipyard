@@ -132,6 +132,9 @@ class ScanReport:
     discarded_acknowledgements: list[str] = field(default_factory=list)
     excluded: list[Finding] = field(default_factory=list)
     discarded_fixtures: list[str] = field(default_factory=list)
+    managed_files_skipped: int = 0
+    managed_files_exempted: int = 0
+    managed_added_lines_exempted: int = 0
 
     @property
     def blocked(self) -> bool:
@@ -281,6 +284,7 @@ def scan_diff(
     environ: dict[str, str] | None = None,
     today: date | None = None,
     fixtures: FixtureRegistry | None = None,
+    managed_paths: Iterable[str] = (),
 ) -> ScanReport:
     """Scan added diff lines for secrets/PII and threshold-triggered escalation."""
     cfg = config or ScannerConfig()
@@ -288,12 +292,20 @@ def scan_diff(
     now = today or date.today()
     registry = load_fixture_registry() if fixtures is None else fixtures
     added = list(_added_lines(diff_text))
+    managed = frozenset(managed_paths)
+    skipped_paths = {_location_path(location) for location, _ in added} & managed
     findings: list[Finding] = []
     acknowledged: list[AcknowledgedFinding] = []
     excluded: list[Finding] = []
 
     for location, text in added:
         for finding, digest in _scan_line(text, location):
+            # SPEC-213: a release manifest is the single authority for canonical
+            # payload ownership. Managed documentation still passes through the
+            # secret scanner; only its PII findings are exempt, so a leaked key
+            # can never hide behind release ownership.
+            if finding.type == "pii" and _location_path(location) in managed:
+                continue
             # SPEC-197: a kit fixture is decided before, and independently of, review.
             # Neither mechanism can accept what the other refuses (R12).
             if _is_kit_fixture(finding, digest, registry):
@@ -305,18 +317,33 @@ def scan_diff(
             else:
                 acknowledged.append(AcknowledgedFinding(finding, accepted.reason, accepted.expires))
 
-    added_text = "\n".join(text for _, text in added)
+    # SPEC-214: managed paths reach this function only after the staged-install
+    # provenance gate has proven their bytes against the release manifest. Their
+    # size therefore says nothing about authored change risk. Keep scanning their
+    # content for secrets, but exclude their added lines from the human-review
+    # thresholds. A changed payload never enters ``managed`` because provenance
+    # rejects it before this call, so it remains fully counted.
+    escalation_added = [
+        (location, text)
+        for location, text in added
+        if _location_path(location) not in managed
+    ]
+    exempted_lines = len(added) - len(escalation_added)
+    added_text = "\n".join(text for _, text in escalation_added)
     token_cost = _estimate_tokens(added_text)
-    escalations = _escalations(len(added), token_cost, cfg, env)
+    escalations = _escalations(len(escalation_added), token_cost, cfg, env)
     return ScanReport(
         findings,
         escalations,
-        len(added),
+        len(escalation_added),
         token_cost,
         acknowledged,
         list(cfg.discarded_acknowledgements),
         excluded,
         list(registry.discarded),
+        len(skipped_paths),
+        len(skipped_paths),
+        exempted_lines,
     )
 
 
@@ -599,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
 
     managed_payload_blocked = False
     staged_nightshift_paths: list[str] = []
+    managed_paths: frozenset[str] = frozenset()
     if args.staged and Path(".nightshift").is_dir():
         staged_names = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "-z"],
@@ -621,6 +649,8 @@ def main(argv: list[str] | None = None) -> int:
             MetadataError,
             format_guidance,
             guard_staged_install,
+            managed_payload_paths,
+            retained_manifest,
         )
 
         try:
@@ -637,9 +667,16 @@ def main(argv: list[str] | None = None) -> int:
                 print("[nightshift scanner] Managed payload edit rejected.", file=sys.stderr)
                 print(format_guidance(managed_rows), file=sys.stderr)
                 managed_payload_blocked = True
+            else:
+                # Preserve the repository-relative spelling emitted by git
+                # diff. The provenance module owns the release-relative list.
+                manifest = retained_manifest(Path(".nightshift"))
+                managed_paths = frozenset(
+                    f".nightshift/{path}" for path in managed_payload_paths(manifest)
+                )
 
     diff_text = _staged_diff() if args.staged else args.diff_file.read_text(encoding="utf-8")
-    report = scan_diff(diff_text, config=load_config(args.config))
+    report = scan_diff(diff_text, config=load_config(args.config), managed_paths=managed_paths)
     if args.acknowledge_template:
         _print_acknowledge_template(diff_text, report)
         # The exit code is the gate. Printing a stanza accepts nothing, so this path must
@@ -964,6 +1001,19 @@ def _print_acknowledge_template(diff_text: str, report: ScanReport) -> None:
 
 
 def _print_report(report: ScanReport) -> None:
+    if report.managed_files_exempted:
+        print(
+            "[nightshift scanner] "
+            f"Exempted {report.managed_files_exempted} verified managed payload "
+            f"file(s) and {report.managed_added_lines_exempted} added line(s) from "
+            "escalation; release-manifest hashes matched.",
+            file=sys.stderr,
+        )
+    if report.managed_files_skipped:
+        print(
+            f"[nightshift scanner] {report.managed_files_skipped} managed files skipped for PII scanning.",
+            file=sys.stderr,
+        )
     for problem in report.discarded_acknowledgements:
         print(
             f"[nightshift scanner] Ignoring invalid PII acknowledgement - {problem}",

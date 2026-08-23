@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +16,88 @@ from typing import Any, Iterable
 SEVERITIES = {"CRITICAL", "WARNING", "SUGGESTION"}
 DIMENSIONS = {"completeness", "correctness", "coherence"}
 FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
+
+# This is the only generated artifact that an independent verifier may ignore
+# when asserting its read-only Git footprint.  Keep the policy exact: a broad
+# ``graphify-out/`` exclusion would hide verifier writes to other artifacts.
+VERIFIER_FOOTPRINT_EXCLUSIONS = frozenset({"graphify-out/graph.html"})
+
+
+@dataclass(frozen=True)
+class GitFootprint:
+    """A read-only snapshot of the worktree assigned to a verifier.
+
+    The caller supplies the worktree under test.  Deliberately accepting no
+    parent-checkout argument prevents a dirty coordinator checkout from
+    contaminating the verifier's footprint decision.
+    """
+
+    tree: str
+    porcelain: str
+
+
+def _run_git(worktree: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
+    return result.stdout
+
+
+def capture_verifier_footprint(worktree: Path) -> GitFootprint:
+    """Capture the verifier footprint from its assigned worktree only."""
+    return GitFootprint(
+        tree=_run_git(worktree, "rev-parse", "HEAD^{tree}").strip(),
+        porcelain=_run_git(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+    )
+
+
+def is_excluded_verifier_footprint_path(path: str) -> bool:
+    """Return whether *path* is the one allowed generated-file artifact."""
+    return path.replace("\\", "/") in VERIFIER_FOOTPRINT_EXCLUSIONS
+
+
+def verifier_footprint_errors(before: GitFootprint, after: GitFootprint) -> list[str]:
+    """Validate a verifier's worktree-local, read-only Git footprint."""
+    errors: list[str] = []
+    if before.tree != after.tree:
+        errors.append(f"verifier mutated the repo tree: {before.tree} -> {after.tree}")
+    dirty_paths = [
+        line[3:]
+        for line in after.porcelain.splitlines()
+        if line.strip() and not is_excluded_verifier_footprint_path(line[3:])
+    ]
+    if dirty_paths:
+        errors.append("verifier left the worktree dirty: " + "; ".join(dirty_paths))
+    return errors
+
+
+def acceptance_criterion_ids(spec_text: str) -> set[str]:
+    """Extract AC IDs from this spec's Acceptance Criteria section only."""
+    section = re.search(
+        r"^##\s+Acceptance Criteria\s*$(.*?)(?=^##\s|\Z)",
+        spec_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return set(re.findall(r"\bAC\d+\b", section.group(1) if section else ""))
+
+
+def uncovered_acceptance_criteria(spec_text: str, reported_ids: Iterable[str]) -> list[str]:
+    """Return current-spec AC IDs absent from a verifier's per-AC evidence."""
+    return sorted(acceptance_criterion_ids(spec_text) - set(reported_ids))
+
+
+def verifier_worktree_boundary(worktree: Path) -> str:
+    """Canonical wording for the parent/verifier isolation boundary."""
+    return (
+        f"Run every read-only Git footprint command against the assigned worktree "
+        f"({worktree}), never the parent or coordinator checkout. Parent-checkout "
+        "dirtiness is outside the verifier footprint."
+    )
 
 
 @dataclass

@@ -893,7 +893,14 @@ def resolve_model_command(args) -> int:
     try:
         yaml_text, _ = _extract_frontmatter_and_body(spec_file)
         spec_frontmatter = DAGBuilder(spec_file.parent)._regex_parse_yaml(yaml_text)
-        config_data = yaml.safe_load(config_file.read_text()) or {}
+        # The shipped config is a YAML stream: each top-level section is a
+        # document separated by ``---``. Merge mapping documents so the model
+        # stylesheet can live in any section while malformed streams still use
+        # this command's existing failure path.
+        config_data = {}
+        for document in yaml.safe_load_all(config_file.read_text(encoding="utf-8")):
+            if isinstance(document, dict):
+                config_data.update(document)
     except (OSError, ValueError, yaml.YAMLError):
         return 1
 
@@ -2184,7 +2191,13 @@ def dispatch_spec_command(args) -> int:
     config: Dict = {}
     if args.config:
         try:
-            config = yaml.safe_load(Path(args.config).read_text()) or {}
+            # Keep custom-handler configuration compatible with the canonical
+            # multi-document stream. ``safe_load_all`` still raises YAMLError
+            # for malformed input, which this command reports below.
+            config = {}
+            for document in yaml.safe_load_all(Path(args.config).read_text(encoding="utf-8")):
+                if isinstance(document, dict):
+                    config.update(document)
         except (OSError, yaml.YAMLError) as exc:
             print(f"Error: cannot read config {args.config}: {exc}", file=sys.stderr)
             return 1

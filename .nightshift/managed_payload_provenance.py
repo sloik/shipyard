@@ -94,6 +94,17 @@ def load_manifest(path: Path, *, label: str = "current manifest") -> dict[str, A
     return data
 
 
+def managed_payload_paths(manifest: Mapping[str, Any]) -> frozenset[str]:
+    """Return the manifest-authoritative managed paths for a release payload.
+
+    Consumers that need to distinguish release-owned files from project-owned
+    files must use this projection rather than maintaining a second path list.
+    ``_manifest_index`` keeps the same validation boundary as provenance
+    admission: corrupt metadata cannot silently broaden an exemption.
+    """
+    return frozenset(_manifest_index(manifest, label="managed payload manifest"))
+
+
 def retained_manifest(install: Path) -> dict[str, Any]:
     marker_path = install / MARKER
     try:

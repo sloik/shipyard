@@ -51,9 +51,21 @@ While the main loop agent works through specs (steps 1-16 of LOOP.md), a watcher
 The watcher stops when:
 
 - All specs in queue are `done` or `blocked`
-- No new commits for 30 minutes (main agent may have quit or stalled)
+- The active loop heartbeat is stale past the configured threshold (see
+  **Heartbeat is the sole liveness signal (SPEC-225)** in ORCHESTRATOR.md) —
+  **not** an absence of new commits. A quiet-but-alive verification phase
+  (declared per R2) or a correctly completed zero-commit run (declared per R3,
+  see AC4) is not a stall; `idle_timeout_min` below measures heartbeat
+  staleness, not commit cadence.
 - `.nightshift/STOP` file exists
 - Timeout exceeded (optional, e.g., 8 hours for overnight run)
+
+> **R1 note (SPEC-225):** an earlier version of this stop condition read "No
+> new commits for 30 minutes (main agent may have quit or stalled)" — a
+> branch-tip/commit-count inferred-activity probe. That phrasing is prohibited:
+> it misclassified a correct zero-commit run as a stall in a measured
+> 2026-08-19 false alarm. Do not reintroduce a commit- or mtime-based liveness
+> check here or anywhere else in this kit; use the heartbeat file only.
 
 ### Configuration
 
@@ -62,8 +74,9 @@ In `config.yaml`:
 ```yaml
 watcher:
   enabled: false                   # opt-in, not default
-  poll_interval_min: 5             # how often to check for new commits
-  idle_timeout_min: 30             # stop if no commits for this long
+  poll_interval_min: 5             # how often to check for new review-worthy commits
+  idle_timeout_min: 30             # stop if the active loop heartbeat is stale this long
+                                    # (heartbeat staleness, not "no commits" — SPEC-225)
   review_file: "WATCHER-REVIEW.md" # where to write feedback
   lens: "general"                  # general | code | security | ux | legal | performance
 ```
@@ -251,7 +264,8 @@ The watcher reads its own config from `config.yaml`:
 watcher:
   enabled: true
   poll_interval_min: 5             # check every 5 minutes
-  idle_timeout_min: 30             # stop if no commits for 30 min
+  idle_timeout_min: 30             # stop if the main agent's heartbeat is stale
+                                    # for 30 min (not "no commits" — SPEC-225)
   review_file: ".nightshift/WATCHER-REVIEW.md"
   lens: "general"                  # or specific: security, ux, performance
 ```

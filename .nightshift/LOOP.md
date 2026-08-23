@@ -513,6 +513,19 @@ passing gate, or follows the controller-backed one bounded unblock pass and
 then resolves to `done` or `blocked`, recording the terminal state and elapsed
 time in parent progress before it is idle.
 
+#### Heartbeat contract when a watcher is enabled (SPEC-225)
+
+An inline main-loop agent and a kickoff worker use the same liveness contract.
+When `watcher.enabled: true`, write the active-run heartbeat to
+`reports/_wip/main-loop-heartbeat.md` before starting work, at every phase
+boundary, and at least once during a long read-only phase.  Each entry states
+the current phase and its expected duration; a correct run that will not create
+a commit states `no_commit_expected: true`.  The watcher and parent judge
+liveness from this heartbeat's state and freshness only.  They MUST NOT use
+file mtimes, branch-tip movement, commit counts, or equivalent inferred
+activity as a substitute or supplement.  A heartbeat that becomes stale with
+no declared phase remains a real stall under the configured threshold.
+
 Before the worker writes `heartbeat_state: worker-started`, a completion with a
 launch/harness error is instead a `launch_failure`: record its timestamp,
 sanitized evidence, launch result, and heartbeat state immediately rather than

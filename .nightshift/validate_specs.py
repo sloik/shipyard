@@ -288,15 +288,20 @@ PROSE_ERROR_KIT_VERSION = "2.24.0"
 def _read_kit_version(config_path: Path) -> str | None:
     """Read kit_version from a config.yaml file.  Returns None on any failure.
 
-    Uses yaml.safe_load so both quoted (``"2.24.0"``) and unquoted
-    (``2.24.0``) values parse correctly.  All exceptions are silently caught
-    so a missing or malformed config always produces the safe default (R3).
+    Canonical config files are YAML streams, with top-level sections separated
+    by ``---``.  Merge mapping documents so a version in a later section is
+    read just like a single-document project config.  All exceptions are
+    silently caught so a missing or malformed config always produces the safe
+    default (R3).
     """
     if config_path is None or not config_path.is_file():
         return None
     try:
         raw = config_path.read_text(encoding="utf-8")
-        cfg = yaml.safe_load(raw) or {}
+        cfg = {}
+        for document in yaml.safe_load_all(raw):
+            if isinstance(document, dict):
+                cfg.update(document)
         val = cfg.get("kit_version")
         return str(val) if val is not None else None
     except Exception:
@@ -717,7 +722,10 @@ def validate_config_file(config_path: Path) -> list:
     findings: list = []
     try:
         raw = config_path.read_text(encoding="utf-8")
-        cfg = yaml.safe_load(raw) or {}
+        cfg = {}
+        for document in yaml.safe_load_all(raw):
+            if isinstance(document, dict):
+                cfg.update(document)
     except Exception as exc:
         findings.append(f"WARNING: could not read config.yaml: {exc}")
         return findings
@@ -766,7 +774,13 @@ def _is_warning(msg: str) -> bool:
     return msg.startswith("WARNING: ")
 
 
-def _render_text(results: dict, source: str) -> str:
+def _render_text(
+    results: dict,
+    source: str,
+    *,
+    paths_examined: int = 1,
+    per_path: list[tuple[str, dict]] | None = None,
+) -> str:
     """Render validation results as human-readable text."""
     lines = []
     error_count = sum(
@@ -781,18 +795,36 @@ def _render_text(results: dict, source: str) -> str:
     )
 
     if error_count == 0 and warning_count == 0:
-        lines.append(f"[nightshift validate-specs] OK — {file_count} spec(s) valid")
-        return "\n".join(lines)
+        if paths_examined == 1:
+            lines.append(f"[nightshift validate-specs] OK — {file_count} spec(s) valid")
+        else:
+            lines.append(
+                f"[nightshift validate-specs] OK — {paths_examined} path(s) examined; "
+                f"{file_count} spec(s) valid"
+            )
 
-    if error_count == 0:
+    elif error_count == 0:
         lines.append(
             f"[nightshift validate-specs] OK (with {warning_count} warning(s)) "
             f"— {file_count} spec(s) checked"
         )
     else:
-        lines.append(
-            f"[nightshift validate-specs] FAILED — {bad_count}/{file_count} spec(s) have errors"
+        prefix = (
+            f"{paths_examined} path(s) examined; " if paths_examined != 1 else ""
         )
+        lines.append(
+            f"[nightshift validate-specs] FAILED — {prefix}{bad_count}/{file_count} spec(s) have errors"
+        )
+    if paths_examined != 1 and per_path is not None:
+        lines.append("  paths:")
+        for path, path_results in per_path:
+            invalid = any(
+                not _is_warning(error)
+                for errors in path_results.values()
+                for error in errors
+            )
+            state = "errors" if invalid else "valid"
+            lines.append(f"    - {path}: {state} ({len(path_results)} spec(s))")
     for fname, errs in results.items():
         actual_errors = [e for e in errs if not _is_warning(e)]
         actual_warnings = [e[len("WARNING: "):] for e in errs if _is_warning(e)]
@@ -805,14 +837,17 @@ def _render_text(results: dict, source: str) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
-    argv = sys.argv[1:]
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if any(arg in {"--help", "-h"} for arg in argv):
+        print("Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text]")
+        return 0
     if not argv:
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [--format json|text]",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
 
     fmt = "text"
     positional = []
@@ -827,47 +862,55 @@ def main() -> None:
 
     if not positional:
         print("Error: no path provided", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
-    path = Path(positional[0])
+    results: dict[str, list[str]] = {}
+    per_path: list[tuple[str, dict[str, list[str]]]] = []
+    multiple_paths = len(positional) > 1
+    for raw_path in positional:
+        path = Path(raw_path)
+        if path.is_dir():
+            try:
+                path_results = validate_directory(path)
+            except ValueError as exc:
+                path_results = {str(path): [str(exc)]}
+        elif path.is_file() and path.suffix == ".md":
+            path_results = {path.name: validate_file(path)}
+        else:
+            path_results = {
+                str(path): ["path does not exist or is not a Markdown spec file"]
+            }
 
-    if path.is_dir():
-        try:
-            results = validate_directory(path)
-        except ValueError as exc:
-            print(json.dumps({"error": str(exc)}), file=sys.stderr)
-            sys.exit(1)
-        has_errors = any(
-            any(not _is_warning(e) for e in errs) for errs in results.values()
-        )
-    elif path.is_file():
-        errors = validate_file(path)
-        results = {path.name: errors}
-        has_errors = any(not _is_warning(e) for e in errors)
-    else:
-        # Multiple files passed as positional args (e.g. from git diff | xargs)
-        results = {}
-        for p in positional:
-            fp = Path(p)
-            if fp.is_file() and fp.suffix == ".md":
-                results[fp.name] = validate_file(fp)
-        has_errors = any(
-            any(not _is_warning(e) for e in errs) for errs in results.values()
-        )
+        per_path.append((raw_path, path_results))
+        for name, errors in path_results.items():
+            key = f"{raw_path}:{name}" if multiple_paths else name
+            results[key] = errors
+
+    has_errors = any(
+        any(not _is_warning(error) for error in errors)
+        for errors in results.values()
+    )
 
     if fmt == "json":
         output = {
             "validated_files": len(results),
+            "paths_examined": len(positional),
             "files_with_errors": sum(1 for e in results.values() if e),
             "results": results,
         }
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        source = str(path)
-        print(_render_text(results, source))
+        print(
+            _render_text(
+                results,
+                positional[0],
+                paths_examined=len(positional),
+                per_path=per_path,
+            )
+        )
 
-    sys.exit(1 if has_errors else 0)
+    return 1 if has_errors else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

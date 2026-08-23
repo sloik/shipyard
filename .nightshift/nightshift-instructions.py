@@ -86,7 +86,11 @@ def _read_config(nightshift_dir: Path) -> dict[str, Any]:
     for candidate in (nightshift_dir / "config.yaml", nightshift_dir.parent / ".nightshift" / "config.yaml"):
         if candidate.exists():
             try:
-                return yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+                config = {}
+                for document in yaml.safe_load_all(candidate.read_text(encoding="utf-8")):
+                    if isinstance(document, dict):
+                        config.update(document)
+                return config
             except yaml.YAMLError:
                 return {}
     return {}

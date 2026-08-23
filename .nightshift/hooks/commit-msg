@@ -23,8 +23,43 @@ if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
     exit 0
 fi
 
-# Lifecycle commits are emitted by the parent and consumed by record_metrics.py.
+# Terminal lifecycle commits are emitted by the parent and consumed by
+# record_metrics.py.  The evidence contract is author-independent: a worker
+# cannot bypass it by writing a canonical lifecycle subject itself.
 if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|blocked)$'; then
+    SPEC_ID=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark (SPEC-([A-Z0-9]+-)*[0-9]+) (done|blocked)$/\1/p')
+    TERMINAL=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|blocked)$/\2/p')
+    REQUIRED_LIFECYCLE_TRAILERS=(
+        "Nightshift-Evidence-Report"
+        "Nightshift-Evidence-Tests"
+        "Nightshift-Evidence-Code"
+        "Nightshift-Evidence-ACs"
+        "Nightshift-Evidence-Verifier"
+        "Nightshift-Blocker-Class"
+        "Nightshift-Blocker-Scope"
+        "Nightshift-Unblock-Attempts"
+        "Nightshift-Unblock-Limit"
+        "Nightshift-Parent-Tool-Calls"
+        "Nightshift-Resolution-Kind"
+    )
+    missing=()
+    for trailer in "${REQUIRED_LIFECYCLE_TRAILERS[@]}"; do
+        if ! grep -qE "^${trailer}:[[:space:]]*[^[:space:]]" "$COMMIT_MSG_FILE"; then
+            missing+=("$trailer")
+        fi
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "[nightshift commit-msg] ERROR: terminal lifecycle commit is missing required trailer(s): ${missing[*]}" >&2
+        exit 1
+    fi
+    # SPEC-224 terminal-outcome-record: projects explicitly opting into terminal_outcomes receive a
+    # second boundary. The Python module reads the configured adapter and staged
+    # data, so this shell hook never duplicates a record parser. A deliberate
+    # `git commit --no-verify` remains outside hook enforcement by Git design.
+    if [ -f ".nightshift/terminal_outcomes.py" ] && [ -f ".nightshift/config.yaml" ] && command -v python3 >/dev/null 2>&1; then
+        python3 .nightshift/terminal_outcomes.py --check-staged --repo . \
+            --config .nightshift/config.yaml --spec-id "$SPEC_ID" --terminal "$TERMINAL"
+    fi
     exit 0
 fi
 

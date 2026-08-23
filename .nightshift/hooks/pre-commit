@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Nightshift Kit — Pre-commit hook
+# Scans staged content for secrets/PII, checks escalation thresholds, then runs
+# configured lint/type_check commands. Any failed gate rejects the commit.
+# Policy source of truth: .nightshift/GIT.md
+#
+# Install: cp .nightshift/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# See: BOOTSTRAP.md § "Install Pre-Commit Hook"
+
+set -euo pipefail
+
+CONFIG=".nightshift/config.yaml"
+
+if [ ! -f "$CONFIG" ]; then
+    echo "[nightshift pre-commit] No config.yaml found — skipping checks"
+    exit 0
+fi
+
+# Read only command scalar values through PyYAML.  In particular, do not let
+# shell parsing or a platform-specific text extractor reinterpret config text
+# before it reaches the intentionally configured eval below.
+extract_cmd() {
+    local key="$1"
+    local val
+    if ! val=$(python3 - "$CONFIG" "$key" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    print("[nightshift pre-commit] Cannot parse config.yaml: PyYAML is unavailable", file=sys.stderr)
+    raise SystemExit(1)
+
+config_path, key = sys.argv[1:]
+try:
+    with open(config_path, encoding="utf-8") as config_file:
+        config = {}
+        for document in yaml.safe_load_all(config_file):
+            if isinstance(document, dict):
+                config.update(document)
+except (OSError, yaml.YAMLError) as error:
+    print(f"[nightshift pre-commit] Cannot parse config.yaml: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(config, dict):
+    print("[nightshift pre-commit] Cannot parse config.yaml: top-level value must be a mapping", file=sys.stderr)
+    raise SystemExit(1)
+
+commands = config.get("commands", {})
+if commands is None:
+    commands = {}
+if not isinstance(commands, dict):
+    print("[nightshift pre-commit] Cannot parse config.yaml: commands must be a mapping", file=sys.stderr)
+    raise SystemExit(1)
+
+value = commands.get(key, "")
+if value is None:
+    value = ""
+if not isinstance(value, str):
+    print(f"[nightshift pre-commit] Cannot parse config.yaml: commands.{key} must be a string", file=sys.stderr)
+    raise SystemExit(1)
+sys.stdout.write(value)
+PY
+    ); then
+        return 1
+    fi
+    printf '%s' "$val"
+}
+
+if ! LINT_CMD=$(extract_cmd "lint"); then
+    exit 1
+fi
+if ! TYPE_CHECK_CMD=$(extract_cmd "type_check"); then
+    exit 1
+fi
+
+FAILED=0
+
+SCANNER=".nightshift/scanner.py"
+if [ -f "$SCANNER" ]; then
+    echo "[nightshift pre-commit] Scanning staged diff for secrets/PII and escalation thresholds..."
+    if ! python3 "$SCANNER" --staged --config "$CONFIG"; then
+        echo "[nightshift pre-commit] SECRET/PII OR ESCALATION GATE FAILED — commit rejected"
+        FAILED=1
+    fi
+fi
+
+# Spec validation — check any staged .nightshift/specs/*.md files
+VALIDATE_SPECS=".nightshift/validate_specs.py"
+if [ -f "$VALIDATE_SPECS" ]; then
+    STAGED_SPECS=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "^\.nightshift/specs/.*\.md$" | grep -Ev '/_TEMPLATE(-[^/]*)?\.md$' || true)
+    if [ -n "$STAGED_SPECS" ]; then
+        echo "[nightshift pre-commit] Validating staged specs..."
+        if ! echo "$STAGED_SPECS" | tr '\n' '\0' | xargs -0 python3 "$VALIDATE_SPECS"; then
+            echo "[nightshift pre-commit] SPEC VALIDATION FAILED — commit rejected"
+            FAILED=1
+        fi
+    fi
+fi
+
+if [ -n "$LINT_CMD" ]; then
+    echo "[nightshift pre-commit] Running lint: $LINT_CMD"
+    if ! eval "$LINT_CMD"; then
+        echo "[nightshift pre-commit] LINT FAILED — commit rejected"
+        FAILED=1
+    fi
+fi
+
+if [ -n "$TYPE_CHECK_CMD" ]; then
+    echo "[nightshift pre-commit] Running type check: $TYPE_CHECK_CMD"
+    if ! eval "$TYPE_CHECK_CMD"; then
+        echo "[nightshift pre-commit] TYPE CHECK FAILED — commit rejected"
+        FAILED=1
+    fi
+fi
+
+if [ "$FAILED" -ne 0 ]; then
+    echo "[nightshift pre-commit] Fix the above errors and try again."
+    exit 1
+fi
+
+exit 0

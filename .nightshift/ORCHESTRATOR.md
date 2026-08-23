@@ -105,6 +105,70 @@ inspectable:
 `reports/_wip/` is intentionally used for this live progress artifact because it
 is already gitignored and reserved for in-flight run scratch state.
 
+### Heartbeat is the sole liveness signal (SPEC-225)
+
+The heartbeat file described above is the **only** liveness signal a parent may
+use to judge whether a worker is alive. Two measured 2026-08-19 false alarms are
+the evidence for this rule and must not be re-triggered by a "smarter" probe:
+
+- A 30-minute quiet gap in the heartbeat file was, on inspection, 24 read-only
+  `pytest` samples with no file `mtime` change — the worker was verifying, not
+  stalled.
+- A branch-tip probe (checking for new commits) declared failure on a run that
+  correctly required no commit at all.
+
+**R1 — prohibition.** Parents (and any secondary review agent such as the
+watcher below) MUST NOT supplement or replace the heartbeat file with an
+inferred-activity probe: no scanning file `mtime`s for recent changes, no
+checking branch-tip advancement, no counting commits, and no equivalent proxy
+for "is the worker doing something." A worker that is reading, testing, or
+verifying without writing files or committing is not stalled, and no such probe
+may say otherwise. If a parent-facing instruction anywhere in this kit would let
+a reader arm one of these probes as a liveness check, that instruction is a bug
+against this rule.
+
+**R2 — declare long read-only phases.** A worker entering a long read-only
+phase (test verification, evidence-gate review, spec/AC re-reading, and similar)
+must heartbeat with the phase name and its expected duration instead of going
+quiet, e.g.:
+
+```
+phase: verification (running full test suite, expected ~8 min)
+```
+
+Silence with no phase declared is not "probably fine" — it is exactly the
+condition R4 below still catches.
+
+**R3 — "no commit expected" is a declarable heartbeat state.** Not every
+correct run produces a commit (a read-only audit, a verification-only spec, a
+run that determines no change is needed). The worker may declare this
+explicitly in its heartbeat, e.g. `no_commit_expected: true`, so the parent's
+terminal-resolution logic does not classify a correct zero-change run as a
+failure or a stall merely because no new commit appeared.
+
+**R4 — real stalls are still caught.** None of R1-R3 weaken stall detection: a
+worker that goes quiet **without** declaring a phase (R2) or a no-commit-expected
+state (R3) must still be caught once the existing stale-heartbeat threshold is
+crossed — the 20/40-minute ladder and escalation behavior described elsewhere in
+this document are unchanged. What changes is only the signal used to decide
+"quiet" — the heartbeat file's own state and timestamp, never a supplemental
+mtime/branch-tip/commit-count probe.
+
+### Independent verifier worktree boundary (SPEC-222)
+
+When a parent dispatches an independent verifier, the verifier's Git footprint
+belongs solely to the assigned run worktree. Every `git status`, tree-hash, and
+diff command used for that assertion must name the worktree under test; it must
+never read the parent/coordinator checkout for this purpose. Unrelated dirtiness
+in the parent checkout is outside the verifier footprint and cannot void an
+otherwise read-only verdict.
+
+The only generated-file exception is the exact relative path
+`graphify-out/graph.html`. Do not exclude its directory, a basename match, or
+other generated files. Canonical `verification_report.py` owns this exact-path
+policy and the current-spec Acceptance Criteria extractor used by verifier-gate
+callers; do not duplicate either rule in a consumer.
+
 ### Immediate launch-failure recovery (SPEC-194)
 
 The stale-heartbeat ladder applies only after a worker has written
