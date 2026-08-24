@@ -11,6 +11,23 @@
 
 ---
 
+## 3.2.2 (2026-08-24)
+
+### Portable positive-delivery receipts (SPEC-227)
+
+- Guarded release handoffs now complete only after one passing canonical-suite
+  run and at least one verified managed installation.
+- Coordinator-generated receipts carry no install paths or private telemetry and
+  bind whole-kit apply mode, safety outcomes, the positive verified-install
+  count, and exact manifest hashes for every changed managed path.
+- Historical string release tokens remain readable, but cannot satisfy the
+  strict positive-delivery validator.
+
+**Migration:** install the whole 3.2.2 kit. No project configuration migration
+is required.
+
+---
+
 ## 3.2.1 (2026-08-24)
 
 ### Qualified cross-project admission on every live path (SPEC-227)

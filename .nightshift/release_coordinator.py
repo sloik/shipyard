@@ -583,6 +583,7 @@ def coordinate_release(
         "release_fingerprint": manifest["fingerprint"],
         "dry_run": dry_run,
         "managed_payload_mode": "canonical_replace",
+        "file_level_patch_attempted": False,
         "include_opt_out": include_opt_out,
         "planned_installs": sum(len(plan.installs) for plan in plans),
         "planned_repositories": len(plans),
@@ -610,6 +611,7 @@ def coordinate_release(
         "push_attempted": False,
         "canonical_suite_runs": 0,
         "canonical_suite_probe": "not_run",
+        "canonical_suite_result": "not_run",
         "smoke_checks_run": 0,
         "producer_session_evidence": {},
         "old_fingerprints": {},
@@ -671,6 +673,9 @@ def coordinate_release(
             return result
         suite_result = _run_canonical_suite_step(runner, suite_argv, canonical)
         result["canonical_suite_runs"] = 1
+        result["canonical_suite_result"] = (
+            "passed" if suite_result.returncode == 0 else "failed"
+        )
         if suite_result.returncode:
             result["failure_class"] = "canonical_preflight"
             result["unexpected_failure"] = (
@@ -868,9 +873,20 @@ def coordinate_release(
     # A handoff scoped to eligible installs is complete after every eligible
     # repository verifies. Known local skips remain observable and keep the
     # coordinator exit non-zero, but do not invalidate deliveries already made.
-    if not result["unexpected_failure"] and not dry_run:
+    if (
+        not dry_run
+        and result["canonical_suite_probe"] == "passed"
+        and result["canonical_suite_runs"] == 1
+        and result["canonical_suite_result"] == "passed"
+        and result["managed_payload_mode"] == "canonical_replace"
+        and result["file_level_patch_attempted"] is False
+        and len(result["verified_installs"]) >= 1
+        and result["unexpected_failure"] is None
+        and result["rollback_attempted"] is False
+        and result["push_attempted"] is False
+    ):
         result["release_handoffs_completed"] = release_handoff.complete_pending_handoffs(
-            canonical, manifest, "coordinator-release-report"
+            canonical, manifest, result
         )
     result["duration_s"] = round(time.monotonic() - started, 3)
     result["completed_at"] = datetime.now(UTC).isoformat()

@@ -16,6 +16,8 @@ from typing import Any, Mapping
 
 
 HANDOFF_DIR = "release-handoffs"
+DELIVERY_RECEIPT_SCHEMA_VERSION = 1
+DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 _PRIVATE_KEYS = frozenset({"telemetry", "private_path", "absolute_path", "dropbox_root"})
 
@@ -55,6 +57,48 @@ def release_impact(changed_paths: list[str], manifest: Mapping[str, Any]) -> lis
     return sorted(path for path in changed_paths if path in known)
 
 
+def _manifest_sha256(manifest: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(entry.get("path")): str(entry.get("sha256"))
+        for entry in manifest.get("files", [])
+        if isinstance(entry, Mapping)
+    }
+
+
+def build_delivery_receipt(
+    artifact: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    release_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project coordinator state into a portable per-handoff receipt."""
+    hashes = _manifest_sha256(manifest)
+    changed = artifact.get("changed_managed_paths", [])
+    return {
+        "schema_version": DELIVERY_RECEIPT_SCHEMA_VERSION,
+        "producer": "release_coordinator",
+        "kit_version": manifest.get("kit_version"),
+        "manifest_fingerprint": fingerprint(manifest),
+        "canonical_suite": {
+            "probe": release_result.get("canonical_suite_probe"),
+            "runs": release_result.get("canonical_suite_runs"),
+            "result": release_result.get("canonical_suite_result"),
+        },
+        "delivery": {
+            "managed_payload_mode": release_result.get("managed_payload_mode"),
+            "file_level_patch": release_result.get("file_level_patch_attempted"),
+            "verified_install_count": len(release_result.get("verified_installs", [])),
+        },
+        "safety": {
+            "unexpected_failure": bool(release_result.get("unexpected_failure")),
+            "rollback_attempted": release_result.get("rollback_attempted"),
+            "push_attempted": release_result.get("push_attempted"),
+        },
+        "changed_managed_path_sha256": {
+            str(path): hashes.get(str(path), "") for path in changed
+        },
+    }
+
+
 def validate_artifact(
     artifact: Mapping[str, Any], *, spec_id: str, manifest: Mapping[str, Any]
 ) -> list[str]:
@@ -91,6 +135,75 @@ def validate_artifact(
     return errors
 
 
+def validate_positive_delivery(
+    artifact: Mapping[str, Any], *, spec_id: str, manifest: Mapping[str, Any]
+) -> list[str]:
+    """Require coordinator-authored positive delivery proof for a completed handoff.
+
+    ``validate_artifact`` deliberately remains compatible with historical completed
+    records whose ``release_report`` is a string token.  Call this stricter validator
+    anywhere a positive managed-install delivery must be proven.
+    """
+    errors = validate_artifact(artifact, spec_id=spec_id, manifest=manifest)
+    receipt = artifact.get("delivery_receipt")
+    if not isinstance(receipt, Mapping):
+        return errors + ["positive delivery requires a structured delivery_receipt"]
+    if receipt.get("schema_version") != DELIVERY_RECEIPT_SCHEMA_VERSION:
+        errors.append("delivery receipt schema_version is invalid")
+    if receipt.get("producer") != "release_coordinator":
+        errors.append("delivery receipt producer must be release_coordinator")
+    if receipt.get("kit_version") != manifest.get("kit_version"):
+        errors.append("delivery receipt kit version does not match manifest")
+    if receipt.get("manifest_fingerprint") != fingerprint(manifest):
+        errors.append("delivery receipt fingerprint does not match manifest")
+
+    suite = receipt.get("canonical_suite")
+    if not isinstance(suite, Mapping) or dict(suite) != {
+        "probe": "passed",
+        "runs": 1,
+        "result": "passed",
+    }:
+        errors.append("delivery receipt requires exactly one passing canonical suite run")
+
+    delivery = receipt.get("delivery")
+    if not isinstance(delivery, Mapping):
+        errors.append("delivery receipt requires whole-kit delivery evidence")
+    else:
+        if delivery.get("managed_payload_mode") != "canonical_replace":
+            errors.append("delivery receipt requires canonical_replace whole-kit mode")
+        if delivery.get("file_level_patch") is not False:
+            errors.append("delivery receipt must prove no file-level patch was used")
+        count = delivery.get("verified_install_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            errors.append("delivery receipt requires a positive verified-install count")
+
+    safety = receipt.get("safety")
+    if not isinstance(safety, Mapping) or any(
+        safety.get(name) is not False
+        for name in ("unexpected_failure", "rollback_attempted", "push_attempted")
+    ):
+        errors.append("delivery receipt requires no unexpected failure, rollback, or push")
+
+    changed = artifact.get("changed_managed_paths")
+    changed_paths = changed if isinstance(changed, list) else []
+    expected_hashes = _manifest_sha256(manifest)
+    expected = {
+        path: expected_hashes[path]
+        for path in changed_paths
+        if path in expected_hashes
+    }
+    actual = receipt.get("changed_managed_path_sha256")
+    if (
+        not isinstance(actual, Mapping)
+        or dict(actual) != expected
+        or len(expected) != len(changed_paths)
+    ):
+        errors.append(
+            "delivery receipt requires the exact manifest SHA-256 for every changed managed path"
+        )
+    return errors
+
+
 def validate_spec_handoff(
     frontmatter: Mapping[str, Any], canonical: Path, manifest: Mapping[str, Any]
 ) -> list[str]:
@@ -115,9 +228,15 @@ def validate_spec_handoff(
     return validate_artifact(data, spec_id=str(frontmatter.get("id", "")), manifest=manifest)
 
 
-def complete_pending_handoffs(canonical: Path, manifest: Mapping[str, Any], report: str) -> list[str]:
-    """Mark matching pending records complete after coordinator-owned success."""
+def complete_pending_handoffs(
+    canonical: Path,
+    manifest: Mapping[str, Any],
+    release_result: Mapping[str, Any],
+) -> list[str]:
+    """Complete matching records only with coordinator-owned positive delivery."""
     completed: list[str] = []
+    if not isinstance(release_result, Mapping):
+        return completed
     directory = canonical / HANDOFF_DIR
     if not directory.is_dir():
         return completed
@@ -127,8 +246,16 @@ def complete_pending_handoffs(canonical: Path, manifest: Mapping[str, Any], repo
             continue
         if validate_artifact(data, spec_id=str(data.get("spec_id", "")), manifest=manifest):
             continue
-        data["status"] = "completed"
-        data["release_report"] = report
-        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        completed.append(str(data["spec_id"]))
+        candidate = dict(data)
+        candidate["status"] = "completed"
+        candidate["release_report"] = DELIVERY_RECEIPT_REPORT
+        candidate["delivery_receipt"] = build_delivery_receipt(
+            candidate, manifest, release_result
+        )
+        if validate_positive_delivery(
+            candidate, spec_id=str(candidate.get("spec_id", "")), manifest=manifest
+        ):
+            continue
+        path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
+        completed.append(str(candidate["spec_id"]))
     return completed
