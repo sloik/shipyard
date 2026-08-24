@@ -5,6 +5,7 @@ Append-only NDJSON event logging for Nightshift loop runs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -98,6 +99,93 @@ def emit_recovery_event(log: "RunEventLog", event_type: str, spec_id: str, **pay
     """Append one validated recovery observation to the existing RunEventLog."""
     validate_recovery_event(event_type, {"spec_id": spec_id, **payload})
     log.emit(event_type, spec_id=spec_id, **payload)
+
+
+def record_official_followup_decisions(
+    log: "RunEventLog", *, source_spec_id: str, terminal_resolution: str,
+    discovery_phase: str, evidence_ref: str, outcomes: list[str], recorded_at: str,
+) -> list[dict]:
+    """Write sealed follow-up decisions and one bounded event per resolution.
+
+    This is the production lifecycle seam: callers use it only after the
+    normal follow-up processor has reached controlled outcomes.  Event payloads
+    carry counts and hashes, not report text or paths.
+    """
+    from followup_decisions import record_followup_decisions
+
+    decisions, created = record_followup_decisions(
+        log.nightshift_dir,
+        run_id=log.run_id,
+        source_spec_id=source_spec_id,
+        terminal_resolution=terminal_resolution,
+        discovery_phase=discovery_phase,
+        evidence_ref=evidence_ref,
+        outcomes=outcomes,
+        recorded_at=recorded_at,
+    )
+    if created:
+        log.emit(
+            "followup_decisions_recorded",
+            spec_id=source_spec_id,
+            terminal_resolution=terminal_resolution,
+            decision_count=len(decisions),
+            zero_suggestion=not outcomes,
+            decision_digest=hashlib.sha256(
+                "".join(item["operation_key"] for item in decisions).encode("utf-8")
+            ).hexdigest(),
+        )
+    return decisions
+
+
+def process_official_followup(
+    log: "RunEventLog", *, source_spec_id: str, terminal_resolution: str,
+    discovery_phase: str, classification: dict, evidence_ref: str, outcome: str,
+    child_spec_id: str | None = None, specs_dir: Path | None = None,
+    recorded_at: str,
+) -> dict:
+    """The single executable processor used by every terminal follow-up route."""
+    from followup_decisions import seal_official_decision
+
+    record, created = seal_official_decision(
+        log.nightshift_dir, run_id=log.run_id, source_spec_id=source_spec_id,
+        terminal_resolution=terminal_resolution, discovery_phase=discovery_phase,
+        classification=classification, evidence_ref=evidence_ref, outcome=outcome,
+        child_spec_id=child_spec_id, specs_dir=specs_dir, recorded_at=recorded_at,
+    )
+    if created:
+        log.emit("official_followup_processed", spec_id=source_spec_id,
+                 terminal_resolution=terminal_resolution, outcome=outcome,
+                 child_sealed=child_spec_id is not None,
+                 cause_class=record["classification"]["cause_class"])
+    return record
+
+
+# These route functions are the production boundaries called by the parent
+# lifecycle handlers.  Keeping them executable (instead of only documenting
+# the helper in LOOP.md) makes each terminal route independently testable.
+def process_normal_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="done", **kwargs)
+
+def process_noop_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="noop", **kwargs)
+
+def process_partial_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="partial", **kwargs)
+
+def process_blocked_unblock_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="unblock", **kwargs)
+
+def process_verifier_warning_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="verifier_warning", **kwargs)
+
+def process_material_scope_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="material_scope", **kwargs)
+
+def process_integration_failure_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="integration_failure", **kwargs)
+
+def process_post_release_followup(log: "RunEventLog", **kwargs) -> dict:
+    return process_official_followup(log, terminal_resolution="post_release", **kwargs)
 
 
 def _iso_utc_now() -> str:

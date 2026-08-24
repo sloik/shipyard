@@ -13,130 +13,31 @@
 
 ## 3.3.0 (2026-08-24)
 
-### Isolated observational extension runtime (SPEC-230)
+### Executable follow-up lineage processing (SPEC-236)
 
-- Added five stable, closed lifecycle events backed by a durable per-run spool;
-  normal execution never waits for or accepts control from an extension.
-- Added exact manifest admission, deny-by-default process isolation, bounded
-  queues and concurrency, deterministic replay, restart recovery, quarantine,
-  process-group cancellation, and deadline-bounded background continuation.
-- Added project and user extension namespaces with private state and verified
-  artifact materialization, while excluding commands, paths, credentials, raw
-  logs, and application data from public events and release evidence.
-- Bound both official `$nightshift run` and `$nightshift kickoff` flows to the
-  five authoritative checkpoints through a standalone per-invocation launcher,
-  without persistent shell state or synthesized facts in DAG dispatch.
-- Added the runtime, protocol, sandbox, registry, checkpoint helper, and
-  extension contract to the whole-kit managed release payload.
-- Versioned the matching Nightshift skill in the manifest and added
-  coordinator-owned, exact-path delivery with dirty-target refusal, atomic hash
-  and mode verification, Git commit evidence, and positive receipt validation.
-- Tightened standalone-verifier containment to remove explicit and
-  candidate-changed reports while retaining only hash-recorded, byte-identical
-  historical report fixtures needed by unchanged canonical tests.
+- The managed follow-up processor now records terminal follow-up decisions through
+  one source-aware executable boundary, with replay-safe zero observations and
+  sealed child backlinks.
 
-**Migration:** install the whole 3.3.0 kit and matching Nightshift skill. Existing
-projects remain extension-disabled unless they add an `extensions:` declaration;
-no configuration migration is required.
-
----
-
-## 3.2.2 (2026-08-24)
-
-### Portable positive-delivery receipts (SPEC-227)
-
-- Guarded release handoffs now complete only after one passing canonical-suite
-  run and at least one verified managed installation.
-- Coordinator-generated receipts carry no install paths or private telemetry and
-  bind whole-kit apply mode, safety outcomes, the positive verified-install
-  count, and exact manifest hashes for every changed managed path.
-- Historical string release tokens remain readable, but cannot satisfy the
-  strict positive-delivery validator.
-
-**Migration:** install the whole 3.2.2 kit. No project configuration migration
-is required.
-
----
-
-## 3.2.1 (2026-08-24)
-
-### Qualified cross-project admission on every live path (SPEC-227)
-
-- Made `after:` strictly project-local and added explicit
-  `requires_specs: [{project, spec}]` resolution for cross-project prerequisites.
-- Applied the same qualified, consumer-local admission behavior to both the DAG
-  CLI and the live bounded-worktree dispatcher, including pending-to-done refresh.
-- Unknown projects, missing specs, malformed declarations, and duplicate foreign
-  flat IDs now refuse only the affected consumer without mutating either project.
-
-### Fail-closed parent verifier dispatch (SPEC-228-001)
-
-- Added one managed `prepare-dispatch` boundary for normal and no-test-suite
-  verifier routes. It reloads containment evidence before emitting a sanitized
-  plan containing only the standalone repository, synthetic refs/commits,
-  neutral suites, and an evidence digest.
-- Surface-preparation and report-reachability failures now produce the distinct
-  controlled reason `verifier_surface_unavailable` before any verifier launch.
-- Corrected the live Nightshift skill contract so the verifier uses the emitted
-  standalone repository instead of the report-bearing run worktree.
-
-### Canonical heartbeat publication example (SPEC-220-001)
-
-- Added a worked `GIT.md` example that creates and writes the worktree-local
-  heartbeat before publishing it to the parent-provided shared path with
-  `/bin/cp`, including the `Write`/direct-redirection boundary explanation.
-
-**Migration:** install the whole 3.2.1 kit before the next verifier dispatch and
-use the matching Nightshift skill revision. No project configuration migration
-is required.
-
----
-
-## 3.2.0 (2026-08-23)
-
-### Foundation installation admission validator (SPEC-229)
-
-- Added a deterministic, side-effect-free `validate_install.py` gate that
-  checks the canonical or installed kit before any existing run preflight.
-- `preflight.py` now denies before Git status, spec loading, or configured
-  commands when installation admission is not `allow`.
-- LOOP, ORCHESTRATOR, and BOOTSTRAP require the gate without a manual fallback.
-
-**Migration:** install the whole 3.2.0 kit so `validate_install.py` is present
-alongside `preflight.py`. The exhaustive hardening program remains assigned to
-SPEC-229-001 through SPEC-229-007.
-
-### Structurally contained verifier read surface (SPEC-228)
-
-- Parents now materialize a standalone sanitized Git repository whose object
-  database cannot resolve the worker report at either baseline or head.
-- Pre-dispatch containment evidence is durable, verifier verdicts require the
-  contamination field, and suite headers are restricted to neutral labels plus
-  exact project-configured commands.
-- The managed verifier helper carries a release smoke self-test for containment
-  and verdict-schema rejection.
-
-**Migration:** install the whole 3.2.0 kit before the next verifier dispatch.
-No project configuration migration is required.
-
----
+**Migration:** install the complete 3.3.0 kit payload; the SPEC-236 handoff
+remains pending until the whole-kit release succeeds.
 
 ## 3.1.9 (2026-08-23)
 
-### Harness-agnostic kickoff completion reconciliation (SPEC-234)
+### Follow-up lineage and incidence metrics (SPEC-236)
 
-- Kickoff parents now persist completion and verifier-dispatch phases before
-  returning idle or status, using stable idempotency keys across duplicate and
-  interrupted deliveries.
-- Callback and bounded-polling harness adapters share one reducer. A failed
-  verifier launch is routed to controller-backed terminal resolution and is
-  never self-verified.
+- Structured follow-up decisions now carry source-aware, immutable lineage with
+  a closed cause/detail taxonomy, explicit zero-suggestion observations and
+  byte-idempotent operation keys.
+- Canonical aggregation distinguishes unique eligible sources from child specs,
+  exposes nullable denominator-aware rates, and offers an allowlisted public
+  projection that excludes prose and project identity.
+- Created child specs can validate their exact source and lineage backlink;
+  ordinary and historical specs remain free of synthetic parentage.
 
-**Migration:** install the released `ORCHESTRATOR.md` and
-`kickoff_reconciliation.py` payload. No project configuration migration is
-required.
-
----
+**Migration:** install the full 3.1.9 payload. Existing historical records may
+be backfilled only from explicit structured evidence; no spec or Git history is
+rewritten.
 
 ## 3.1.8 (2026-08-23)
 
@@ -178,6 +79,7 @@ payload. No project configuration migration is required.
 
 **Migration:** install the released `LOOP.md`, `ORCHESTRATOR.md`, and
 `WATCHER.md` managed payload. No project configuration migration is required.
+
 ## 3.1.5 (2026-08-22)
 
 ### Managed payload PII scan (SPEC-213)

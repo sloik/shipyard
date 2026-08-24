@@ -646,12 +646,30 @@ For any new spec (follow-up, manually created, or baseline), run:
 python3 .nightshift/check_followup_spec.py \
   --suggestion-title "Short title of the new spec" \
   --specs-dir .nightshift/specs/ \
+  --source-spec SPEC-004 \
   [--parent-id SPEC-004]     # Include when the spec is a child of an existing spec
   [--domain be]              # Optional: domain hint (ds/ui/net/be/watch/arch/test/infra/misc)
   [--layer 2]                # Optional: used for informational cluster notes
 ```
 
 Use the `proposed_id` from the JSON output as the spec's `id:` field.
+
+### Follow-up lineage (SPEC-236)
+
+For a follow-up created from a resolved run, `--source-spec` is mandatory in the
+official flow and must resolve in the same spec directory. Record one closed
+cause/detail classification and safe relative evidence in the immutable lineage
+store before sealing `outcome: created`. The child frontmatter contains only:
+
+```yaml
+followup:
+  source_spec_id: SPEC-004
+  lineage_record: metrics/followups/<operation-key>.json
+  outcome: created
+```
+
+Ordinary specs omit `followup:`. Never infer this backlink from a title, numeric
+ID, `after:` edge, similarity, report prose, or blocked status.
 
 ### Parent-scoped IDs prevent cross-stream collisions
 

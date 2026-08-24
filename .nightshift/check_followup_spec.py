@@ -259,9 +259,19 @@ def check(
     threshold: float,
     parent_id: str | None = None,
     suggestion_body: str | None = None,
+    source_spec_id: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run all checks. Returns (exit_code, result_dict)."""
     specs = _load_specs(specs_dir)
+    known_ids = {str(spec.get("id", "")) for spec in specs}
+    if source_spec_id is not None and source_spec_id not in known_ids:
+        return 2, {
+            "status": "error",
+            "detail": "source_spec_id does not resolve in specs-dir",
+            "source_spec_id": source_spec_id,
+            "nfr_texts": [],
+            "notes": [],
+        }
     suggestion_tokens = _tokenise(suggestion_title)
     conflicts: list[dict[str, str]] = []
     notes: list[str] = []
@@ -349,6 +359,7 @@ def check(
     if conflicts:
         return 1, {
             "status": "conflict",
+            "source_spec_id": source_spec_id,
             "conflicts": conflicts,
             "nfr_texts": nfr_texts,
             "notes": notes,
@@ -358,6 +369,7 @@ def check(
     return 0, {
         "status": "clean",
         "proposed_id": proposed_id,
+        "source_spec_id": source_spec_id,
         "nfr_texts": nfr_texts,
         "notes": notes,
     }
@@ -470,6 +482,14 @@ def main() -> None:
             "catching verbatim duplicates that share few title tokens (the SPEC-055==048 leak)."
         ),
     )
+    parser.add_argument(
+        "--source-spec", default=None,
+        help=(
+            "Source spec ID for a structured follow-up proposal. When supplied it "
+            "must resolve in --specs-dir and is echoed in the machine result so the "
+            "creator can write the required followup: backlink."
+        ),
+    )
     args = parser.parse_args()
 
     specs_dir = args.specs_dir
@@ -501,6 +521,7 @@ def main() -> None:
         threshold=args.similarity_threshold,
         parent_id=args.parent_id,
         suggestion_body=args.suggestion_body,
+        source_spec_id=args.source_spec,
     )
     print(json.dumps(result, indent=2))
     sys.exit(exit_code)

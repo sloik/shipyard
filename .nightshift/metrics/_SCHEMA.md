@@ -46,6 +46,15 @@ The private manifest carries hashes plus approved relative evidence references,
 project/origin/worktree fingerprints, and kit/schema versions. Sink state may
 be `awaiting_sync`; it never changes the evidence gate or lifecycle outcome.
 
+### Follow-up incidence aggregate (SPEC-236)
+
+The optional follow-up aggregate is a versioned JSON artifact rather than a
+per-spec YAML field. Its public/fleet form contains only closed category
+distributions, counts, rates with explicit eligible denominators and nullable
+`sample_state`, suppression counts, time-window metadata and source hashes.
+Titles, requirement/AC prose, report text, paths, commands, prompts, model output,
+environment data and credentials are prohibited.
+
 ---
 
 ## Root Fields (Required)

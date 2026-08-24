@@ -2118,6 +2118,16 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel) &&
 
 After the run resolves and a report exists, check the report for a `## Suggested Follow-up Specs` section. This applies after **every** run completion or unblock — not only for `done` specs (a blocked run can still surface valid follow-ups).
 
+After processing that section, the coordinator executes the managed canonical
+processor exactly once: `python3 .nightshift/followup_processor.py --root
+.nightshift --specs-dir .nightshift/specs --source-spec <SPEC-ID> --run-id
+<RUN-ID> --terminal-context <done|noop|partial|blocked|unblock|verifier_warning|material_scope|integration_failure|post_release>
+--evidence-ref <project-relative-report>`. A suggestion also passes controlled
+classification and source-aware child arguments. The processor runs the
+source-aware conflict check, preserves distinct conflict/NFR/tool outcomes, and
+seals `created` only after its child exists with the exact backlink. No
+suggestion records the required zero observation. A report alone is not evidence.
+
 For each suggestion entry, run the conflict check:
 
 ```bash

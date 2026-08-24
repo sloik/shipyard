@@ -1972,8 +1972,11 @@ print(f"Cleaned up {deleted} checkpoint files for {current_spec_id}")
    ## Suggested Follow-up Specs
    <!-- SPEC-060: Structured follow-up suggestions for the kickoff agent to autocreate. -->
    <!-- If no suggestions: write "(none)" as the body (no list items). -->
-   <!-- The kickoff agent will run check_followup_spec.py on each entry and autocreate -->
-   <!-- a spec if no conflicts are found. Conflicts and NFR violations are recorded here. -->
+   <!-- The kickoff agent records one immutable lineage decision for every suggestion,
+        including a zero-suggestion observation. It passes --source-spec, one closed
+        cause/detail pair, discovery phase and safe relative evidence before creation.
+        A created child carries followup.source_spec_id, lineage_record and outcome:
+        created; conflicts, rejections and tool-unavailable retain their own outcome. -->
 
    <!-- Zero-suggestion form: -->
    <!-- (none) -->
@@ -1990,6 +1993,9 @@ print(f"Cleaned up {deleted} checkpoint files for {current_spec_id}")
                  # and cannot collide with follow-ups from other parents.
      # Filled in by kickoff agent after check_followup_spec.py runs:
      outcome: "created SPEC-004-003 | conflict: <reason> | pending (script missing)"
+     cause_class: "source_contract_gap | planned_decomposition | implementation_defect | external_change | evidence_only_completion | measured_optimization"
+     detail_reason: "closed taxonomy member for cause_class"
+     discovery_phase: "authoring | implementation | verification | integration | live_validation | release | post_release | manual_review"
 
    ## Changelog
    [Include changelog entries from step 12]
@@ -2011,7 +2017,24 @@ print(f"Cleaned up {deleted} checkpoint files for {current_spec_id}")
    still completes.
 3. Write to `reports/YYYY-MM-DD-nightshift-report.md`
 4. **Verify the file exists** — confirm `reports/YYYY-MM-DD-nightshift-report.md` is present and non-empty before continuing. If it is missing or empty, write it again.
-5. Commit: `[SPEC-XXX] docs: generate nightshift report`
+5. **Seal the official follow-up decisions (SPEC-236).** After every terminal
+   resolution — `done`, `partial`, `noop`, `blocked`, unblock, verifier warning,
+   material scope split, integration failure, and post-release review — process
+   every structured suggestion through `check_followup_spec.py --source-spec
+   <source-id>` and the normal conflict/NFR flow, then invoke the managed
+   `followup_processor.py` command below exactly once. Pass
+   source ID, controlled cause/detail/planned classification, project-relative
+   evidence, and the child ID only after the child exists and its `followup:`
+   backlink validates. Preserve `accepted_pending`, `conflict_existing`,
+   `rejected_nfr`, and `tool_unavailable` as distinct outcomes. The no-suggestion
+   route uses `rejected_not_needed`, writing the required denominator observation.
+   Never hand-write a decision event or treat report prose as a recorded decision.
+   Execute the managed boundary for each context: `python3 followup_processor.py
+   --root .nightshift --specs-dir .nightshift/specs --source-spec <SPEC-ID>
+   --run-id <RUN-ID> --terminal-context <done|noop|partial|blocked|unblock|verifier_warning|material_scope|integration_failure|post_release>
+   --evidence-ref <project-relative-report>`. Supply structured suggestion,
+   classification, and child arguments when a suggestion exists.
+6. Commit: `[SPEC-XXX] docs: generate nightshift report`
 
 **Why:** A human can scan the report in 2 minutes and know if anything needs attention. This is the primary deliverable of a Nightshift run — not just the code, but the audit trail.
 

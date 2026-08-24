@@ -640,6 +640,36 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     _spec_id = str(fm.get("id", ""))
     _is_nfr = _spec_id.startswith("NFR-") or _spec_type == "nfr"
 
+    # SPEC-236: ordinary specs intentionally have no synthetic parentage.  A
+    # newly-created follow-up opts into this compact, auditable backlink; its
+    # lineage evidence stays in the ignored metrics surface rather than being
+    # copied into mutable spec prose.
+    followup = fm.get("followup")
+    if followup is not None:
+        if not isinstance(followup, dict):
+            errors.append("followup must be a mapping")
+        else:
+            allowed = {"source_spec_id", "lineage_record", "outcome"}
+            for key in sorted(set(followup) - allowed):
+                errors.append(f"followup.{key} is not allowed")
+            source_id = followup.get("source_spec_id")
+            if not isinstance(source_id, str) or not source_id.strip():
+                errors.append("followup.source_spec_id must be a non-empty string")
+            elif source_id == _spec_id:
+                errors.append("followup.source_spec_id may not self-reference")
+            else:
+                corpus = all_specs if all_specs is not None else _load_directory_frontmatters(spec_file.parent)
+                if source_id not in {str(candidate.get("id", "")) for candidate in corpus}:
+                    errors.append("followup.source_spec_id does not resolve")
+            reference = followup.get("lineage_record")
+            if not isinstance(reference, str) or not reference.strip():
+                errors.append("followup.lineage_record must be a non-empty relative path")
+            elif reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
+                errors.append("followup.lineage_record must be a safe relative path")
+            outcome = followup.get("outcome")
+            if outcome != "created":
+                errors.append("followup.outcome must be 'created' when a child spec exists")
+
     # SPEC-210 — absence is counted as ``unclassified`` by the derived summary,
     # never made a validation error or an implicit promotion refusal. A declared
     # malformed gap is surfaced early.

@@ -411,6 +411,10 @@ metrics:
   # Which metric dimensions to track.
   track: [duration, test_results, review_cycles, build_errors, files_changed]
 
+  # Follow-up incidence aggregates suppress a public/fleet cohort whose eligible
+  # population is smaller than this value. Project-local analysis remains intact.
+  followup_minimum_cohort_size: 2
+
 ---
 
 # =============================================================================
