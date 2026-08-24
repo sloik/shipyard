@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,12 @@ HANDOFF_DIR = "release-handoffs"
 DELIVERY_RECEIPT_SCHEMA_VERSION = 1
 DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+RELEASE_HANDOFF_DECLARATION_POLICY_DATE = date(2026, 8, 8)
+CURRENT_SPEC_TEMPLATE_VERSION = 7
+MISSING_RELEASE_HANDOFF_DECLARATION_ERROR = (
+    "release_handoff declaration required: choose impact: required "
+    "or impact: exempt with a reason"
+)
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 _PRIVATE_KEYS = frozenset(
     {"telemetry", "private_path", "absolute_path", "dropbox_root"}
@@ -258,9 +265,30 @@ def validate_positive_delivery(
 def validate_spec_handoff(
     frontmatter: Mapping[str, Any], canonical: Path, manifest: Mapping[str, Any]
 ) -> list[str]:
-    """Validate terminal release-impact declarations without retrofitting history."""
+    """Validate current release-handoff declarations without retrofitting history.
+
+    Specs created on or after the SPEC-189 policy date, or authored from the
+    current template, must classify their release impact even if their status is
+    later changed to ``done``. Older specs retain compatibility through their
+    durable creation/template metadata, not terminal status.
+    """
     declaration = frontmatter.get("release_handoff")
     if declaration is None:
+        created = frontmatter.get("created")
+        try:
+            subject_to_policy = (
+                date.fromisoformat(str(created))
+                >= RELEASE_HANDOFF_DECLARATION_POLICY_DATE
+            )
+        except ValueError:
+            subject_to_policy = False
+        template_version = frontmatter.get("template_version")
+        try:
+            subject_to_current_template = int(template_version) >= CURRENT_SPEC_TEMPLATE_VERSION
+        except (TypeError, ValueError):
+            subject_to_current_template = False
+        if subject_to_policy or subject_to_current_template:
+            return [MISSING_RELEASE_HANDOFF_DECLARATION_ERROR]
         return []
     if not isinstance(declaration, Mapping):
         return ["release_handoff must be a mapping"]

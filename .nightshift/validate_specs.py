@@ -570,6 +570,15 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                     )
             errors.extend(validate_blocked(fm))
 
+    canonical = Path(__file__).resolve().parent
+    manifest_path = canonical / "release-manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            errors.extend(release_handoff.validate_spec_handoff(fm, canonical, manifest))
+        except (json.JSONDecodeError, OSError):
+            errors.append("release handoff validation could not read canonical manifest")
+
     # A done spec must have all checkboxes checked in Requirements and
     # Acceptance Criteria sections — unchecked boxes in those sections mean
     # requirements or ACs were never completed. Other sections (e.g. Live
@@ -604,15 +613,6 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                     f"{spec_file}:{_finding['line']}: status is 'done' but has an unchecked "
                     f"checkbox in {_finding['section']}: {_finding['text']}"
                 )
-        canonical = Path(__file__).resolve().parent
-        manifest_path = canonical / "release-manifest.json"
-        if manifest_path.is_file():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-                errors.extend(release_handoff.validate_spec_handoff(fm, canonical, manifest))
-            except (json.JSONDecodeError, OSError):
-                errors.append("release handoff validation could not read canonical manifest")
-
     attachments = fm.get("attachments")
     if attachments is not None:
         if not isinstance(attachments, list):
