@@ -142,16 +142,38 @@ def _clear_snapshot(destination: Path) -> None:
             shutil.rmtree(child)
 
 
+def _tracked_report_objects(
+    source_repository: Path,
+    ref: str,
+    *,
+    report_paths: Iterable[str],
+) -> dict[str, str]:
+    """Return tracked report paths and blob IDs for one trusted ref."""
+    objects: dict[str, str] = {}
+    entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
+    for raw in entries:
+        if not raw:
+            continue
+        metadata, raw_path = raw.split(b"\t", 1)
+        _mode, kind, object_id = metadata.decode("ascii").split()
+        path = _normalise_repo_path(raw_path.decode("utf-8", "surrogateescape"))
+        if kind == "blob" and is_verifier_report_path(path, explicit=report_paths):
+            objects[path] = object_id
+    return objects
+
+
 def _materialize_ref(
     source_repository: Path,
     destination: Path,
     ref: str,
     *,
     report_paths: Iterable[str],
+    retained_report_paths: Iterable[str] = (),
 ) -> list[str]:
     """Materialize one tracked snapshot without sharing the source object DB."""
     _clear_snapshot(destination)
     excluded: list[str] = []
+    retained = set(retained_report_paths)
     entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
     for raw in entries:
         if not raw:
@@ -159,7 +181,7 @@ def _materialize_ref(
         metadata, raw_path = raw.split(b"\t", 1)
         mode, kind, object_id = metadata.decode("ascii").split()
         path = _normalise_repo_path(raw_path.decode("utf-8", "surrogateescape"))
-        if is_verifier_report_path(path, explicit=report_paths):
+        if is_verifier_report_path(path, explicit=report_paths) and path not in retained:
             excluded.append(path)
             continue
         if kind != "blob" or mode not in {"100644", "100755", "120000"}:
@@ -188,15 +210,20 @@ def prepare_verifier_surface(
     report_paths: Iterable[str],
     evidence_path: Path,
 ) -> dict[str, Any]:
-    """Build the sole verifier surface as a standalone, report-free Git repo.
+    """Build a standalone Git repo with candidate conclusions removed.
 
     A linked worktree is deliberately rejected as the destination: worktrees
-    share the source object database and therefore leave excluded report blobs
-    reachable through Git even when absent from the checkout.
+    share the source object database and therefore leave excluded candidate
+    report blobs reachable through Git even when absent from the checkout.
+
+    Explicit reports and every report added, removed, or changed by the
+    candidate are removed from both synthetic refs. Byte-identical historical
+    reports are retained so unchanged canonical tests may consume their own
+    fixtures; their exact content hashes are recorded in containment evidence.
     """
     source_repository = source_repository.resolve()
     destination = destination.resolve()
-    report_paths = tuple(report_paths)
+    report_paths = tuple(sorted({_normalise_repo_path(path) for path in report_paths}))
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("verifier surface destination must be empty")
     destination.mkdir(parents=True, exist_ok=True)
@@ -213,6 +240,24 @@ def prepare_verifier_surface(
         raise ValueError("verifier surface may not share the source Git object database")
     _run_git(destination, "config", "user.name", "Nightshift verifier surface")
     _run_git(destination, "config", "user.email", "verifier@example.invalid")
+    explicit_reports = set(report_paths)
+    baseline_report_objects = _tracked_report_objects(
+        source_repository, baseline_ref, report_paths=report_paths
+    )
+    head_report_objects = _tracked_report_objects(
+        source_repository, head_ref, report_paths=report_paths
+    )
+    retained_reports = {
+        path: object_id
+        for path, object_id in baseline_report_objects.items()
+        if path not in explicit_reports and head_report_objects.get(path) == object_id
+    }
+    retained_hashes = {
+        path: hashlib.sha256(
+            _git_bytes(source_repository, "cat-file", "blob", object_id)
+        ).hexdigest()
+        for path, object_id in sorted(retained_reports.items())
+    }
     refs = (("baseline", baseline_ref), ("head", head_ref))
     commits: dict[str, str] = {}
     excluded_by_ref: dict[str, list[str]] = {}
@@ -222,7 +267,11 @@ def prepare_verifier_surface(
     )
     for label, ref in refs:
         excluded_by_ref[label] = _materialize_ref(
-            source_repository, destination, ref, report_paths=report_paths
+            source_repository,
+            destination,
+            ref,
+            report_paths=report_paths,
+            retained_report_paths=retained_reports,
         )
         _run_git(destination, "add", "-A")
         result = subprocess.run(
@@ -235,7 +284,10 @@ def prepare_verifier_surface(
         _run_git(destination, "tag", f"verifier-{label}")
 
     probes = []
-    for path in sorted({_normalise_repo_path(item) for item in report_paths}):
+    excluded_paths = sorted(
+        set(excluded_by_ref["baseline"]) | set(excluded_by_ref["head"])
+    )
+    for path in excluded_paths:
         for label in ("baseline", "head"):
             probe = subprocess.run(
                 ["git", "-C", str(destination), "cat-file", "-e", f"verifier-{label}:{path}"],
@@ -250,6 +302,7 @@ def prepare_verifier_surface(
         "source_refs": {"baseline": baseline_ref, "head": head_ref},
         "surface_commits": commits,
         "excluded_paths": excluded_by_ref,
+        "retained_historical_report_sha256": retained_hashes,
         "report_reachability": probes,
         "shared_object_database": False,
         "head_tree": _run_git(destination, "rev-parse", "HEAD^{tree}").strip(),
@@ -306,9 +359,21 @@ def prepare_verifier_dispatch(
         evidence_bytes = evidence_path.read_bytes()
         durable_evidence = json.loads(evidence_bytes)
         probes = durable_evidence.get("report_reachability")
+        excluded = durable_evidence.get("excluded_paths")
+        excluded_paths = (
+            {
+                path
+                for values in excluded.values()
+                if isinstance(values, list)
+                for path in values
+                if isinstance(path, str)
+            }
+            if isinstance(excluded, dict)
+            else set()
+        )
         expected_probes = {
             (label, report_path)
-            for report_path in normalized_reports
+            for report_path in excluded_paths
             for label in ("baseline", "head")
         }
         observed_probes = {
@@ -317,12 +382,25 @@ def prepare_verifier_dispatch(
             if isinstance(probe, dict) and probe.get("unreachable") is True
         } if isinstance(probes, list) else set()
         commits = durable_evidence.get("surface_commits")
+        retained = durable_evidence.get("retained_historical_report_sha256")
+        observed_retained: dict[str, str] = {}
+        if isinstance(retained, dict):
+            for path in retained:
+                baseline_body = _git_bytes(
+                    destination, "show", f"verifier-baseline:{path}"
+                )
+                head_body = _git_bytes(destination, "show", f"verifier-head:{path}")
+                if baseline_body != head_body:
+                    raise ValueError("retained historical report differs between refs")
+                observed_retained[path] = hashlib.sha256(head_body).hexdigest()
         ready = (
             durable_evidence == evidence
             and bool(normalized_reports)
             and durable_evidence.get("surface_kind") == "standalone-sanitized-git"
             and durable_evidence.get("shared_object_database") is False
             and observed_probes == expected_probes
+            and isinstance(retained, dict)
+            and observed_retained == retained
             and isinstance(commits, dict)
             and set(commits) == {"baseline", "head"}
             and _run_git(destination, "rev-parse", "verifier-baseline").strip() == commits["baseline"]

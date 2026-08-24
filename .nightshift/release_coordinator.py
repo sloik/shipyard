@@ -9,13 +9,16 @@ outside the computed release allowlist.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
@@ -69,6 +72,7 @@ class RepositoryPlan:
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
 SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 CANONICAL_SUITE_TIMEOUT_S = 300
+SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
 
 
 def _run(
@@ -100,10 +104,14 @@ def _run_canonical_suite_step(
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         detail = f"canonical suite command exceeded {CANONICAL_SUITE_TIMEOUT_S}s: {' '.join(argv)}"
-        return subprocess.CompletedProcess(argv, 124, stdout, f"{stderr}\n{detail}".strip())
+        return subprocess.CompletedProcess(
+            argv, 124, stdout, f"{stderr}\n{detail}".strip()
+        )
 
 
-def _run_canonical_suite(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_canonical_suite(
+    argv: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
     """Run release preflight without leaking an operator commit authorization.
 
     ``NIGHTSHIFT_ESCALATION_SIGNOFF`` is intentionally consumed by a managed
@@ -118,6 +126,7 @@ def _run_canonical_suite(argv: list[str], cwd: Path) -> subprocess.CompletedProc
         cwd=cwd,
         text=True,
         capture_output=True,
+        check=False,
         timeout=CANONICAL_SUITE_TIMEOUT_S,
         env=environment,
     )
@@ -240,12 +249,16 @@ def _suite_argv(metadata: dict, phase: str) -> list[str]:
         raise ValueError("canonical suite runner must be uv")
     dependencies = metadata.get("dependencies")
     command = metadata.get(phase)
-    if not isinstance(dependencies, list) or not dependencies or not all(
-        isinstance(item, str) and item.strip() for item in dependencies
+    if (
+        not isinstance(dependencies, list)
+        or not dependencies
+        or not all(isinstance(item, str) and item.strip() for item in dependencies)
     ):
         raise ValueError("canonical suite dependencies must be non-empty strings")
-    if not isinstance(command, list) or not command or not all(
-        isinstance(item, str) and item.strip() for item in command
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(item, str) and item.strip() for item in command)
     ):
         raise ValueError(f"canonical suite {phase} must be a non-empty argv list")
     argv = ["uv", "run"]
@@ -275,7 +288,9 @@ def _managed_relative(plan: RepositoryPlan, repo_path: str) -> str:
     return repo_path
 
 
-def validate_release_ownership(plans: Iterable[RepositoryPlan], manifest: dict) -> list[str]:
+def validate_release_ownership(
+    plans: Iterable[RepositoryPlan], manifest: dict
+) -> list[str]:
     """Prove copy/stage/commit ownership for every repo before first write."""
     errors: list[str] = []
     managed = {entry["path"] for entry in manifest["files"]}
@@ -304,7 +319,9 @@ def validate_release_ownership(plans: Iterable[RepositoryPlan], manifest: dict) 
         for repo_path in sorted(copy_paths):
             relative = _managed_relative(plan, repo_path)
             if _project_owned_managed_path(relative):
-                errors.append(f"project-owned path entered release allowlist: {repo_path}")
+                errors.append(
+                    f"project-owned path entered release allowlist: {repo_path}"
+                )
     return sorted(set(errors))
 
 
@@ -330,7 +347,9 @@ def plan_repositories(
     for repo, repo_installs in sorted(grouped.items(), key=lambda item: str(item[0])):
         allowed: set[str] = set()
         declarations = [_committed_kit_policy(install) for install in repo_installs]
-        declared_values = {value for value, _source in declarations if value is not None}
+        declared_values = {
+            value for value, _source in declarations if value is not None
+        }
         if len(declared_values) > 1:
             policy = "invalid:conflicting"
         else:
@@ -384,10 +403,7 @@ def preflight_repository(
         _relative(plan.root, install / entry["path"])
         for install in plan.installs
         for entry in manifest["files"]
-    } | {
-        _relative(plan.root, install / release.MARKER)
-        for install in plan.installs
-    }
+    } | {_relative(plan.root, install / release.MARKER) for install in plan.installs}
     # Project-owned configuration is never canonical payload, even when its
     # schema already needs no migration and therefore is absent from the
     # commit allowlist.  A pre-existing edit must skip this repository before
@@ -510,12 +526,18 @@ def _refresh_recognized_nightshift_precommit_hooks(plan: RepositoryPlan) -> list
         if not directory.is_absolute():
             directory = plan.root / directory
         target = directory / "pre-commit"
-        if not target.is_file() or "Nightshift Kit — Pre-commit hook" not in target.read_text(errors="replace")[:300]:
+        if (
+            not target.is_file()
+            or "Nightshift Kit — Pre-commit hook"
+            not in target.read_text(errors="replace")[:300]
+        ):
             continue
         try:
             shutil.copy2(source, target)
         except OSError as exc:
-            errors.append(f"could not refresh recognized Nightshift pre-commit hook: {exc}")
+            errors.append(
+                f"could not refresh recognized Nightshift pre-commit hook: {exc}"
+            )
     return errors
 
 
@@ -563,6 +585,183 @@ def _commit_repository(
     return sha, []
 
 
+def _skill_manifest_entry(manifest: dict) -> dict | None:
+    return next(
+        (
+            entry
+            for entry in manifest.get("files", [])
+            if entry.get("path") == SKILL_MANAGED_PATH
+        ),
+        None,
+    )
+
+
+def _skill_delivery_preflight(
+    canonical: Path, release_root: Path | None, manifest: dict
+) -> tuple[dict | None, list[str]]:
+    """Resolve and preflight the separately installed active skill payload."""
+    entry = _skill_manifest_entry(manifest)
+    if entry is None:
+        return None, []
+    if release_root is None:
+        return None, ["managed canonical skill requires an explicit release root"]
+    root = release_root.resolve()
+    repo = _git_root(root)
+    if repo is None or repo != root:
+        return None, ["release root must be the owning git repository root"]
+    source = canonical / SKILL_MANAGED_PATH
+    target = root / SKILL_MANAGED_PATH
+    if not source.is_file() or source.is_symlink():
+        return None, ["canonical skill source is missing or unsafe"]
+    target_relative = _relative(repo, target)
+    if target_relative != SKILL_MANAGED_PATH:
+        return None, ["canonical skill target path is not exact"]
+    staged, dirty = _porcelain_paths(repo)
+    errors = []
+    if target_relative in dirty:
+        errors.append("canonical skill target is dirty or pre-staged")
+    source_mode = stat.S_IMODE(source.stat().st_mode)
+    expected_mode = 0o755 if entry.get("executable") else 0o644
+    if source_mode != expected_mode:
+        errors.append("canonical skill source mode does not match manifest")
+    if release.sha256(source) != entry.get("sha256"):
+        errors.append("canonical skill source hash does not match manifest")
+    return {
+        "repo": repo,
+        "source": source,
+        "target": target,
+        "target_relative": target_relative,
+        "sha256": entry.get("sha256"),
+        "mode": expected_mode,
+        "preexisting_staged": staged,
+    }, errors
+
+
+def _atomic_copy_skill(source: Path, target: Path, mode: int) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".nightshift-skill-", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(source.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(mode)
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _commit_evidence(
+    repo: Path,
+    target_relative: str,
+    expected_hash: str,
+    expected_mode: int,
+    preexisting_staged: set[str],
+) -> tuple[dict | None, list[str]]:
+    staged = set(
+        _run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.splitlines()
+    )
+    created_exact_commit = target_relative in staged
+    if staged - {target_relative} != preexisting_staged:
+        return None, ["canonical skill staging changed unrelated paths"]
+    if created_exact_commit:
+        commit = _run(
+            [
+                "git",
+                "commit",
+                "-m",
+                "[SPEC-230] chore: deliver managed Nightshift skill",
+                "--",
+                target_relative,
+            ],
+            cwd=repo,
+        )
+        if commit.returncode:
+            return None, [
+                commit.stderr.strip() or commit.stdout.strip() or "skill commit failed"
+            ]
+        remaining = set(
+            _run(
+                ["git", "diff", "--cached", "--name-only"], cwd=repo
+            ).stdout.splitlines()
+        )
+        if remaining != preexisting_staged:
+            return None, ["canonical skill commit consumed unrelated staging"]
+    sha = _run(
+        ["git", "log", "-1", "--format=%H", "--", target_relative], cwd=repo
+    ).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None, ["canonical skill has no owning commit"]
+    committed_paths = set(
+        _run(
+            ["git", "show", "--pretty=format:", "--name-only", sha], cwd=repo
+        ).stdout.splitlines()
+    )
+    blob = _run(["git", "show", f"{sha}:{target_relative}"], cwd=repo)
+    tree = _run(["git", "ls-tree", sha, "--", target_relative], cwd=repo)
+    expected_git_mode = "100755" if expected_mode == 0o755 else "100644"
+    if (
+        (created_exact_commit and committed_paths != {target_relative})
+        or target_relative not in committed_paths
+        or blob.returncode
+        or hashlib.sha256(blob.stdout.encode()).hexdigest() != expected_hash
+        or tree.returncode
+        or not tree.stdout.startswith(expected_git_mode + " ")
+    ):
+        return None, ["canonical skill commit evidence verification failed"]
+    return {
+        "sha": sha,
+        "paths": sorted(committed_paths),
+        "verified": True,
+        "unrelated_staging_preserved": True,
+        "mode": expected_git_mode,
+    }, []
+
+
+def _deliver_skill(plan: dict) -> tuple[dict | None, list[str]]:
+    repo = plan["repo"]
+    target = plan["target"]
+    target_relative = plan["target_relative"]
+    _atomic_copy_skill(plan["source"], target, plan["mode"])
+    verification = {
+        "bytes": target.read_bytes() == plan["source"].read_bytes(),
+        "sha256": release.sha256(target) == plan["sha256"],
+        "mode": stat.S_IMODE(target.stat().st_mode) == plan["mode"],
+    }
+    if not all(verification.values()):
+        return None, ["canonical skill target verification failed"]
+    add = _run(["git", "add", "-f", "--", target_relative], cwd=repo)
+    if add.returncode:
+        return None, [add.stderr.strip() or "canonical skill git add failed"]
+    commit, errors = _commit_evidence(
+        repo,
+        target_relative,
+        plan["sha256"],
+        plan["mode"],
+        plan["preexisting_staged"],
+    )
+    if errors:
+        return None, errors
+    return {
+        "status": "verified",
+        "source_relative_path": SKILL_MANAGED_PATH,
+        "target_relative_path": target_relative,
+        "sha256": plan["sha256"],
+        "mode": f"{plan['mode']:04o}",
+        "allowlist": [target_relative],
+        "verification": verification,
+        "commit_evidence": commit,
+    }, []
+
+
 def coordinate_release(
     canonical: Path,
     installs: Iterable[Path],
@@ -574,10 +773,14 @@ def coordinate_release(
     inject_unexpected_after_commits: int | None = None,
     smoke_timeout_s: int = 60,
     include_opt_out: bool = False,
+    release_root: Path | None = None,
 ) -> dict:
     """Coordinate one exact release with known-failure isolation and stop semantics."""
     started = time.monotonic()
     plans, initial_skips = plan_repositories(installs, manifest)
+    skill_plan, skill_preflight_errors = _skill_delivery_preflight(
+        canonical, release_root, manifest
+    )
     result = {
         "release_version": manifest["kit_version"],
         "release_fingerprint": manifest["fingerprint"],
@@ -617,6 +820,18 @@ def coordinate_release(
         "old_fingerprints": {},
         "post_commit_rebuild_time_s": None,
         "release_handoffs_completed": [],
+        "skill_delivery": (
+            {
+                "status": "planned" if skill_plan else "not_required",
+                "source_relative_path": SKILL_MANAGED_PATH,
+                "target_relative_path": SKILL_MANAGED_PATH,
+                "sha256": skill_plan["sha256"] if skill_plan else None,
+                "mode": f"{skill_plan['mode']:04o}" if skill_plan else None,
+                "allowlist": [SKILL_MANAGED_PATH] if skill_plan else [],
+                "verification": {"bytes": False, "sha256": False, "mode": False},
+                "commit_evidence": None,
+            }
+        ),
         "rerun_command": (
             f"python3 {canonical / 'release_coordinator.py'}"
             f" --root {canonical.parents[2]} --apply"
@@ -633,11 +848,15 @@ def coordinate_release(
             result["old_fingerprints"][str(install)] = old
 
     ownership_errors = validate_release_ownership(plans, manifest)
+    ownership_errors.extend(skill_preflight_errors)
     if ownership_errors:
         result["failure_class"] = "canonical_preflight"
         result["unexpected_failure"] = "; ".join(ownership_errors)
         result["untouched"] = [
-            {"repository": str(plan.root), "installs": [str(item) for item in plan.installs]}
+            {
+                "repository": str(plan.root),
+                "installs": [str(item) for item in plan.installs],
+            }
             for plan in plans
         ]
         result["duration_s"] = round(time.monotonic() - started, 3)
@@ -664,7 +883,10 @@ def coordinate_release(
                 probe_result.stdout + "\n" + probe_result.stderr
             ).strip()[-2000:]
             result["untouched"] = [
-                {"repository": str(plan.root), "installs": [str(item) for item in plan.installs]}
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                }
                 for plan in plans
             ]
             result["duration_s"] = round(time.monotonic() - started, 3)
@@ -870,6 +1092,26 @@ def coordinate_release(
                 if (Path(install) / "reflexion_producer.py").is_file()
             },
         }
+    if not dry_run and result["unexpected_failure"] is None and skill_plan is not None:
+        # Recheck after managed-install commits so a concurrent edit/stage race
+        # cannot be overwritten by the external exact-path delivery.
+        refreshed_plan, refreshed_errors = _skill_delivery_preflight(
+            canonical, release_root, manifest
+        )
+        if refreshed_errors or refreshed_plan is None:
+            skill_errors = refreshed_errors or ["canonical skill plan disappeared"]
+            skill_delivery = None
+        else:
+            skill_delivery, skill_errors = _deliver_skill(refreshed_plan)
+        if skill_errors:
+            result["failure_class"] = "unexpected_mid_rollout"
+            result["unexpected_failure"] = "; ".join(skill_errors)
+            result["skill_delivery"] = {
+                **result["skill_delivery"],
+                "status": "failed",
+            }
+        else:
+            result["skill_delivery"] = skill_delivery
     # A handoff scoped to eligible installs is complete after every eligible
     # repository verifies. Known local skips remain observable and keep the
     # coordinator exit non-zero, but do not invalidate deliveries already made.
@@ -885,8 +1127,8 @@ def coordinate_release(
         and result["rollback_attempted"] is False
         and result["push_attempted"] is False
     ):
-        result["release_handoffs_completed"] = release_handoff.complete_pending_handoffs(
-            canonical, manifest, result
+        result["release_handoffs_completed"] = (
+            release_handoff.complete_pending_handoffs(canonical, manifest, result)
         )
     result["duration_s"] = round(time.monotonic() - started, 3)
     result["completed_at"] = datetime.now(UTC).isoformat()
@@ -942,6 +1184,7 @@ def main() -> int:
         manifest,
         dry_run=args.dry_run,
         include_opt_out=args.include_opt_out,
+        release_root=args.root.resolve(),
     )
     result["rerun_command"] = (
         f"python3 {canonical / 'release_coordinator.py'}"

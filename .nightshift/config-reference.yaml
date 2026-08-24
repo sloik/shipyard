@@ -1,0 +1,1354 @@
+# =============================================================================
+# Nightshift Kit — config.yaml Reference
+# =============================================================================
+#
+# Canonical schema reference for config.yaml. Every field is documented with
+# its type, default value, valid options, and usage notes.
+#
+# This file is a valid YAML document that can be loaded and parsed. It serves
+# as both documentation and a complete example of a multi-stack project config.
+#
+# Kit Version: 2.67.3 (2026-08-09)
+# Schema Version: 3.0.0 (multi-stack support)
+#
+# Backward compatibility:
+#   When the `stacks:` section is ABSENT, behavior is identical to v2.2.1.
+#   Single-stack projects require no migration and no version bump.
+#   The `stacks:` section requires schema_version: "3.0.0" or higher.
+#
+# =============================================================================
+
+---
+
+# =============================================================================
+# Schema Version
+# =============================================================================
+# Type:     string (SemVer)
+# Required: yes
+# Default:  "3.0.0"
+#
+# The SemVer version of the config schema itself. This is distinct from
+# kit_version, which tracks the Nightshift protocol/runtime bundle.
+#
+# 3.0.0 adds multi-stack support. The `stacks:` section is optional; projects
+# without it keep flat-command behavior.
+
+schema_version: "3.0.0"
+
+---
+
+# =============================================================================
+# Kit Version
+# =============================================================================
+# Type:     string (SemVer)
+# Required: yes
+# Default:  none — must be set explicitly
+#
+# The SemVer version of the Nightshift Kit protocol this config targets.
+# Used by the loop and tooling to enable/disable features and validate schema.
+#
+# Version history:
+  # 2.67.3: Canonical payload copy, then separate project config migration.
+  # 2.67.2: Explicit operator-authorized legacy managed-payload adoption.
+  # 2.67.1: Pre-copy release ownership and deterministic suite recovery (SPEC-207).
+  # 2.66.0: Exact historical-checkbox disposition evidence (SPEC-204).
+  # 2.65.0: Managed-install provenance audit and direct-edit admission guard (SPEC-203).
+  # 2.56.0: Control-board work counts and self-explanatory loop metric hover help (SPEC-144).
+  # 2.55.0: Pending draft and ready work tiles (SPEC-142).
+#   2.54.0: Static active-NFR reconciliation gate and auditable waivers (SPEC-140).
+#   2.53.0: Parent-authoritative kickoff resolution metrics and recovery analytics (SPEC-139-004-001).
+#   2.52.0: Bounded parallel orchestration proof and operator guidance (SPEC-139-004).
+#   2.49.1: Board status updates write through to spec frontmatter and reconcile newer non-terminal file status.
+#   2.49.0: Multi-axis code-generation rubric with Pareto model scorecards (SPEC-108).
+#   2.48.0: Trajectory/path evaluation with opt-in expected trajectory assertions (SPEC-107).
+#   2.47.0: Failure taxonomy, asymmetric confusion analysis, and tool-call validity metrics (SPEC-106).
+#   2.46.0: Loop observability metrics: MTTD, MTTR, CFR, format-failure/easy-fix rates (SPEC-111).
+#   2.45.0: Confidence calibration reliability diagram + ECE floor tuning (SPEC-112).
+#   2.44.1: Board reconciles stale durable status checkpoints with newer terminal spec frontmatter (SPEC-120).
+#   2.44.0: Loop-level caching with prompt-prefix and exact sub-step caches (SPEC-105).
+#   2.43.0: Offline replay-eval gate for /evolve protocol changes (SPEC-110).
+#   2.42.0: Graded eval metrics and calibrated judge pinning (SPEC-097).
+#   2.37.0: Actor-critic in-place revision loop with raw validation critic input (SPEC-096).
+#   2.36.0: Commit-time secret/PII scanner + escalation gate (SPEC-093).
+#   2.14.3: Board kickoff prompts require one focused unblock pass before marking a spec blocked.
+#   2.14.2: NFR-family specs (id NFR-* or type nfr) stay active/retired and are never blocked.
+#   2.14.1: Canonical sync deploys first-party Python helper modules required by validators.
+#   2.14.0: Kickoff agent resolves runs autonomously; escalates only on insufficient evidence.
+#   2.13.1: Blocked specs keep the real title H1; Block Reason is an H2.
+#   2.13.0: Board spec links show linked-spec status and hover previews.
+#   2.12.1: Explicit /nightshift kickoff command passes kickoff context into the launched run brief.
+#   2.12.0: Board run prompt delegates to /nightshift run; orchestrator exposes kickoff-parent progress.
+#   2.11.1: Git policy source of truth — GIT.md owns workflow semantics.
+#   2.11.0: OpenSpec-transfer tooling — instruction packets, verification reports, source fingerprints, stacking metadata, replay bundles.
+#   2.10.3: validate_specs.py + shared spec_frontmatter.py propagation.
+#   2.4.0: Local Web Kanban Board.
+#   2.3.0: Karpathy prompts/template + accumulated audit follow-up.
+#   2.2.1: Step 14 (human review report) made MANDATORY with self-verification
+#          + Step 16 exit gate.
+#   2.2.0: Pre-commit hook (hooks/pre-commit), nightshift-sync.py syncs hooks/.
+#   2.1.0: DevKB injection, spec status lifecycle, nightshift-sync.py.
+#   2.0.0: Hierarchical specs, nightshift-dag.py, NFR hierarchy.
+#
+# When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
+# A config with stacks: but schema_version below 3.0.0 is a validation error.
+
+kit_version: "3.3.0"
+
+---
+
+# =============================================================================
+# Nightshift State Persistence
+# =============================================================================
+# Type: mapping
+# Required: no
+# Default: commit-backed
+#
+# `commit-backed` preserves the historical lifecycle-commit flow. `private-local`
+# keeps spec/report/metric/control state out of Git while application changes still
+# use ordinary branches and commits. Invalid values are fatal; Nightshift never
+# infers private-local from `.gitignore` or a public remote.
+
+nightshift_state:
+  policy: commit-backed              # commit-backed | private-local
+  private_paths: [".nightshift"]     # repo-relative roots checked before launch/merge
+
+---
+
+# =============================================================================
+# Terminal outcome records (SPEC-224)
+# =============================================================================
+# Opt-in boundary for projects that require a durable, fleet-comparable record
+# whenever the parent commits `chore: mark SPEC-... done|blocked`.  `json-array`
+# and `jsonl` are deliberately generic adapters; field mappings keep the
+# canonical contract independent from any project's ledger vocabulary.
+#
+# Hook enforcement covers normal commits only. `git commit --no-verify` remains
+# an explicit Git bypass and must be treated as an auditable operator action.
+terminal_outcomes:
+  enabled: false
+  adapter: "json-array"               # json-array | jsonl
+  path: "agent-outcomes.json"         # repository-relative outcome store
+  fields:
+    spec_id: "spec"
+    terminal_outcome: "outcome"
+    agent_response: "agent_response"
+    causal_confidence: "causal_confidence"
+    human_action_needed: "human_action_needed"
+    evidence_refs: "evidence_refs"
+  required_fields: [spec_id, terminal_outcome, agent_response, causal_confidence, human_action_needed, evidence_refs]
+
+---
+
+# =============================================================================
+# Private observability (SPEC-187)
+# =============================================================================
+# Absent means disabled.  `private-dropbox` is explicit opt-in and resolves its
+# private root only from NIGHTSHIFT_DROPBOX_ROOT; never put a path, URL, token,
+# or secret in this public config.  Dropbox outage uses NIGHTSHIFT_OUTBOX_ROOT.
+#
+# observability:
+#   sink: private-dropbox
+#
+# For a registered public project, first run `observability_enroll.py audit`.
+# Migration copies hash-verified private artifacts before an explicitly approved
+# future-index cleanup.  It never rewrites Git history; remediation is separate.
+
+---
+
+# =============================================================================
+# Project Metadata
+# =============================================================================
+# Identifies the project. Used in metrics, reports, and branch names.
+
+project:
+  # Type:     string
+  # Required: yes
+  # Default:  none
+  # Format:   short name, no spaces (e.g., "my-app", "tram-tracker")
+  name: "multi-stack-example"
+
+  # Type:     string
+  # Required: yes
+  # Default:  none
+  # One-line description of what this project does.
+  description: "Example multi-stack project with Python API, Swift app, and shell scripts"
+
+  # Type:     list of strings
+  # Required: yes
+  # Default:  []
+  # Primary languages used in the project.
+  # Valid values: python, typescript, javascript, swift, rust, go, java, kotlin,
+  #              ruby, c, cpp, csharp, shell, html, css, sql, etc.
+  language:
+    - python
+    - swift
+    - shell
+
+---
+
+# =============================================================================
+# Build & Test Commands (Flat / Default Stack)
+# =============================================================================
+# Every command must exit 0 on success, non-zero on failure.
+# Paths are relative to the project root.
+# Leave a field as "" if it doesn't apply to your stack.
+#
+# When `stacks:` is present, the flat `commands:` block serves as the DEFAULT
+# FALLBACK for files that match no stack's scope. Files matching a stack use
+# that stack's commands instead.
+#
+# When `stacks:` is absent, this is the sole command source (v2.2.1 behavior).
+#
+# Examples by stack:
+#   Node/TS:   build: "npm run build"        test: "npm test"           lint: "npx eslint . --max-warnings 0"
+#   Python:    build: ""                      test: "pytest"             lint: "ruff check ."
+#   Swift:     build: "swift build"           test: "swift test"         lint: "swiftlint lint --strict"
+#   Rust:      build: "cargo build"           test: "cargo test"         lint: "cargo clippy -- -D warnings"
+#   Go:        build: "go build ./..."        test: "go test ./..."      lint: "golangci-lint run"
+#   Android:   build: "./gradlew assembleDebug"  test: "./gradlew test"  lint: "./gradlew lint"
+#   iOS:       build: "xcodebuild build ..."  test: "xcodebuild test ..." lint: "swiftlint lint --strict"
+
+commands:
+  # Type:     string
+  # Required: yes (but can be "")
+  # Default:  ""
+  # Compile/build the project. "" if no build step needed.
+  build: ""
+
+  # Type:     string
+  # Required: yes (but can be "")
+  # Default:  ""
+  # Run the full test suite.
+  test: "pytest"
+
+  # Type:     integer
+  # Required: no
+  # Default:  300
+  # Timeout for test execution in seconds. 0 = no timeout (not recommended).
+  test_timeout_s: 300
+
+  # Type:     string
+  # Required: yes (but can be "")
+  # Default:  ""
+  # Static analysis. Configure to fail on warnings.
+  lint: "ruff check ."
+
+  # Type:     string
+  # Required: yes for typed languages (but can be "")
+  # Default:  ""
+  # Type checking: tsc, mypy, pyright, etc. "" if the language is untyped.
+  type_check: "mypy ."
+
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Check formatting without changing files.
+  format: "ruff format --check ."
+
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Auto-fix formatting. The agent uses this if `format` fails.
+  format_fix: "ruff format ."
+
+---
+
+# =============================================================================
+# Project Conventions
+# =============================================================================
+# Type:     list of strings
+# Required: no
+# Default:  []
+#
+# Key patterns and rules this project follows. The agent and reviewers will
+# know about these. Be specific — vague conventions waste tokens.
+#
+# When `stacks:` is present, each stack can also define its own `conventions`
+# string. Stack-level conventions are injected alongside these project-level
+# conventions for work within that stack's scope.
+
+conventions:
+  - "Tests live in tests/ mirroring the src/ directory structure"
+  - "All public functions must have doc comments"
+  - "No debug/print statements in production code"
+  - "Database queries must use parameterized statements"
+
+---
+
+# =============================================================================
+# Review Configuration
+# =============================================================================
+# Controls how plan reviews (step 7) and post-implementation reviews (step 10)
+# are conducted.
+
+review:
+  # Type:     string
+  # Required: no
+  # Default:  "self"
+  # Valid:    "self" | "subagent" | "hybrid"
+  #
+  # - "self": persona self-review in steps 7 and 10. Works with any agent/harness.
+  #   The agent role-plays reviewer personas and reviews its own work.
+  #   PRO: Works everywhere. CON: Agent has sunk-cost bias, may miss issues.
+  #
+  # - "subagent": dispatch separate review agents for plan review (step 7) and
+  #   post-implementation review (step 10). Requires harness with subagent support.
+  #   PRO: Independent reviewers, no sunk-cost bias. CON: Higher token cost.
+  #
+  # - "hybrid" (recommended): self-review for step 7 (plan), subagent for step 10
+  #   (code). Balances cost vs. quality — independent eyes on the final code,
+  #   but plan review is cheaper.
+  mode: "hybrid"
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [architect, security, performance, domain, quality, user]
+  # Which review personas are active. Remove any that don't apply.
+  enabled: [architect, security, performance, domain, quality, user]
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  []
+  # Extra project-specific review criteria beyond the 6 standard personas.
+  extra_criteria:
+    - "All public functions must have doc comments"
+    - "No debug/print statements in production code"
+
+---
+
+# =============================================================================
+# Knowledge Injection
+# =============================================================================
+# Controls pattern injection from knowledge/patterns/ into agent context.
+
+knowledge:
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  # Enable/disable knowledge pattern injection into agent context at LOOP step 3.
+  injection: true
+
+  # Type:     integer
+  # Required: no
+  # Default:  5
+  # Maximum number of patterns to inject per spec (top N by relevance score).
+  # Higher values provide more context but may overwhelm the agent.
+  max_patterns: 5
+
+  # Type:     string
+  # Required: no
+  # Default:  "domain+tags"
+  # Valid:    "domain+tags" | "all" | "none"
+  #
+  # - "domain+tags": Match by exact domain name (3 pts) and tag overlap (2 pts each)
+  # - "all": Include all patterns that score >0 points on any dimension
+  # - "none": Disable knowledge injection entirely (same as injection: false)
+  match_strategy: "domain+tags"
+
+---
+
+# =============================================================================
+# DevKB — External Development Knowledge Base
+# =============================================================================
+# Cross-project knowledge base of hard-won lessons per technology.
+# Lives outside the project (e.g., in Argo Home) and is injected at bootstrap
+# and every loop iteration so agents don't repeat known mistakes.
+#
+# How it works:
+#   1. At bootstrap (Phase E) and each LOOP step 3, the agent reads DevKB files
+#      matching the project's language stack.
+#   2. During work, if the agent discovers a new pattern or fix that's cross-project
+#      relevant, it writes a staged update to .nightshift/knowledge/devkb-updates/.
+#   3. A human (or scheduled task) syncs staged updates back to the canonical DevKB.
+#
+# When `stacks:` is present, each stack can also specify `devkb` — a list of
+# DevKB file basenames to load for that stack's work. These are loaded in
+# addition to (not instead of) the project-level DevKB mappings.
+
+devkb:
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Absolute path to DevKB directory. "" to disable DevKB injection.
+  path: "/Users/ed/Dropbox/Argo/DevKB"
+
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  # Stage DevKB updates in .nightshift/knowledge/devkb-updates/.
+  writeback: true
+
+  # Type:     mapping of string -> list of strings
+  # Required: no
+  # Default:  {} (empty mapping)
+  # Map project languages to DevKB files (basenames, not full paths).
+  mappings:
+    swift: ["swift.md", "xcode.md"]
+    python: ["python.md"]
+    shell: ["shell.md"]
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  []
+  # Files to always load regardless of language.
+  always_include: ["git.md", "architecture.md"]
+
+---
+
+# =============================================================================
+# Metrics Collection
+# =============================================================================
+
+metrics:
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  enabled: true
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [duration, test_results, review_cycles, build_errors, files_changed]
+  # Which metric dimensions to track.
+  track: [duration, test_results, review_cycles, build_errors, files_changed]
+
+---
+
+# =============================================================================
+# Circuit Breaker (Stall Detection)
+# =============================================================================
+# If any threshold is hit, the agent stops the current spec and moves on.
+# Tune these based on your project's compile/test times.
+
+circuit_breaker:
+  # Type:     integer
+  # Required: no
+  # Default:  3
+  # Consecutive identical build/test errors before circuit trips.
+  max_same_error: 3
+
+  # Type:     integer
+  # Required: no
+  # Default:  5
+  # Maximum review rounds per spec.
+  max_review_cycles: 5
+
+  # Type:     integer
+  # Required: no
+  # Default:  120
+  # Hard ceiling per spec in minutes. Increase for slow builds.
+  max_spec_duration_min: 120
+
+  # Type:     number
+  # Required: no
+  # Default:  3
+  # Stall if a phase takes N times the running average.
+  phase_duration_multiplier: 3
+
+# Type: integer
+# Required: no
+# Default: 90000000
+# A per-run token-spend refusal ceiling. A breach blocks the run and writes a
+# partial-work report; it must never trim, truncate, or rewrite request/history.
+# Derived 2026-07-31 from 289 local historical sessions: 89,945,209 p95, rounded
+# up to the next 100,000 tokens.
+run_token_ceiling: 90000000
+
+---
+
+# =============================================================================
+# Parallel Admission
+# =============================================================================
+# The dynamic frontier planner reads durable spec state and declared `touches:`
+# surfaces. Its output is a machine-readable admission-plan.json plus a human
+# review artifact. This does not create worktrees or merge branches.
+
+parallel_admission:
+  # Type:     integer
+  # Required: no
+  # Default:  1
+  # Maximum workers admitted at one time, including already active workers.
+  worker_limit: 1
+
+  # Type:     string
+  # Required: no
+  # Default:  "exclusive"
+  # Valid:    "exclusive" | "allow"
+  # `exclusive` means a missing or coarse touches: declaration is treated as a
+  # shared surface and cannot be co-admitted. `allow` records the policy but
+  # permits it; use only when another isolation control is authoritative.
+  missing_touches_policy: "exclusive"
+
+parallel_integration:
+  # Type:     integer
+  # Required: no
+  # Default:  1
+  # Maximum coordinator-requested repair attempts after post-merge main
+  # validation fails. The merge is reverted and unmerged work retained after
+  # this limit. This does not permit workers to merge directly.
+  max_repair_attempts: 1
+  # Parent-owned release surfaces. Workers emit intents; the integration broker
+  # serializes their application after code integration.
+  protected_release_surfaces: ["CHANGELOG.md", "VERSION", "release-handoff.md"]
+
+---
+
+# =============================================================================
+# Outcome Routing (SPEC-042)
+# =============================================================================
+# Per-outcome retry / abort / escalate policies consumed by the LOOP.md
+# Step 11 retry driver (canonical/retry_loop.py). Loaded once at Phase
+# 0-A.outcomes; immutable for the rest of the run.
+#
+# Two keys are accepted as aliases:
+#   * `outcome_routing:` — SPEC-034 canonical key (stable, preferred).
+#   * `outcomes:`        — SPEC-042 friendly alias (identical semantics).
+#
+# If both are present, `outcome_routing:` wins.
+# If neither is present, the module defaults in outcome_router.DEFAULT_POLICIES
+# apply and existing loop behaviour is preserved (SPEC-042 AC5).
+#
+# Per-spec overrides are supported via spec frontmatter using either key;
+# a spec-level entry REPLACES (does not merge with) the config entries.
+
+outcomes:
+  # Type:     list of mappings
+  # Required: no
+  # Default:  module defaults in outcome_router.DEFAULT_POLICIES
+  #
+  # Each entry:
+  #   - outcome: <OUTCOME_NAME>    # one of: SUCCESS, TEST_FAIL, BUILD_FAIL,
+  #                                #         TIMEOUT, CONTEXT_OVERFLOW,
+  #                                #         REVIEW_REJECTED, FATAL
+  #     action:  <action>           # one of: next, retry, replan,
+  #                                 #         summarize_and_retry, abort,
+  #                                 #         block, escalate
+  #     retry:                     # required when action is retry/replan/
+  #                                #          summarize_and_retry
+  #       max_retries:  <int>      # integer, default 3
+  #       backoff:      <string>   # "none" | "linear" | "exponential"
+  #       base_s:       <number>   # base backoff in seconds (default 5.0)
+  #       max_s:        <number>   # cap on exponential backoff (default 120)
+  defaults:
+    # Proceed immediately — success short-circuits the retry loop.
+    - outcome: SUCCESS
+      action: next
+
+    # Tests failed: retry up to twice with exponential backoff.
+    - outcome: TEST_FAIL
+      action: retry
+      retry:
+        max_retries: 2
+        backoff: exponential
+        base_s: 5.0
+        max_s: 60.0
+
+    # Build broke: retry up to once, short linear backoff.
+    - outcome: BUILD_FAIL
+      action: retry
+      retry:
+        max_retries: 1
+        backoff: linear
+        base_s: 5.0
+        max_s: 10.0
+
+    # Review rejection is a semantic failure: escalate for human review
+    # rather than retry blindly.
+    - outcome: REVIEW_REJECTED
+      action: escalate
+
+    # Context overflow: summarize & retry once, no sleep.
+    - outcome: CONTEXT_OVERFLOW
+      action: summarize_and_retry
+      retry:
+        max_retries: 1
+        backoff: none
+
+    # Fatal outcome: abort immediately, never retry.
+    - outcome: FATAL
+      action: abort
+
+---
+
+# =============================================================================
+# Runner Mode
+# =============================================================================
+# How to execute multiple specs.
+
+runner:
+  # Type:     string
+  # Required: no
+  # Default:  "inline"
+  # Valid:    "inline" | "orchestrator"
+  #
+  # - "inline": all specs run in one session. Simple, low overhead.
+  #   Works well for 1-2 specs. Context bloats on longer runs.
+  # - "orchestrator": delegate each spec to a fresh sub-agent (via Agent tool).
+  #   Each spec gets a clean context window. Recommended for 3+ specs.
+  #   See ORCHESTRATOR.md for the full protocol.
+  mode: "inline"
+
+  # Type:     string
+  # Required: no
+  # Default:  "code"
+  # Valid:    "code" | "research" | "analysis"
+  #
+  # - code: TDD cycle — tests, build, lint, type-check
+  # - research: Source gathering, synthesis, fact-checking — no build/test
+  # - analysis: Data processing, financial statements, reports — validation-focused
+  #
+  # When `stacks:` is present, each stack can override this via its `domain` field.
+  domain: "code"
+
+  # Type:     string
+  # Required: no
+  # Default:  "auto"
+  # Valid:    "auto" | "fixed"
+  #
+  # - auto: orchestrator picks tier per spec based on type/layer/AC count
+  # - fixed: always use tier-1 for all sub-agents
+  model_selection: "auto"
+
+  # Type:     string
+  # Required: no
+  # Default:  "claude-code"
+  # Execution harness. Logged in metrics for traceability.
+  harness: "claude-code"
+
+  # Type:     mapping
+  # Required: no
+  # Model tiers for orchestrator mode.
+  tiers:
+    tier-1:                              # Bugfix, simple features (<=3 ACs)
+      # Type:     string
+      # Required: yes (when tiers are used)
+      model: "claude-haiku-4-5-20251001"
+      # Type:     string
+      # Required: no
+      # Default:  "claude-code"
+      harness: "claude-code"
+      # api_base: ""                     # Uncomment for local models: "http://localhost:1234/v1"
+    tier-2:                              # Features (4-8 ACs), complex bugfixes
+      model: "claude-sonnet-4-6"
+      harness: "claude-code"
+    tier-3:                              # Architectural changes (9+ ACs, layer 3)
+      model: "claude-opus-4-6"
+      harness: "claude-code"
+
+---
+
+# =============================================================================
+# Multi-Model Comparison (OPTIONAL)
+# =============================================================================
+# When enabled, the orchestrator runs each spec through each listed model
+# sequentially (separate worktrees per model per spec). Results are collected
+# in metrics/ and compared via compare_models.py.
+
+comparison:
+  # Type:     boolean
+  # Required: no
+  # Default:  false
+  enabled: false
+
+  # Type:     list of mappings
+  # Required: when comparison.enabled is true
+  # Each entry needs: name (model identifier), harness, optional api_base.
+  models: []
+    # - name: "claude-sonnet-4-6"
+    #   harness: "claude-code"
+    # - name: "qwen/qwen3.6-27b"
+    #   harness: "aider"
+    #   api_base: "http://localhost:1234/v1"
+
+  # Type:     string
+  # Required: no
+  # Default:  "reports/model-comparison"
+  # Where comparison reports go.
+  report_dir: "reports/model-comparison"
+
+---
+
+# =============================================================================
+# Runtime Traceability
+# =============================================================================
+# Fields that identify and trace each loop execution.
+# Filled in at runtime or copied into metrics files.
+
+runtime:
+  # Type:     string
+  # Required: no
+  # Default:  none
+  # Date-based version of LOOP.md (YYYY-MM-DD format). Updated when LOOP.md changes.
+  loop_version: "2026-08-24"
+
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Filled at runtime — the actual model used.
+  model: ""
+
+  # Type:     string
+  # Required: no
+  # Default:  "claude-code"
+  # Execution harness. Usually static per project.
+  harness: "claude-code"
+
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Filled at runtime — which tier was selected.
+  tier: ""
+
+---
+
+# =============================================================================
+# Git Configuration
+# =============================================================================
+#
+# Workflow semantics are defined in GIT.md. This section only declares fields,
+# valid values, defaults, and project-local choices.
+
+git:
+  # Type:     string
+  # Required: no
+  # Default:  "main"
+  # The main/default branch of the repo.
+  main_branch: "main"
+
+  # Type:     string
+  # Required: no
+  # Default:  "nightshift"
+  # Spec branches are named: <branch_prefix>/SPEC-001, etc.
+  branch_prefix: "nightshift"
+
+  # Type:     string
+  # Required: no
+  # Default:  "conventional"
+  # Valid:    "conventional" | "simple"
+  # Conventional: feat/fix/test/docs prefixes. Simple: free-form messages.
+  commit_style: "conventional"
+
+  # Type:     string
+  # Required: no
+  # Default:  "spec-id"
+  # Valid:    "spec-id" | "none"
+  # When "spec-id": every commit must start with [SPEC-NNN] prefix.
+  # Enforced by the commit-msg hook (hooks/commit-msg).
+  # Examples: [SPEC-033] feat: handler registry, [SPEC-004-002] test: add tests
+  commit_prefix: "spec-id"
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [] (empty — behaviour unchanged)
+  # Added:    SPEC-183
+  # Path prefixes whose commits may use a plain conventional-commit subject
+  # WITHOUT a [SPEC-ID], e.g. "docs: add corpus note". The exemption applies only
+  # when EVERY staged path is under one of these prefixes; a commit mixing
+  # exempt and non-exempt paths still requires the spec prefix.
+  #
+  # Why this exists: a knowledge corpus has no specs, so requiring a spec ID
+  # forces either a fabricated one or --no-verify — and --no-verify also skips
+  # the secret/PII scan. In one repo that friction left an entire documentation
+  # vault untracked for months.
+  #
+  # Use for documentation/vault trees only. Do NOT list source directories:
+  # spec traceability for code is the point of commit_prefix.
+  # unprefixed_paths:
+  #   - "Wiedza/"
+  #   - "docs/"
+
+  # Reserved documentation-domain email handling is canonical-owned (SPEC-198).
+  # It has no config key: `scanner.py` alone recognizes the closed RFC-derived
+  # set, including subdomains, so projects cannot extend or override it.
+
+  # Type:     list of mappings
+  # Required: no
+  # Default:  [] (empty — behaviour unchanged)
+  # Added:    SPEC-192
+  # Accepts ONE reviewed PII value that the scanner would otherwise block, so an
+  # authorised commit does not need --no-verify (which skips the secret scan, spec
+  # validation, lint and the spec-ID check as well).
+  #
+  # Each entry needs all four fields, and any entry that fails validation is
+  # discarded — the finding it named keeps blocking. There is no path from a
+  # malformed entry to a wider gate.
+  #
+  #   sha256   the digest of the matched value. NEVER the value itself: this file
+  #            is tracked and scanned, so a literal here would be PII in the repo
+  #            and would trip the gate it exists to satisfy. Get it from
+  #            `python3 .nightshift/scanner.py --staged --acknowledge-template`.
+  #   class    one of: credit_card, email, home_address, phone, ssn.
+  #   expires  YYYY-MM-DD, mandatory, at most 365 days ahead. An acknowledgement
+  #            decays: leave it alone and the gate closes again by itself.
+  #   reason   mandatory, >= 10 characters. What was reviewed and why it is safe.
+  #
+  # Approval covers that one value and nothing else — not the file, not the rule,
+  # not the directory. A different address or a different email still blocks.
+  # SECRETS (bearer tokens, API keys) CAN NEVER BE ACKNOWLEDGED. Acknowledged
+  # findings are still printed on every commit, marked [acknowledged].
+  # pii_acknowledgements:
+  #   - sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  #     class: home_address
+  #     expires: 2026-11-05
+  #     reason: "Reviewed 2026-08-08: sample address in a fixture, not a real one."
+
+  # SPEC-197: there is NO key here for excluding paths from the scan, and that is
+  # deliberate. `excluded_paths`, `fixture_paths`, `skip_paths` — none of them exist, and
+  # no environment variable or CLI flag does either. The kit excludes its OWN detector
+  # fixtures, and only where a canonical-owned path anchor AND the digest of the exact
+  # matched value both agree; the digest registry (tests/fixture_digests.txt) is never
+  # synced to a project install, so the mechanism is inert here. A per-project path
+  # exclusion is the allowlist SPEC-192 rejected: it widens silently and without limit,
+  # and the reviewer approves a directory rather than a thing. If a real finding is safe
+  # to commit, acknowledge that one value above. See GIT.md § order of remedies.
+
+  # SPEC-198: there is NO key here for documentation domains, and that is deliberate.
+  # An email on a domain reserved by RFC 2606 / RFC 6761 (.test, .example, .invalid,
+  # .localhost, example.com/.net/.org and their subdomains) never produces a finding,
+  # because no such domain can receive mail. That set is a closed list in scanner.py,
+  # owned by canonical. It cannot be read from, extended by, or overridden from this
+  # file, an environment variable, or a CLI flag — a per-project domain list is the
+  # allowlist SPEC-192 rejected, one rung wider. See GIT.md.
+
+  # Type:     string
+  # Required: no
+  # Default:  "auto"
+  # Valid:    "auto" | "enabled" | "disabled"
+  # Whether to use git worktrees for spec isolation. "auto" is mandatory for
+  # orchestrator, parallel-layers, and multi-model comparison paths, and
+  # optional for single-agent inline runs. Blocked/failed worktrees can be
+  # pinned for inspection with a .nightshift-keep file at the worktree root.
+  worktrees: "auto"
+
+  # Type:     string
+  # Required: no
+  # Default:  "no-ff"
+  # Valid:    "no-ff" | "squash" | "rebase"
+  # Merge strategy for spec branches into the main branch.
+  merge_strategy: "no-ff"
+
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  # When true, merge the spec branch to main_branch after tests pass
+  # and review approves. When false, leave on branch for manual merge.
+  merge_on_pass: true
+
+  # Type:     integer
+  # Required: no
+  # Default:  500
+  # Pre-commit escalation gate: staged added-line count above this value requires
+  # explicit Lukasz sign-off before the commit/merge path can proceed.
+  diff_risk_threshold: 500
+
+  # Type:     integer
+  # Required: no
+  # Default:  8000
+  # Pre-commit escalation gate: approximate staged diff token cost above this
+  # value requires explicit Lukasz sign-off before the commit/merge path proceeds.
+  token_cost_threshold: 8000
+
+  # Type:     string
+  # Required: no
+  # Default:  "NIGHTSHIFT_ESCALATION_SIGNOFF"
+  # The hook accepts this environment variable only after explicit Lukasz sign-off.
+  escalation_signoff_env: "NIGHTSHIFT_ESCALATION_SIGNOFF"
+
+---
+
+# =============================================================================
+# Domain Configuration (for research and analysis modes)
+# =============================================================================
+# These settings apply when runner.domain is "research" or "analysis".
+# Ignored when domain is "code".
+
+domain:
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Command to run validation checks (e.g., "python validate_output.py").
+  validate: ""
+
+  # Type:     string
+  # Required: no
+  # Default:  ""
+  # Command to check output format/structure.
+  format_check: ""
+
+  # Type:     string
+  # Required: no
+  # Default:  "output/"
+  # Where deliverables go.
+  output_dir: "output/"
+
+  # Type:     string
+  # Required: no
+  # Default:  "markdown"
+  # Valid:    "markdown" | "json" | "yaml" | "csv" | "docx" | "custom"
+  output_format: "markdown"
+
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  # Require source citations in output.
+  require_sources: true
+
+  # Type:     integer
+  # Required: no
+  # Default:  3
+  # Minimum number of distinct sources.
+  min_sources: 3
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [methodology, accuracy, completeness, bias]
+  # Review personas for research/analysis domains.
+  review_personas:
+    - methodology
+    - accuracy
+    - completeness
+    - bias
+
+---
+
+# =============================================================================
+# Checkpointing (for crash recovery)
+# =============================================================================
+# Allows the Nightshift loop to resume mid-spec after a crash (context window
+# exhaustion, network failure, agent timeout). Checkpoints are JSON snapshots
+# saved after major loop steps.
+#
+# Checkpoint files:
+#   .nightshift/checkpoints/<spec-id>/step-<NN>.json — numbered snapshots
+#   .nightshift/checkpoints/<spec-id>/latest.json    — pointer to most recent
+
+checkpointing:
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  enabled: true
+
+  # Type:     string
+  # Required: no
+  # Default:  "checkpoints"
+  # Directory for checkpoint files, relative to .nightshift/.
+  dir: "checkpoints"
+
+  # Type:     boolean
+  # Required: no
+  # Default:  true
+  # Remove checkpoints when spec completes (step 13).
+  clear_on_completion: true
+
+---
+
+# =============================================================================
+# Watcher Configuration (OPTIONAL)
+# =============================================================================
+# Parallel review agent. Leave disabled until the main loop works reliably.
+
+watcher:
+  # Type:     boolean
+  # Required: no
+  # Default:  false
+  enabled: false
+
+  # Type:     integer
+  # Required: no
+  # Default:  5
+  # How often to check for new commits (minutes).
+  poll_interval_min: 5
+
+  # Type:     integer
+  # Required: no
+  # Default:  30
+  # Stop if no new commits for this long (minutes).
+  idle_timeout_min: 30
+
+  # Type:     string
+  # Required: no
+  # Default:  "WATCHER-REVIEW.md"
+  # File where watcher writes its review.
+  review_file: "WATCHER-REVIEW.md"
+
+  # Type:     string
+  # Required: no
+  # Default:  "general"
+  # Valid:    "general" | "code" | "security" | "ux" | "legal" | "performance"
+  # Review lens for the watcher.
+  lens: "general"
+
+---
+
+# =============================================================================
+# Multi-Stack Configuration (v3.0.0+)
+# =============================================================================
+#
+# OVERVIEW
+# --------
+# The `stacks:` section defines per-stack build/test/lint commands, file scope,
+# environment setup, and DevKB mappings for multi-stack projects.
+#
+# BACKWARD COMPATIBILITY
+# ----------------------
+# When `stacks:` is ABSENT, behavior is identical to v2.2.1. The flat
+# `commands:` block above is the sole command source. No migration needed.
+# No warnings. No version requirement change.
+#
+# When `stacks:` is PRESENT, `kit_version` must be "3.0.0" or higher.
+# A config with stacks: but kit_version below 3.0.0 produces a validation error.
+#
+# FILE-TO-STACK MATCHING
+# ----------------------
+# When the loop needs to determine which stack owns a changed file:
+#   1. Directory check: does the file path start with any entry in scope.dirs?
+#   2. Extension check: does the file extension match any entry in scope.extensions?
+#   3. First match wins: if a file matches multiple stacks, the first stack
+#      declared in this YAML wins (YAML preserves insertion order).
+#   4. Fallthrough: files matching no stack use the flat `commands:` block above.
+#      If no flat commands are configured either, no validation runs and a WARN
+#      is logged.
+#
+# ENVIRONMENT WRAPPING
+# --------------------
+# When a stack has env.activate set, every command is wrapped in a subshell:
+#   (env.activate && command)
+# For example: (source .venv/bin/activate && ruff check src/api/)
+#
+# PREFLIGHT BINARY CHECKS
+# -----------------------
+# env.requires lists binary names. During preflight (Step 1), each is checked
+# via `command -v <binary>`.
+#   - Missing binary for a stack with test/lint/build commands = GATE (hard stop)
+#   - Missing binary for a stack with only optional commands = WARN
+#
+# STACK NAME RULES
+# ----------------
+# Stack names must match the regex [a-z0-9_-]+
+# Examples: python-api, swift_app, shell, html-dashboard, backend-v2
+#
+# SCHEMA VALIDATION RULES (documented here, not yet implemented)
+# ---------------------------------------------------------------
+# 1. Each stack must have a `scope` with at least one entry in `dirs` or
+#    `extensions`. A stack with empty/missing scope is a validation error.
+# 2. Each stack must have at least one non-empty command in `commands`.
+#    A stack where build, test, lint, type_check, format, and format_fix are
+#    all "" is a validation error.
+# 3. Stack names must be non-empty strings matching [a-z0-9_-]+.
+#    Names with uppercase, spaces, or special characters are a validation error.
+# 4. env.requires entries must be non-empty strings.
+# 5. Unknown top-level fields inside a stack definition produce a validation
+#    WARNING (not an error). This allows forward-compatible extension.
+# 6. If stacks: is present but kit_version is below "3.0.0" or missing,
+#    this is a validation ERROR.
+
+stacks:
+
+  # --------------------------------------------------------------------------
+  # Stack 1: Python API
+  # --------------------------------------------------------------------------
+  python-api:
+
+    # scope: Defines which files belong to this stack.
+    # Type:     mapping
+    # Required: yes
+    # At least one of `dirs` or `extensions` must be non-empty.
+    scope:
+      # Type:     list of strings
+      # Required: no (but at least one of dirs/extensions must be non-empty)
+      # Default:  []
+      # Directory prefixes relative to the project root.
+      # A file matches if its path starts with any of these prefixes.
+      # Include trailing slash for clarity (both "src/api" and "src/api/" work).
+      dirs:
+        - "src/api/"
+        - "src/models/"
+        - "tests/api/"
+
+      # Type:     list of strings
+      # Required: no (but at least one of dirs/extensions must be non-empty)
+      # Default:  []
+      # File extensions. With or without leading dot (both ".py" and "py" work).
+      extensions:
+        - ".py"
+
+    # commands: Stack-specific build/test/lint commands.
+    # Type:     mapping
+    # Required: yes — at least one command must be non-empty.
+    # These override the flat `commands:` block for files in this stack's scope.
+    commands:
+      # Type:     string
+      # Default:  ""
+      build: ""
+
+      # Type:     string
+      # Default:  ""
+      test: "pytest tests/api/ -v"
+
+      # Type:     integer
+      # Default:  300
+      test_timeout_s: 300
+
+      # Type:     string
+      # Default:  ""
+      lint: "ruff check src/api/ src/models/"
+
+      # Type:     string
+      # Default:  ""
+      type_check: "mypy src/api/ src/models/"
+
+      # Type:     string
+      # Default:  ""
+      format: "ruff format --check src/api/ src/models/"
+
+      # Type:     string
+      # Default:  ""
+      format_fix: "ruff format src/api/ src/models/"
+
+    # devkb: DevKB files relevant to this stack.
+    # Type:     list of strings
+    # Required: no
+    # Default:  []
+    # Basenames of DevKB files (e.g., "python.md"). Loaded from the path
+    # configured in the project-level `devkb.path`. These are loaded IN ADDITION
+    # to project-level DevKB mappings and always_include files.
+    devkb:
+      - "python.md"
+
+    # env: Environment setup for this stack.
+    # Type:     mapping
+    # Required: no
+    # Default:  {} (no activation, no requirements)
+    env:
+      # Type:     string
+      # Required: no
+      # Default:  ""
+      # Shell command run in a subshell before each command in this stack.
+      # Every stack command is wrapped: (activate && command)
+      # Example: (source .venv/bin/activate && ruff check src/api/)
+      # Leave as "" if no environment activation is needed.
+      activate: "source .venv/bin/activate"
+
+      # Type:     list of strings
+      # Required: no
+      # Default:  []
+      # Binary names checked via `command -v <binary>` during preflight.
+      # Missing binary for a stack with test/lint = GATE (hard stop).
+      # Missing binary for a stack with only optional commands = WARN.
+      # Each entry must be a non-empty string.
+      requires:
+        - "python3"
+        - "ruff"
+        - "mypy"
+
+    # conventions: Stack-specific coding conventions.
+    # Type:     string
+    # Required: no
+    # Default:  ""
+    # Free-form text injected into agent briefs for work in this stack's scope.
+    # Injected alongside (not instead of) project-level conventions.
+    conventions: "Use type hints on all function signatures. Follow PEP 8."
+
+    # domain: Override project-level runner.domain for this stack.
+    # Type:     string
+    # Required: no
+    # Default:  inherits from runner.domain
+    # Valid:    "code" | "research" | "analysis"
+    # Useful when a project mixes code stacks with research/analysis stacks.
+    domain: "code"
+
+  # --------------------------------------------------------------------------
+  # Stack 2: Swift App
+  # --------------------------------------------------------------------------
+  swift-app:
+    scope:
+      dirs:
+        - "Sources/"
+        - "Tests/"
+      extensions:
+        - ".swift"
+
+    commands:
+      build: "swift build"
+      test: "swift test"
+      test_timeout_s: 600
+      lint: "swiftlint lint --strict"
+      type_check: ""                     # Swift compiler handles type checking
+      format: ""
+      format_fix: ""
+
+    devkb:
+      - "swift.md"
+      - "xcode.md"
+
+    env:
+      activate: ""                       # No activation needed for Swift
+      requires:
+        - "swift"
+        - "swiftlint"
+
+    conventions: "Follow Swift API Design Guidelines. Use @Observable @MainActor pattern for ViewModels."
+    domain: "code"
+
+  # --------------------------------------------------------------------------
+  # Stack 3: Shell Scripts
+  # --------------------------------------------------------------------------
+  shell:
+    scope:
+      dirs:
+        - "scripts/"
+      extensions:
+        - ".sh"
+        - ".bash"
+
+    commands:
+      build: ""
+      test: ""                           # Shell scripts typically lack a test suite
+      test_timeout_s: 60
+      lint: "shellcheck scripts/*.sh"
+      type_check: ""
+      format: ""
+      format_fix: ""
+
+    devkb:
+      - "shell.md"
+
+    env:
+      activate: ""
+      requires:
+        - "shellcheck"
+
+    conventions: "Use set -euo pipefail in all scripts."
+    domain: "code"
+
+---
+
+# =============================================================================
+# Bootstrap Checklist
+# =============================================================================
+#
+# Single-stack projects:
+#   1. Fill in project name, description, languages
+#   2. Fill in commands — test each one locally first (must exit 0)
+#   3. List 3-5 conventions by reading existing code patterns
+#   4. Adjust review personas (remove irrelevant ones)
+#   5. Set git.main_branch to match your repo
+#   6. Leave watcher disabled for first runs
+#   7. Write a spec in specs/, point your agent at BOOTSTRAP.md, walk away
+#
+# Multi-stack projects (additional steps):
+#   8. Set kit_version to "3.0.0" or higher
+#   9. Define each stack under `stacks:` with scope, commands, and env
+#  10. Test each stack's commands individually from the project root
+#  11. Verify env.requires binaries are installed: command -v <binary>
+#  12. Keep the flat `commands:` block for fallback (files matching no stack)
+
+---
+
+# =============================================================================
+# Troubleshooting
+# =============================================================================
+#
+# "Build/test/lint command fails"
+#   -> Verify the command works from the project root first.
+#   -> The loop expects a green baseline before starting any specs.
+#
+# "Lint errors everywhere"
+#   -> Either fix the config or start with a higher warning threshold,
+#      then tighten incrementally.
+#
+# "Stack command not found / binary missing"
+#   -> Check env.requires entries with: command -v <binary>
+#   -> Verify env.activate path is correct (e.g., .venv exists)
+#   -> Preflight will GATE on missing binaries for stacks with test/lint commands
+#
+# "File matched wrong stack"
+#   -> Stacks are matched in declaration order (first match wins)
+#   -> Check scope.dirs prefixes — a file in src/api/utils.py matches "src/api/"
+#   -> Reorder stacks if a more specific scope should take priority
+#
+# "stacks: present but validation error about schema_version"
+#   -> Set schema_version: "3.0.0" or higher when using the stacks: section
+#   -> Configs without stacks: can omit stacks and keep flat-command behavior
+#
+# "Unknown field warning inside a stack"
+#   -> Only scope, commands, devkb, env, conventions, and domain are recognized
+#   -> Unknown fields produce a WARNING (not error) for forward compatibility
+#   -> Check for typos in field names
+
+---
+
+# =============================================================================
+# Board Column Defaults Override (SPEC-078)
+# =============================================================================
+# Type:     mapping (optional)
+# Default:  absent (canonical SPEC-074 defaults apply)
+#
+# Optionally overrides the per-column default display state and/or column order
+# shown when a user opens the board for the first time (fresh board / version
+# mismatch). The override is READ AT STARTUP by board.py and is NOT synced by
+# nightshift-sync.py — it survives canonical syncs.
+#
+# Sub-keys (all optional):
+#
+#   default_state: mapping of status-id → "expanded" | "collapsed" | "hidden"
+#     Only specified columns are overridden; omitted columns keep the canonical
+#     SPEC-074 default_state. Valid status ids are the 9 canonical statuses.
+#
+#   order: list of all 9 status ids in the desired column order.
+#     Must be a FULL permutation of all 9 statuses (drift guard enforced).
+#     If absent, canonical order is used.
+#
+# Error handling: an invalid override (unknown status id, bad state value,
+#   partial order list) is IGNORED with a stderr WARNING and the canonical
+#   defaults are preserved. A bad config.yaml never prevents board startup.
+#
+# Example — a project that treats NFR/superseded columns as always hidden and
+# wants blocked expanded by default:
+#
+#   board_column_defaults:
+#     default_state:
+#       blocked: expanded
+#       superseded: hidden
+#       retired: hidden
+#     order:
+#       - in_progress
+#       - ready
+#       - draft
+#       - blocked
+#       - active
+#       - planning
+#       - done
+#       - superseded
+#       - retired
+
+board_column_defaults:
+  default_state:
+    blocked: expanded      # override: show blocked expanded by default
+    superseded: hidden     # already hidden in canonical, explicit here for clarity
+    retired: hidden        # already hidden in canonical
+  order:
+    - in_progress
+    - ready
+    - draft
+    - blocked
+    - active
+    - planning
+    - done
+    - superseded
+    - retired
+
+---
+
+# Observational extensions (SPEC-230): optional list, default empty. Exact item
+# keys are id, source, subscriptions, capabilities, network_endpoint, limits.
+# Stable events are run.started, work.completed, verification.requested,
+# verification.completed, run.completed. Capabilities are artifact_refs.read,
+# artifacts.write, state.read_write, background.continue, network.loopback.
+# Limits require positive integer max_concurrency, max_queue, max_processes,
+# deadline_s, max_output_bytes, max_memory_bytes, max_cpu_s. v1 applies a
+# stricter one-process/no-fork host policy. Public config must not contain
+# commands, paths, URLs, credentials, prompts, output, or environment values.
+extensions: []
+
+# This file is the canonical schema reference for config.yaml.
+# Update it as the config schema evolves.

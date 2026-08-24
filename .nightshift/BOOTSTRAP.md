@@ -881,6 +881,9 @@ Once all phases are done:
 
 **You are ready to enter the loop.**
 
+Load `.nightshift/EXTENSIONS.md`; both official run paths use its mechanical
+checkpoint helper and optional observers never gain coordinator authority.
+
 Proceed to `.nightshift/LOOP.md`, **Step 1: Pre-flight Check**. Step 1 runs
 `validate_install.py` (SPEC-229) as its first executable action, before any
 lifecycle write, Git mutation, or configured command; a missing/unexecutable

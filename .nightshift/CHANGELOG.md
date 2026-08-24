@@ -11,6 +11,36 @@
 
 ---
 
+## 3.3.0 (2026-08-24)
+
+### Isolated observational extension runtime (SPEC-230)
+
+- Added five stable, closed lifecycle events backed by a durable per-run spool;
+  normal execution never waits for or accepts control from an extension.
+- Added exact manifest admission, deny-by-default process isolation, bounded
+  queues and concurrency, deterministic replay, restart recovery, quarantine,
+  process-group cancellation, and deadline-bounded background continuation.
+- Added project and user extension namespaces with private state and verified
+  artifact materialization, while excluding commands, paths, credentials, raw
+  logs, and application data from public events and release evidence.
+- Bound both official `$nightshift run` and `$nightshift kickoff` flows to the
+  five authoritative checkpoints through a standalone per-invocation launcher,
+  without persistent shell state or synthesized facts in DAG dispatch.
+- Added the runtime, protocol, sandbox, registry, checkpoint helper, and
+  extension contract to the whole-kit managed release payload.
+- Versioned the matching Nightshift skill in the manifest and added
+  coordinator-owned, exact-path delivery with dirty-target refusal, atomic hash
+  and mode verification, Git commit evidence, and positive receipt validation.
+- Tightened standalone-verifier containment to remove explicit and
+  candidate-changed reports while retaining only hash-recorded, byte-identical
+  historical report fixtures needed by unchanged canonical tests.
+
+**Migration:** install the whole 3.3.0 kit and matching Nightshift skill. Existing
+projects remain extension-disabled unless they add an `extensions:` declaration;
+no configuration migration is required.
+
+---
+
 ## 3.2.2 (2026-08-24)
 
 ### Portable positive-delivery receipts (SPEC-227)

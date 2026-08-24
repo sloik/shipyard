@@ -160,6 +160,14 @@ events_logger.emit(
 )
 ```
 
+After the run ID and run kind are authoritative, invoke
+`extension_checkpoint.py` for `run.started` exactly once. Invoke it again at
+the real `work.completed`, `verification.requested`, `verification.completed`,
+and `run.completed` boundaries defined by `EXTENSIONS.md`, preserving sequence
+1..5. Publication is fsync-before-notify; a failed publication launches no
+consumer and cannot alter the run result. Never manufacture these checkpoints
+through `nightshift-dag.py dispatch-spec`.
+
 The same pattern repeats at Step 13 start and Step 16 end — see those steps
 for their capture blocks. Never fabricate an epoch; if the shell call fails,
 omit the event (validator will flag the absence as `timestamp_drift_vs_shell`

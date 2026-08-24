@@ -23,6 +23,16 @@ ignored 3 of 4 Phase 8 improvements.)
 commit format, merge strategy, and post-merge validation. This document describes
 orchestrator sequencing and references that policy.
 
+## Observational extension checkpoint contract (SPEC-230)
+
+Both direct `$nightshift run` and the `$nightshift kickoff` wrapper execute the
+five mechanical calls in `EXTENSIONS.md` at their real authoritative
+boundaries. The kickoff parent does not synthesize or duplicate worker facts:
+the shared run ID and sequences make each event/job exactly once. After durable
+enqueue it may launch the independent extension supervisor/drain; it never waits
+for an extension domain result or places extension work in the integration queue.
+`background.continue` may outlive `run.completed` until its declared deadline.
+
 ## Versioned release handoff (SPEC-189)
 
 Before recording a release-impact canonical spec as `done`, the parent verifies
