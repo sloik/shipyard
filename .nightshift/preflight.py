@@ -34,6 +34,11 @@ except ImportError:  # pragma: no cover
     FrontmatterError = ValueError  # type: ignore[assignment]
     parse_spec_file = None  # type: ignore[assignment]
 
+try:
+    import validate_install
+except ImportError:  # pragma: no cover
+    validate_install = None  # type: ignore[assignment]
+
 
 RUNNABLE_STATUSES = frozenset({"ready", "in_progress", "active"})
 BLOCKING_COMMANDS = frozenset({"build", "test"})
@@ -267,6 +272,47 @@ def _command_state(commands: dict[str, Any], repo: Path) -> dict[str, Any]:
     return results
 
 
+def run_install_admission(spec_id: str) -> dict[str, Any]:
+    """SPEC-229 admission gate: the first executable action of every preflight run.
+
+    Runs installation/integration validation before any Git status read, spec
+    load, or configured command. There is no manual fallback: a missing or
+    unexecutable validator, or a non-allow result, is itself a blocking
+    preflight failure — it does not fall through to the checks below.
+    """
+    install_root = Path(__file__).resolve().parent
+    profile = "canonical" if install_root.name == "canonical" else "installed"
+    if validate_install is None:
+        return {
+            "ok": False,
+            "reason": "validate_install.py is unavailable; installation admission cannot run.",
+            "admission": "indeterminate",
+        }
+    try:
+        ctx, _findings, _config, config_sha = validate_install.run_validation(
+            install_root, profile, "preflight", spec_id
+        )
+        artifact = validate_install.build_artifact(ctx, config_sha)
+        dest, digest, art_inv = validate_install._atomic_write_artifact(ctx.install, artifact)
+        ctx.add(art_inv)
+        artifact = validate_install.build_artifact(ctx, config_sha)
+        admission = artifact["admission"] if dest is not None else "indeterminate"
+    except Exception as exc:  # noqa: BLE001 - any internal failure denies, never crashes preflight
+        return {
+            "ok": False,
+            "reason": f"validate_install.py raised {exc.__class__.__name__}; treated as indeterminate.",
+            "admission": "indeterminate",
+        }
+    return {
+        "ok": admission == "allow",
+        "reason": None if admission == "allow" else f"Installation admission gate result: {admission}.",
+        "admission": admission,
+        "artifact_path": str(dest.relative_to(install_root)) if dest else None,
+        "artifact_sha256": digest,
+        "coverage": artifact.get("coverage"),
+    }
+
+
 def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) -> dict[str, Any]:
     """Return the preflight result mapping. Writing the artifact is handled by main."""
     repo = repo.resolve()
@@ -282,6 +328,18 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
         "blocking_failures": [],
         "warnings": [],
     }
+
+    install_admission = run_install_admission(spec_id)
+    result["checks"]["install_admission"] = install_admission
+    if not install_admission["ok"]:
+        result["blocking_failures"].append(
+            install_admission["reason"] or "Installation admission gate denied this start."
+        )
+        # No manual fallback (R5): installation admission failure stops the
+        # path here. Spec/dependency/baseline checks below never run, and no
+        # project command is executed.
+        result["ok"] = False
+        return result
 
     git = _git_status(repo)
     result["checks"]["git"] = git

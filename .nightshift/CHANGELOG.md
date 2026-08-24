@@ -11,7 +11,53 @@
 
 ---
 
+## 3.2.1 (2026-08-24)
+
+### Qualified cross-project admission on every live path (SPEC-227)
+
+- Made `after:` strictly project-local and added explicit
+  `requires_specs: [{project, spec}]` resolution for cross-project prerequisites.
+- Applied the same qualified, consumer-local admission behavior to both the DAG
+  CLI and the live bounded-worktree dispatcher, including pending-to-done refresh.
+- Unknown projects, missing specs, malformed declarations, and duplicate foreign
+  flat IDs now refuse only the affected consumer without mutating either project.
+
+### Fail-closed parent verifier dispatch (SPEC-228-001)
+
+- Added one managed `prepare-dispatch` boundary for normal and no-test-suite
+  verifier routes. It reloads containment evidence before emitting a sanitized
+  plan containing only the standalone repository, synthetic refs/commits,
+  neutral suites, and an evidence digest.
+- Surface-preparation and report-reachability failures now produce the distinct
+  controlled reason `verifier_surface_unavailable` before any verifier launch.
+- Corrected the live Nightshift skill contract so the verifier uses the emitted
+  standalone repository instead of the report-bearing run worktree.
+
+### Canonical heartbeat publication example (SPEC-220-001)
+
+- Added a worked `GIT.md` example that creates and writes the worktree-local
+  heartbeat before publishing it to the parent-provided shared path with
+  `/bin/cp`, including the `Write`/direct-redirection boundary explanation.
+
+**Migration:** install the whole 3.2.1 kit before the next verifier dispatch and
+use the matching Nightshift skill revision. No project configuration migration
+is required.
+
+---
+
 ## 3.2.0 (2026-08-23)
+
+### Foundation installation admission validator (SPEC-229)
+
+- Added a deterministic, side-effect-free `validate_install.py` gate that
+  checks the canonical or installed kit before any existing run preflight.
+- `preflight.py` now denies before Git status, spec loading, or configured
+  commands when installation admission is not `allow`.
+- LOOP, ORCHESTRATOR, and BOOTSTRAP require the gate without a manual fallback.
+
+**Migration:** install the whole 3.2.0 kit so `validate_install.py` is present
+alongside `preflight.py`. The exhaustive hardening program remains assigned to
+SPEC-229-001 through SPEC-229-007.
 
 ### Structurally contained verifier read surface (SPEC-228)
 
@@ -85,7 +131,6 @@ payload. No project configuration migration is required.
 
 **Migration:** install the released `LOOP.md`, `ORCHESTRATOR.md`, and
 `WATCHER.md` managed payload. No project configuration migration is required.
-
 ## 3.1.5 (2026-08-22)
 
 ### Managed payload PII scan (SPEC-213)

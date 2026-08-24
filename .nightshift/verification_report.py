@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,41 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "spec_id", "branch", "baseline_commit", "head_commit", "verdict",
     "acs", "suites", "git_footprint", "contamination",
 })
+
+
+class VerifierSurfacePreparationError(RuntimeError):
+    """Controlled pre-dispatch failure; the harness must launch no verifier."""
+
+
+@dataclass(frozen=True)
+class PreparedVerifierDispatch:
+    """Validated private preparation state for one harness dispatch.
+
+    ``evidence`` remains parent-owned.  Only :meth:`public_plan` may cross the
+    harness boundary, which deliberately omits the source repository, report
+    paths, and parent-owned evidence path.
+    """
+
+    repository: Path
+    evidence_path: Path
+    evidence: dict[str, Any]
+    evidence_sha256: str
+    suite_commands: tuple[str, ...]
+
+    def public_plan(self) -> dict[str, Any]:
+        commits = self.evidence["surface_commits"]
+        return {
+            "schema_version": "1.0.0",
+            "surface_kind": "standalone-sanitized-git",
+            "repository": str(self.repository),
+            "baseline_ref": "verifier-baseline",
+            "head_ref": "verifier-head",
+            "baseline_commit": commits["baseline"],
+            "head_commit": commits["head"],
+            "brief_kind": "normal" if self.suite_commands else "no-test-suite",
+            "suite_commands": list(self.suite_commands),
+            "containment_evidence_sha256": self.evidence_sha256,
+        }
 
 
 @dataclass(frozen=True)
@@ -223,6 +259,89 @@ def prepare_verifier_surface(
     return evidence
 
 
+def prepare_verifier_dispatch(
+    source_repository: Path,
+    destination: Path,
+    *,
+    baseline_ref: str,
+    head_ref: str,
+    report_paths: Iterable[str],
+    evidence_path: Path,
+    suite_commands: Iterable[str] = (),
+) -> PreparedVerifierDispatch:
+    """Prepare the sole verifier surface and emit a sanitized launch plan.
+
+    Normal and no-test-suite routes call this same boundary.  The durable
+    evidence is reloaded and independently checked before a plan exists, so a
+    preparation or reachability failure cannot degrade to the source worktree.
+    """
+    try:
+        source_repository = source_repository.resolve()
+        destination = destination.resolve()
+        normalized_reports = tuple(sorted({_normalise_repo_path(path) for path in report_paths}))
+        suites = tuple(suite_commands)
+        if (
+            destination == source_repository
+            or destination.is_relative_to(source_repository)
+            or source_repository.is_relative_to(destination)
+        ):
+            raise ValueError("verifier surface must be outside the source repository")
+        if not all(isinstance(command, str) and command.strip() for command in suites):
+            raise ValueError("suite commands must be non-empty strings")
+        source_text = str(source_repository)
+        if any(
+            source_text in command
+            or any(report_path in command for report_path in normalized_reports)
+            for command in suites
+        ):
+            raise ValueError("suite command discloses the source repository or report path")
+        evidence = prepare_verifier_surface(
+            source_repository,
+            destination,
+            baseline_ref=baseline_ref,
+            head_ref=head_ref,
+            report_paths=normalized_reports,
+            evidence_path=evidence_path,
+        )
+        evidence_bytes = evidence_path.read_bytes()
+        durable_evidence = json.loads(evidence_bytes)
+        probes = durable_evidence.get("report_reachability")
+        expected_probes = {
+            (label, report_path)
+            for report_path in normalized_reports
+            for label in ("baseline", "head")
+        }
+        observed_probes = {
+            (probe.get("ref"), probe.get("path"))
+            for probe in probes
+            if isinstance(probe, dict) and probe.get("unreachable") is True
+        } if isinstance(probes, list) else set()
+        commits = durable_evidence.get("surface_commits")
+        ready = (
+            durable_evidence == evidence
+            and bool(normalized_reports)
+            and durable_evidence.get("surface_kind") == "standalone-sanitized-git"
+            and durable_evidence.get("shared_object_database") is False
+            and observed_probes == expected_probes
+            and isinstance(commits, dict)
+            and set(commits) == {"baseline", "head"}
+            and _run_git(destination, "rev-parse", "verifier-baseline").strip() == commits["baseline"]
+            and _run_git(destination, "rev-parse", "verifier-head").strip() == commits["head"]
+        )
+    except Exception as exc:
+        raise VerifierSurfacePreparationError("verifier surface preparation failed") from exc
+
+    if not ready:
+        raise VerifierSurfacePreparationError("verifier surface reachability assertion failed")
+    return PreparedVerifierDispatch(
+        repository=destination,
+        evidence_path=evidence_path.resolve(),
+        evidence=durable_evidence,
+        evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        suite_commands=suites,
+    )
+
+
 def validate_verifier_verdict_dict(data: dict[str, Any]) -> list[str]:
     """Validate the independent-verifier envelope fields owned by the kit."""
     errors = [f"missing top-level key '{key}'" for key in sorted(VERIFIER_VERDICT_REQUIRED_KEYS - data.keys())]
@@ -235,7 +354,9 @@ def verifier_surface_self_test() -> dict[str, Any]:
     """Managed release smoke contract for containment and verdict semantics."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        source, surface = root / "source", root / "surface"
+        source = root / "source"
+        surface = root / "surface"
+        no_suite_surface = root / "surface-no-suite"
         source.mkdir()
         subprocess.run(["git", "init", "-q", str(source)], check=True)
         _run_git(source, "config", "user.name", "Nightshift smoke")
@@ -251,11 +372,32 @@ def verifier_surface_self_test() -> dict[str, Any]:
         _run_git(source, "add", "-A")
         _run_git(source, "commit", "-qm", "head")
         head = _run_git(source, "rev-parse", "HEAD").strip()
-        evidence = prepare_verifier_surface(
+        prepared = prepare_verifier_dispatch(
             source, surface, baseline_ref=baseline, head_ref=head,
             report_paths=["canonical/reports/nightshift-report.md"],
             evidence_path=root / "containment.json",
+            suite_commands=["python -m pytest -q"],
         )
+        no_suite = prepare_verifier_dispatch(
+            source, no_suite_surface, baseline_ref=baseline, head_ref=head,
+            report_paths=["canonical/reports/nightshift-report.md"],
+            evidence_path=root / "containment-no-suite.json",
+        )
+        plan = prepared.public_plan()
+        no_suite_plan = no_suite.public_plan()
+        forbidden_values = {str(source.resolve()), "canonical/reports/nightshift-report.md"}
+        serialized_plans = json.dumps([plan, no_suite_plan], sort_keys=True)
+        if any(value in serialized_plans for value in forbidden_values):
+            raise RuntimeError("dispatch plan disclosed source repository or report path")
+        if (
+            plan["repository"] != str(surface.resolve())
+            or plan["brief_kind"] != "normal"
+            or no_suite_plan["repository"] != str(no_suite_surface.resolve())
+            or no_suite_plan["brief_kind"] != "no-test-suite"
+            or no_suite_plan["suite_commands"]
+        ):
+            raise RuntimeError("normal/no-test-suite dispatch plan contract failed")
+        evidence = prepared.evidence
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
             "head_commit": head, "verdict": "pass", "acs": [{"id": "AC1", "status": "pass", "evidence": "smoke"}],
@@ -501,6 +643,7 @@ def completion_gate(report_json: Path, *, override_reason_file: Path | None = No
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     if raw_argv and not raw_argv[0].startswith("-") and raw_argv[0] not in {
+        "prepare-dispatch",
         "prepare-surface",
         "verifier-self-test",
     }:
@@ -521,6 +664,14 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--head", required=True)
     prepare.add_argument("--report-path", action="append", required=True)
     prepare.add_argument("--evidence", required=True, type=Path)
+    dispatch = subparsers.add_parser("prepare-dispatch")
+    dispatch.add_argument("--source", required=True, type=Path)
+    dispatch.add_argument("--destination", required=True, type=Path)
+    dispatch.add_argument("--baseline", required=True)
+    dispatch.add_argument("--head", required=True)
+    dispatch.add_argument("--report-path", action="append", required=True)
+    dispatch.add_argument("--evidence", required=True, type=Path)
+    dispatch.add_argument("--suite-command", action="append", default=[])
     subparsers.add_parser("verifier-self-test")
     args = parser.parse_args(raw_argv)
     if args.command == "prepare-surface":
@@ -528,6 +679,21 @@ def main(argv: list[str] | None = None) -> int:
             args.source, args.destination, baseline_ref=args.baseline,
             head_ref=args.head, report_paths=args.report_path, evidence_path=args.evidence,
         )
+        return 0
+    if args.command == "prepare-dispatch":
+        try:
+            prepared = prepare_verifier_dispatch(
+                args.source, args.destination, baseline_ref=args.baseline,
+                head_ref=args.head, report_paths=args.report_path,
+                evidence_path=args.evidence, suite_commands=args.suite_command,
+            )
+        except VerifierSurfacePreparationError:
+            print(json.dumps({
+                "status": "evidence_gap",
+                "controller_reason": "verifier_surface_unavailable",
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+        print(json.dumps(prepared.public_plan(), sort_keys=True))
         return 0
     if args.command == "verifier-self-test":
         verifier_surface_self_test()

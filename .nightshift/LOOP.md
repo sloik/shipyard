@@ -338,13 +338,21 @@ Also verify the configured commands are present before execution:
 - `commands.lint` / `commands.type_check` may be null, but only as documented warnings
 - Missing tools or unavailable executables belong to `failure_class: "environment"`
 
-> **Preferred mechanization (SPEC-089-001):** if `.nightshift/preflight.py` exists,
-> run `python3 .nightshift/preflight.py --spec-id <id>` before the manual checks
-> below. It captures clean-tree state, selected-spec status, dependency state, and
-> baseline command outcomes in `metrics/<id>.preflight.json`. A non-zero exit is a
-> Step 1 pre-flight failure; read the artifact's `blocking_failures` and follow the
-> existing failure/test-gate flow below. If the script is unavailable, continue with
-> the manual checks in this section.
+> **Mandatory admission gate (SPEC-229), then mechanization (SPEC-089-001):**
+> before any of the manual checks below, `.nightshift/preflight.py` runs
+> `validate_install.py` as its first executable action — installation and
+> integration admission for this exact install, config bytes, release
+> fingerprint, and Git identity/state. A missing/unexecutable validator or a
+> non-`allow` result is itself a blocking Step 1 failure with **no manual
+> fallback**: do not proceed to the manual checks in this section, claim the
+> spec, write `in_progress`, create a branch/worktree, or run any configured
+> command. Then run `python3 .nightshift/preflight.py --spec-id <id>` (which
+> already includes the admission gate) before the manual checks below. It
+> captures clean-tree state, selected-spec status, dependency state, and
+> baseline command outcomes in `metrics/<id>.preflight.json`. A non-zero exit
+> is a Step 1 pre-flight failure; read the artifact's `blocking_failures`
+> (including `checks.install_admission`) and follow the existing
+> failure/test-gate flow below.
 
 #### Phase 0-B: Baseline Test Gate
 

@@ -30,7 +30,11 @@ if str(CANONICAL_DIR) not in sys.path:
     sys.path.insert(0, str(CANONICAL_DIR))
 
 from model_stylesheet import resolve_model
-from dependency_registry import DependencyRegistryResolver
+from dependency_registry import (
+    DependencyRegistryResolver,
+    parse_requires_specs_text,
+    qualified_dependency_key,
+)
 from parallel_executor import (
     AdmissionSpec,
     plan_dynamic_admission,
@@ -48,6 +52,11 @@ _STOP_WORDS = frozenset({
 
 _BUGFIX_KEYWORDS = {"fix", "crash", "bug", "broken", "error", "fail", "regression"}
 _REFACTOR_KEYWORDS = {"refactor", "restructure", "reorganize", "clean up", "simplify", "extract", "decouple"}
+
+
+def _parse_requires_specs_text(yaml_text: str) -> tuple[Tuple[Tuple[str, str], ...], Optional[str]]:
+    """Use the shared strict parser while retaining the legacy parser elsewhere."""
+    return parse_requires_specs_text(yaml_text)
 
 
 class Color(Enum):
@@ -156,6 +165,8 @@ class SpecFrontmatter:
     provides: List[str] = field(default_factory=list)
     requires: List[str] = field(default_factory=list)
     touches: List[str] = field(default_factory=list)
+    requires_specs: Tuple[Tuple[str, str], ...] = ()
+    requires_specs_error: Optional[str] = None
 
 
 @dataclass
@@ -257,6 +268,9 @@ class DAGBuilder:
         self.specs: Dict[str, SpecFrontmatter] = {}
         self.local_spec_ids: Set[str] = set()
         self.dependency_resolution = None
+        self.qualified_dependency_statuses: Dict[str, str] = {}
+        self.qualified_dependency_errors: Dict[str, str] = {}
+        self.qualified_dependency_details: Dict[str, str] = {}
 
     def load_specs(self) -> Dict[str, SpecFrontmatter]:
         """
@@ -269,6 +283,9 @@ class DAGBuilder:
             ValueError: If YAML frontmatter is malformed.
         """
         self.specs = {}
+        self.qualified_dependency_statuses = {}
+        self.qualified_dependency_errors = {}
+        self.qualified_dependency_details = {}
         for spec_file in self.specs_dir.glob("*.md"):
             try:
                 frontmatter = self._parse_frontmatter(spec_file)
@@ -277,30 +294,18 @@ class DAGBuilder:
             except ValueError as e:
                 raise ValueError(f"Error parsing {spec_file.name}: {e}")
         self.local_spec_ids = set(self.specs)
-        local_specs = {
-            spec_id: {"id": spec_id, "status": spec.status}
-            for spec_id, spec in self.specs.items()
-        }
-        dependency_ids = {
-            dependency
-            for spec in self.specs.values()
-            for dependency in spec.after
-        }
-        self.dependency_resolution = DependencyRegistryResolver(self.specs_dir).resolve(
-            dependency_ids,
-            local_specs=local_specs,
-        )
-        if self.dependency_resolution.errors:
-            raise ValueError("; ".join(self.dependency_resolution.errors.values()))
-        for spec_id, record in self.dependency_resolution.resolved.items():
-            if spec_id in self.specs:
-                continue
-            self.specs[spec_id] = SpecFrontmatter(
-                id=spec_id,
-                status=record.status,
-                type=str(record.frontmatter.get("type") or "external"),
-                priority=int(record.frontmatter.get("priority") or 1),
+        # ``after:`` is intentionally a same-project graph edge.  Never scan a
+        # registry for it: a duplicate flat ID in another project must not make
+        # unrelated local boards fail to load.
+        self.dependency_resolution = None
+        resolver = DependencyRegistryResolver(self.specs_dir)
+        for spec in self.specs.values():
+            resolution = resolver.resolve_qualified(
+                spec.id, spec.requires_specs, parse_error=spec.requires_specs_error
             )
+            self.qualified_dependency_statuses.update(resolution.statuses)
+            self.qualified_dependency_errors.update(resolution.errors)
+            self.qualified_dependency_details.update(resolution.details)
         return self.specs
 
     def _parse_frontmatter(self, filepath: Path) -> Optional[SpecFrontmatter]:
@@ -345,6 +350,7 @@ class DAGBuilder:
         if not spec_id:
             raise ValueError("Missing required field: id")
 
+        requires_specs, requires_specs_error = _parse_requires_specs_text(yaml_text)
         return SpecFrontmatter(
             id=spec_id,
             parent=data.get("parent"),
@@ -364,6 +370,8 @@ class DAGBuilder:
             provides=data.get("provides", []),
             requires=data.get("requires", []),
             touches=data.get("touches", []),
+            requires_specs=requires_specs,
+            requires_specs_error=requires_specs_error,
         )
 
     @staticmethod
@@ -940,7 +948,12 @@ def admission(args) -> int:
         AdmissionSpec(
             spec_id=spec.id,
             status=spec.status,
-            after=tuple(spec.after),
+            after=tuple(spec.after) + tuple(
+                qualified_dependency_key(spec.id, project, required_id)
+                for project, required_id in spec.requires_specs
+            ) + (() if not spec.requires_specs_error else (
+                qualified_dependency_key(spec.id, "MALFORMED", "requires_specs"),
+            )),
             touches=tuple(spec.touches),
             priority=spec.priority,
         )
@@ -948,17 +961,15 @@ def admission(args) -> int:
         for spec in [specs[spec_id]]
         if spec.type not in ("main", "nfr")
     ]
-    resolution = builder.dependency_resolution
     plan = plan_dynamic_admission(
         runnable_specs,
         worker_limit,
         missing_touches_policy=missing_touches_policy,
         dependency_statuses={
-            spec_id: record.status
-            for spec_id, record in (resolution.resolved if resolution else {}).items()
-            if spec_id not in builder.local_spec_ids
+            **builder.qualified_dependency_statuses,
         },
-        dependency_errors=resolution.errors if resolution else {},
+        dependency_errors=builder.qualified_dependency_errors,
+        dependency_details=builder.qualified_dependency_details,
     )
     json_path, markdown_path = write_admission_plan(plan, specs_dir)
     print(f"admission plan written: {json_path}")

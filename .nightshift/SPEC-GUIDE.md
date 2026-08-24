@@ -571,7 +571,8 @@ reconciling any bounded read-only review.
      - `layer: [0-3]` ← Should be filled from Phase 2
      - `type: [...]` ← From Phase 2 — see § Spec Types for all valid values
      - `status: ready` ← Ready to enter the loop
-     - `after: [list of spec IDs]` ← From Phase 2
+     - `after: [list of same-project spec IDs]` ← From Phase 2
+     - `requires_specs: []` ← Explicit cross-project prerequisites only, each `{project: REGISTERED_PROJECT, spec: SPEC-ID}`
      - `provides: []` ← Optional capability markers this spec creates (SPEC-054)
      - `requires: []` ← Optional capability markers this spec needs; advisory unless paired with `after:`
      - `touches: []` ← Optional advisory files/capabilities for overlap warnings
@@ -592,7 +593,7 @@ reconciling any bounded read-only review.
 
 ## Stacking Metadata
 
-Optional fields `provides`, `requires`, and `touches` help the board/orchestrator explain sequencing without replacing `after:`. `after:` remains the only hard dependency source. `requires` warnings tell an agent that a capability provider is missing or should probably be declared as a hard dependency. `touches` warnings prevent unsafe parallel work when two ready specs edit the same protocol file or capability.
+Optional fields `provides`, `requires`, and `touches` help the board/orchestrator explain sequencing without replacing dependency declarations. `after:` is the hard dependency graph **within this project only**. For a prerequisite owned by another registered project, use `requires_specs:` with an explicit project and spec ID; admission reads that project without mutating it and refuses only the consumer if it is not `done`, unknown, missing, or malformed. `requires` warnings tell an agent that a capability provider is missing or should probably be declared as a hard dependency. `touches` warnings prevent unsafe parallel work when two ready specs edit the same protocol file or capability.
 
 ## Attachment Metadata
 

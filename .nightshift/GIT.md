@@ -394,13 +394,9 @@ differently and must not be conflated:
   main-checkout path inside a nested, gitignored repo. Plain Bash commands
   that do their own file I/O (`cat`, `sed`, `cp`, a script writing files, an
   HTTPS download writing to disk) are not subject to that tool-level check
-  and succeed against the same absolute path. (This repo's own heartbeat
-  publication is the concrete illustration of the general pattern, though no
-  worked heartbeat/`/bin/cp` example previously existed in this file: an
-  agent worktree writes its heartbeat locally, then runs `/bin/cp <local
-  path> <main-checkout path>` to publish it outside the worktree — a plain
-  Bash file copy, not `Write` or `>` redirection, because those would be
-  refused.)
+  and succeed against the same absolute path. See [Worked heartbeat publication
+  example](#worked-heartbeat-publication-from-an-isolated-worktree) for the
+  canonical cross-worktree heartbeat pattern.
 - **Bash invocations of `git` itself are NOT exempt when they target a nested
   repo's own `.git`.** `git -C <nested-path> ...`, `--git-dir=<nested-path>/.git`,
   and `git lfs pull` run inside or against the nested repo are blocked by the
@@ -411,6 +407,33 @@ differently and must not be conflated:
   vendor/thing pull`, `git lfs pull` in the nested repo) is blocked, the
   workaround is a plain, non-git operation instead: an HTTPS download or a
   direct file write/copy to the same absolute path, per the exemption above.
+
+### Worked heartbeat publication from an isolated worktree
+
+When a kickoff worker must make its liveness heartbeat visible to the parent
+checkout, write the complete heartbeat in the worker's own worktree and then
+copy that local file to the parent-provided shared path:
+
+```bash
+HEARTBEAT_LOCAL="$PWD/.nightshift/reports/_wip/orchestrator-progress-<SPEC-ID>.md"
+HEARTBEAT_SHARED="<main-repo-abs>/.nightshift/reports/_wip/orchestrator-progress-<SPEC-ID>.md"
+
+mkdir -p "$(dirname "$HEARTBEAT_LOCAL")"
+cat > "$HEARTBEAT_LOCAL" <<'HEARTBEAT'
+heartbeat_state: worker-started
+phase: implementation
+last_action: loaded the assigned spec and required context
+next_action: implement and validate the bounded change
+HEARTBEAT
+/bin/cp "$HEARTBEAT_LOCAL" "$HEARTBEAT_SHARED"
+```
+
+The destination is outside the isolated worktree, so `Write` and direct shell
+redirection (`>`) to `$HEARTBEAT_SHARED` are refused by the worktree boundary.
+The plain Bash `/bin/cp` command is permitted because it copies an already
+worktree-local file through normal Bash file I/O rather than using those
+boundary-checked write mechanisms. This copy is the supported way to publish
+the heartbeat without writing directly to the parent checkout.
 
 ## Worktree Cleanup and Retention
 

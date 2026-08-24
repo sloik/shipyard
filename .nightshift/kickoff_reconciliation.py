@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Protocol
 
+from verification_report import VerifierSurfacePreparationError
+
 
 class ResolutionPhase(str, Enum):
     WORKER_RUNNING = "worker_running"
@@ -145,6 +147,20 @@ def reconcile(
         assert state.verifier_dispatch_key
         try:
             adapter.dispatch_verifier(run_id, idempotency_key=state.verifier_dispatch_key)
+        except VerifierSurfacePreparationError:
+            # Preparation and report-unreachability are pre-launch gates.  The
+            # parent records a controlled evidence gap and never substitutes
+            # the source worktree or a parent self-check.
+            return _persist(
+                adapter,
+                KickoffResolutionState(
+                    **{
+                        **state.as_record(),
+                        "phase": ResolutionPhase.CONTROLLER_RESOLUTION_REQUIRED,
+                        "controller_reason": "verifier_surface_unavailable",
+                    }
+                ),
+            )
         except Exception:
             # Deliberately retain no harness exception text in durable state.
             # The parent records sanitized evidence then enters its existing

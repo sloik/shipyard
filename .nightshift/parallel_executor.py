@@ -8,6 +8,7 @@ for parallel spec execution with git worktree-based isolation.
 
 import enum
 import json
+import re
 import subprocess
 import uuid
 import time
@@ -18,7 +19,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 import yaml
 
-from dependency_registry import DependencyRegistryResolver
+from dependency_registry import (
+    DependencyRegistryResolver,
+    parse_requires_specs,
+    parse_requires_specs_text,
+)
 
 from worktree_paths import (
     WorktreePathError,
@@ -189,6 +194,8 @@ class BoundedWorktreeDispatcher:
         self._dependency_resolver = DependencyRegistryResolver(self.specs_dir)
         self._dependency_statuses: Dict[str, str] = {}
         self._dependency_errors: Dict[str, str] = {}
+        self._dependency_details: Dict[str, str] = {}
+        self.last_plan: AdmissionPlan | None = None
 
     @property
     def enabled(self) -> bool:
@@ -215,7 +222,9 @@ class BoundedWorktreeDispatcher:
             missing_touches_policy=settings.get("missing_touches_policy", "exclusive"),
             dependency_statuses=self._dependency_statuses,
             dependency_errors=self._dependency_errors,
+            dependency_details=self._dependency_details,
         )
+        self.last_plan = plan
         launched: List[DispatchedWorker] = []
         by_id = {spec.spec_id: spec for spec in specs}
         for spec_id in plan.admitted:
@@ -226,6 +235,7 @@ class BoundedWorktreeDispatcher:
 
     def _load_specs(self) -> List[AdmissionSpec]:
         specs: List[AdmissionSpec] = []
+        qualified_by_consumer: Dict[str, tuple[tuple[tuple[str, str], ...], str | None]] = {}
         for path in sorted(self.specs_dir.glob("*.md")):
             content = path.read_text(encoding="utf-8")
             if not content.startswith("---"):
@@ -233,12 +243,37 @@ class BoundedWorktreeDispatcher:
             parts = content.split("---", 2)
             if len(parts) < 3:
                 continue
-            data = yaml.safe_load(parts[1]) or {}
+            try:
+                data = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                # A syntactically malformed declared field belongs to this
+                # consumer's admission decision; it must not abort unrelated
+                # specs. Recover only the minimal identity/status needed to
+                # represent that local refusal.
+                requires_specs, requires_specs_error = parse_requires_specs_text(parts[1])
+                if requires_specs_error is None:
+                    continue
+                id_match = re.search(r"^\s*id:\s*(\S+)\s*$", parts[1], re.MULTILINE)
+                if not id_match:
+                    continue
+                status_match = re.search(r"^\s*status:\s*(\S+)\s*$", parts[1], re.MULTILINE)
+                priority_match = re.search(r"^\s*priority:\s*(\d+)\s*$", parts[1], re.MULTILINE)
+                data = {
+                    "id": id_match.group(1),
+                    "status": status_match.group(1) if status_match else "draft",
+                    "priority": int(priority_match.group(1)) if priority_match else 1,
+                }
+                qualified_by_consumer[id_match.group(1)] = (
+                    requires_specs, requires_specs_error
+                )
             spec_id = data.get("id")
             if not isinstance(spec_id, str):
                 continue
             checkpoint = self.status_store.get_state(spec_id)
             status = (checkpoint or {}).get("status", data.get("status", "draft"))
+            if spec_id not in qualified_by_consumer:
+                requires_specs, requires_specs_error = parse_requires_specs(data)
+                qualified_by_consumer[spec_id] = (requires_specs, requires_specs_error)
             specs.append(AdmissionSpec(
                 spec_id=spec_id,
                 status=status,
@@ -246,21 +281,33 @@ class BoundedWorktreeDispatcher:
                 touches=tuple(data.get("touches") or ()),
                 priority=int(data.get("priority", 1)),
             ))
-        local_specs = {
-            spec.spec_id: {"id": spec.spec_id, "status": spec.status}
-            for spec in specs
-        }
-        resolution = self._dependency_resolver.resolve(
-            (dependency for spec in specs for dependency in spec.after),
-            local_specs=local_specs,
-        )
-        self._dependency_statuses = {
-            spec_id: record.status
-            for spec_id, record in resolution.resolved.items()
-            if spec_id not in local_specs
-        }
-        self._dependency_errors = dict(resolution.errors)
-        return specs
+        # Admission must observe a prerequisite's current on-disk status on
+        # every refill; the resolver's short structural cache is unsuitable for
+        # the pending -> done transition that unlocks a live worker slot.
+        self._dependency_resolver.invalidate()
+        statuses: Dict[str, str] = {}
+        errors: Dict[str, str] = {}
+        details: Dict[str, str] = {}
+        resolved_specs: List[AdmissionSpec] = []
+        for spec in specs:
+            requirements, parse_error = qualified_by_consumer[spec.spec_id]
+            resolution = self._dependency_resolver.resolve_qualified(
+                spec.spec_id, requirements, parse_error=parse_error
+            )
+            statuses.update(resolution.statuses)
+            errors.update(resolution.errors)
+            details.update(resolution.details)
+            resolved_specs.append(AdmissionSpec(
+                spec.spec_id,
+                spec.status,
+                spec.after + resolution.dependency_keys,
+                spec.touches,
+                spec.priority,
+            ))
+        self._dependency_statuses = statuses
+        self._dependency_errors = errors
+        self._dependency_details = details
+        return resolved_specs
 
     def _admission_spec_for_active(self, worker: DispatchedWorker) -> AdmissionSpec:
         for spec in self._load_specs():
@@ -744,6 +791,7 @@ def plan_dynamic_admission(
     missing_touches_policy: str = "exclusive",
     dependency_statuses: Mapping[str, str] | None = None,
     dependency_errors: Mapping[str, str] | None = None,
+    dependency_details: Mapping[str, str] | None = None,
 ) -> AdmissionPlan:
     """Build a pure, deterministic admission plan for the current DAG frontier.
 
@@ -763,6 +811,7 @@ def plan_dynamic_admission(
         for spec_id, status in (dependency_statuses or {}).items()
     }
     resolution_errors = dict(dependency_errors or {})
+    resolved_details = dict(dependency_details or {})
     active_by_id = {spec.spec_id: spec for spec in active_specs}
     active_by_id.update({
         spec.spec_id: spec
@@ -860,8 +909,17 @@ def plan_dynamic_admission(
             ):
                 frontier.append(spec)
             else:
+                pending_dependencies = [
+                    dependency
+                    for dependency in spec.after
+                    if (spec_by_id[dependency].status if dependency in spec_by_id else external_statuses.get(dependency)) != "done"
+                ]
                 decisions[spec.spec_id] = AdmissionDecision(
-                    spec.spec_id, "not_ready", "dependencies_pending", "waiting for dependencies"
+                    spec.spec_id,
+                    "not_ready",
+                    "dependencies_pending",
+                    "; ".join(resolved_details.get(dependency, f"waiting for dependency {dependency}")
+                              for dependency in pending_dependencies),
                 )
 
     admitted: List[AdmissionSpec] = []

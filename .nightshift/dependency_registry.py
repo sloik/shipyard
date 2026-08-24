@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -57,6 +58,66 @@ class DependencyResolution:
         for spec_id, record in self.resolved.items():
             combined[spec_id] = record.public_frontmatter()
         return combined
+
+
+@dataclass(frozen=True)
+class QualifiedDependencyResolution:
+    """Consumer-scoped planner inputs for explicit cross-project prerequisites."""
+
+    dependency_keys: tuple[str, ...] = ()
+    statuses: Mapping[str, str] = field(default_factory=dict)
+    errors: Mapping[str, str] = field(default_factory=dict)
+    details: Mapping[str, str] = field(default_factory=dict)
+
+
+def qualified_dependency_key(consumer_id: str, project: str, spec_id: str) -> str:
+    """Return an opaque key that cannot collide across consumers or projects."""
+    return f"requires_specs:{consumer_id}:{project.upper()}:{spec_id}"
+
+
+def parse_requires_specs(
+    frontmatter: Mapping[str, Any],
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """Parse the additive ``requires_specs`` field with one strict contract.
+
+    Absence is compatible and means no qualified prerequisites.  A declaration
+    is a list of mappings with non-empty string ``project`` and ``spec`` values;
+    malformed declarations are returned as local admission errors rather than
+    raising and aborting a board load.
+    """
+    if "requires_specs" not in frontmatter:
+        return (), None
+    value = frontmatter.get("requires_specs")
+    if not isinstance(value, list):
+        return (), "requires_specs must be a list of {project, spec} mappings"
+
+    parsed: list[tuple[str, str]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            return (), f"requires_specs[{index}] must be a {{project, spec}} mapping"
+        project = entry.get("project")
+        spec_id = entry.get("spec")
+        if not isinstance(project, str) or not project.strip():
+            return (), f"requires_specs[{index}].project must be a non-empty string"
+        if not isinstance(spec_id, str) or not spec_id.strip():
+            return (), f"requires_specs[{index}].spec must be a non-empty string"
+        parsed.append((project.strip().upper(), spec_id.strip()))
+    return tuple(parsed), None
+
+
+def parse_requires_specs_text(
+    frontmatter_text: str,
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """Parse ``requires_specs`` from raw frontmatter without aborting its board."""
+    if not re.search(r"^\s*requires_specs\s*:", frontmatter_text, re.MULTILINE):
+        return (), None
+    try:
+        data = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError as exc:
+        return (), f"requires_specs frontmatter is malformed: {exc}"
+    if not isinstance(data, dict):
+        return (), "requires_specs frontmatter must be a mapping"
+    return parse_requires_specs(data)
 
 
 def _expand_path(raw_path: str) -> Path:
@@ -165,6 +226,64 @@ class DependencyRegistryResolver:
             {spec_id: tuple(self._records.get(spec_id, ())) for spec_id in requested},
             self._registry_error,
         )
+
+    def resolve_in_project(self, project_name: str, spec_id: str) -> tuple[SpecRecord | None, str | None]:
+        """Resolve one explicit cross-project prerequisite without mutating it.
+
+        ``after:`` deliberately has no access to this method.  A qualified
+        ``requires_specs`` entry owns the project selector, so duplicate IDs in
+        other registered projects cannot turn a consumer's local admission into
+        a fleet-wide graph failure.
+        """
+        self._refresh_if_stale()
+        normalized_project = str(project_name).strip().upper()
+        normalized_spec = str(spec_id).strip()
+        projects, _ = self._load_projects()
+        matches = [project for project in projects if project.name.upper() == normalized_project]
+        if not matches:
+            return None, f"unknown project {normalized_project}"
+        if len(matches) != 1:
+            return None, f"ambiguous registered project {normalized_project}"
+
+        project = matches[0]
+        records = [
+            record
+            for record in self._records.get(normalized_spec, ())
+            if record.project.path == project.path
+        ]
+        if len(records) == 1:
+            return records[0], None
+        if not records:
+            return None, f"missing spec {normalized_spec} in project {normalized_project}"
+        return None, f"ambiguous spec {normalized_spec} in project {normalized_project}"
+
+    def resolve_qualified(
+        self,
+        consumer_id: str,
+        requirements: Sequence[tuple[str, str]],
+        *,
+        parse_error: str | None = None,
+    ) -> QualifiedDependencyResolution:
+        """Resolve one consumer's qualified prerequisites without fleet ambiguity."""
+        if parse_error:
+            key = qualified_dependency_key(consumer_id, "MALFORMED", "requires_specs")
+            return QualifiedDependencyResolution((key,), errors={key: parse_error})
+
+        keys: list[str] = []
+        statuses: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        details: dict[str, str] = {}
+        for project, spec_id in requirements:
+            key = qualified_dependency_key(consumer_id, project, spec_id)
+            keys.append(key)
+            record, error = self.resolve_in_project(project, spec_id)
+            if error:
+                errors[key] = error
+                continue
+            assert record is not None
+            statuses[key] = record.status
+            details[key] = f"project {project}, spec {spec_id}, status {record.status}"
+        return QualifiedDependencyResolution(tuple(keys), statuses, errors, details)
 
     def _refresh_if_stale(self) -> None:
         if self._loaded_at and time.monotonic() - self._loaded_at < self.cache_seconds:

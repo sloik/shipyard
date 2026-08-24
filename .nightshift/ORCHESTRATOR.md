@@ -161,7 +161,7 @@ watchdog process.
 ### Independent verifier read boundary (SPEC-222, SPEC-228)
 
 When a parent dispatches an independent verifier, it first uses managed
-`verification_report.py prepare-surface` to create a standalone sanitized Git
+`verification_report.py prepare-dispatch` to create a standalone sanitized Git
 repository. That repository is the verifier's sole read surface. It has an
 independent object database and synthetic baseline/head refs containing all
 tracked branch content except recognized report roots and the explicit run
@@ -169,6 +169,17 @@ report. A linked worktree, sparse checkout, or deleted checkout file is not an
 eligible substitute because it leaves excluded blobs reachable through the
 source object database. Pre-dispatch evidence must record that every report-path
 probe is unreachable and that the object database is not shared.
+
+The normal-suite and no-test-suite routes invoke that same executable boundary;
+the latter supplies an empty suite tuple rather than bypassing preparation. On
+success it emits a sanitized dispatch plan containing only the standalone
+repository, its synthetic refs/commits, the configured suite tuple, brief kind,
+and containment-evidence digest. It never emits the source checkout, report
+paths, or parent-owned evidence path. The parent harness must assign the emitted
+repository to every verifier command and must not substitute the run worktree.
+A nonzero exit or invalid plan forbids the Agent call and becomes the controlled
+evidence-gap reason `verifier_surface_unavailable`. Lifecycle, merge, watchdog
+cleanup, and terminal resolution remain parent-owned.
 
 Every `git status`, tree-hash, and diff command used for the verifier footprint
 assertion must name the standalone surface. The source run worktree and parent
@@ -250,8 +261,10 @@ human status ping.  If a process dies after the dispatch intent was persisted,
 the next reconciliation retries with the same key; the adapter launches at most
 one independent verifier.  A verifier-launch failure enters
 `controller_resolution_required` with the sanitized reason
-`verifier_launch_failed`; the parent then uses the existing controller-backed
-terminal-resolution path and never self-verifies.
+`verifier_launch_failed`; a preparation or report-unreachability failure uses
+the distinct sanitized reason `verifier_surface_unavailable`. The parent then
+uses the existing controller-backed terminal-resolution path and never
+self-verifies.
 
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)
@@ -359,10 +372,16 @@ infrastructure that cannot be isolated or capacity-limited. Run those cases
 sequentially or create an explicit parent plan first.
 
 ### 1. Bootstrap
+- **Mandatory admission gate (SPEC-229):** before verifying the git tree or reading
+  `config.yaml` for execution, `validate_install.py` must run and return `allow`
+  (`.nightshift/preflight.py --spec-id <SPEC_ID>` runs it first automatically). A
+  missing/unexecutable validator or a non-`allow` result blocks Bootstrap entirely —
+  there is no manual fallback. Do not claim a spec, write lifecycle state, or create
+  a branch/worktree/heartbeat before this gate returns `allow`.
 - Read `config.yaml`, verify clean git tree, run pre-flight (same as LOOP.md step 1).
-  Prefer `python3 .nightshift/preflight.py --spec-id <SPEC_ID>` when present so the
-  clean-tree/spec/dependency/baseline findings are captured in a durable artifact;
-  fall back to LOOP.md Step 1 manual checks if the script is unavailable.
+  Run `python3 .nightshift/preflight.py --spec-id <SPEC_ID>` (present on every
+  supported install) so the admission/clean-tree/spec/dependency/baseline findings
+  are captured in a durable artifact.
 - Verify `runner.mode == "orchestrator"` is set
 - Verify all fields present: `runner.model`, `runner.harness` are non-empty
 - Log: orchestrator session started, timestamp
@@ -1044,7 +1063,9 @@ Read LOOP-DOMAIN-MAP.md and apply the `{EFFECTIVE_DOMAIN}` column for steps 1, 4
    - Do NOT work on multiple specs
 
 3. **Execute LOOP.md steps 1–15:**
-   - Step 1: Pre-flight check (prefer `.nightshift/preflight.py --spec-id {SPEC_ID}` when present; fall back to manual checks)
+   - Step 1: Pre-flight check — run `.nightshift/preflight.py --spec-id {SPEC_ID}`, which runs
+     `validate_install.py` first (SPEC-229). A missing/unexecutable validator or a non-`allow`
+     admission result blocks Step 1 with no manual fallback.
    - Step 2: Task selection (you're assigned {SPEC_ID} — skip the algorithm)
    - Steps 3–15: Full 16-step cycle for your spec
    - Do NOT do step 16 (loop back to task selection)
