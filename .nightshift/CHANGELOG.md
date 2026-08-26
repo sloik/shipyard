@@ -11,6 +11,20 @@
 
 ---
 
+## 3.6.5 (2026-08-26)
+
+### Complete installation admission coverage (SPEC-229-001)
+
+- The coordinator now invokes the common installation admission gate before
+  Git, spec-readiness, lifecycle, command, or dispatch work.
+- Instruction-packet generation invokes the same gate for the resolved install
+  and emits no packet when admission is denied or indeterminate.
+- The supported-start inventory now covers both paths and has regression tests
+  for missing future inventory entries.
+
+**Migration:** none. Install the complete 3.6.5 kit payload; partial file-level
+updates are not supported.
+
 ## 3.6.4 (2026-08-26)
 
 ### Atomic package lifecycle state (SPEC-231)

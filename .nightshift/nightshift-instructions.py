@@ -29,6 +29,15 @@ except Exception as exc:  # pragma: no cover - import guard for deployed copies
     print(f"Error: cannot import spec_frontmatter.py: {exc}", file=sys.stderr)
     sys.exit(2)
 
+try:
+    from preflight import run_install_admission
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    run_install_admission = None  # type: ignore[assignment]
+
+
+class InstructionAdmissionError(RuntimeError):
+    """Raised when instruction generation is not admitted by the install gate."""
+
 PROTOCOL_FILES = [
     "BOOTSTRAP.md",
     "LOOP.md",
@@ -205,6 +214,19 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
     nightshift_dir = nightshift_dir.resolve()
     specs_dir = specs_dir.resolve()
     project_root = project_root.resolve()
+    if run_install_admission is None:
+        raise InstructionAdmissionError(
+            "validate_install.py is unavailable; installation admission cannot run."
+        )
+    admission = run_install_admission(
+        spec_id, install_root=nightshift_dir, invocation_kind="instructions"
+    )
+    if not admission.get("ok"):
+        raise InstructionAdmissionError(
+            admission.get("reason")
+            or f"Installation admission gate result: {admission.get('admission', 'indeterminate')}."
+        )
+
     config = _read_config(nightshift_dir)
     specs = _find_specs(specs_dir)
     blockers: list[dict[str, str]] = []
@@ -351,7 +373,16 @@ def main(argv: list[str] | None = None) -> int:
     nightshift_dir = Path(args.nightshift_dir)
     specs_dir = Path(args.specs_dir) if args.specs_dir else _default_specs_dir(nightshift_dir)
     project_root = Path(args.project_root) if args.project_root else _repo_root_hint()
-    packet = generate_packet(args.spec, nightshift_dir=nightshift_dir, specs_dir=specs_dir, project_root=project_root)
+    try:
+        packet = generate_packet(
+            args.spec,
+            nightshift_dir=nightshift_dir,
+            specs_dir=specs_dir,
+            project_root=project_root,
+        )
+    except InstructionAdmissionError as exc:
+        print(f"ADMISSION DENIED: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(packet, indent=2, ensure_ascii=False))
     else:

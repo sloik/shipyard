@@ -77,14 +77,30 @@ STATUS_SEVERITY_RANK = {
 # (test_validate_install.py::test_entrypoint_inventory_matches_repo) is the
 # mechanism that fails when a new start surface is added without wiring it
 # here first — see the "Suggested Follow-up Specs" section of the SPEC-229
-# report for the surfaces NOT YET in this list (nightshift_coordinator.py,
-# nightshift-instructions.py, the board-copied kickoff skill route).
+# report for the out-of-repository board-copied kickoff skill route.
 ENTRYPOINT_INVENTORY: tuple[dict[str, str], ...] = (
     {"path": "preflight.py", "marker": "validate_install"},
+    {"path": "nightshift_coordinator.py", "marker": "run_install_admission"},
+    {"path": "nightshift-instructions.py", "marker": "run_install_admission"},
     {"path": "LOOP.md", "marker": "validate_install.py"},
     {"path": "ORCHESTRATOR.md", "marker": "validate_install.py"},
     {"path": "BOOTSTRAP.md", "marker": "validate_install.py"},
 )
+
+SUPPORTED_START_ENTRYPOINTS: tuple[str, ...] = (
+    "preflight.py",
+    "nightshift_coordinator.py",
+    "nightshift-instructions.py",
+)
+
+
+def entrypoint_inventory_gaps(
+    supported: tuple[str, ...] = SUPPORTED_START_ENTRYPOINTS,
+    inventory: tuple[dict[str, str], ...] = ENTRYPOINT_INVENTORY,
+) -> list[str]:
+    """Return supported start surfaces absent from the admission inventory."""
+    inventoried = {entry.get("path") for entry in inventory}
+    return sorted(path for path in supported if path not in inventoried)
 
 # Managed entrypoints/runtime resources that KIT.CLOSURE proves are declared,
 # present, and probe-able from the selected install root.
@@ -993,7 +1009,7 @@ def check_int_hooks(ctx: ValidationContext) -> None:
 
 def check_int_entrypoints(ctx: ValidationContext) -> None:
     inv = Invariant("INT.ENTRYPOINTS", "integration", required=True)
-    missing = []
+    missing = entrypoint_inventory_gaps()
     for entry in ENTRYPOINT_INVENTORY:
         path = ctx.install / entry["path"]
         if not path.is_file():

@@ -44,6 +44,11 @@ from worktree_janitor import run_startup_janitor
 from verifier_feedback import FeedbackRuntimeAdapter, FeedbackState, reconcile_feedback
 
 try:
+    from preflight import run_install_admission
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    run_install_admission = None  # type: ignore[assignment]
+
+try:
     from jsonschema import ValidationError as JsonSchemaValidationError
     from jsonschema import validate as jsonschema_validate
 except ImportError:
@@ -1091,6 +1096,22 @@ class Coordinator:
 
     def preflight(self) -> None:
         """Validate pre-flight checks. Raise on failure."""
+        install_root = self.project_root / ".nightshift"
+        if not install_root.is_dir():
+            install_root = Path(__file__).resolve().parent
+        if run_install_admission is None:
+            raise CoordinatorError(
+                "validate_install.py is unavailable; installation admission cannot run."
+            )
+        admission = run_install_admission(
+            None, install_root=install_root, invocation_kind="coordinator"
+        )
+        if not admission.get("ok"):
+            raise CoordinatorError(
+                admission.get("reason")
+                or f"Installation admission gate result: {admission.get('admission', 'indeterminate')}."
+            )
+
         # Check git is clean
         if not git_is_clean(self.project_root):
             raise CoordinatorError("Git tree not clean. Commit or stash changes before running coordinator.")

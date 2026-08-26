@@ -272,7 +272,12 @@ def _command_state(commands: dict[str, Any], repo: Path) -> dict[str, Any]:
     return results
 
 
-def run_install_admission(spec_id: str) -> dict[str, Any]:
+def run_install_admission(
+    spec_id: str | None,
+    *,
+    install_root: Path | None = None,
+    invocation_kind: str = "preflight",
+) -> dict[str, Any]:
     """SPEC-229 admission gate: the first executable action of every preflight run.
 
     Runs installation/integration validation before any Git status read, spec
@@ -280,9 +285,10 @@ def run_install_admission(spec_id: str) -> dict[str, Any]:
     unexecutable validator, or a non-allow result, is itself a blocking
     preflight failure — it does not fall through to the checks below.
     """
-    install_root = Path(__file__).resolve().parent
+    install_root = (install_root or Path(__file__).resolve().parent).resolve()
     profile = "canonical" if install_root.name == "canonical" else "installed"
-    if validate_install is None:
+    validator_path = install_root / "validate_install.py"
+    if validate_install is None or not validator_path.is_file():
         return {
             "ok": False,
             "reason": "validate_install.py is unavailable; installation admission cannot run.",
@@ -290,7 +296,7 @@ def run_install_admission(spec_id: str) -> dict[str, Any]:
         }
     try:
         ctx, _findings, _config, config_sha = validate_install.run_validation(
-            install_root, profile, "preflight", spec_id
+            install_root, profile, invocation_kind, spec_id
         )
         artifact = validate_install.build_artifact(ctx, config_sha)
         dest, digest, art_inv = validate_install._atomic_write_artifact(ctx.install, artifact)
@@ -329,7 +335,7 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
         "warnings": [],
     }
 
-    install_admission = run_install_admission(spec_id)
+    install_admission = run_install_admission(spec_id, install_root=config_path.parent)
     result["checks"]["install_admission"] = install_admission
     if not install_admission["ok"]:
         result["blocking_failures"].append(
