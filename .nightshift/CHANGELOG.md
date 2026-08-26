@@ -11,6 +11,20 @@
 
 ---
 
+## 3.6.4 (2026-08-26)
+
+### Atomic package lifecycle state (SPEC-231)
+
+- Install and update now restore the prior package tree when the authoritative
+  ledger write fails, preventing orphaned activated bytes.
+- Removal first moves the owned tree outside the discovery root and restores it
+  if the ledger write fails, so every failure leaves one ledger-matching state.
+- Remove dry-runs now enumerate every owned relative file, revoked event and
+  capability, and the ordered mutation actions before apply.
+
+**Migration:** none. Install the complete 3.6.4 kit payload. Existing package
+ledgers and installed package layouts remain compatible.
+
 ## 3.6.3 (2026-08-26)
 
 ### Independent private experiment streams (SPEC-238)

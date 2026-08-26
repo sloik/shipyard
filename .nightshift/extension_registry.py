@@ -616,6 +616,18 @@ class ExtensionPackageManager:
         record = ledger["packages"].get(extension_id)
         if record is None:
             raise PackageError("package is not installed in the explicit scope")
+        try:
+            owned = resolve_beneath(
+                self._installed_root(scope, must_exist=True), extension_id
+            )
+        except ProtocolError as exc:
+            raise PackageError(str(exc)) from exc
+        files: list[str] = []
+        for path in sorted(owned.rglob("*")):
+            if path.is_symlink():
+                raise PackageError("installed package contains symlink")
+            if path.is_file():
+                files.append(path.relative_to(owned).as_posix())
         return self._remember_plan(
             {
                 "operation": "remove",
@@ -623,14 +635,18 @@ class ExtensionPackageManager:
                 "id": extension_id,
                 "old_version": record["active"],
                 "new_version": None,
-                "files": [],
+                "files": files,
                 "capability_changes": {
                     "added_events": [],
                     "added_capabilities": [],
-                    "removed_events": [],
-                    "removed_capabilities": [],
+                    "removed_events": sorted(record["events"]),
+                    "removed_capabilities": sorted(record["capabilities"]),
                 },
-                "actions": ["ledger-write", "remove-owned-bytes"],
+                "actions": [
+                    "stage-removal",
+                    "ledger-write",
+                    "remove-owned-bytes",
+                ],
                 "package_sha256": record["versions"][record["active"]]["package_sha256"],
                 "ledger_digest": digest(ledger),
             }
@@ -711,50 +727,87 @@ class ExtensionPackageManager:
                 installed_root.mkdir(exist_ok=True)
                 destination = installed_root / extension_id / inspected["version"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.is_symlink():
+                    raise PackageError("installed package destination may not be a symlink")
+                backup_parent: Path | None = None
+                backup: Path | None = None
                 if destination.exists():
-                    shutil.rmtree(destination)
+                    backup_parent = Path(
+                        tempfile.mkdtemp(
+                            prefix=f"{extension_id}-prior-", dir=stage_parent
+                        )
+                    )
+                    backup = backup_parent / "package"
+                    os.replace(destination, backup)
                 os.replace(staging, destination)
-                record = ledger["packages"].get(extension_id)
-                if record is None:
-                    record = {
-                        "active": inspected["version"],
-                        "versions": {},
-                        "approvals": {},
-                        "approval_required": [],
-                    }
-                    ledger["packages"][extension_id] = record
-                expanded = bool(
-                    plan["capability_changes"]["added_events"]
-                    or plan["capability_changes"]["added_capabilities"]
-                )
-                if operation == "update":
-                    for project_id, approval in record["approvals"].items():
-                        if expanded:
-                            approval["enabled"] = False
-                            record["approval_required"].append(project_id)
-                        else:
-                            approval["version"] = inspected["version"]
-                record["approval_required"] = sorted(set(record["approval_required"]))
-                record.update(
-                    {
-                        "active": inspected["version"],
-                        "active_plan_digest": plan_digest,
+                ledger_committed = False
+                try:
+                    record = ledger["packages"].get(extension_id)
+                    if record is None:
+                        record = {
+                            "active": inspected["version"],
+                            "versions": {},
+                            "approvals": {},
+                            "approval_required": [],
+                        }
+                        ledger["packages"][extension_id] = record
+                    expanded = bool(
+                        plan["capability_changes"]["added_events"]
+                        or plan["capability_changes"]["added_capabilities"]
+                    )
+                    if operation == "update":
+                        for project_id, approval in record["approvals"].items():
+                            if expanded:
+                                approval["enabled"] = False
+                                record["approval_required"].append(project_id)
+                            else:
+                                approval["version"] = inspected["version"]
+                    record["approval_required"] = sorted(
+                        set(record["approval_required"])
+                    )
+                    record.update(
+                        {
+                            "active": inspected["version"],
+                            "active_plan_digest": plan_digest,
+                            "events": inspected["events"],
+                            "capabilities": inspected["capabilities"],
+                            "protocol_range": inspected["protocol_range"],
+                        }
+                    )
+                    record["versions"][inspected["version"]] = {
+                        "package_sha256": inspected["package_sha256"],
+                        "inventory_digest": inspected["inventory_digest"],
                         "events": inspected["events"],
                         "capabilities": inspected["capabilities"],
                         "protocol_range": inspected["protocol_range"],
                     }
-                )
-                record["versions"][inspected["version"]] = {
-                    "package_sha256": inspected["package_sha256"],
-                    "inventory_digest": inspected["inventory_digest"],
-                    "events": inspected["events"],
-                    "capabilities": inspected["capabilities"],
-                    "protocol_range": inspected["protocol_range"],
-                }
-                self._write(scope, ledger)
+                    self._write(scope, ledger)
+                    ledger_committed = True
+                except Exception:
+                    if destination.exists():
+                        os.replace(destination, staging)
+                    if backup is not None and backup.exists():
+                        os.replace(backup, destination)
+                    else:
+                        try:
+                            destination.parent.rmdir()
+                        except OSError:
+                            pass
+                    raise
+                finally:
+                    if (
+                        backup_parent is not None
+                        and backup_parent.exists()
+                        and (
+                            ledger_committed
+                            or backup is None
+                            or not backup.exists()
+                        )
+                    ):
+                        shutil.rmtree(backup_parent)
             finally:
                 if staging.exists():
-                    shutil.rmtree(staging)
+                    shutil.rmtree(staging, ignore_errors=True)
         elif operation == "rollback":
             record = ledger["packages"][extension_id]
             self._verify_directory(scope, extension_id, plan["new_version"])
@@ -781,11 +834,31 @@ class ExtensionPackageManager:
             )
         elif operation == "remove":
             before = digest(ledger)
-            ledger["packages"].pop(extension_id)
-            self._write(scope, ledger)
-            owned = self._installed_root(scope, must_exist=True) / extension_id
-            if owned.exists():
-                shutil.rmtree(owned)
+            try:
+                owned = resolve_beneath(
+                    self._installed_root(scope, must_exist=True), extension_id
+                )
+            except ProtocolError as exc:
+                raise PackageError(str(exc)) from exc
+            stage_parent = self._staging_root(scope)
+            stage_parent.mkdir(exist_ok=True)
+            tombstone_parent = Path(
+                tempfile.mkdtemp(prefix=f"{extension_id}-remove-", dir=stage_parent)
+            )
+            tombstone = tombstone_parent / "package"
+            os.replace(owned, tombstone)
+            try:
+                ledger["packages"].pop(extension_id)
+                self._write(scope, ledger)
+            except Exception:
+                os.replace(tombstone, owned)
+                shutil.rmtree(tombstone_parent)
+                raise
+            # The ledger is the activation authority and the owned tree has
+            # already left .installed atomically. A failed best-effort cleanup
+            # can leave only unreachable staging garbage, never an installed
+            # package absent from the ledger.
+            shutil.rmtree(tombstone_parent, ignore_errors=True)
             self._observe(
                 "package.remove.completed",
                 operation_id=operation_id,
