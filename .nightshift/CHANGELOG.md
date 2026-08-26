@@ -11,6 +11,19 @@
 
 ---
 
+## 3.6.1 (2026-08-26)
+
+### Private-sink outage continuity (SPEC-238)
+
+- Experiment observers now retain the last verified event-chain head while an
+  enrolled private sink is unavailable, seal subsequent events to the private
+  outbox, and reconcile them without resetting sequence or chain history.
+- Event append validates the enrolled sink before creating a stream lock, so a
+  missing transport root cannot be mistaken for a valid empty evidence store.
+
+**Migration:** none. Install the complete 3.6.1 kit payload; already retained
+3.6.0 experiment events and results remain valid and unchanged.
+
 ## 3.6.0 (2026-08-26)
 
 ### Evidence-backed real-use experiments (SPEC-238 / SPEC-238-001)

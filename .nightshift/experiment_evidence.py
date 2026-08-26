@@ -52,6 +52,7 @@ class ExperimentObserver:
         self.descriptor = validate_descriptor(descriptor)
         self.producer = producer
         self.release_fingerprint = release_fingerprint
+        self._known_events = load_events(context, self.descriptor)
 
     def emit(
         self,
@@ -64,7 +65,15 @@ class ExperimentObserver:
         source_class: str = "passive",
         occurred_at: str | None = None,
     ) -> dict[str, Any]:
-        current = load_events(self.context, self.descriptor)
+        transport_unavailable = False
+        try:
+            current = load_events(self.context, self.descriptor)
+            self._known_events = current
+        except ObservabilityStoreError as exc:
+            if not any(word in str(exc) for word in ("root", "Git provenance", "No such file", "Dropbox")):
+                raise
+            current = list(self._known_events)
+            transport_unavailable = True
         stable = canonical({
             "experiment_id": self.descriptor["experiment_id"],
             "operation_id": operation_id,
@@ -97,7 +106,20 @@ class ExperimentObserver:
             outcome=outcome,
             payload=payload,
         )
-        return append_event(self.context, self.descriptor, event)
+        if transport_unavailable:
+            receipt = write_or_outbox(
+                self.context,
+                kind="experiment_event",
+                artifact_id=event["event_id"],
+                run_sequence=event["sequence"],
+                producer=event["producer"],
+                payload={"experiment_event": event},
+            )
+        else:
+            receipt = append_event(self.context, self.descriptor, event)
+        if receipt.get("status") in {"stored", "awaiting_sync"}:
+            self._known_events.append(event)
+        return receipt
 
 
 @contextmanager
@@ -174,6 +196,10 @@ def append_event(
     candidate = validate_event(event, descriptor)
     if candidate["project_id"] != context.project_id:
         raise ExperimentEvidenceError("event project_id does not match private enrollment")
+    # Validate the enrolled sink before the lock path is created. Otherwise a
+    # missing transport root could be accidentally recreated as an empty store,
+    # erasing the distinction between outage and a valid zero-event stream.
+    read_artifacts(context, kind="experiment_event")
     with _stream_lock(context, descriptor["experiment_id"]):
         current = load_events(context, descriptor)
         for existing in current:
