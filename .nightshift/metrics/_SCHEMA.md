@@ -55,6 +55,16 @@ distributions, counts, rates with explicit eligible denominators and nullable
 Titles, requirement/AC prose, report text, paths, commands, prompts, model output,
 environment data and credentials are prohibited.
 
+### Real-use experiment projection (SPEC-238)
+
+Experiments are not per-spec metric YAML fields. A tracked descriptor plus private
+immutable events derives `reports/_wip/experiment-status.json`; a terminal review
+also seals a private result. Every rate includes integer numerator,
+`eligible_denominator`, nullable `value`, and `sample_state`. Supported states are
+`registered`, `collecting`, `review_due`, `resolved`, and `retired`; conclusions
+are `supported`, `not_supported`, `inconclusive`, or `invalidated`. Zero eligible
+events are never interpreted as success.
+
 ---
 
 ## Root Fields (Required)

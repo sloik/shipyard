@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
+from typing import Any
 
 import yaml
-from extension_protocol import EVENTS, ProtocolError
+from extension_protocol import EVENTS, ProtocolError, digest
 from extension_registry import ExtensionRegistry
 from extension_runtime import ExtensionRuntime, ExtensionSpool, ExtensionSupervisor
 from extension_sandbox import host_backend
@@ -74,9 +76,15 @@ def publish_checkpoint(
     payload: dict,
     config: dict,
     artifact_root: Path | None = None,
+    experiment_observer: Any | None = None,
 ) -> dict:
     """Optional extension failures never alter the authoritative caller result."""
-    registry = ExtensionRegistry(project_root / ".nightshift" / "extensions", user_root)
+    registry = ExtensionRegistry(
+        project_root / ".nightshift" / "extensions",
+        user_root,
+        project_id=(experiment_observer.context.project_id if experiment_observer else None),
+        experiment_observer=experiment_observer,
+    )
     admissions, failures = registry.admit(config, sandbox_backend=host_backend())
     if not admissions:
         # No-config is a strict no-child control. Existing orphaned work is
@@ -105,9 +113,10 @@ def publish_checkpoint(
     )
     runtime.spool.ingest_artifact_refs(payload, artifact_root)
     envelope, jobs = runtime.publish(sequence=sequence, event=event, payload=payload)
-    started = launch_supervisor(
-        runtime, admissions, jobs, run_completed=event == "run.completed"
-    )
+    launch_kwargs = {"run_completed": event == "run.completed"}
+    if experiment_observer is not None:
+        launch_kwargs["experiment_observer"] = experiment_observer
+    started = launch_supervisor(runtime, admissions, jobs, **launch_kwargs)
     return {
         "status": "published",
         "event_id": envelope["event_id"],
@@ -123,6 +132,7 @@ def launch_supervisor(
     jobs: list[Path],
     *,
     run_completed: bool,
+    experiment_observer: Any | None = None,
 ) -> bool:
     """Fork a detached one-shot drain after durable enqueue.
 
@@ -143,7 +153,7 @@ def launch_supervisor(
         _detach_standard_streams()
         maximum = os.sysconf("SC_OPEN_MAX")
         os.closerange(3, min(maximum, 65536))
-        drain_supervisor(runtime, admissions)
+        drain_supervisor(runtime, admissions, experiment_observer=experiment_observer)
     finally:
         os._exit(0)
 
@@ -159,7 +169,9 @@ def _detach_standard_streams() -> None:
             os.close(devnull)
 
 
-def drain_supervisor(runtime: ExtensionRuntime, admissions: list) -> None:
+def drain_supervisor(
+    runtime: ExtensionRuntime, admissions: list, *, experiment_observer: Any | None = None
+) -> None:
     """Recover all jobs and always reap the drain's owned process tree."""
     supervisor = ExtensionSupervisor(runtime.spool, backend=host_backend())
     try:
@@ -173,6 +185,37 @@ def drain_supervisor(runtime: ExtensionRuntime, admissions: list) -> None:
                 future.result()
             except Exception:  # noqa: BLE001, S112 -- optional job is contained
                 continue
+        if experiment_observer is not None:
+            by_namespace = {item.namespace: item for item in admissions}
+            for job in sorted(runtime.spool.run_root.glob("extensions/*/jobs/*")):
+                terminal = job / "terminal.json"
+                if not terminal.is_file() or terminal.is_symlink():
+                    continue
+                admission = by_namespace.get(job.parent.parent.name)
+                if admission is None:
+                    continue
+                try:
+                    state = json.loads(terminal.read_text(encoding="utf-8")).get("state")
+                    correlations = {
+                        "subject_digest": digest(admission.extension_id),
+                        "admission_digest": admission.config_digest,
+                        "job_digest": digest(job.name),
+                        "run_digest": digest(runtime.spool.run_id),
+                        **({"package_digest": admission.package_digest} if admission.package_digest else {}),
+                        **({"plan_digest": admission.plan_digest} if admission.plan_digest else {}),
+                    }
+                    operation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{runtime.spool.run_id}:{job.name}"))
+                    experiment_observer.emit(
+                        "package.runtime.job_terminal",
+                        operation_id=operation_id,
+                        correlations=correlations,
+                        outcome="succeeded" if state in {"completed", "completed-after-run"} else "failed",
+                        payload={"successful": state in {"completed", "completed-after-run"}},
+                        source_class="passive",
+                    )
+                except Exception:
+                    # Optional evidence collection never changes extension or run outcomes.
+                    continue
     finally:
         supervisor.shutdown()
 

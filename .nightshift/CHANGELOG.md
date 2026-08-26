@@ -11,6 +11,104 @@
 
 ---
 
+## 3.6.0 (2026-08-26)
+
+### Evidence-backed real-use experiments (SPEC-238 / SPEC-238-001)
+
+- Added revision-bound tracked experiment descriptors, closed private domain
+  events, immutable hash-chained capture, sealed results, deterministic analysis,
+  and rebuildable running-experiment projections.
+- Source specs can explicitly delegate only post-delivery Live Execution
+  hypotheses to completed instrumentation; delivery correctness, safety, privacy,
+  compatibility, NFR, and release proof remain non-delegable.
+- Added denominator-aware experiment metrics, fleet and board visibility, and
+  idempotent unsupported-result routing through the existing follow-up authority.
+- Registered `EXP-SPEC-231-01` and instrumented reusable-package lifecycle
+  boundaries without expanding SPEC-230's five-event public protocol.
+
+**Migration:** no automatic enrollment or collection. Projects that opt in retain
+private evidence outside Git and may delete/rebuild the sanitized WIP projection.
+
+## 3.5.0 (2026-08-26)
+
+### Reusable extension packages and scoped installation (SPEC-231)
+
+- Added deterministic, data-only `.nsext` packaging with a closed manifest,
+  complete digest inventory, schemas, documentation, tests, license, and provenance.
+- Added explicit project/user install, verify, update, rollback, remove, approval,
+  ledger, atomic staging, and sanitized discovery/status operations.
+- Capability-expanding updates now disable prior project approvals until the new
+  exact version is explicitly re-approved; catalogues remain informational only.
+- Canonical tests use local fixtures and the managed release contains packaging
+  machinery without any production extension package.
+
+**Migration:** install the complete 3.5.0 kit payload. Existing observational
+extensions continue to work. Reusable packages are not installed or enabled
+automatically.
+
+## 3.4.0 (2026-08-25)
+
+### Controlled verifier-remediation feedback (SPEC-235)
+
+- A current, uncontaminated independent failing verdict can now enter one
+  parent-owned, signed, size/privacy-bounded remediation packet.
+- One mutually exclusive resume-or-fresh remediation attempt must produce a new
+  head and pass a newly independent verifier before serial integration.
+- Invalid verdicts receive one replacement verifier, while replay, contradictory
+  delivery, exhausted budgets, and pre-verifier implementer blocks fail closed
+  through controlled terminal policy.
+- The durable reducer exposes a source-tagged recovery-admission seam for the
+  later SPEC-235-001 implementer-blocked diagnosis without implementing it here.
+
+**Migration:** install the complete 3.4.0 kit payload. No project configuration
+migration is required.
+
+## 3.3.3 (2026-08-25)
+
+### Installation-admission adversarial hardening (SPEC-229-005)
+
+- One combined privacy fixture now proves that absolute-path, Git-remote,
+  command, URL, environment, and subprocess-output canaries remain absent from
+  both console and JSON evidence.
+- Artifact creation now rejects traversal identifiers, symlinked output paths,
+  concurrent writers, interrupted/full writes, and hostile spec identifiers as
+  indeterminate instead of leaving a partial success signal.
+- Root and effective hook paths are bound to one coherent Git worktree, with
+  linked-worktree positives and foreign, nested, and escaped negatives.
+
+**Migration:** install the complete 3.3.3 kit payload. No project configuration
+migration is required.
+
+## 3.3.2 (2026-08-25)
+
+### Complete installation-admission contract coverage (SPEC-229-004)
+
+- Configuration admission now evaluates every documented severity row, including
+  domain-specific optional commands, selected-stack capabilities, safe defaults,
+  private-local paths, and controlled unknown I/O outcomes.
+- Managed payload validation assigns corrupt fingerprints to `KIT.MARKER` while
+  unsafe or empty file manifests remain exact `KIT.PAYLOAD` failures.
+- Coverage accounting denies zero or incomplete applicability, and supported
+  retained-prior releases are distinguished from divergent or unsupported ones.
+
+**Migration:** install the complete 3.3.2 kit payload. No project configuration
+migration is required.
+
+## 3.3.1 (2026-08-25)
+
+### Live installed managed-payload hook proof (SPEC-229-002)
+
+- A real temporary repository now exercises the released pre-commit hook through
+  ordinary `git commit` processes, proving both managed-payload rejection and
+  project-owned application/config/spec/knowledge/evidence/board-state commits.
+- Rejection guidance names the installed path, its canonical-relative
+  destination, and the required whole-kit release route.
+- Installed admission fixtures now deny removed, shadowed, and early-success
+  hook wiring specifically through `INT.HOOKS`.
+
+**Migration:** install the complete 3.3.1 kit payload. No project configuration
+migration is required.
+
 ## 3.3.0 (2026-08-24)
 
 ### Executable follow-up lineage processing (SPEC-236)

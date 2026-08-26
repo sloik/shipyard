@@ -1288,6 +1288,24 @@ checkpoint.save_checkpoint(
 
 ### 9.5. Completion Verification (Premature Victory Guard)
 
+#### Parent-controlled remediation after an independent failure (SPEC-235)
+
+When the independent parent verifier returns a valid `fail`, the worker does not
+receive verdict prose and the verifier never contacts it. The parent runs the
+managed `verifier_feedback.py` admission/reducer boundary. One signed,
+privacy-bounded packet may authorize either resuming the original implementer or
+one fresh remediation worker, never both. The resulting changed head requires a
+fresh independent verifier before acceptance or serial integration; the first
+verifier, implementer and remediator cannot fill that role.
+
+An invalid or contaminated initial verdict creates no feedback packet and may
+trigger one replacement verifier on the unchanged head. A second invalid
+verdict, an unchanged/failed remediation, dispatch unavailability, or a fresh
+valid failure resolves through parent-owned blocked policy without another
+automatic attempt. Normalized actor attempts remain distinct from lifecycle:
+`implementer_blocked` is recorded and terminally handled once but is not admitted
+for remediation until SPEC-235-001 extends the source-tagged seam.
+
 **Purpose:** Prevent declaring a spec "complete" without verifying each Acceptance Criterion individually. Tests may pass without covering all ACs.
 
 **Critical Anti-Rationalization Rules:**
@@ -1348,6 +1366,18 @@ checkpoint.save_checkpoint(
 - "This AC is probably fine" → PROVE it with evidence
 
 **Why:** Over many iterations, agents rationalize "tests pass, so we're done" without checking each AC individually. This step makes that rationalization impossible — each AC gets an explicit yes/no verdict with supporting evidence.
+
+#### 9.5c. Deferred real-use hypotheses (SPEC-238)
+
+Before closure, inspect `real_use_evidence`. `required_before_done` means every
+Live Execution item must be checked from direct evidence. `delegated_experiment`
+permits only unchecked stable `LE<n>` items, each mapped exactly once to a valid
+preregistered experiment, completed instrumentation spec, and immutable SPEC-236
+lineage. Confirm the deferred claim is post-delivery adoption, effectiveness, or
+reliability—not correctness, safety, privacy, compatibility, an NFR, or release
+proof. The derived experiment state may be registered/collecting at source closure;
+zero samples are explicitly not success. Later unsupported evidence goes through
+the normal follow-up processor and never reopens or edits historical status.
 
 #### 9.5b. Verification Report Artifact (SPEC-052)
 

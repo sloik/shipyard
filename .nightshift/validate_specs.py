@@ -30,6 +30,12 @@ except ImportError:
 import release_handoff
 
 try:
+    from experiment_protocol import ExperimentProtocolError, load_descriptor
+except ImportError:  # portable older project kit
+    ExperimentProtocolError = ValueError
+    load_descriptor = None
+
+try:
     from spec_frontmatter import VALID_SPEC_STATUSES
     from spec_frontmatter import (
         NFR_FAMILY_STATUSES,
@@ -428,6 +434,164 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
     return loaded
 
 
+def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str]]:
+    """Return checked and unchecked stable LE IDs from the exact section."""
+    checked: set[str] = set()
+    unchecked: set[str] = set()
+    in_section = False
+    for line in body_lines:
+        if line.startswith("## "):
+            in_section = line.strip() == "## Live Execution Checklist"
+            continue
+        if not in_section:
+            continue
+        match = re.match(r"^\s*- \[([ xX])\]\s+\*\*(LE[1-9][0-9]*):\*\*", line)
+        if match:
+            (checked if match.group(1).lower() == "x" else unchecked).add(match.group(2))
+    return checked, unchecked
+
+
+def validate_real_use_evidence(
+    fm: dict,
+    body_lines: list[str],
+    spec_file: Path,
+    all_specs: list[dict] | None,
+) -> list[str]:
+    """Validate explicit live-proof completion or prospective delegation."""
+    declaration = fm.get("real_use_evidence")
+    if declaration is None:
+        # Existing specs are intentionally grandfathered. Corpus migration is a
+        # coverage metric, not a retroactive lifecycle failure.
+        if fm.get("type") == "feature" and isinstance(fm.get("template_version"), int) and fm["template_version"] >= 8:
+            message = "template v8 feature requires real_use_evidence policy"
+            return [f"WARNING: {message}" if fm.get("status") == "draft" else message]
+        return []
+    errors: list[str] = []
+    if not isinstance(declaration, dict):
+        return ["real_use_evidence must be a mapping"]
+    allowed = {"policy", "deferred", "reason"}
+    unknown = sorted(set(declaration) - allowed)
+    if unknown:
+        errors.append("real_use_evidence has unknown fields: " + ", ".join(unknown))
+    policy = declaration.get("policy")
+    policies = {"required_before_done", "delegated_experiment", "not_applicable"}
+    if policy not in policies:
+        errors.append("real_use_evidence.policy must be required_before_done, delegated_experiment, or not_applicable")
+        return errors
+    checked, unchecked = _live_execution_items(body_lines)
+    status = str(fm.get("status", ""))
+    deferred = declaration.get("deferred", [])
+    if policy == "not_applicable":
+        reason = declaration.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append("real_use_evidence.not_applicable requires a non-empty reason")
+        if deferred:
+            errors.append("real_use_evidence.not_applicable may not defer live items")
+        touches = fm.get("touches")
+        if not (
+            isinstance(touches, list) and len(touches) == 1
+            and isinstance(touches[0], str)
+            and Path(touches[0]).suffix.lower() in {".css", ".md", ".txt"}
+        ):
+            errors.append("real_use_evidence.not_applicable is limited to one CSS/text file")
+        return errors
+    if declaration.get("reason") is not None:
+        errors.append("real_use_evidence.reason is allowed only for not_applicable")
+    if policy == "required_before_done":
+        if deferred:
+            errors.append("required_before_done may not contain deferred mappings")
+        if status == "done" and unchecked:
+            errors.append("status is 'done' but real_use_evidence requires completed live execution: " + ", ".join(sorted(unchecked)))
+        return errors
+    if not isinstance(deferred, list) or not deferred:
+        return errors + ["delegated_experiment requires a non-empty deferred list"]
+    mapped: list[str] = []
+    corpus = all_specs if all_specs is not None else _load_directory_frontmatters(spec_file.parent)
+    by_id = {str(candidate.get("id", "")): candidate for candidate in corpus}
+    expected_fields = {
+        "live_execution_id", "experiment_id", "descriptor", "hypothesis_ids",
+        "instrumentation_spec_id", "lineage_record", "lineage_hash",
+    }
+    for index, raw in enumerate(deferred):
+        prefix = f"real_use_evidence.deferred[{index}]"
+        if not isinstance(raw, dict):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+        if set(raw) != expected_fields:
+            missing = sorted(expected_fields - set(raw))
+            extra = sorted(set(raw) - expected_fields)
+            errors.append(f"{prefix} must use the closed mapping; missing={missing}, extra={extra}")
+            continue
+        live_id = raw["live_execution_id"]
+        if not isinstance(live_id, str) or not re.fullmatch(r"LE[1-9][0-9]*", live_id):
+            errors.append(f"{prefix}.live_execution_id must match LE<number>; R/AC/NFR delegation is forbidden")
+        else:
+            mapped.append(live_id)
+            if live_id in checked:
+                errors.append(f"{prefix} maps checked live item {live_id}")
+        reference = raw["lineage_record"]
+        if not isinstance(reference, str) or not reference or reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
+            errors.append(f"{prefix}.lineage_record must be a safe relative SPEC-236 reference")
+        lineage_hash = raw["lineage_hash"]
+        if not isinstance(lineage_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", lineage_hash):
+            errors.append(f"{prefix}.lineage_hash must be a lowercase SHA-256 digest")
+        elif isinstance(reference, str):
+            roots = [spec_file.parent, spec_file.parent.parent]
+            lineage_path = next((root / reference for root in roots if (root / reference).is_file()), None)
+            if lineage_path is not None:
+                import hashlib
+                if hashlib.sha256(lineage_path.read_bytes()).hexdigest() != lineage_hash:
+                    errors.append(f"{prefix}.lineage_hash disagrees with immutable record")
+        instrumentation_id = raw["instrumentation_spec_id"]
+        if instrumentation_id == fm.get("id"):
+            errors.append(f"{prefix}.instrumentation_spec_id may not self-reference")
+        instrumentation = by_id.get(str(instrumentation_id))
+        if instrumentation is None:
+            errors.append(f"{prefix}.instrumentation_spec_id does not resolve")
+        elif status == "done" and instrumentation.get("status") != "done":
+            errors.append(f"{prefix}.instrumentation_spec_id must be done before source closure")
+        if isinstance(instrumentation, dict) and fm.get("id") in (instrumentation.get("after") or []):
+            errors.append(f"{prefix}.instrumentation_spec_id creates a circular closure dependency")
+        descriptor_ref = raw["descriptor"]
+        descriptor = None
+        if not isinstance(descriptor_ref, str) or not descriptor_ref or descriptor_ref.startswith(("/", "~")) or ".." in Path(descriptor_ref).parts or "://" in descriptor_ref:
+            errors.append(f"{prefix}.descriptor must be a safe relative path")
+        elif load_descriptor is None:
+            errors.append(f"{prefix}.descriptor cannot be validated because experiment protocol is unavailable")
+        else:
+            roots = [spec_file.parent, spec_file.parent.parent]
+            path = next((root / descriptor_ref for root in roots if (root / descriptor_ref).is_file()), roots[-1] / descriptor_ref)
+            try:
+                descriptor = load_descriptor(path)
+            except (ExperimentProtocolError, OSError) as exc:
+                errors.append(f"{prefix}.descriptor is invalid: {exc}")
+        if descriptor is not None:
+            if descriptor.get("experiment_id") != raw["experiment_id"]:
+                errors.append(f"{prefix}.experiment_id disagrees with descriptor")
+            if descriptor.get("source_spec_id") != fm.get("id"):
+                errors.append(f"{prefix}.descriptor does not backlink to source spec")
+            hypotheses = {item["id"]: item for item in descriptor["hypotheses"]}
+            hypothesis_ids = raw["hypothesis_ids"]
+            if not isinstance(hypothesis_ids, list) or not hypothesis_ids:
+                errors.append(f"{prefix}.hypothesis_ids must be a non-empty list")
+            else:
+                for hypothesis_id in hypothesis_ids:
+                    hypothesis = hypotheses.get(hypothesis_id)
+                    if hypothesis is None:
+                        errors.append(f"{prefix}.hypothesis_ids contains unknown {hypothesis_id}")
+                    elif live_id not in hypothesis["live_execution_ids"]:
+                        errors.append(f"{prefix}.{live_id} is not mapped by hypothesis {hypothesis_id}")
+    duplicates = sorted({item for item in mapped if mapped.count(item) > 1})
+    if duplicates:
+        errors.append("delegated live execution IDs must map exactly once: " + ", ".join(duplicates))
+    if status == "done" and set(mapped) != unchecked:
+        errors.append(
+            "done delegated_experiment mappings must exactly cover unchecked live items; "
+            f"unchecked={sorted(unchecked)}, mapped={sorted(set(mapped))}"
+        )
+    return errors
+
+
 def fleet_uniqueness_findings(specs_dir: Path, spec_files: list[Path]) -> dict[str, list[str]]:
     """Return warning-only fleet ID collision findings for ``spec_files``.
 
@@ -613,6 +777,7 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                     f"{spec_file}:{_finding['line']}: status is 'done' but has an unchecked "
                     f"checkbox in {_finding['section']}: {_finding['text']}"
                 )
+    errors.extend(validate_real_use_evidence(fm, lines[end_idx + 1:], spec_file, all_specs))
     attachments = fm.get("attachments")
     if attachments is not None:
         if not isinstance(attachments, list):

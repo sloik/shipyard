@@ -312,6 +312,8 @@ class Admission:
     executable: Path
     executable_sha256: str
     network_endpoint: str | None = None
+    package_digest: str | None = None
+    plan_digest: str | None = None
 
     @property
     def namespace(self) -> str:

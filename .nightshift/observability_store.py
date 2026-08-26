@@ -24,7 +24,15 @@ from private_state import PrivateStateError, _merged_yaml
 
 PRIVATE_DROPBOX = "private-dropbox"
 SCHEMA_VERSION = 1
-ARTIFACT_KINDS = frozenset({"origin", "location", "provenance", "event", "run_manifest"})
+ARTIFACT_KINDS = frozenset({
+    "origin",
+    "location",
+    "provenance",
+    "event",
+    "run_manifest",
+    "experiment_event",
+    "experiment_result",
+})
 _URL = re.compile(r"(?:https?://|ssh://|git@)", re.I)
 _SECRET = re.compile(r"(?:api[_-]?key|secret|password|token|authorization|bearer)\\s*[:=]", re.I)
 
@@ -214,15 +222,18 @@ def _put(context: StoreContext, kind: str, object_id: str, payload: Mapping[str,
         quarantine = target.parent.parent.parent / "quarantine" / f"{object_id}-{record['content_hash']}.json"
         _atomic_create(quarantine, _canonical(record))
         raise ObservabilityStoreError("duplicate artifact ID has divergent content; quarantined")
-    if kind == "event":
+    if kind in {"event", "experiment_event"}:
         for existing_path in target.parent.glob("*.json") if target.parent.exists() else []:
             if existing_path.is_symlink() or not existing_path.is_file():
                 raise ObservabilityStoreError("event store contains invalid partial artifact")
             existing = json.loads(existing_path.read_text(encoding="utf-8"))
-            if existing.get("payload", {}).get("run_sequence") == safe.get("run_sequence"):
+            existing_payload = existing.get("payload", {})
+            existing_sequence = existing_payload.get("run_sequence")
+            candidate_sequence = safe.get("run_sequence")
+            if existing_sequence == candidate_sequence:
                 quarantine = target.parent.parent.parent / "quarantine" / f"{object_id}-{record['content_hash']}.json"
                 _atomic_create(quarantine, _canonical(record))
-                raise ObservabilityStoreError("run sequence conflicts with immutable event; quarantined")
+                raise ObservabilityStoreError("stream sequence conflicts with immutable event; quarantined")
     _atomic_create(target, _canonical(record))
     return {"status": "stored", "content_hash": record["content_hash"], "path_fingerprint": fingerprint(target)}
 
@@ -280,6 +291,52 @@ def write_or_outbox(
                 **dict(payload),
             },
         })
+
+
+def read_artifacts(context: StoreContext, *, kind: str) -> list[dict[str, Any]]:
+    """Read one allowlisted immutable-object collection in stable order.
+
+    Callers still validate their domain payloads. This boundary verifies the
+    private root, regular-file shape, object kind, and content address before
+    returning any record.
+    """
+    _validated_root(context.repo, context.root)
+    kind = _safe_component(kind)
+    if kind not in ARTIFACT_KINDS:
+        raise ObservabilityStoreError("artifact kind is not allowlisted")
+    folder = (
+        context.root
+        / "nightshift-observability"
+        / "projects"
+        / context.project_id
+        / "objects"
+        / kind
+    )
+    records: list[dict[str, Any]] = []
+    for path in sorted(folder.glob("*.json")) if folder.exists() else []:
+        if path.is_symlink() or not path.is_file():
+            raise ObservabilityStoreError("private object collection contains invalid entry")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ObservabilityStoreError("private object is unreadable or corrupt") from exc
+        if not isinstance(record, dict) or record.get("kind") != kind:
+            raise ObservabilityStoreError("private object kind is invalid")
+        hashable = {
+            key: value for key, value in record.items() if key != "content_hash"
+        }
+        payload = hashable.get("payload")
+        if isinstance(payload, dict):
+            hashable["payload"] = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"created_at", "observed_at"}
+            }
+        expected = hashlib.sha256(_canonical(hashable)).hexdigest()
+        if record.get("content_hash") != expected:
+            raise ObservabilityStoreError("private object content hash mismatch")
+        records.append(record)
+    return records
 
 
 def _relative_evidence_ref(value: str) -> str:

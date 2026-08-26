@@ -23,11 +23,14 @@ config-severity contract, and signal contract around them.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -52,7 +55,7 @@ import release  # noqa: E402
 import managed_payload_provenance as provenance  # noqa: E402
 
 SCHEMA_VERSION = "1.0.0"
-VALIDATOR_VERSION = "1.0.0"
+VALIDATOR_VERSION = "1.1.0"
 
 ADMISSION_ALLOW = "allow"
 ADMISSION_DENY = "deny"
@@ -96,6 +99,19 @@ REQUIRED_CONFIG_SECTIONS = (
     "project", "commands", "review", "runner", "git", "nightshift_state", "release_policy",
 )
 RUNNER_MODES = {"inline", "orchestrator"}
+SUPPORTED_SCHEMA_VERSIONS = {"3.0.0"}
+EFFECTIVE_DOMAINS = {"code", "research", "analysis"}
+REVIEW_MODES = {"self", "subagent", "hybrid"}
+REVIEW_PERSONAS = {"architect", "security", "performance", "domain", "quality", "user"}
+KNOWN_TOP_LEVEL_KEYS = {
+    "schema_version", "kit_version", "project", "release_policy", "nightshift_state",
+    "observability", "commands", "conventions", "review", "knowledge", "devkb", "metrics",
+    "circuit_breaker", "git", "runner", "comparison", "watcher", "checkpointing", "stacks",
+    "parallel_admission", "domain", "handlers", "outcomes", "outcome_routing",
+}
+SAFE_INVOCATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+SAFE_SPEC_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+ARTIFACT_LOCK_NAME = ".validate_install.lock"
 
 
 class DuplicateKeyLoader(yaml.SafeLoader):
@@ -274,9 +290,10 @@ def check_root_identity(ctx: ValidationContext) -> None:
     inv = Invariant("ROOT.IDENTITY", "root", required=True)
     try:
         install = ctx.install.resolve(strict=False)
+        requested_root = ctx.root
         code, toplevel = _git_run(install, "rev-parse", "--show-toplevel")
-        code2, common = _git_run(install, "rev-parse", "--git-common-dir")
-        if code != 0:
+        code2, _common = _git_run(install, "rev-parse", "--git-common-dir")
+        if code != 0 or code2 != 0:
             inv.set(
                 "fail",
                 observed="not-a-git-repository",
@@ -289,23 +306,34 @@ def check_root_identity(ctx: ValidationContext) -> None:
             ctx.add(inv)
             return
         toplevel_path = Path(toplevel).resolve()
-        # Traversal/symlink-escape check: the resolved install must not sit
-        # outside the resolved git toplevel via a symlink hop.
-        try:
-            install.relative_to(toplevel_path)
-            escapes = False
-        except ValueError:
-            # A linked worktree's install dir can legitimately live outside
-            # the main toplevel; that is valid when its common-dir resolves.
-            escapes = code2 != 0
-        if escapes:
+        direct_install_root = requested_root.name == ".nightshift"
+        requested_project = requested_root.parent if direct_install_root else requested_root
+        requested_symlink = (
+            requested_root != requested_root.resolve(strict=False)
+            or ctx.install != install
+        )
+        wrong_project = ctx.profile == "installed" and requested_project.resolve() != toplevel_path
+        wrong_install = (
+            ctx.profile == "installed"
+            and install != (toplevel_path / ".nightshift").resolve(strict=False)
+        )
+        if requested_symlink or wrong_project or wrong_install:
             inv.set(
                 "fail",
-                observed="path-escape",
-                expected="install-under-git-root-or-linked-worktree",
+                observed="foreign-nested-or-escaped-root",
+                expected="install-bound-to-requested-git-root",
                 owner="operator",
                 remediation_code="NS-REM-ROOT-ESCAPE",
-                detail="install root is not reachable from its Git identity",
+                detail="requested root and install do not share one direct Git worktree identity",
+            )
+        elif ctx.spec_id is not None and SAFE_SPEC_ID.fullmatch(ctx.spec_id) is None:
+            inv.set(
+                "unknown",
+                observed="invalid-spec-id",
+                expected="bounded-portable-spec-id",
+                owner="operator",
+                remediation_code="NS-REM-ROOT-ESCAPE",
+                detail="selected spec identifier contains unsupported characters or length",
             )
         else:
             inv.set(
@@ -394,8 +422,19 @@ def check_kit_marker_and_payload_installed(ctx: ValidationContext) -> None:
     marker_inv = Invariant("KIT.MARKER", "payload", required=True)
     payload_inv = Invariant("KIT.PAYLOAD", "payload", required=True)
     try:
-        retained = provenance.retained_manifest(ctx.install)
-    except provenance.MetadataError as exc:
+        marker = json.loads((ctx.install / release.MARKER).read_text(encoding="utf-8"))
+        retained = marker.get("release_manifest") if isinstance(marker, dict) else None
+        if not isinstance(retained, dict):
+            raise provenance.MetadataError("release marker has no retained per-file release manifest")
+        if retained.get("fingerprint") != provenance._manifest_fingerprint(retained):
+            raise provenance.MetadataError("retained release manifest fingerprint is missing or corrupt")
+        if (
+            marker.get("fingerprint") != retained.get("fingerprint")
+            or marker.get("kit_version") != retained.get("kit_version")
+            or marker.get("schema_version") != retained.get("schema_version")
+        ):
+            raise provenance.MetadataError("release marker and retained manifest disagree")
+    except (OSError, json.JSONDecodeError, provenance.MetadataError) as exc:
         marker_inv.set(
             "fail", observed="marker-invalid", expected="fingerprint-bound-retained-manifest",
             owner="operator", remediation_code="NS-REM-MARKER-MISSING", detail=str(exc)[:300],
@@ -405,11 +444,52 @@ def check_kit_marker_and_payload_installed(ctx: ValidationContext) -> None:
         ctx.add(payload_inv)
         return
 
-    marker_inv.set("pass", observed="agree", expected="agree", owner="validator", remediation_code="NS-REM-NONE")
+    try:
+        current_version = tuple(int(part) for part in release.kit_version(CANONICAL_DIR).split("."))
+        retained_version = tuple(int(part) for part in str(retained.get("kit_version", "")).split("."))
+    except (OSError, ValueError):
+        current_version = retained_version = ()
+    supported = (
+        retained.get("schema_version") in SUPPORTED_SCHEMA_VERSIONS
+        and len(retained_version) == 3
+        and len(current_version) == 3
+        and retained_version <= current_version
+    )
+    if not supported:
+        marker_inv.set(
+            "fail", observed="unsupported-release", expected="supported-retained-release",
+            owner="operator", remediation_code="NS-REM-MARKER-VERSION",
+            detail="retained release is newer than this validator or uses an unsupported schema",
+        )
+    else:
+        current_fingerprint = None
+        try:
+            names = _canonical_names()
+            _ok, _errors, current = release.validate_manifest(CANONICAL_DIR, names)
+            current_fingerprint = current.get("fingerprint") if current else None
+        except (ConfigParseError, OSError, ValueError):
+            pass
+        classification = (
+            provenance.EXACT_CURRENT
+            if current_fingerprint == retained.get("fingerprint")
+            else provenance.RETAINED_PRIOR_RELEASE
+        )
+        marker_inv.set(
+            "pass", observed=classification, expected="supported-release",
+            owner="validator", remediation_code="NS-REM-NONE",
+        )
     ctx.add(marker_inv)
 
-    ok, errors = release.verify_install(ctx.install, retained)
-    declared = len(retained.get("files", []))
+    errors: list[str] = []
+    try:
+        declared = len(provenance.managed_payload_paths(retained))
+    except provenance.MetadataError as exc:
+        declared = 0
+        errors.append(str(exc))
+    if not errors:
+        ok, errors = release.verify_install(ctx.install, retained)
+    else:
+        ok = False
     if ok and declared > 0:
         payload_inv.set(
             "pass", observed=f"{declared}/{declared}", expected=f"{declared}/{declared}",
@@ -461,7 +541,7 @@ def check_kit_closure(ctx: ValidationContext) -> None:
         names = _canonical_names() if ctx.profile == "canonical" else [
             entry["path"] for entry in provenance.retained_manifest(ctx.install).get("files", [])
         ]
-        gaps = release.managed_import_gaps(ctx.install, names) if ctx.profile == "canonical" else []
+        gaps = release.managed_import_gaps(ctx.install, names)
     except (ConfigParseError, provenance.MetadataError, OSError):
         gaps = []
 
@@ -494,6 +574,30 @@ class ConfigFinding:
     action: str
 
 
+def classify_config_findings(findings: list[ConfigFinding]) -> tuple[str, str, int]:
+    """Return the config contract's highest result, admission, and exit code."""
+    statuses = {finding.status for finding in findings}
+    if "error" in statuses:
+        return "error", ADMISSION_DENY, 1
+    if "unknown" in statuses:
+        return "unknown", ADMISSION_INDETERMINATE, 2
+    if "warning" in statuses:
+        return "warning", ADMISSION_ALLOW, 0
+    if statuses and statuses <= {"not_applicable"}:
+        return "not_applicable", ADMISSION_ALLOW, 0
+    return "pass", ADMISSION_ALLOW, 0
+
+
+def _parallel_limit_is_fail_closed(config: dict[str, Any]) -> bool:
+    """Prove the runtime disables parallel admission for an invalid limit."""
+    try:
+        import parallel_executor
+
+        return parallel_executor.parallel_worker_limit(config) is None
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
+
+
 def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[str, Any] | None, str | None]:
     """Return (findings, merged-config-or-None, config-sha256-or-None)."""
     findings: list[ConfigFinding] = []
@@ -506,24 +610,31 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
     try:
         documents = _load_config_documents(ctx.config_path)
         config = _merge_documents(documents)
+    except OSError as exc:
+        findings.append(ConfigFinding("<root>", "unknown", "NS-CFG-IO", "operator",
+                                      f"configuration I/O failed: {exc.__class__.__name__}"))
+        return findings, None, config_sha
     except ConfigParseError as exc:
         findings.append(ConfigFinding("<root>", "error", "NS-CFG-PARSE", "operator", str(exc)))
         return findings, None, config_sha
 
     schema_version = config.get("schema_version")
-    if not isinstance(schema_version, str) or not re.match(r"^\d+\.\d+\.\d+$", schema_version or ""):
+    if (
+        not isinstance(schema_version, str)
+        or not re.match(r"^\d+\.\d+\.\d+$", schema_version or "")
+        or schema_version not in SUPPORTED_SCHEMA_VERSIONS
+    ):
         findings.append(ConfigFinding("schema_version", "error", "NS-CFG-SCHEMA-VERSION", "operator",
                                        "set schema_version to a supported x.y.z value"))
     kit_version_cfg = config.get("kit_version")
-    try:
-        expected_kit_version = release.kit_version(CANONICAL_DIR)
-    except (OSError, ValueError):
-        expected_kit_version = None
-    if ctx.profile == "installed" and expected_kit_version and kit_version_cfg not in (None, expected_kit_version):
-        # Installed config need not match the *canonical checkout's* kit_version
-        # (that is the retained release marker's job, checked by KIT.MARKER);
-        # this only flags a structurally malformed kit_version field.
-        pass
+    if ctx.profile == "installed":
+        try:
+            selected_kit_version = provenance.retained_manifest(ctx.config_path.parent).get("kit_version")
+        except (provenance.MetadataError, OSError):
+            selected_kit_version = None
+        if selected_kit_version and kit_version_cfg != selected_kit_version:
+            findings.append(ConfigFinding("kit_version", "error", "NS-CFG-KIT-VERSION", "operator",
+                                           "config kit_version must match the selected installed release"))
     if kit_version_cfg is not None and not isinstance(kit_version_cfg, str):
         findings.append(ConfigFinding("kit_version", "error", "NS-CFG-KIT-VERSION", "operator",
                                        "kit_version must be a string"))
@@ -545,7 +656,9 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
             findings.append(ConfigFinding("project.name", "error", "NS-CFG-IDENTITY-PLACEHOLDER", "operator",
                                            "set project.name to this project's real name"))
         language = project.get("language")
-        if not language or (isinstance(language, list) and not language):
+        if not isinstance(language, list) or not language or not all(
+            isinstance(item, str) and item.strip() for item in language
+        ):
             findings.append(ConfigFinding("project.language", "error", "NS-CFG-IDENTITY-LANGUAGE", "operator",
                                            "set project.language to a non-empty list"))
     else:
@@ -555,7 +668,11 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
     commands = config.get("commands") if isinstance(config.get("commands"), dict) else {}
     stacks = config.get("stacks") if isinstance(config.get("stacks"), dict) else {}
     domain = config.get("domain") if isinstance(config.get("domain"), dict) else {}
-    effective_domain = domain.get("effective") or domain.get("type") or "code"
+    runner = config.get("runner") if isinstance(config.get("runner"), dict) else {}
+    effective_domain = domain.get("effective") or domain.get("type") or runner.get("domain") or "code"
+    if effective_domain not in EFFECTIVE_DOMAINS:
+        findings.append(ConfigFinding("runner.domain", "error", "NS-CFG-DOMAIN", "operator",
+                                       "set the effective domain to code, research, or analysis"))
 
     if ctx.profile == "installed" and effective_domain == "code":
         flat_test = str(commands.get("test", "") or "").strip()
@@ -585,8 +702,12 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
         if any(marker in flat_test_l for marker in ("_eval-project", "eval-project")):
             findings.append(ConfigFinding("commands.test", "error", "NS-CFG-EVAL-PROJECT-RESIDUE", "operator",
                                            "point commands.test at this project, not the kit's eval fixture"))
+    elif ctx.profile == "installed" and effective_domain in {"research", "analysis"}:
+        for key in ("build", "test", "lint", "type_check", "format", "format_fix"):
+            if not str(commands.get(key, "") or "").strip():
+                findings.append(ConfigFinding(f"commands.{key}", "not_applicable", "NS-CFG-OK",
+                                               "validator", ""))
 
-    runner = config.get("runner") if isinstance(config.get("runner"), dict) else {}
     mode = runner.get("mode")
     if mode is not None and mode not in RUNNER_MODES:
         findings.append(ConfigFinding("runner.mode", "error", "NS-CFG-RUNNER-MODE", "operator",
@@ -597,26 +718,111 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
                 findings.append(ConfigFinding(f"runner.{field_name}", "error", "NS-CFG-RUNNER-ORCHESTRATOR-FIELD",
                                                "operator", f"set runner.{field_name} for orchestrator mode"))
 
+    review = config.get("review") if isinstance(config.get("review"), dict) else {}
+    review_mode = review.get("mode", "self")
+    if review_mode not in REVIEW_MODES:
+        findings.append(ConfigFinding("review.mode", "error", "NS-CFG-REVIEW-MODE", "operator",
+                                       "set review.mode to self, subagent, or hybrid"))
+    personas = review.get("enabled", list(REVIEW_PERSONAS))
+    if not isinstance(personas, list) or any(item not in REVIEW_PERSONAS for item in personas):
+        findings.append(ConfigFinding("review.enabled", "error", "NS-CFG-REVIEW-PERSONAS", "operator",
+                                       "use only documented review personas"))
+
+    state = config.get("nightshift_state") if isinstance(config.get("nightshift_state"), dict) else {}
+    state_policy = state.get("policy", "commit-backed")
+    if state_policy not in {"commit-backed", "private-local"}:
+        findings.append(ConfigFinding("nightshift_state.policy", "error", "NS-CFG-STATE-POLICY",
+                                       "operator", "use commit-backed or private-local"))
+    private_paths = state.get("private_paths", [".nightshift"])
+    if state_policy == "private-local":
+        if not isinstance(private_paths, list) or not private_paths:
+            findings.append(ConfigFinding("nightshift_state.private_paths", "error", "NS-CFG-PRIVATE-PATH",
+                                           "operator", "declare contained ignored private paths"))
+        else:
+            for raw_path in private_paths:
+                candidate = Path(raw_path) if isinstance(raw_path, str) else Path("..")
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    findings.append(ConfigFinding("nightshift_state.private_paths", "error", "NS-CFG-PRIVATE-PATH",
+                                                   "operator", "private paths must stay repository-relative"))
+                    break
+                repo = ctx.config_path.parent
+                ignored_code, _ = _git_run(repo, "check-ignore", "-q", "--", candidate.as_posix())
+                tracked_code, _ = _git_run(repo, "ls-files", "--error-unmatch", "--", candidate.as_posix())
+                if ignored_code != 0 or tracked_code == 0:
+                    findings.append(ConfigFinding("nightshift_state.private_paths", "error",
+                                                   "NS-CFG-PRIVATE-PATH", "operator",
+                                                   "private-local paths must be ignored and untracked"))
+                    break
+    else:
+        findings.append(ConfigFinding("nightshift_state.private_paths", "not_applicable", "NS-CFG-OK",
+                                       "validator", ""))
+
+    release_policy = config.get("release_policy") if isinstance(config.get("release_policy"), dict) else {}
+    if release_policy.get("committed_kit", "allow") not in {"allow", "opt_out"}:
+        findings.append(ConfigFinding("release_policy.committed_kit", "error", "NS-CFG-RELEASE-POLICY",
+                                       "operator", "use allow or opt_out"))
+
+    main_branch = (config.get("git") or {}).get("main_branch") if isinstance(config.get("git"), dict) else None
+    if not isinstance(main_branch, str) or not main_branch.strip():
+        findings.append(ConfigFinding("git.main_branch", "error", "NS-CFG-MAIN-BRANCH", "operator",
+                                       "set a non-empty main branch"))
+
     circuit_breaker = config.get("circuit_breaker") if isinstance(config.get("circuit_breaker"), dict) else {}
     parallel_admission = config.get("parallel_admission") if isinstance(config.get("parallel_admission"), dict) else {}
-    limit = parallel_admission.get("limit") if isinstance(parallel_admission, dict) else None
-    if parallel_admission and (limit is None or not isinstance(limit, int) or limit <= 0):
-        # NFR-001 fail-closed: missing/invalid limit is only a WARNING when the
-        # consuming path demonstrably coerces to sequential (limit=1). This
-        # validator cannot execute the coercing code path, so it records the
-        # coercion as unproven and treats it per the stricter documented
-        # default: warn (effective limit 1) rather than block, matching the
-        # contract's "record effective limit 1" instruction — never ERROR
-        # solely for an absent/zero value that config-side defaults already
-        # coerce to sequential.
-        findings.append(ConfigFinding("parallel_admission.limit", "warning", "NS-CFG-PARALLEL-LIMIT",
-                                       "operator", "parallel limit missing/invalid; coerced to sequential (1)"))
-    del circuit_breaker
+    limit = parallel_admission.get("worker_limit", 1)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        if _parallel_limit_is_fail_closed(config):
+            findings.append(ConfigFinding("parallel_admission.limit", "warning", "NS-CFG-PARALLEL-LIMIT",
+                                           "operator", "parallel limit invalid; execution is fail-closed sequential"))
+        else:
+            findings.append(ConfigFinding("parallel_admission.limit", "error", "NS-CFG-PARALLEL-LIMIT",
+                                           "operator", "invalid parallel limit lacks a proven sequential fallback"))
+    for key, value in circuit_breaker.items():
+        if key.startswith("max_") or key.endswith("_min") or key.endswith("_multiplier"):
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                findings.append(ConfigFinding(f"circuit_breaker.{key}", "error", "NS-CFG-CIRCUIT-RANGE",
+                                               "operator", "set a positive numeric threshold"))
+
+    for stack_name, stack in stacks.items():
+        if not isinstance(stack, dict):
+            findings.append(ConfigFinding(f"stacks.{stack_name}", "error", "NS-CFG-STACK", "operator",
+                                           "stack definitions must be mappings"))
+            continue
+        requires = stack.get("env", {}).get("requires", []) if isinstance(stack.get("env"), dict) else []
+        if not isinstance(requires, list) or any(not isinstance(item, str) or not item.strip() for item in requires):
+            findings.append(ConfigFinding(f"stacks.{stack_name}.env.requires", "error", "NS-CFG-ENV-REQUIRES",
+                                           "operator", "env.requires must contain binary names"))
+        else:
+            for capability in requires:
+                if shutil.which(capability) is None:
+                    findings.append(ConfigFinding(f"stacks.{stack_name}.env.requires.{capability}", "error",
+                                                   "NS-CFG-ENV-MISSING", "operator",
+                                                   "install the required selected-profile capability"))
+
+    watcher = config.get("watcher") if isinstance(config.get("watcher"), dict) else {}
+    if watcher.get("enabled", False):
+        if watcher.get("available", True) is False:
+            findings.append(ConfigFinding("watcher.available", "warning", "NS-CFG-OPTIONAL-UNAVAILABLE",
+                                           "project-maintainer", "restore the optional watcher when useful"))
+    else:
+        findings.append(ConfigFinding("watcher.enabled", "not_applicable", "NS-CFG-OK", "validator", ""))
+
+    metrics = config.get("metrics") if isinstance(config.get("metrics"), dict) else {}
+    if metrics.get("enabled", True) is False:
+        findings.append(ConfigFinding("metrics.enabled", "not_applicable", "NS-CFG-OK", "validator", ""))
+
+    if "worktrees" not in (config.get("git") or {}):
+        findings.append(ConfigFinding("git.worktrees", "pass", "NS-CFG-DEFAULT", "validator",
+                                       "effective default is auto"))
 
     devkb = config.get("devkb") if isinstance(config.get("devkb"), dict) else {}
     devkb_path = devkb.get("path")
     if isinstance(devkb_path, str) and devkb_path:
         pass  # explicitly declared external field: absolute is allowed, never echoed
+
+    for key in sorted(set(config) - KNOWN_TOP_LEVEL_KEYS):
+        findings.append(ConfigFinding(key, "warning", "NS-CFG-UNKNOWN-KEY", "project-maintainer",
+                                       "review the unrecognized configuration key"))
 
     return findings, config, config_sha
 
@@ -650,9 +856,12 @@ def check_config_invariants(ctx: ValidationContext, findings: list[ConfigFinding
 
     emit("CFG.PARSE_VERSION", ("<root>", "schema_version", "kit_version"))
     emit("CFG.IDENTITY", ("project",))
-    emit("CFG.COMMAND_DOMAIN", ("commands",))
-    emit("CFG.RUNNER_POLICY", ("runner", "parallel_admission", "circuit_breaker"))
-    emit("CFG.PATH_PRIVACY", ("path",))
+    emit("CFG.COMMAND_DOMAIN", ("commands", "stacks"))
+    emit("CFG.RUNNER_POLICY", (
+        "runner", "parallel_admission", "circuit_breaker", "review", "git",
+        "nightshift_state", "release_policy", "watcher", "metrics",
+    ))
+    emit("CFG.PATH_PRIVACY", ("path", "observability"))
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +908,41 @@ def check_int_hooks(ctx: ValidationContext) -> None:
     if hooks_dir is None:
         inv.set("fail", observed="hooks-dir-unresolved", expected="pre-commit-wired",
                  owner="operator", remediation_code="NS-REM-HOOK-MISSING")
+        ctx.add(inv)
+        return
+    code, toplevel = _git_run(ctx.install, "rev-parse", "--show-toplevel")
+    if code != 0:
+        inv.set("fail", observed="git-unresolved", expected="hooks-under-git-worktree",
+                owner="operator", remediation_code="NS-REM-GIT-UNRESOLVED")
+        ctx.add(inv)
+        return
+    try:
+        hooks_resolved = hooks_dir.resolve(strict=False)
+        toplevel_resolved = Path(toplevel).resolve(strict=True)
+        hooks_resolved.relative_to(toplevel_resolved)
+    except (OSError, ValueError):
+        inv.set(
+            "fail", observed="foreign-or-escaped", expected="hooks-under-git-worktree",
+            owner="operator", remediation_code="NS-REM-HOOK-SHADOWED",
+            detail="effective core.hooksPath resolves outside the selected Git worktree",
+        )
+        ctx.add(inv)
+        return
+    ancestor = hooks_resolved
+    nested_boundary = False
+    while ancestor != toplevel_resolved:
+        if os.path.lexists(ancestor / ".git"):
+            nested_boundary = True
+            break
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+    if nested_boundary:
+        inv.set(
+            "fail", observed="nested-git-boundary", expected="hooks-owned-by-selected-worktree",
+            owner="operator", remediation_code="NS-REM-HOOK-SHADOWED",
+            detail="effective core.hooksPath crosses a nested Git repository boundary",
+        )
         ctx.add(inv)
         return
     hook = hooks_dir / "pre-commit"
@@ -781,7 +1025,7 @@ def check_int_entrypoints(ctx: ValidationContext) -> None:
 # ---------------------------------------------------------------------------
 
 def run_validation(root: Path, profile: str, kind: str, spec_id: str | None) -> tuple[ValidationContext, list[ConfigFinding], dict[str, Any] | None, str | None]:
-    root = root.resolve()
+    root = root.absolute()
     install = root / ".nightshift" if profile == "installed" and (root / ".nightshift").is_dir() else root
     config_path = install / "config.yaml"
     ctx = ValidationContext(root=root, install=install, profile=profile, kind=kind, spec_id=spec_id, config_path=config_path)
@@ -809,7 +1053,16 @@ def _atomic_write_artifact(install: Path, payload: dict[str, Any]) -> tuple[Path
     out_dir = install / "reports" / "_wip" / "install-validation"
     try:
         real_root = install.resolve()
+        if SAFE_INVOCATION_ID.fullmatch(str(payload.get("invocation_id", ""))) is None:
+            raise ValueError("invalid generated invocation id")
+        for candidate in (install / "reports", install / "reports" / "_wip", out_dir):
+            if candidate.is_symlink():
+                raise ValueError("symlinked artifact directory")
         out_dir.mkdir(parents=True, exist_ok=True)
+        if any(candidate.is_symlink() for candidate in (
+            install / "reports", install / "reports" / "_wip", out_dir,
+        )):
+            raise ValueError("symlinked artifact directory")
         resolved_out_dir = out_dir.resolve()
         # Path/symlink-escape guard: resolved output dir must remain under
         # the resolved install root.
@@ -820,10 +1073,20 @@ def _atomic_write_artifact(install: Path, payload: dict[str, Any]) -> tuple[Path
         return None, None, inv
 
     invocation_id = payload["invocation_id"]
-    safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", invocation_id) + ".json"
-    dest = out_dir / safe_name
+    dest = out_dir / f"{invocation_id}.json"
     body = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    lock_handle = None
     try:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise OSError(errno.ENOTSUP, "no no-follow file-open support")
+        lock_fd = os.open(
+            out_dir / ARTIFACT_LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        lock_handle = os.fdopen(lock_fd, "a+")
+        os.fchmod(lock_handle.fileno(), stat.S_IRUSR | stat.S_IWUSR)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fd, tmp_path = tempfile.mkstemp(prefix=".validate_install-", suffix=".tmp", dir=str(out_dir))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -842,6 +1105,12 @@ def _atomic_write_artifact(install: Path, payload: dict[str, Any]) -> tuple[Path
         inv.set("fail", observed=str(exc.__class__.__name__), expected="atomic-write-success",
                 owner="validator", remediation_code="NS-REM-ARTIFACT-WRITE")
         return None, None, inv
+    finally:
+        if lock_handle is not None:
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
 
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     inv.set("pass", observed="written", expected="written", owner="validator", remediation_code="NS-REM-NONE",
@@ -869,9 +1138,9 @@ def build_artifact(
     required_unknown = any(i.required and i.status == "unknown" for i in invariants)
     coverage_gap = not (checked == applicable and applicable > 0)
 
-    if required_fail or coverage_gap and required_unknown:
+    if required_fail or coverage_gap:
         admission, exit_code = ADMISSION_DENY, 1
-    elif required_unknown or coverage_gap:
+    elif required_unknown:
         admission, exit_code = ADMISSION_INDETERMINATE, 2
     else:
         admission, exit_code = ADMISSION_ALLOW, 0
@@ -901,7 +1170,11 @@ def build_artifact(
         "release": {"kit_version": expected_kit_version},
         "bindings": {
             "config_sha256": config_sha,
-            "spec_id": ctx.spec_id,
+            "spec_id_sha256": (
+                hashlib.sha256(ctx.spec_id.encode("utf-8")).hexdigest()
+                if ctx.spec_id is not None
+                else None
+            ),
         },
         "coverage": {
             "declared": declared, "applicable": applicable, "checked": checked,

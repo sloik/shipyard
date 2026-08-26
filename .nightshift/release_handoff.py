@@ -20,7 +20,7 @@ DELIVERY_RECEIPT_SCHEMA_VERSION = 1
 DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
 RELEASE_HANDOFF_DECLARATION_POLICY_DATE = date(2026, 8, 8)
-CURRENT_SPEC_TEMPLATE_VERSION = 7
+CURRENT_SPEC_TEMPLATE_VERSION = 8
 MISSING_RELEASE_HANDOFF_DECLARATION_ERROR = (
     "release_handoff declaration required: choose impact: required "
     "or impact: exempt with a reason"

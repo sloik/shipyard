@@ -8,7 +8,7 @@
 # This file is a valid YAML document that can be loaded and parsed. It serves
 # as both documentation and a complete example of a multi-stack project config.
 #
-# Kit Version: 2.67.3 (2026-08-09)
+# Kit Version: 3.6.0 (2026-08-26)
 # Schema Version: 3.0.0 (multi-stack support)
 #
 # Backward compatibility:
@@ -48,6 +48,7 @@ schema_version: "3.0.0"
 # Used by the loop and tooling to enable/disable features and validate schema.
 #
 # Version history:
+#   3.6.0: Evidence-backed real-use experiments and package lifecycle instrumentation (SPEC-238).
   # 2.67.3: Canonical payload copy, then separate project config migration.
   # 2.67.2: Explicit operator-authorized legacy managed-payload adoption.
   # 2.67.1: Pre-copy release ownership and deterministic suite recovery (SPEC-207).
@@ -92,7 +93,7 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.3.0"
+kit_version: "3.6.0"
 
 ---
 
@@ -135,6 +136,15 @@ terminal_outcomes:
     causal_confidence: "causal_confidence"
     human_action_needed: "human_action_needed"
     evidence_refs: "evidence_refs"
+  # Optional role-aware SPEC-235 mappings use the same selected adapter/path.
+  # Omitted names retain their canonical spelling. Projects may map any of:
+  # schema_version, spec_id, run_id, role, agent_outcome, reason, head_digest,
+  # artifact_refs, idempotency_key, attempt_ordinal, duration_s,
+  # terminal_outcome, human_action_required, and next_action.
+  agent_fields:
+    role: "role"
+    agent_outcome: "agent_outcome"
+    idempotency_key: "idempotency_key"
   required_fields: [spec_id, terminal_outcome, agent_response, causal_confidence, human_action_needed, evidence_refs]
 
 ---
@@ -152,6 +162,10 @@ terminal_outcomes:
 # For a registered public project, first run `observability_enroll.py audit`.
 # Migration copies hash-verified private artifacts before an explicitly approved
 # future-index cleanup.  It never rewrites Git history; remediation is separate.
+# Prospective experiment descriptors are tracked project data under experiments/.
+# Their events/results use this same opt-in private sink. No raw event, path, user
+# identity, prompt, command, URL, or credential belongs in config or Git. The
+# derived reports/_wip/experiment-status.json is replaceable and ignored.
 
 ---
 
@@ -1353,6 +1367,21 @@ board_column_defaults:
 # stricter one-process/no-fork host policy. Public config must not contain
 # commands, paths, URLs, credentials, prompts, output, or environment values.
 extensions: []
+
+# Reusable extension packages (SPEC-231) are installed only through an explicit
+# project or user scope. Package lifecycle operations are always dry-run first;
+# the returned sealed plan names exact files, old/new versions, capability/event
+# changes, and actions. Apply refuses a changed package or installation ledger.
+#
+# Installation never enables an extension. Runtime enablement above still names
+# the exact `id` and `source`. A version update that adds an event or capability
+# disables every existing project approval until that project explicitly approves
+# the new exact version and subset. There is no search-order precedence.
+#
+# Package/catalogue metadata is data-only: inspection and installation do not
+# import or execute entry points. Catalogues may advertise packages, but cannot
+# install, update, enable, trust, or grant them. Remote trust/signing, dependency
+# resolution, marketplaces, and automatic upgrades are not part of this schema.
 
 # This file is the canonical schema reference for config.yaml.
 # Update it as the config schema evolves.

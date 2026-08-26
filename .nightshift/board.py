@@ -662,6 +662,8 @@ def _performance_route_key(path: str, status_code: int) -> str | None:
         route = "specs"
     elif path == "/api/graph":
         route = "graph"
+    elif path == "/api/experiments":
+        route = "experiments"
     elif path == "/api/refresh":
         route = "refresh"
     elif re.fullmatch(r"/api/spec/[^/]+", path):
@@ -1207,6 +1209,29 @@ async def get_loop_observability() -> dict:
     if compute_loop_observability is None:
         raise HTTPException(status_code=503, detail="loop observability unavailable")
     return compute_loop_observability(history_db_dir)
+
+
+@app.get("/api/experiments")
+async def get_experiments() -> dict:
+    """Return only the sanitized, rebuildable experiment projection."""
+    if reports_dir is None:
+        return {"schema_version": 1, "experiments": []}
+    path = reports_dir / "_wip" / "experiment-status.json"
+    if not path.is_file() or path.is_symlink():
+        return {"schema_version": 1, "experiments": []}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=503, detail="experiment projection unavailable")
+    rows = value.get("experiments") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(rows, list):
+        raise HTTPException(status_code=503, detail="experiment projection invalid")
+    try:
+        from fleet_metrics import experiment_projection_rows
+        projected = experiment_projection_rows(value)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="experiment projection invalid") from exc
+    return {"schema_version": 1, "experiments": projected}
 
 
 @app.get("/api/spec/{spec_id}")

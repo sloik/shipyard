@@ -432,11 +432,18 @@ def format_rows(rows: Sequence[PathProvenance]) -> str:
 
 def format_guidance(rows: Sequence[PathProvenance] = ()) -> str:
     detail = f"\n{format_rows(rows)}" if rows else ""
+    path_remedies = "".join(
+        "\nPreserve the installed edit at "
+        f".nightshift/{row.path}; implement canonical/{row.path} under a canonical "
+        "Nightshift spec; then publish the complete managed payload through the "
+        "whole-kit release flow."
+        for row in rows
+    )
     return (
         "Managed Nightshift payload divergence detected. Preserve every project delta in place, "
         "create or update a canonical Nightshift spec, and implement and release it through the "
         "canonical flow. Review each unresolved path individually; no provenance was inferred "
-        f"from timestamps, similarity, or aggregate fingerprints.{detail}"
+        f"from timestamps, similarity, or aggregate fingerprints.{detail}{path_remedies}"
     )
 
 

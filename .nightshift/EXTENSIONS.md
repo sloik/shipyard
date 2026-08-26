@@ -45,6 +45,46 @@ observational. Missing arguments, an unavailable interpreter, or an unexpected
 helper exit produce only a controlled private
 `.extension-private/checkpoint-diagnostics.jsonl` record.
 
+## Reusable package lifecycle
+
+`extension_package.py` defines the portable `.nsext` archive. Its canonical ZIP
+bytes are deterministic and contain the SPEC-230 manifest, payload, input/output
+schemas, documentation, tests, license, provenance, and a complete per-file
+SHA-256 inventory. Inspection is data-only: it neither extracts nor imports the
+entry point, and rejects missing, extra, changed, traversing, symlinked, or
+executable archive members.
+
+`ExtensionPackageManager` owns explicit `project` and `user` installation scopes.
+Every install, verify, update, rollback, and remove starts as a sealed dry-run plan.
+Apply rechecks both package bytes and ledger state, stages a complete verified tree,
+then atomically changes the installation ledger. The ledger is activation authority,
+so an interruption cannot expose mixed package bytes. Duplicate IDs and omitted or
+ambiguous scope never resolve through search order.
+
+Updates require a compatible protocol range, strictly increasing version, integrity
+match, and a declared migration from the active version. Added events or capabilities
+disable existing project approvals until each consumer explicitly re-approves the new
+exact version. Deterministic list, inspect, and status views expose only portable IDs,
+versions, scopes, compatibility, declared authority, consumers, and controlled health.
+
+Catalogue documents are informational data. Their optional fields must be declared by
+the catalogue schema; reading or removing an entry has no installation, enablement,
+grant, trust, or runtime effect. Production extension packages remain outside the
+Nightshift kit and require their own specs, provenance, tests, dependencies, and
+release cadence.
+
+When a project explicitly enrolls private observability and supplies a validated
+experiment observer, package administration emits closed private observations at
+inspection, plan, apply/rejection/interruption, verification, approval, rollback,
+removal, and preservation boundaries. Installed-package admission/refusal and
+terminal job state are correlated through package, plan, approval, admission, run,
+and job digests. These observations belong to the SPEC-238 private experiment
+protocol; they do not add a sixth event to SPEC-230, grant execution authority, or
+make package success depend on telemetry. A missing capture is an explicit
+instrumentation gap. The controlled `interrupt_after_stage` seam is accepted only
+by the direct administrative API against an operator-selected isolated root; it is
+not configurable through ordinary project YAML.
+
 Payloads contain controlled enums, semantic versions, SHA-256 digests,
 timestamps, stable IDs, and `{name, sha256, size}` relative artifact references.
 Raw prompts, output, logs, commands, environment, credentials, URLs, absolute

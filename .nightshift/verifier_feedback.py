@@ -1,0 +1,1498 @@
+"""Controlled verifier-remediation feedback for a Nightshift kickoff parent.
+
+The module is deliberately provider neutral.  It validates a failing independent
+verdict, creates one immutable parent-signed packet, and reduces normalized
+events into durable keyed effects.  Runtime adapters execute effects; they do
+not decide lifecycle, eligibility, verification, or integration policy.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, replace
+from enum import Enum
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
+
+from verification_report import validate_verifier_verdict_dict
+
+PACKET_SCHEMA_VERSION = 1
+MAX_PACKET_BYTES = 32_768
+MAX_ITEMS = 64
+MAX_TOKEN_LENGTH = 256
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+AC_RE = re.compile(r"AC[1-9][0-9]*")
+PRIVATE_PATH_PARTS = frozenset({"private", ".private", "_private"})
+FORBIDDEN_TEXT_RE = re.compile(
+    r"(?:https?://|file://|/Users/|/home/|\\Users\\|\$\{|`|\$\(|\n|\r|"
+    r"password|passwd|secret|credential|api[_-]?key|access[_-]?token|"
+    r"environment|username|prompt|raw[_ -]?output|log(?:s|file)?)",
+    re.IGNORECASE,
+)
+FORBIDDEN_PACKET_KEYS = frozenset(
+    {
+        "raw_output",
+        "logs",
+        "log",
+        "prompt",
+        "prompts",
+        "environment",
+        "env",
+        "credentials",
+        "username",
+        "url",
+        "secret",
+        "stderr",
+        "stdout",
+    }
+)
+CAUSAL_CONFIDENCE = frozenset({"demonstrated", "supported", "not_established"})
+REMEDIATION_MODES = frozenset({"resume_original", "fresh_worker"})
+ACTOR_ROLES = frozenset({"implementer", "verifier", "remediator", "parent"})
+ACTOR_OUTCOMES = frozenset(
+    {
+        "completed",
+        "blocked",
+        "refused",
+        "failed",
+        "stalled",
+        "unavailable",
+        "passed",
+        "cancelled",
+    }
+)
+CONTROLLED_REASONS = frozenset(
+    {
+        "ordinary_progress",
+        "external_input",
+        "external_authority",
+        "safety_refusal",
+        "scope_refusal",
+        "budget_exhausted",
+        "adapter_failure",
+        "invalid_verdict",
+        "dispatch_failure",
+        "unchanged_head",
+        "remediation_failure",
+        "fresh_verifier_failure",
+        "implementer_blocked",
+        "unknown_recovery_source",
+        "contradictory_duplicate",
+    }
+)
+
+
+def _human_action_for(reason: str, next_action: str) -> bool:
+    """Derive escalation from controlled policy, including exhausted invalid verdicts."""
+    return reason in HUMAN_ACTION_REASONS or (
+        reason == "invalid_verdict" and next_action == "operator_controller_action"
+    )
+
+
+NEXT_ACTIONS = frozenset(
+    {
+        "continue",
+        "dispatch_replacement_verifier",
+        "dispatch_remediation",
+        "dispatch_fresh_verifier",
+        "serial_integration",
+        "operator_controller_action",
+        "provide_external_input",
+        "authorize_scope",
+        "inspect_adapter",
+    }
+)
+HUMAN_ACTION_REASONS = frozenset(
+    {
+        "external_input",
+        "external_authority",
+        "safety_refusal",
+        "scope_refusal",
+        "budget_exhausted",
+        "adapter_failure",
+        "dispatch_failure",
+        "unchanged_head",
+        "remediation_failure",
+        "fresh_verifier_failure",
+        "contradictory_duplicate",
+        "unknown_recovery_source",
+    }
+)
+
+
+class FeedbackValidationError(ValueError):
+    """A packet, verdict, event, or admission request failed closed."""
+
+
+class RecoverySource(str, Enum):
+    VERIFIER_FAILURE = "verifier_failure"
+    IMPLEMENTER_BLOCKED = "implementer_blocked"
+
+
+class FeedbackPhase(str, Enum):
+    AWAITING_VERDICT = "awaiting_verdict"
+    AWAITING_REPLACEMENT_VERDICT = "awaiting_replacement_verdict"
+    PACKET_ADMITTED = "packet_admitted"
+    REMEDIATION_DISPATCHING = "remediation_dispatching"
+    REMEDIATION_RUNNING = "remediation_running"
+    AWAITING_FRESH_VERDICT = "awaiting_fresh_verdict"
+    READY_FOR_INTEGRATION = "ready_for_integration"
+    TERMINAL_DONE = "terminal_done"
+    TERMINAL_BLOCKED = "terminal_blocked"
+
+
+@dataclass(frozen=True)
+class EvidenceReference:
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RemediationFeedback:
+    schema_version: int
+    packet_type: str
+    run_id: str
+    spec_id: str
+    implementation_head: str
+    source_verdict_digest: str
+    failed_ac_ids: tuple[str, ...]
+    evidence: tuple[EvidenceReference, ...]
+    reproduction_commands: tuple[tuple[str, ...], ...]
+    verification_commands: tuple[tuple[str, ...], ...]
+    allowed_change_surface: tuple[str, ...]
+    forbidden_surface: tuple[str, ...]
+    guardrails: tuple[str, ...]
+    causal_confidence: str
+    remediation_ordinal: int
+    signature: str
+
+    def record(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["failed_ac_ids"] = list(self.failed_ac_ids)
+        value["evidence"] = [asdict(item) for item in self.evidence]
+        for key in ("reproduction_commands", "verification_commands"):
+            value[key] = [list(command) for command in getattr(self, key)]
+        for key in ("allowed_change_surface", "forbidden_surface", "guardrails"):
+            value[key] = list(getattr(self, key))
+        return value
+
+
+@dataclass(frozen=True)
+class RecoveryAdmission:
+    source: RecoverySource | None
+    packet: RemediationFeedback | None
+    admitted: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class NormalizedFeedbackEvent:
+    key: str
+    kind: str
+    role: str
+    outcome: str
+    source: str | None = None
+    head: str | None = None
+    actor_id: str | None = None
+    verdict: Mapping[str, Any] | None = None
+    remediation_mode: str | None = None
+    candidate_refs: tuple[EvidenceReference, ...] = ()
+    changed_paths: tuple[str, ...] = ()
+    duration_s: float = 0.0
+    reason: str = "ordinary_progress"
+    next_action: str = "continue"
+
+    def digest(self) -> str:
+        return _digest(_json_safe(asdict(self)))
+
+
+@dataclass(frozen=True)
+class FeedbackEffect:
+    key: str
+    kind: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class FeedbackState:
+    run_id: str
+    spec_id: str
+    implementation_head: str
+    expected_ac_ids: tuple[str, ...]
+    original_authority: tuple[str, ...]
+    candidate_branch: str = ""
+    candidate_worktree_ref: str = ""
+    implementer_ids: tuple[str, ...] = ()
+    controller_action_id: str | None = None
+    prior_head_digest: str | None = None
+    prior_verdict_digest: str | None = None
+    phase: FeedbackPhase = FeedbackPhase.AWAITING_VERDICT
+    packet: RemediationFeedback | None = None
+    remediation_mode: str | None = None
+    remediation_used: int = 0
+    remediation_limit: int = 1
+    replacement_verifier_used: int = 0
+    initial_verifier_id: str | None = None
+    remediator_id: str | None = None
+    remediated_head: str | None = None
+    processed_events: tuple[tuple[str, str], ...] = ()
+    pending_effects: tuple[FeedbackEffect, ...] = ()
+    delivered_effect_keys: tuple[str, ...] = ()
+    failed_effect_keys: tuple[str, ...] = ()
+    quarantined_event_keys: tuple[str, ...] = ()
+    human_action_required: bool = False
+    terminal_reason: str | None = None
+
+
+class FeedbackRuntimeAdapter(Protocol):
+    """Harness-neutral persistence, polling, and keyed-effect boundary."""
+
+    def load_state(self, run_id: str) -> FeedbackState | None: ...
+    def save_state(self, state: FeedbackState) -> None: ...
+    def poll_events(self, run_id: str) -> Iterable[NormalizedFeedbackEvent]: ...
+    def execute_effect(
+        self, effect: FeedbackEffect, *, idempotency_key: str
+    ) -> None: ...
+
+
+KNOWN_EVENT_KINDS = frozenset({
+    "actor_result",
+    "verdict",
+    "select_remediation",
+    "remediation_dispatched",
+    "remediation_result",
+    "dispatch_failed",
+    "integration_result",
+    "recovery_admission",
+})
+
+# The complete persistence/effect boundary inventory owned by this reducer.  Tests
+# consume this declaration mechanically so a new phase cannot be mistaken for a
+# representative mid-flow sample.
+OWNED_REPLAY_BOUNDARIES = (
+    ("packet_persist", FeedbackPhase.PACKET_ADMITTED, "persist_packet"),
+    ("remediation_dispatch", FeedbackPhase.REMEDIATION_DISPATCHING, "dispatch_remediation"),
+    ("remediation_dispatch_result", FeedbackPhase.REMEDIATION_RUNNING, None),
+    ("remediation_result", FeedbackPhase.AWAITING_FRESH_VERDICT, "dispatch_verifier"),
+    ("integration_enqueue", FeedbackPhase.READY_FOR_INTEGRATION, "enqueue_integration_broker"),
+    ("terminal_result", FeedbackPhase.TERMINAL_DONE, "terminal_resolution"),
+)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        _json_safe(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+
+
+def _digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _packet_unsigned(packet: RemediationFeedback) -> dict[str, Any]:
+    value = packet.record()
+    value.pop("signature")
+    return value
+
+
+def _validate_identity(value: str, label: str) -> None:
+    if not isinstance(value, str) or not IDENTITY_RE.fullmatch(value):
+        raise FeedbackValidationError(f"invalid {label}")
+
+
+def _validate_hash(value: str, label: str) -> None:
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise FeedbackValidationError(f"invalid {label}")
+
+
+def _validate_safe_text(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > MAX_TOKEN_LENGTH:
+        raise FeedbackValidationError(f"invalid {label}")
+    if FORBIDDEN_TEXT_RE.search(value):
+        raise FeedbackValidationError(f"unsafe {label}")
+
+
+def _validate_relative_path(value: str, label: str) -> None:
+    _validate_safe_text(value, label)
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or value == ".git"
+        or value.startswith(("~", ".git/"))
+        or any(part.casefold() in PRIVATE_PATH_PARTS for part in path.parts)
+    ):
+        raise FeedbackValidationError(f"unsafe {label}")
+
+
+def _within_surface(path: str, surface: str) -> bool:
+    """Return whether a validated path is equal to or below a surface entry."""
+    normalized = surface.rstrip("/")
+    return path == normalized or path.startswith(normalized + "/")
+
+
+def validate_changed_surface(
+    packet: RemediationFeedback, changed_paths: Iterable[str]
+) -> None:
+    """Reject a remediation result that escapes its exact parent-owned authority."""
+    changed = tuple(changed_paths)
+    if not changed or len(changed) > MAX_ITEMS or len(changed) != len(set(changed)):
+        raise FeedbackValidationError("invalid changed surface")
+    for path in changed:
+        _validate_relative_path(path, "changed path")
+        if not any(
+            _within_surface(path, item) for item in packet.allowed_change_surface
+        ):
+            raise FeedbackValidationError("changed path exceeds allowed surface")
+        if any(_within_surface(path, item) for item in packet.forbidden_surface):
+            raise FeedbackValidationError("changed path enters forbidden surface")
+
+
+def validate_evidence_content(packet: RemediationFeedback, project_root: Path) -> None:
+    """Resolve relative evidence inside the project and reject stale content hashes."""
+    root = project_root.resolve()
+    for item in packet.evidence:
+        _validate_relative_path(item.path, "evidence path")
+        candidate = (root / item.path).resolve()
+        if root not in candidate.parents or not candidate.is_file():
+            raise FeedbackValidationError("evidence path is missing or outside project")
+        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if not hmac.compare_digest(actual, item.sha256):
+            raise FeedbackValidationError("stale evidence hash")
+
+
+def _validate_command(command: tuple[str, ...], label: str) -> None:
+    if not command or len(command) > MAX_ITEMS:
+        raise FeedbackValidationError(f"invalid {label}")
+    for token in command:
+        _validate_safe_text(token, label)
+        if any(mark in token for mark in (";", "&&", "||", ">", "<", "|")):
+            raise FeedbackValidationError(f"shell interpolation in {label}")
+
+
+def sign_payload(payload: Mapping[str, Any], parent_key: bytes) -> str:
+    if not isinstance(parent_key, bytes) or len(parent_key) < 16:
+        raise FeedbackValidationError("parent signing key is too short")
+    return hmac.new(parent_key, _canonical_bytes(payload), hashlib.sha256).hexdigest()
+
+
+def validate_remediation_feedback(
+    packet: RemediationFeedback,
+    *,
+    parent_key: bytes,
+    known_ac_ids: Iterable[str],
+) -> None:
+    if (
+        packet.schema_version != PACKET_SCHEMA_VERSION
+        or packet.packet_type != "remediation_feedback"
+    ):
+        raise FeedbackValidationError("unknown remediation packet schema")
+    _validate_identity(packet.run_id, "run_id")
+    _validate_identity(packet.spec_id, "spec_id")
+    _validate_hash(packet.implementation_head, "implementation_head")
+    _validate_hash(packet.source_verdict_digest, "source_verdict_digest")
+    if packet.causal_confidence not in CAUSAL_CONFIDENCE:
+        raise FeedbackValidationError("unknown causal confidence")
+    if packet.remediation_ordinal != 1:
+        raise FeedbackValidationError("remediation ordinal must be one")
+    known = set(known_ac_ids)
+    if not packet.failed_ac_ids or len(packet.failed_ac_ids) != len(
+        set(packet.failed_ac_ids)
+    ):
+        raise FeedbackValidationError("failed AC IDs must be non-empty and unique")
+    if any(
+        not AC_RE.fullmatch(item) or item not in known for item in packet.failed_ac_ids
+    ):
+        raise FeedbackValidationError("unknown failed AC ID")
+    if not packet.evidence or len(packet.evidence) > MAX_ITEMS:
+        raise FeedbackValidationError("invalid evidence references")
+    for item in packet.evidence:
+        _validate_relative_path(item.path, "evidence path")
+        _validate_hash(item.sha256, "evidence hash")
+    for label, commands in (
+        ("reproduction command", packet.reproduction_commands),
+        ("verification command", packet.verification_commands),
+    ):
+        if not commands or len(commands) > MAX_ITEMS:
+            raise FeedbackValidationError(f"invalid {label} vectors")
+        for command in commands:
+            _validate_command(command, label)
+    for label, values in (
+        ("allowed surface", packet.allowed_change_surface),
+        ("forbidden surface", packet.forbidden_surface),
+    ):
+        if not values or len(values) > MAX_ITEMS or len(values) != len(set(values)):
+            raise FeedbackValidationError(f"invalid {label}")
+        for value in values:
+            _validate_relative_path(value, label)
+    if any(
+        _within_surface(allowed, forbidden) or _within_surface(forbidden, allowed)
+        for allowed in packet.allowed_change_surface
+        for forbidden in packet.forbidden_surface
+    ):
+        raise FeedbackValidationError("allowed and forbidden surfaces overlap")
+    if not packet.guardrails or len(packet.guardrails) > MAX_ITEMS:
+        raise FeedbackValidationError("invalid guardrails")
+    for guardrail in packet.guardrails:
+        _validate_safe_text(guardrail, "guardrail")
+    expected = sign_payload(_packet_unsigned(packet), parent_key)
+    if not hmac.compare_digest(packet.signature, expected):
+        raise FeedbackValidationError("invalid packet signature")
+    record = packet.record()
+    if set(record) & FORBIDDEN_PACKET_KEYS:
+        raise FeedbackValidationError("forbidden packet field")
+    if len(_canonical_bytes(record)) > MAX_PACKET_BYTES:
+        raise FeedbackValidationError("remediation packet is oversized")
+
+
+def remediation_feedback_from_dict(data: Mapping[str, Any]) -> RemediationFeedback:
+    """Parse the closed packet schema; unknown and missing fields fail closed."""
+    expected = set(RemediationFeedback.__dataclass_fields__)
+    unknown = set(data) - expected
+    missing = expected - set(data)
+    if unknown or missing:
+        raise FeedbackValidationError(
+            f"packet fields mismatch (missing={sorted(missing)}, unknown={sorted(unknown)})"
+        )
+    if set(data) & FORBIDDEN_PACKET_KEYS:
+        raise FeedbackValidationError("forbidden packet field")
+    try:
+        return RemediationFeedback(
+            schema_version=data["schema_version"],
+            packet_type=data["packet_type"],
+            run_id=data["run_id"],
+            spec_id=data["spec_id"],
+            implementation_head=data["implementation_head"],
+            source_verdict_digest=data["source_verdict_digest"],
+            failed_ac_ids=tuple(data["failed_ac_ids"]),
+            evidence=tuple(EvidenceReference(**item) for item in data["evidence"]),
+            reproduction_commands=tuple(
+                tuple(item) for item in data["reproduction_commands"]
+            ),
+            verification_commands=tuple(
+                tuple(item) for item in data["verification_commands"]
+            ),
+            allowed_change_surface=tuple(data["allowed_change_surface"]),
+            forbidden_surface=tuple(data["forbidden_surface"]),
+            guardrails=tuple(data["guardrails"]),
+            causal_confidence=data["causal_confidence"],
+            remediation_ordinal=data["remediation_ordinal"],
+            signature=data["signature"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FeedbackValidationError("invalid packet field types") from exc
+
+
+def feedback_state_record(state: FeedbackState) -> dict[str, Any]:
+    """Serialize every durable reducer field without losing controller provenance."""
+    return _json_safe(asdict(state))
+
+
+def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
+    """Restore a closed durable state record produced by :func:`feedback_state_record`."""
+    expected = set(FeedbackState.__dataclass_fields__)
+    if set(data) != expected:
+        raise FeedbackValidationError("feedback state fields mismatch")
+    try:
+        packet_data = data.get("packet")
+        effects = tuple(
+            FeedbackEffect(
+                key=item["key"], kind=item["kind"], payload=dict(item["payload"])
+            )
+            for item in data["pending_effects"]
+        )
+        state = FeedbackState(
+            run_id=data["run_id"],
+            spec_id=data["spec_id"],
+            implementation_head=data["implementation_head"],
+            expected_ac_ids=tuple(data["expected_ac_ids"]),
+            original_authority=tuple(data["original_authority"]),
+            candidate_branch=data["candidate_branch"],
+            candidate_worktree_ref=data["candidate_worktree_ref"],
+            implementer_ids=tuple(data["implementer_ids"]),
+            controller_action_id=data["controller_action_id"],
+            prior_head_digest=data["prior_head_digest"],
+            prior_verdict_digest=data["prior_verdict_digest"],
+            phase=FeedbackPhase(data["phase"]),
+            packet=(
+                remediation_feedback_from_dict(packet_data)
+                if packet_data is not None
+                else None
+            ),
+            remediation_mode=data["remediation_mode"],
+            remediation_used=data["remediation_used"],
+            remediation_limit=data["remediation_limit"],
+            replacement_verifier_used=data["replacement_verifier_used"],
+            initial_verifier_id=data["initial_verifier_id"],
+            remediator_id=data["remediator_id"],
+            remediated_head=data["remediated_head"],
+            processed_events=tuple(tuple(item) for item in data["processed_events"]),
+            pending_effects=effects,
+            delivered_effect_keys=tuple(data["delivered_effect_keys"]),
+            failed_effect_keys=tuple(data["failed_effect_keys"]),
+            quarantined_event_keys=tuple(data["quarantined_event_keys"]),
+            human_action_required=data["human_action_required"],
+            terminal_reason=data["terminal_reason"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FeedbackValidationError("invalid feedback state field types") from exc
+    _validate_identity(state.run_id, "run id")
+    _validate_identity(state.spec_id, "spec id")
+    _validate_hash(state.implementation_head, "implementation head")
+    if state.controller_action_id is not None:
+        _validate_identity(state.controller_action_id, "controller action id")
+    for label, value in (
+        ("prior head digest", state.prior_head_digest),
+        ("prior verdict digest", state.prior_verdict_digest),
+    ):
+        if value is not None:
+            _validate_hash(value, label)
+    return state
+
+
+def _verdict_digest(verdict: Mapping[str, Any]) -> str:
+    return _digest(dict(verdict))
+
+
+def validate_verifier_verdict(
+    verdict: Mapping[str, Any],
+    *,
+    spec_id: str,
+    implementation_head: str,
+    expected_ac_ids: Iterable[str],
+    verifier_id: str,
+    implementer_ids: Iterable[str] = (),
+) -> None:
+    errors = validate_verifier_verdict_dict(dict(verdict))
+    if errors:
+        raise FeedbackValidationError("invalid verifier schema: " + "; ".join(errors))
+    if (
+        verdict.get("spec_id") != spec_id
+        or verdict.get("head_commit") != implementation_head
+    ):
+        raise FeedbackValidationError("stale or mismatched verdict identity")
+    if verdict.get("contamination") is not None:
+        raise FeedbackValidationError("contaminated verdict")
+    if not verifier_id or verifier_id in set(implementer_ids):
+        raise FeedbackValidationError("verifier is not independent")
+    footprint = verdict.get("git_footprint")
+    if (
+        not isinstance(footprint, Mapping)
+        or footprint.get("tree_before") != footprint.get("tree_after")
+        or footprint.get("porcelain")
+    ):
+        raise FeedbackValidationError("verifier write footprint is not clean")
+    acs = verdict.get("acs")
+    if not isinstance(acs, list) or not acs:
+        raise FeedbackValidationError("verdict has no AC evidence")
+    expected = tuple(expected_ac_ids)
+    reported: list[str] = []
+    for item in acs:
+        if not isinstance(item, Mapping) or item.get("status") not in {
+            "pass",
+            "fail",
+            "unverifiable",
+        }:
+            raise FeedbackValidationError("invalid per-AC result")
+        if not isinstance(item.get("evidence"), str) or not item["evidence"].strip():
+            raise FeedbackValidationError("missing per-AC evidence")
+        reported.append(item.get("id"))
+    if len(reported) != len(set(reported)) or set(reported) != set(expected):
+        raise FeedbackValidationError("incomplete or duplicate AC coverage")
+
+
+def validate_failure_verdict(
+    verdict: Mapping[str, Any],
+    *,
+    spec_id: str,
+    implementation_head: str,
+    expected_ac_ids: Iterable[str],
+    verifier_id: str,
+    implementer_ids: Iterable[str] = (),
+) -> tuple[str, ...]:
+    validate_verifier_verdict(
+        verdict,
+        spec_id=spec_id,
+        implementation_head=implementation_head,
+        expected_ac_ids=expected_ac_ids,
+        verifier_id=verifier_id,
+        implementer_ids=implementer_ids,
+    )
+    if verdict.get("verdict") != "fail":
+        raise FeedbackValidationError("verdict is not a failure")
+    acs = verdict.get("acs")
+    expected = tuple(expected_ac_ids)
+    failed = tuple(
+        item.get("id")
+        for item in acs
+        if isinstance(item, Mapping) and item.get("status") == "fail"
+    )
+    if (
+        not failed
+        or len(failed) != len(set(failed))
+        or any(item not in expected for item in failed)
+    ):
+        raise FeedbackValidationError("invalid failed AC evidence")
+    return failed
+
+
+def create_remediation_feedback(
+    *,
+    run_id: str,
+    spec_id: str,
+    implementation_head: str,
+    verdict: Mapping[str, Any],
+    verifier_id: str,
+    expected_ac_ids: Iterable[str],
+    evidence: Iterable[EvidenceReference],
+    reproduction_commands: Iterable[Iterable[str]],
+    verification_commands: Iterable[Iterable[str]],
+    allowed_change_surface: Iterable[str] | None,
+    forbidden_surface: Iterable[str],
+    guardrails: Iterable[str],
+    causal_confidence: str,
+    parent_key: bytes,
+    project_root: Path,
+    implementer_ids: Iterable[str] = (),
+) -> RemediationFeedback:
+    expected = tuple(expected_ac_ids)
+    failed = validate_failure_verdict(
+        verdict,
+        spec_id=spec_id,
+        implementation_head=implementation_head,
+        expected_ac_ids=expected,
+        verifier_id=verifier_id,
+        implementer_ids=implementer_ids,
+    )
+    declared_surface = verdict.get("allowed_change_surface")
+    if (
+        not isinstance(declared_surface, list)
+        or not declared_surface
+        or len(declared_surface) != len(set(declared_surface))
+        or not all(isinstance(item, str) for item in declared_surface)
+    ):
+        raise FeedbackValidationError("failure verdict has no valid declared change surface")
+    for item in declared_surface:
+        _validate_relative_path(item, "verdict declared surface")
+    if allowed_change_surface is not None and tuple(allowed_change_surface) != tuple(
+        declared_surface
+    ):
+        raise FeedbackValidationError("caller surface differs from verdict declaration")
+    unsigned = RemediationFeedback(
+        schema_version=PACKET_SCHEMA_VERSION,
+        packet_type="remediation_feedback",
+        run_id=run_id,
+        spec_id=spec_id,
+        implementation_head=implementation_head,
+        source_verdict_digest=_verdict_digest(verdict),
+        failed_ac_ids=failed,
+        evidence=tuple(evidence),
+        reproduction_commands=tuple(
+            tuple(command) for command in reproduction_commands
+        ),
+        verification_commands=tuple(
+            tuple(command) for command in verification_commands
+        ),
+        allowed_change_surface=tuple(declared_surface),
+        forbidden_surface=tuple(forbidden_surface),
+        guardrails=tuple(guardrails),
+        causal_confidence=causal_confidence,
+        remediation_ordinal=1,
+        signature="",
+    )
+    packet = replace(
+        unsigned, signature=sign_payload(_packet_unsigned(unsigned), parent_key)
+    )
+    validate_remediation_feedback(packet, parent_key=parent_key, known_ac_ids=expected)
+    validate_evidence_content(packet, project_root)
+    return packet
+
+
+def admit_recovery(
+    source: str, *, packet: RemediationFeedback | None
+) -> RecoveryAdmission:
+    """The source-neutral seam.  Only verifier failures are admitted by SPEC-235."""
+    try:
+        typed = RecoverySource(source)
+    except ValueError:
+        return RecoveryAdmission(None, None, False, "unknown_recovery_source")
+    if typed is RecoverySource.VERIFIER_FAILURE and packet is not None:
+        return RecoveryAdmission(typed, packet, True, "ordinary_progress")
+    if typed is RecoverySource.IMPLEMENTER_BLOCKED:
+        return RecoveryAdmission(typed, None, False, "implementer_blocked")
+    return RecoveryAdmission(typed, None, False, "invalid_verdict")
+
+
+def resume_controller_action(
+    prior: FeedbackState,
+    *,
+    action_id: str,
+    run_id: str,
+    prior_head_digest: str,
+    prior_verdict_digest: str,
+) -> FeedbackState:
+    """Start an explicit new controller action from a terminal attempt.
+
+    Polling and reconnecting only reload ``prior``.  A budget is available again
+    only through this parent-owned constructor, which binds the new action to
+    the prior implementation head and admitted verdict digest.
+    """
+    _validate_identity(action_id, "controller action id")
+    _validate_identity(run_id, "run id")
+    _validate_hash(prior_head_digest, "prior head digest")
+    _validate_hash(prior_verdict_digest, "prior verdict digest")
+    if prior.phase not in {FeedbackPhase.TERMINAL_DONE, FeedbackPhase.TERMINAL_BLOCKED}:
+        raise FeedbackValidationError("controller resume requires a terminal prior action")
+    expected_verdict = (
+        prior.packet.source_verdict_digest if prior.packet else "0" * 64
+    )
+    if prior_head_digest != prior.implementation_head or prior_verdict_digest != expected_verdict:
+        raise FeedbackValidationError("controller resume prior digest mismatch")
+    return FeedbackState(
+        run_id=run_id,
+        spec_id=prior.spec_id,
+        implementation_head=prior.implementation_head,
+        expected_ac_ids=prior.expected_ac_ids,
+        original_authority=prior.original_authority,
+        candidate_branch=prior.candidate_branch,
+        candidate_worktree_ref=prior.candidate_worktree_ref,
+        implementer_ids=prior.implementer_ids,
+        controller_action_id=action_id,
+        prior_head_digest=prior_head_digest,
+        prior_verdict_digest=prior_verdict_digest,
+    )
+
+
+def surfaces_overlap(left: Iterable[str], right: Iterable[str]) -> bool:
+    """Conservatively detect equal or ancestor-related repository surfaces."""
+    left_paths = [PurePosixPath(item) for item in left]
+    right_paths = [PurePosixPath(item) for item in right]
+    for path in (*left_paths, *right_paths):
+        _validate_relative_path(path.as_posix(), "overlap surface")
+    return any(
+        a == b or a in b.parents or b in a.parents
+        for a in left_paths
+        for b in right_paths
+    )
+
+
+def normalized_outcome_record(
+    state: FeedbackState,
+    event: NormalizedFeedbackEvent,
+    *,
+    terminal_outcome: str | None = None,
+    human_action_required: bool | None = None,
+) -> dict[str, Any]:
+    if event.role not in ACTOR_ROLES or event.outcome not in ACTOR_OUTCOMES:
+        raise FeedbackValidationError("invalid role or actor outcome")
+    if event.reason not in CONTROLLED_REASONS or event.next_action not in NEXT_ACTIONS:
+        raise FeedbackValidationError("invalid outcome reason or next action")
+    if event.duration_s < 0:
+        raise FeedbackValidationError("duration must be non-negative")
+    if event.head is not None:
+        _validate_hash(event.head, "outcome head")
+    derived_human_action = _human_action_for(event.reason, event.next_action)
+    if (
+        human_action_required is not None
+        and human_action_required is not derived_human_action
+    ):
+        raise FeedbackValidationError(
+            "human action is inconsistent with the controlled reason policy"
+        )
+    refs = [{"path": item.path, "sha256": item.sha256} for item in event.candidate_refs]
+    for item in event.candidate_refs:
+        _validate_relative_path(item.path, "candidate reference")
+        _validate_hash(item.sha256, "candidate hash")
+    return {
+        "schema_version": 1,
+        "spec_id": state.spec_id,
+        "run_id": state.run_id,
+        "role": event.role,
+        "agent_outcome": event.outcome,
+        "reason": event.reason,
+        "head_digest": event.head,
+        "artifact_refs": refs,
+        "idempotency_key": event.key,
+        "attempt_ordinal": 1,
+        "duration_s": event.duration_s,
+        "terminal_outcome": terminal_outcome,
+        "human_action_required": derived_human_action,
+        "next_action": event.next_action,
+    }
+
+
+def _effect(
+    state: FeedbackState, kind: str, suffix: str, **payload: Any
+) -> FeedbackEffect:
+    verdict_digest = (
+        state.packet.source_verdict_digest if state.packet else "no-verdict"
+    )
+    key = (
+        f"feedback:{state.run_id}:{state.spec_id}:{state.implementation_head}:"
+        f"{verdict_digest}:{suffix}"
+    )
+    return FeedbackEffect(key=key, kind=kind, payload=_json_safe(payload))
+
+
+def _append_effects(state: FeedbackState, *effects: FeedbackEffect) -> FeedbackState:
+    existing = {item.key for item in state.pending_effects} | set(
+        state.delivered_effect_keys
+    )
+    return replace(
+        state,
+        pending_effects=state.pending_effects
+        + tuple(item for item in effects if item.key not in existing),
+    )
+
+
+def _terminal(
+    state: FeedbackState, reason: str, *, human: bool, event: NormalizedFeedbackEvent
+) -> FeedbackState:
+    derived_human_action = _human_action_for(reason, event.next_action)
+    if human is not derived_human_action:
+        raise FeedbackValidationError(
+            "terminal human action is inconsistent with the controlled reason policy"
+        )
+    state = replace(
+        state,
+        phase=FeedbackPhase.TERMINAL_BLOCKED,
+        terminal_reason=reason,
+        human_action_required=derived_human_action,
+    )
+    return _append_effects(
+        state,
+        _effect(
+            state,
+            "record_outcome",
+            f"outcome:{event.key}",
+            record=normalized_outcome_record(
+                state,
+                event,
+                terminal_outcome="blocked",
+                human_action_required=derived_human_action,
+            ),
+        ),
+        _effect(
+            state,
+            "terminal_resolution",
+            "terminal:blocked",
+            outcome="blocked",
+            reason=reason,
+            human_action_required=derived_human_action,
+            remediation_budget={
+                "used": state.remediation_used,
+                "limit": state.remediation_limit,
+            },
+            preserved_candidate={
+                "branch": state.candidate_branch,
+                "worktree_ref": state.candidate_worktree_ref,
+                "evidence": [
+                    asdict(item) for item in (state.packet.evidence if state.packet else ())
+                ],
+            },
+        ),
+    )
+
+
+def _event_expected(state: FeedbackState, event: NormalizedFeedbackEvent) -> bool:
+    """Leave early delivery unconsumed so durable polling can replay it later."""
+    active = set(FeedbackPhase) - {
+        FeedbackPhase.TERMINAL_DONE,
+        FeedbackPhase.TERMINAL_BLOCKED,
+    }
+    allowed = {
+        "actor_result": active,
+        "verdict": {
+            FeedbackPhase.AWAITING_VERDICT,
+            FeedbackPhase.AWAITING_REPLACEMENT_VERDICT,
+            FeedbackPhase.AWAITING_FRESH_VERDICT,
+        },
+        "select_remediation": {FeedbackPhase.PACKET_ADMITTED},
+        "remediation_dispatched": {FeedbackPhase.REMEDIATION_DISPATCHING},
+        "remediation_result": {
+            FeedbackPhase.REMEDIATION_DISPATCHING,
+            FeedbackPhase.REMEDIATION_RUNNING,
+        },
+        "dispatch_failed": active,
+        "integration_result": {FeedbackPhase.READY_FOR_INTEGRATION},
+        "recovery_admission": active,
+    }
+    return state.phase in allowed.get(event.kind, set())
+
+
+def _record_actor_effect(
+    state: FeedbackState, event: NormalizedFeedbackEvent
+) -> FeedbackState:
+    return _append_effects(
+        state,
+        _effect(
+            state,
+            "record_outcome",
+            f"actor-outcome:{event.key}",
+            record=normalized_outcome_record(state, event),
+        ),
+    )
+
+
+def reduce_feedback_event(
+    state: FeedbackState,
+    event: NormalizedFeedbackEvent,
+    *,
+    parent_key: bytes,
+    packet_inputs: Mapping[str, Any] | None = None,
+) -> FeedbackState:
+    _validate_identity(event.key, "event key")
+    digest = event.digest()
+    prior = dict(state.processed_events)
+    if event.key in prior:
+        if prior[event.key] == digest:
+            return state
+        quarantined = tuple(dict.fromkeys((*state.quarantined_event_keys, event.key)))
+        failed = replace(state, quarantined_event_keys=quarantined)
+        failed = _append_effects(
+            failed,
+            _effect(
+                failed,
+                "quarantine",
+                f"quarantine:{event.key}",
+                event_key=event.key,
+                reason="contradictory_duplicate",
+            ),
+        )
+        if state.phase in {
+            FeedbackPhase.TERMINAL_DONE,
+            FeedbackPhase.TERMINAL_BLOCKED,
+        }:
+            return failed
+        return _terminal(
+            failed,
+            "contradictory_duplicate",
+            human=True,
+            event=replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="contradictory_duplicate",
+                next_action="operator_controller_action",
+            ),
+        )
+    if state.phase in {FeedbackPhase.TERMINAL_DONE, FeedbackPhase.TERMINAL_BLOCKED}:
+        return state
+    if event.kind not in KNOWN_EVENT_KINDS:
+        rejected = replace(
+            event,
+            role="parent",
+            outcome="blocked",
+            reason="scope_refusal",
+            next_action="authorize_scope",
+        )
+        return _terminal(state, "scope_refusal", human=True, event=rejected)
+    if not _event_expected(state, event):
+        return state
+    state = replace(
+        state, processed_events=state.processed_events + ((event.key, digest),)
+    )
+
+    if event.kind == "actor_result":
+        state = _record_actor_effect(state, event)
+        if _human_action_for(event.reason, event.next_action):
+            return _terminal(
+                state,
+                event.reason,
+                human=True,
+                event=replace(event, role="parent", outcome="blocked"),
+            )
+        if event.role == "implementer" and event.outcome == "blocked":
+            admission = admit_recovery(
+                RecoverySource.IMPLEMENTER_BLOCKED.value, packet=None
+            )
+            assert not admission.admitted
+            return _terminal(
+                state,
+                admission.reason,
+                human=False,
+                event=replace(
+                    event,
+                    reason="implementer_blocked",
+                    next_action="operator_controller_action",
+                ),
+            )
+        return state
+
+    if event.kind == "recovery_admission":
+        admission = admit_recovery(event.source or "", packet=state.packet)
+        if not admission.admitted:
+            rejected = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason=admission.reason,
+                next_action="operator_controller_action",
+            )
+            return _terminal(
+                state, admission.reason, human=True, event=rejected
+            )
+        return state
+
+    if event.kind == "verdict":
+        if event.role != "verifier" or event.verdict is None or not event.actor_id:
+            valid = False
+            validation_error = "invalid_verdict"
+        else:
+            try:
+                validate_verifier_verdict(
+                    event.verdict,
+                    spec_id=state.spec_id,
+                    implementation_head=event.head or state.implementation_head,
+                    expected_ac_ids=state.expected_ac_ids,
+                    verifier_id=event.actor_id,
+                    implementer_ids=state.implementer_ids,
+                )
+                valid = True
+                validation_error = "invalid_verdict"
+            except FeedbackValidationError:
+                valid = False
+                validation_error = "invalid_verdict"
+
+        verdict_event = replace(event, reason="ordinary_progress", next_action="continue")
+        replacement_available = (
+            state.phase
+            in {
+                FeedbackPhase.AWAITING_VERDICT,
+                FeedbackPhase.AWAITING_REPLACEMENT_VERDICT,
+            }
+            and state.replacement_verifier_used == 0
+        )
+        rejection_event = replace(
+            event,
+            reason="invalid_verdict",
+            next_action=(
+                "dispatch_replacement_verifier"
+                if replacement_available
+                else "operator_controller_action"
+            ),
+        )
+        if not valid:
+            state = _record_actor_effect(state, rejection_event)
+
+        if state.phase in {
+            FeedbackPhase.AWAITING_VERDICT,
+            FeedbackPhase.AWAITING_REPLACEMENT_VERDICT,
+        }:
+            if not valid:
+                if state.replacement_verifier_used == 0:
+                    next_state = replace(
+                        state,
+                        phase=FeedbackPhase.AWAITING_REPLACEMENT_VERDICT,
+                        replacement_verifier_used=1,
+                    )
+                    return _append_effects(
+                        next_state,
+                        _effect(
+                            next_state,
+                            "dispatch_verifier",
+                            "replacement-verifier:1",
+                            purpose="replacement",
+                            head=state.implementation_head,
+                            ordinal=1,
+                        ),
+                    )
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason=validation_error,
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state, validation_error, human=True, event=blocked_event
+                )
+            if event.verdict.get("verdict") == "pass":
+                state = _record_actor_effect(state, verdict_event)
+                ready = replace(state, phase=FeedbackPhase.READY_FOR_INTEGRATION)
+                return _append_effects(
+                    ready,
+                    _effect(
+                        ready,
+                        "enqueue_integration_broker",
+                        "integration",
+                        head=state.implementation_head,
+                        fresh_main_validation=True,
+                        owner="coordinator",
+                        broker_entrypoint="IntegrationBroker.integrate_completed",
+                    ),
+                )
+            if event.verdict.get("verdict") != "fail" or packet_inputs is None:
+                state = _record_actor_effect(state, rejection_event)
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason="invalid_verdict",
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state, "invalid_verdict", human=True, event=blocked_event
+                )
+            try:
+                packet = create_remediation_feedback(
+                    run_id=state.run_id,
+                    spec_id=state.spec_id,
+                    implementation_head=state.implementation_head,
+                    verdict=event.verdict,
+                    verifier_id=event.actor_id,
+                    expected_ac_ids=state.expected_ac_ids,
+                    parent_key=parent_key,
+                    implementer_ids=state.implementer_ids,
+                    **packet_inputs,
+                )
+            except FeedbackValidationError:
+                state = _record_actor_effect(state, rejection_event)
+                if state.replacement_verifier_used == 0:
+                    rejected = replace(
+                        state,
+                        phase=FeedbackPhase.AWAITING_REPLACEMENT_VERDICT,
+                        replacement_verifier_used=1,
+                    )
+                    return _append_effects(
+                        rejected,
+                        _effect(
+                            rejected,
+                            "dispatch_verifier",
+                            "replacement-verifier:1",
+                            purpose="replacement",
+                            head=state.implementation_head,
+                            ordinal=1,
+                        ),
+                    )
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason="invalid_verdict",
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state, "invalid_verdict", human=True, event=blocked_event
+                )
+            admission = admit_recovery(
+                RecoverySource.VERIFIER_FAILURE.value, packet=packet
+            )
+            state = _record_actor_effect(state, verdict_event)
+            admitted = replace(
+                state,
+                phase=FeedbackPhase.PACKET_ADMITTED,
+                packet=admission.packet,
+                initial_verifier_id=event.actor_id,
+            )
+            return _append_effects(
+                admitted,
+                _effect(
+                    admitted,
+                    "persist_packet",
+                    f"packet:{packet.source_verdict_digest}:1",
+                    packet=packet.record(),
+                ),
+            )
+
+        if state.phase is FeedbackPhase.AWAITING_FRESH_VERDICT:
+            disallowed_verifiers = {
+                *state.implementer_ids,
+                state.initial_verifier_id,
+                state.remediator_id,
+            }
+            if (
+                not valid
+                or event.verdict.get("verdict") != "pass"
+                or event.head != state.remediated_head
+                or event.actor_id in disallowed_verifiers
+            ):
+                if valid:
+                    state = _record_actor_effect(state, verdict_event)
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason="fresh_verifier_failure",
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state, "fresh_verifier_failure", human=True, event=blocked_event
+                )
+            state = _record_actor_effect(state, verdict_event)
+            ready = replace(state, phase=FeedbackPhase.READY_FOR_INTEGRATION)
+            return _append_effects(
+                ready,
+                _effect(
+                    ready,
+                    "enqueue_integration_broker",
+                    "integration",
+                    head=state.remediated_head,
+                    fresh_main_validation=True,
+                    owner="coordinator",
+                    broker_entrypoint="IntegrationBroker.integrate_completed",
+                ),
+            )
+
+    if (
+        event.kind == "select_remediation"
+        and state.phase is FeedbackPhase.PACKET_ADMITTED
+    ):
+        if (
+            event.role != "parent"
+            or event.remediation_mode not in REMEDIATION_MODES
+            or state.remediation_mode is not None
+        ):
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="scope_refusal",
+                next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        selected = replace(
+            state,
+            phase=FeedbackPhase.REMEDIATION_DISPATCHING,
+            remediation_mode=event.remediation_mode,
+            remediation_used=1,
+        )
+        return _append_effects(
+            selected,
+            _effect(
+                selected,
+                "dispatch_remediation",
+                "remediation:1",
+                mode=event.remediation_mode,
+                packet=state.packet.record() if state.packet else None,
+                original_authority=list(state.original_authority),
+            ),
+        )
+
+    if (
+        event.kind == "remediation_dispatched"
+        and state.phase is FeedbackPhase.REMEDIATION_DISPATCHING
+    ):
+        if event.role != "parent":
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="scope_refusal",
+                next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        return replace(state, phase=FeedbackPhase.REMEDIATION_RUNNING)
+
+    if event.kind == "remediation_result" and state.phase in {
+        FeedbackPhase.REMEDIATION_DISPATCHING,
+        FeedbackPhase.REMEDIATION_RUNNING,
+    }:
+        state = _record_actor_effect(state, event)
+        if event.role != "remediator":
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="scope_refusal",
+                next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        if (
+            event.outcome != "completed"
+            or not event.head
+            or event.head == state.implementation_head
+        ):
+            reason = (
+                "unchanged_head"
+                if event.head == state.implementation_head
+                else "remediation_failure"
+            )
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason=reason,
+                next_action="operator_controller_action",
+            )
+            return _terminal(state, reason, human=True, event=blocked_event)
+        if not event.actor_id or state.packet is None:
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="remediation_failure",
+                next_action="operator_controller_action",
+            )
+            return _terminal(
+                state, "remediation_failure", human=True, event=blocked_event
+            )
+        try:
+            validate_changed_surface(state.packet, event.changed_paths)
+        except FeedbackValidationError:
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="scope_refusal",
+                next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        fresh = replace(
+            state,
+            phase=FeedbackPhase.AWAITING_FRESH_VERDICT,
+            remediated_head=event.head,
+            remediator_id=event.actor_id,
+        )
+        return _append_effects(
+            fresh,
+            _effect(
+                fresh,
+                "dispatch_verifier",
+                "fresh-verifier:1",
+                purpose="fresh",
+                head=event.head,
+                ordinal=1,
+                exclude_actor_ids=[state.initial_verifier_id, event.actor_id],
+            ),
+        )
+
+    if event.kind == "dispatch_failed":
+        blocked_event = replace(
+            event,
+            role="parent",
+            outcome="blocked",
+            reason="dispatch_failure",
+            next_action="inspect_adapter",
+        )
+        return _terminal(state, "dispatch_failure", human=True, event=blocked_event)
+
+    if (
+        event.kind == "integration_result"
+        and state.phase is FeedbackPhase.READY_FOR_INTEGRATION
+    ):
+        if event.role != "parent":
+            blocked_event = replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="scope_refusal",
+                next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        if event.outcome == "completed":
+            done = replace(
+                state,
+                phase=FeedbackPhase.TERMINAL_DONE,
+                terminal_reason="ordinary_progress",
+            )
+            return _append_effects(
+                done,
+                _effect(
+                    done,
+                    "record_outcome",
+                    f"parent-outcome:{event.key}",
+                    record=normalized_outcome_record(
+                        done, event, terminal_outcome="done"
+                    ),
+                ),
+                _effect(
+                    done,
+                    "terminal_resolution",
+                    "terminal:done",
+                    outcome="done",
+                    fresh_main_validation=True,
+                ),
+            )
+        blocked_event = replace(
+            event,
+            role="parent",
+            outcome="blocked",
+            reason="adapter_failure",
+            next_action="inspect_adapter",
+        )
+        return _terminal(state, "adapter_failure", human=True, event=blocked_event)
+
+    return state
+
+
+def _deliver_pending_effects(
+    adapter: FeedbackRuntimeAdapter,
+    state: FeedbackState,
+    *,
+    parent_key: bytes,
+) -> FeedbackState:
+    """Reconcile persisted effects, including restart after acknowledgement loss."""
+    if state.failed_effect_keys:
+        return state
+    for effect in state.pending_effects:
+        if (
+            effect.key in state.delivered_effect_keys
+            or effect.key in state.failed_effect_keys
+        ):
+            continue
+        try:
+            adapter.execute_effect(effect, idempotency_key=effect.key)
+        except Exception:  # noqa: BLE001 - adapters may surface provider-neutral exceptions.
+            state = replace(
+                state,
+                pending_effects=tuple(
+                    item for item in state.pending_effects if item.key != effect.key
+                ),
+                failed_effect_keys=state.failed_effect_keys + (effect.key,),
+            )
+            failure_event = NormalizedFeedbackEvent(
+                key=f"adapter-failure:{hashlib.sha256(effect.key.encode()).hexdigest()[:24]}",
+                kind="dispatch_failed",
+                role="parent",
+                outcome="failed",
+                reason="adapter_failure",
+                next_action="inspect_adapter",
+            )
+            state = reduce_feedback_event(state, failure_event, parent_key=parent_key)
+            adapter.save_state(state)
+            return state
+        state = replace(
+            state,
+            delivered_effect_keys=state.delivered_effect_keys + (effect.key,),
+            pending_effects=tuple(
+                item for item in state.pending_effects if item.key != effect.key
+            ),
+        )
+        adapter.save_state(state)
+    return state
+
+
+def reconcile_feedback(
+    adapter: FeedbackRuntimeAdapter,
+    initial_state: FeedbackState,
+    *,
+    parent_key: bytes,
+    events: Iterable[NormalizedFeedbackEvent] | None = None,
+    packet_inputs: Mapping[str, Any] | None = None,
+) -> FeedbackState:
+    """Persist reducer state before executing each keyed effect, then acknowledge it."""
+    state = adapter.load_state(initial_state.run_id) or initial_state
+    state = _deliver_pending_effects(adapter, state, parent_key=parent_key)
+    for event in events if events is not None else adapter.poll_events(state.run_id):
+        state = reduce_feedback_event(
+            state, event, parent_key=parent_key, packet_inputs=packet_inputs
+        )
+        adapter.save_state(state)
+        state = _deliver_pending_effects(adapter, state, parent_key=parent_key)
+    return state

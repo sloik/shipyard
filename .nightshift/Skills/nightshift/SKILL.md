@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.3.0
+version: 3.6.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -19,6 +19,15 @@ For registered public projects, audit tracked Nightshift artifacts with
 hash-verifies private artifacts before an operator-approved future-index
 cleanup. It never rewrites history; history remediation remains a separate,
 explicit dry-run-first operator action.
+
+For future real-use questions, preregister a falsifiable adoption, effectiveness,
+or reliability hypothesis and collect closed privacy-safe events at normal
+workflow boundaries. A source spec may close with unchecked live items only when
+`real_use_evidence.policy: delegated_experiment` maps every item exactly once to a
+valid descriptor, finished instrumentation spec, and SPEC-236 lineage record.
+Never delegate Requirements, Acceptance Criteria, NFRs, destructive safety,
+privacy, compatibility, or release evidence. Zero samples remain `no_samples`;
+later unsupported evidence creates a linked follow-up without rewriting history.
 
 The Nightshift Kit itself is agent-agnostic (any agent that reads files and runs commands can follow it). This skill is the human-facing interface — it guides users through the parts that require judgment, context, and decisions.
 
@@ -1783,6 +1792,23 @@ and route to the controller-backed unblock path with
 `Nightshift-Blocker-Class: evidence_gap`.
 
 **e. Route on the validated verdict.**
+
+Before routing a validated `fail` to terminal blocking, use the managed
+`verifier_feedback.py` boundary. Only a current, uncontaminated, independently
+produced failure with complete AC evidence and a clean footprint can create the
+parent-signed packet. The parent selects exactly one remediation mode
+(`resume_original` or `fresh_worker`), preserves the original authority, and
+requires a newly independent verifier on the changed head before integration.
+The verifier and remediation actor never communicate directly, mutate lifecycle,
+merge, or self-accept.
+
+Invalid/contaminated verdicts create no packet and permit only one replacement
+verifier on the unchanged head. Remediation or dispatch failure, unchanged head,
+a second invalid verdict, or a fresh valid failure exhausts the bounded path and
+resolves through controlled blocked policy. Record each actor attempt separately
+from the parent delivery result via the configured SPEC-224 adapter. The typed
+admission seam admits `verifier_failure` only; `implementer_blocked` remains an
+attempt plus existing terminal-policy input until SPEC-235-001.
 
 After the verdict validator has produced the auditable verdict, publish the
 actual verification outcome exactly once. Map `pass` to `passed`, `fail` to

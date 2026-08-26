@@ -69,6 +69,40 @@ RECOVERY_EVENT_TYPES = frozenset({
 })
 RECOVERY_OUTCOMES = frozenset({"passed", "failed", "skipped", "succeeded", "exhausted"})
 
+# SPEC-235 actor-attempt events remain distinct from the parent lifecycle
+# decision.  Payloads contain controlled values and hash-bound relative refs;
+# conclusions and raw execution data stay outside the run stream.
+FEEDBACK_ROLES = frozenset({"implementer", "verifier", "remediator", "parent"})
+FEEDBACK_OUTCOMES = frozenset({
+    "completed", "blocked", "refused", "failed", "stalled", "unavailable",
+    "passed", "cancelled",
+})
+
+
+def emit_feedback_outcome(log: "RunEventLog", record: Dict) -> None:
+    from verifier_feedback import CONTROLLED_REASONS, NEXT_ACTIONS, SHA256_RE, _validate_relative_path
+
+    allowed = {
+        "schema_version", "spec_id", "run_id", "role", "agent_outcome", "reason",
+        "head_digest", "artifact_refs", "idempotency_key", "attempt_ordinal",
+        "duration_s", "terminal_outcome", "human_action_required", "next_action",
+    }
+    if set(record) != allowed:
+        raise ValueError("feedback outcome fields do not match the closed schema")
+    if record["role"] not in FEEDBACK_ROLES or record["agent_outcome"] not in FEEDBACK_OUTCOMES:
+        raise ValueError("invalid feedback role or outcome")
+    if record["reason"] not in CONTROLLED_REASONS or record["next_action"] not in NEXT_ACTIONS:
+        raise ValueError("invalid feedback reason or next action")
+    if record["head_digest"] is not None and not SHA256_RE.fullmatch(record["head_digest"]):
+        raise ValueError("invalid feedback head digest")
+    for item in record["artifact_refs"]:
+        _validate_relative_path(item["path"], "feedback artifact reference")
+        if not SHA256_RE.fullmatch(item["sha256"]):
+            raise ValueError("invalid feedback artifact digest")
+    log.emit("agent_outcome", spec_id=record["spec_id"], **{
+        key: value for key, value in record.items() if key != "spec_id"
+    })
+
 
 def validate_recovery_event(event_type: str, payload: Dict) -> None:
     """Reject unbounded recovery telemetry before it enters the event stream."""

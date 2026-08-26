@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -21,6 +22,39 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 FLEET_FIELDS = ("spec_id", "terminal_outcome", "agent_response", "causal_confidence", "human_action_needed", "evidence_refs")
+AGENT_OUTCOME_FIELDS = (
+    "schema_version", "spec_id", "run_id", "role", "agent_outcome", "reason",
+    "head_digest", "artifact_refs", "idempotency_key", "attempt_ordinal",
+    "duration_s", "terminal_outcome", "human_action_required", "next_action",
+)
+AGENT_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}")
+FORBIDDEN_AGENT_FIELD_RE = re.compile(
+    r"(?:password|passwd|secret|credential|token|prompt|log|url|path|username|environment)",
+    re.IGNORECASE,
+)
+
+
+def _agent_field_mapping(config: dict[str, Any]) -> dict[str, str]:
+    """Return one collision-free, privacy-safe canonical-to-adapter mapping."""
+    raw = config.get("agent_fields", {})
+    if not isinstance(raw, dict):
+        raise TypeError("terminal_outcomes.agent_fields must be a mapping")
+    unknown = set(raw) - set(AGENT_OUTCOME_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown canonical agent fields: {sorted(unknown)}")
+    mapping: dict[str, str] = {}
+    for canonical in AGENT_OUTCOME_FIELDS:
+        output = raw.get(canonical, canonical)
+        if (
+            not isinstance(output, str)
+            or not AGENT_FIELD_NAME_RE.fullmatch(output)
+            or FORBIDDEN_AGENT_FIELD_RE.search(output)
+        ):
+            raise ValueError(f"unsafe adapter output field for {canonical}")
+        mapping[canonical] = output
+    if len(set(mapping.values())) != len(mapping):
+        raise ValueError("agent field mapping contains output collisions")
+    return mapping
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -60,6 +94,34 @@ def normalized(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]
     fields = config.get("fields", {})
     fields = fields if isinstance(fields, dict) else {}
     return {canonical: record.get(str(fields.get(canonical, canonical))) for canonical in FLEET_FIELDS}
+
+
+def configured_agent_outcome(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Map one closed SPEC-235 record through the existing adapter configuration."""
+    if set(record) != set(AGENT_OUTCOME_FIELDS):
+        raise ValueError("agent outcome fields do not match the closed schema")
+    fields = _agent_field_mapping(config)
+    return {fields[name]: record[name] for name in AGENT_OUTCOME_FIELDS}
+
+
+def normalized_agent_outcome(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize either configured adapter shape back to provider-neutral fields."""
+    fields = _agent_field_mapping(config)
+    return {name: record.get(fields[name]) for name in AGENT_OUTCOME_FIELDS}
+
+
+def encode_agent_outcomes(records: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """Encode records with the configured SPEC-224 json-array or jsonl adapter."""
+    mapped = [configured_agent_outcome(record, config) for record in records]
+    adapter = str(config.get("adapter", "json-array"))
+    if adapter == "json-array":
+        return json.dumps(mapped, sort_keys=True, separators=(",", ":")) + "\n"
+    if adapter == "jsonl":
+        return "".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n"
+            for item in mapped
+        )
+    raise ValueError(f"unsupported terminal outcome adapter: {adapter}")
 
 
 def conforming(record: dict[str, Any], spec_id: str, terminal: str, config: dict[str, Any]) -> bool:

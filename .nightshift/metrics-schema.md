@@ -33,6 +33,24 @@ fingerprints. Redacted private evidence remains in the operator store. Raw logs,
 prompts, command arguments, environment values, secrets, application/user data,
 absolute paths, and remote URLs are forbidden in every class.
 
+## Prospective real-use experiments (SPEC-238)
+
+Tracked `experiments/*.yaml` descriptors preregister a revision-bound hypothesis,
+eligible population, event chain, numerator/denominator, thresholds, stopping rule,
+producer fingerprint, privacy class, and invalidating assumptions. The private
+observability store owns immutable `experiment_event` and `experiment_result`
+objects. Events are per-project sequence/hash chained and carry only UUIDs,
+digests, controlled identifiers, enums, booleans, counts, durations, and versions.
+
+`reports/_wip/experiment-status.json` is replaceable derived state. The board
+`/api/experiments` route and fleet snapshot expose only experiment/source IDs,
+revision, state, review trigger, sample state, eligible count, integer numerator
+and denominator, nullable value, evidence scope, conclusion, and bounded timing.
+Raw observations never cross that projection. Empty denominators are
+`sample_state: no_samples` with `value: null`; passive observations cannot support
+a controlled or randomized claim. Unsupported or invalidated sealed results use
+the existing SPEC-236 follow-up processor exactly once.
+
 ## Recovery telemetry and run projection (SPEC-188)
 
 Recovery observations use the existing run event stream only: `capability_probe`,
@@ -279,3 +297,24 @@ the single-line body `_No failures this run._` — no placeholder
    matches the "Minimal form" example above).
 
 Both sources feed into a single grouped output keyed by `error_type`.
+
+## Controlled verifier-remediation fields (SPEC-235)
+
+Role-aware attempt and parent-delivery records use controlled fields only:
+
+| Field | Type | Contract |
+| --- | --- | --- |
+| `role` | enum | `implementer`, `verifier`, `remediator`, or `parent` |
+| `agent_outcome` | enum | `completed`, `blocked`, `refused`, `failed`, `stalled`, `unavailable`, `passed`, or `cancelled` |
+| `reason` | enum | Controlled reducer reason; never prose conclusions |
+| `head_digest` | string/null | Exact candidate Git digest |
+| `artifact_refs` | list | Project-relative path plus SHA-256 only |
+| `idempotency_key` | string | Stable run/spec/head/effect identity |
+| `attempt_ordinal` | integer | Remediation and replacement budgets are independently bounded at `1/1` |
+| `duration_s` | number | Measured non-negative duration |
+| `human_action_required` | boolean | True only for external authority/input, safety/scope refusal, exhausted budgets, or adapter failure |
+| `next_action` | enum | Controlled controller/operator action |
+
+Actor outcomes never copy directly into spec lifecycle. The parent terminal row
+is a separate delivery decision. Packet bodies, verdict prose, logs, prompts,
+commands, environment values and private paths are not metrics fields.

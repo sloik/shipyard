@@ -276,6 +276,33 @@ the distinct sanitized reason `verifier_surface_unavailable`. The parent then
 uses the existing controller-backed terminal-resolution path and never
 self-verifies.
 
+### Controlled verifier remediation (SPEC-235)
+
+A current, schema-valid, uncontaminated independent `fail` verdict may enter
+`verifier_feedback.py` exactly once. The parent validates its identity, current
+head, complete AC coverage and clean footprint, then creates one immutable,
+parent-signed `remediation_feedback` packet. The packet carries only hash-bound
+project-relative evidence, argv command vectors, the original authority and an
+exact allowed/forbidden surface; reports, prompts, logs, private paths and raw
+output never cross the boundary.
+
+The durable reducer owns the mutually exclusive `resume_original` or
+`fresh_worker` choice, a `1/1` remediation budget, and keyed effects. A changed
+head must pass a newly identified independent verifier before it enters the one
+serial integration queue and fresh-main validation. Dispatch failure,
+unavailability, unchanged head, remediation failure, or a fresh valid failure
+resolves `blocked` with one controlled next action. Invalid/contaminated initial
+verdicts create no packet and receive at most one replacement verifier on the
+unchanged head; a second invalid verdict terminates with human action required.
+
+Adapters translate callbacks, polling, cancellation and liveness into normalized
+events and execute keyed effects; they contain no lifecycle or eligibility
+policy. Actor-attempt outcomes are recorded separately from the parent delivery
+decision through the configured SPEC-224 adapter. The typed admission seam is
+source tagged: this release admits only `verifier_failure`. A pre-verifier
+`implementer_blocked` result preserves candidate evidence and reaches existing
+terminal policy once; SPEC-235-001 owns its later diagnosis and admission.
+
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)
 - Context window management matters (long-running projects)

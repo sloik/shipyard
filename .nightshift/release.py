@@ -173,6 +173,11 @@ def validate_manifest(
         for command in manifest["smoke_checks"]
     ):
         errors.append("manifest smoke-check metadata is invalid")
+    if any(
+        isinstance(entry, dict) and str(entry.get("path", "")).endswith(".nsext")
+        for entry in manifest.get("files", [])
+    ):
+        errors.append("managed release payload cannot contain production .nsext packages")
     errors.extend(managed_import_gaps(canonical, names))
     return not errors, errors, manifest
 

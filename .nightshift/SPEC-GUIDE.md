@@ -62,6 +62,19 @@ must not generate, renew, or silently rebaseline this evidence.
 3. **`cortex_cites:`** frontmatter is OPTIONAL but encouraged. List Cortex entry IDs used as proof-of-research (e.g., `[#230, #240]`).
 4. **`attachments:`** frontmatter is OPTIONAL for evidence artifacts. Use it for screenshots, annotated images, logs, videos, or data files that clarify expected vs actual behavior.
 
+**Real-use evidence (SPEC-238):** A feature must declare one of
+`required_before_done`, `delegated_experiment`, or narrowly reasoned
+`not_applicable` in `real_use_evidence`. Prefer a falsifiable adoption,
+effectiveness, or reliability hypothesis preregistered before its first eligible
+event. A delegated unchecked `LE<n>` must map exactly once to a tracked experiment
+descriptor, its hypothesis IDs, a completed instrumentation spec, and immutable
+SPEC-236 lineage. This permits the delivery spec to close while the experiment is
+visibly registered or collecting. It never permits delegation of Requirements,
+Acceptance Criteria, active NFRs, destructive-operation safety, privacy,
+compatibility, or release proof. Zero observations are `no_samples` with a null
+value, never success; later unsupported evidence creates linked remediation and
+does not rewrite the source spec's historical status.
+
 ---
 
 ## Phase 0: Auto-Discovery (Agent Work)
