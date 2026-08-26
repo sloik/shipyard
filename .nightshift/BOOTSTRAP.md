@@ -28,6 +28,16 @@ migration and remain commit-backed.
 4. **Tooling Audit** — verify static tools exist, create SPEC-000-tooling if needed
 5. **Knowledge & Entry** — read project docs, check specs queue, enter LOOP
 
+### Managed-payload result-acceptance boundary
+
+A successful installation admission must retain the returned integrity receipt.
+After work, the coordinator invokes `managed_payload_provenance.verify_terminal_integrity`
+with that original receipt before accepting a result, changing lifecycle state,
+merging, validating after merge, or cleaning a worktree. Never rerun admission as
+a substitute: doing so would bless changed bytes. Deny or indeterminate preserves
+the branch, worktree, index, and divergent installed payload for canonical repair
+and whole-kit release.
+
 ---
 
 ## Phase A: Auto-Discovery (Silent Agent Work)

@@ -39,6 +39,11 @@ try:
 except ImportError:  # pragma: no cover
     validate_install = None  # type: ignore[assignment]
 
+try:
+    import managed_payload_provenance
+except ImportError:  # pragma: no cover
+    managed_payload_provenance = None  # type: ignore[assignment]
+
 
 RUNNABLE_STATUSES = frozenset({"ready", "in_progress", "active"})
 BLOCKING_COMMANDS = frozenset({"build", "test"})
@@ -277,6 +282,7 @@ def run_install_admission(
     *,
     install_root: Path | None = None,
     invocation_kind: str = "preflight",
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """SPEC-229 admission gate: the first executable action of every preflight run.
 
@@ -299,9 +305,10 @@ def run_install_admission(
             install_root, profile, invocation_kind, spec_id
         )
         artifact = validate_install.build_artifact(ctx, config_sha)
+        invocation_id = str(artifact["invocation_id"])
         dest, digest, art_inv = validate_install._atomic_write_artifact(ctx.install, artifact)
         ctx.add(art_inv)
-        artifact = validate_install.build_artifact(ctx, config_sha)
+        artifact = validate_install.build_artifact(ctx, config_sha, invocation_id=invocation_id)
         admission = artifact["admission"] if dest is not None else "indeterminate"
     except Exception as exc:  # noqa: BLE001 - any internal failure denies, never crashes preflight
         return {
@@ -309,12 +316,38 @@ def run_install_admission(
             "reason": f"validate_install.py raised {exc.__class__.__name__}; treated as indeterminate.",
             "admission": "indeterminate",
         }
+    receipt_path = None
+    receipt_sha256 = None
+    if admission == "allow":
+        if managed_payload_provenance is None or dest is None or digest is None:
+            return {
+                "ok": False,
+                "reason": "Managed-payload integrity receipt could not be created; treated as indeterminate.",
+                "admission": "indeterminate",
+            }
+        try:
+            receipt_path, receipt_sha256 = managed_payload_provenance.write_integrity_receipt(
+                ctx.install,
+                spec_id=spec_id or "unselected",
+                invocation_id=invocation_id,
+                run_id=run_id,
+                admitted_artifact_sha256=digest,
+            )
+        except Exception as exc:  # noqa: BLE001 - receipt failure denies admission
+            return {
+                "ok": False,
+                "reason": f"Managed-payload integrity receipt failed ({exc.__class__.__name__}); treated as indeterminate.",
+                "admission": "indeterminate",
+            }
     return {
         "ok": admission == "allow",
         "reason": None if admission == "allow" else f"Installation admission gate result: {admission}.",
         "admission": admission,
         "artifact_path": str(dest.relative_to(install_root)) if dest else None,
         "artifact_sha256": digest,
+        "integrity_receipt_path": receipt_path,
+        "integrity_receipt_sha256": receipt_sha256,
+        "integrity_run_id": run_id or invocation_id,
         "coverage": artifact.get("coverage"),
     }
 

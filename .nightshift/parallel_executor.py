@@ -134,6 +134,10 @@ class WorktreeHandle:
     # Release surfaces (CHANGELOG/version/handoff) are applied by the parent
     # only.  A worker may describe a requested edit here but must not commit it.
     release_intents: List[Dict[str, Any]] = field(default_factory=list)
+    integrity_receipt_path: Optional[str] = None
+    integrity_receipt_sha256: Optional[str] = None
+    integrity_run_id: Optional[str] = None
+    integrity_acceptance: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -179,6 +183,9 @@ class BoundedWorktreeDispatcher:
         poll_worker,
         janitor=None,
         prepare=None,
+        admit_worker=None,
+        terminal_gate=None,
+        dispatch_guard=None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.project_root = Path(project_root)
@@ -189,6 +196,9 @@ class BoundedWorktreeDispatcher:
         self.poll_worker = poll_worker
         self.janitor = janitor
         self.prepare = prepare
+        self.admit_worker = admit_worker
+        self.terminal_gate = terminal_gate
+        self.dispatch_guard = dispatch_guard
         self.run_id = uuid.uuid4().hex
         self.active: Dict[str, DispatchedWorker] = {}
         self._dependency_resolver = DependencyRegistryResolver(self.specs_dir)
@@ -211,6 +221,8 @@ class BoundedWorktreeDispatcher:
         if not self.enabled:
             return []
         self._collect_completed()
+        if self.dispatch_guard is not None and not self.dispatch_guard():
+            return []
         specs = self._load_specs()
         limit = parallel_worker_limit(self.config)
         assert limit is not None
@@ -338,6 +350,14 @@ class BoundedWorktreeDispatcher:
                 note="worktree preparation failed; recoverable",
             )
             raise RuntimeError(f"unable to create worktree for {spec.spec_id}")
+        if self.admit_worker is not None:
+            admission = self.admit_worker(spec.spec_id, prepared, worker_run_id)
+            if not isinstance(admission, dict) or not admission.get("ok"):
+                prepared.status = "held"
+                raise RuntimeError(f"managed payload admission denied for {spec.spec_id}")
+            prepared.integrity_receipt_path = admission.get("integrity_receipt_path")
+            prepared.integrity_receipt_sha256 = admission.get("integrity_receipt_sha256")
+            prepared.integrity_run_id = admission.get("integrity_run_id") or worker_run_id
         worker = self.start_worker(spec.spec_id, prepared, worker_run_id)
         dispatched = DispatchedWorker(spec.spec_id, worker_run_id, prepared, worker)
         self.active[spec.spec_id] = dispatched
@@ -350,6 +370,32 @@ class BoundedWorktreeDispatcher:
                 continue
             self.active.pop(spec_id)
             success = isinstance(outcome, dict) and outcome.get("status") == "success"
+            if success and self.terminal_gate is not None:
+                acceptance = self.terminal_gate(dispatched.handle, outcome)
+                if not isinstance(acceptance, dict) or not acceptance.get("ok"):
+                    dispatched.handle.status = "held"
+                    dispatched.handle.outcome = outcome if isinstance(outcome, dict) else {"outcome": str(outcome)}
+                    dispatched.handle.integrity_acceptance = acceptance if isinstance(acceptance, dict) else {"outcome": "indeterminate"}
+                    self._block_dependents(spec_id)
+                    continue
+                dispatched.handle.status = "completed"
+                dispatched.handle.outcome = outcome
+                dispatched.handle.integrity_acceptance = acceptance
+                self.status_store.update_state(
+                    spec_id, "in_progress", run_id=dispatched.run_id,
+                    source="coordinator", note="worker result passed terminal integrity gate; awaiting serial integration",
+                    payload={"integrity_acceptance": acceptance},
+                )
+                continue
+            if success and self.admit_worker is not None:
+                dispatched.handle.status = "completed"
+                dispatched.handle.outcome = outcome
+                self.status_store.update_state(
+                    spec_id, "in_progress", run_id=dispatched.run_id,
+                    source="coordinator", note="worker completed; awaiting terminal integrity gate and serial integration",
+                    payload=outcome,
+                )
+                continue
             self.status_store.update_state(
                 spec_id,
                 "done" if success else "pending",
@@ -357,6 +403,24 @@ class BoundedWorktreeDispatcher:
                 source="coordinator",
                 note="worker completed" if success else "worker crashed; recoverable",
                 payload=outcome if isinstance(outcome, dict) else {"outcome": str(outcome)},
+            )
+
+    def _block_dependents(self, failed_spec_id: str) -> None:
+        """Hold only transitive dependents; preserve the divergent worker state."""
+        specs = self._load_specs()
+        dependencies = {spec.spec_id: set(spec.after) for spec in specs}
+        blocked = {failed_spec_id}
+        changed = True
+        while changed:
+            changed = False
+            for spec_id, after in dependencies.items():
+                if spec_id not in blocked and blocked.intersection(after):
+                    blocked.add(spec_id)
+                    changed = True
+        for spec_id in sorted(blocked - {failed_spec_id}):
+            self.status_store.update_state(
+                spec_id, "blocked", source="coordinator",
+                note=f"held by managed payload drift in {failed_spec_id}",
             )
 
 
@@ -432,6 +496,7 @@ class IntegrationQueueResult:
     held: List[str] = field(default_factory=list)
     reverted: List[str] = field(default_factory=list)
     decisions: List[QueueDecision] = field(default_factory=list)
+    integrity_failures: List[Dict[str, str]] = field(default_factory=list)
 
 
 class SerializedIntegrationQueue:
@@ -453,6 +518,7 @@ class SerializedIntegrationQueue:
         max_repair_attempts: int = 1,
         evidence_path: Optional[Path] = None,
         protected_surfaces: Optional[Iterable[str]] = None,
+        terminal_gate: Optional[Callable[[WorktreeHandle], Dict[str, Any]]] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.main_branch = main_branch
@@ -465,6 +531,21 @@ class SerializedIntegrationQueue:
         self.protected_surfaces = set(protected_surfaces or ())
         self._reservations: Dict[str, Set[str]] = {}
         self._last_rebase_conflicts: List[str] = []
+        self.terminal_gate = terminal_gate
+        self._shared_integrity_failure: Dict[str, str] | None = None
+
+    @property
+    def shared_integrity_failed(self) -> bool:
+        return self._shared_integrity_failure is not None
+
+    def _record_shared_integrity_failure(self, reason_code: str) -> None:
+        """Record exactly one run-level failure without terminalizing workers."""
+        if self._shared_integrity_failure is None:
+            self._shared_integrity_failure = {
+                "event": "managed_payload_integrity_failed",
+                "reason_code": reason_code,
+                "scope": "shared",
+            }
 
     def reserve(self, handle: WorktreeHandle) -> List[str]:
         """Reserve declared and release surfaces before a worker is dispatched.
@@ -488,9 +569,21 @@ class SerializedIntegrationQueue:
         result = IntegrationQueueResult()
         accepted_files: Set[str] = set()
         accepted_declared: Set[str] = set()
+        shared_integrity_failure = (
+            self._shared_integrity_failure["reason_code"]
+            if self._shared_integrity_failure is not None else None
+        )
         for handle in sorted((h for h in handles if h.status == "completed"), key=lambda h: h.spec_id):
             queued_at = time.monotonic()
             before = self._head()
+            if shared_integrity_failure is not None:
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(
+                    handle.spec_id, "held", before, before,
+                    reason=f"shared_managed_payload_integrity:{shared_integrity_failure}",
+                    reserved_surfaces=sorted(self._reservations.get(handle.spec_id, set(handle.declared_touches))),
+                ))
+                continue
             dirty = self._main_is_dirty()
             reserved = sorted(self._reservations.get(handle.spec_id, set(handle.declared_touches)))
             if dirty:
@@ -507,6 +600,23 @@ class SerializedIntegrationQueue:
                 result.held.append(handle.spec_id)
                 result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, reason=str(exc), reserved_surfaces=reserved))
                 continue
+            if self.terminal_gate is not None:
+                acceptance = self.terminal_gate(handle)
+                handle.integrity_acceptance = acceptance
+                if not isinstance(acceptance, dict) or not acceptance.get("ok"):
+                    result.held.append(handle.spec_id)
+                    reason_code = acceptance.get("reason_code", "NS-MPI-INDETERMINATE") if isinstance(acceptance, dict) else "NS-MPI-INDETERMINATE"
+                    result.decisions.append(QueueDecision(
+                        handle.spec_id, "held", before, before,
+                        reason=f"managed_payload_integrity:{reason_code}",
+                        reserved_surfaces=reserved,
+                    ))
+                    if isinstance(acceptance, dict) and acceptance.get("scope") == "shared":
+                        shared_integrity_failure = reason_code
+                        self._record_shared_integrity_failure(reason_code)
+                    else:
+                        self._block_dependents(handle.spec_id)
+                    continue
             observed = self._changed_files(handle.branch_name)
             protected = sorted(set(observed) & self.protected_surfaces)
             intents = {str(intent.get("path", "")) for intent in handle.release_intents if isinstance(intent, dict)}
@@ -556,6 +666,9 @@ class SerializedIntegrationQueue:
                 accepted_files.update(observed)
                 accepted_declared.update(declared)
                 self.release(handle.spec_id)
+        result.integrity_failures = list(
+            [self._shared_integrity_failure] if self._shared_integrity_failure else []
+        )
         if self.evidence_path is not None:
             write_integration_queue_result(result, self.evidence_path)
         return result
@@ -657,6 +770,7 @@ def write_integration_queue_result(result: IntegrationQueueResult, output_path: 
         "held": result.held,
         "reverted": result.reverted,
         "decisions": [asdict(decision) for decision in result.decisions],
+        "integrity_failures": result.integrity_failures,
     }, indent=2) + "\n", encoding="utf-8")
     return output_path
 

@@ -3,6 +3,8 @@
 # Scans staged content for secrets/PII, checks escalation thresholds, then runs
 # configured lint/type_check commands. Any failed gate rejects the commit.
 # Policy source of truth: .nightshift/GIT.md
+# managed_payload_provenance is enforced by scanner.py before this hook can
+# report success; keep this marker ahead of every unconditional-success path.
 #
 # Install: cp .nightshift/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 # See: BOOTSTRAP.md § "Install Pre-Commit Hook"

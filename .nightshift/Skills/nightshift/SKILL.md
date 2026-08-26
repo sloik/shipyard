@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.6.6
+version: 3.6.7
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -680,6 +680,15 @@ manifest and approved relative references. `awaiting_sync` is observable but
 does not alter the evidence gate or lifecycle result.
 
 ## `/nightshift kickoff [spec-id]` — Parent Kickoff Wrapper
+
+The parent retains the successful installation admission's integrity receipt.
+When the worker returns, it invokes
+`managed_payload_provenance.verify_terminal_integrity` with that original
+receipt before verifier-result acceptance, lifecycle terminalization, merge,
+post-merge validation, or worktree cleanup. A fresh admission is not a valid
+replacement. Deny or indeterminate preserves the worker branch/worktree and
+routes the release-owned path to its canonical path/spec plus whole-kit release;
+the parent never resets, checks out, bulk-copies, deletes, or auto-repairs it.
 
 Use this command when a board-copied prompt or human explicitly wants a parent
 agent to start and monitor a Nightshift run without doing implementation work.

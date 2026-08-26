@@ -204,6 +204,14 @@ unresolved project delta in place, create or update a canonical Nightshift spec,
 and ship it through the guarded whole-kit release. Doctor and release preflight
 use the same audit and never rewrite the dirty worktree or index.
 
+The hook is fast feedback, not the acceptance authority. Its rejection names
+the installed release-owned path, the matching `canonical/<path>` destination,
+and the canonical spec plus whole-kit release remedy. Because Git permits
+`--no-verify` and unstaged edits never reach a hook, the coordinator separately
+compares the admitted receipt with disk at result acceptance. A deny or
+indeterminate result occurs before lifecycle, merge, post-merge validation, or
+cleanup and preserves HEAD, index, branch, worktree, and divergent payload.
+
 Hooks are enforcement implementations. If this policy changes, update this file
 first, then update hooks and drift checks to match.
 

@@ -15,7 +15,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -34,6 +34,11 @@ try:
 except Exception:  # pragma: no cover - deployed install may be incomplete
     run_install_admission = None  # type: ignore[assignment]
 
+try:
+    import managed_payload_provenance
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    managed_payload_provenance = None  # type: ignore[assignment]
+
 
 class InstructionAdmissionError(RuntimeError):
     """Raised when instruction generation is not admitted by the install gate."""
@@ -51,6 +56,49 @@ VALIDATION_FILES = [
     "nightshift-dag.py",
     "hooks/pre-commit",
 ]
+
+# These harness/protocol routes share one executable coordinator-owned result
+# boundary.  A new official route is not accepted merely by naming it here:
+# canonical closure separately requires the route's managed source to carry the
+# terminal marker and the fault-injected contract tests invoke this function.
+OFFICIAL_INSTRUCTION_RESULT_PATHS = frozenset({
+    "inline-run",
+    "kickoff",
+    "board-copied-kickoff",
+    "direct-loop",
+    "direct-orchestrator",
+})
+
+
+def accept_instruction_result(
+    packet: dict[str, Any],
+    *,
+    nightshift_dir: Path,
+    official_path: str,
+    coordinator_action: Callable[[dict[str, Any]], Any],
+) -> tuple[dict[str, Any], Any | None]:
+    """Gate one instruction-driven result before its first authority action.
+
+    The callback is intentionally named and owned by the coordinator.  Workers
+    receive the packet but no callback, merge object, or lifecycle store.
+    """
+    if official_path not in OFFICIAL_INSTRUCTION_RESULT_PATHS:
+        raise InstructionAdmissionError("unknown result-acceptance path")
+    if managed_payload_provenance is None:
+        raise InstructionAdmissionError("terminal integrity helper is unavailable")
+    binding = packet.get("resultAcceptance")
+    if not isinstance(binding, dict):
+        raise InstructionAdmissionError("result acceptance binding is unavailable")
+    acceptance = managed_payload_provenance.verify_terminal_integrity(
+        Path(nightshift_dir),
+        spec_id=str(packet.get("spec_id", "")),
+        receipt_ref=str(binding.get("receipt_ref", "")),
+        receipt_sha256=str(binding.get("receipt_sha256", "")),
+        run_id=str(binding.get("run_id", "")) or None,
+    ).to_dict()
+    if not acceptance["ok"]:
+        return acceptance, None
+    return acceptance, coordinator_action(acceptance)
 
 
 @dataclass(frozen=True)
@@ -226,6 +274,13 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
             admission.get("reason")
             or f"Installation admission gate result: {admission.get('admission', 'indeterminate')}."
         )
+    acceptance_binding = {
+        "receipt_ref": admission.get("integrity_receipt_path"),
+        "receipt_sha256": admission.get("integrity_receipt_sha256"),
+        "run_id": admission.get("integrity_run_id"),
+        "decision_owner": "coordinator",
+        "gate": "managed_payload_provenance.verify_terminal_integrity",
+    }
 
     config = _read_config(nightshift_dir)
     specs = _find_specs(specs_dir)
@@ -246,6 +301,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
             "progress": {"tasks": {"total": 0, "complete": 0, "remaining": 0}, "acceptanceCriteria": {"total": 0, "complete": 0, "remaining": 0}},
             "blockingReasons": [_blocker("spec", "selected spec cannot be executed", f"{spec_id} not found in {specs_dir}", "Create the spec file or pass the correct --specs-dir/--spec value.")],
             "recommendedNextAction": "fix_blockers",
+            "resultAcceptance": acceptance_binding,
         }
 
     fm = located.frontmatter
@@ -330,6 +386,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         "progress": {"tasks": {k: tasks[k] for k in ("total", "complete", "remaining")}, "acceptanceCriteria": acceptance},
         "blockingReasons": blockers,
         "recommendedNextAction": next_action,
+        "resultAcceptance": acceptance_binding,
     }
 
 
@@ -352,7 +409,12 @@ def render_text(packet: dict[str, Any]) -> str:
     lines += ["</commands>", "", "<blockers>"]
     for blocker in packet.get("blockingReasons", []):
         lines.append(f"  - {blocker['owner']}: {blocker['risk']} | fix: {blocker['suggested_fix']}")
-    lines += ["</blockers>", "", "<next_action>", packet.get("recommendedNextAction", "read_context"), "</next_action>", "", "</artifact>"]
+    acceptance = packet.get("resultAcceptance") or {}
+    lines += ["</blockers>", "", "<result_acceptance>"]
+    lines.append(f"  <receipt>{acceptance.get('receipt_ref', '')}</receipt>")
+    lines.append(f"  <sha256>{acceptance.get('receipt_sha256', '')}</sha256>")
+    lines.append("</result_acceptance>")
+    lines += ["", "<next_action>", packet.get("recommendedNextAction", "read_context"), "</next_action>", "", "</artifact>"]
     return "\n".join(lines)
 
 

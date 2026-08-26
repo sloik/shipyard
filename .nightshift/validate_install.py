@@ -105,6 +105,10 @@ def entrypoint_inventory_gaps(
 # Managed entrypoints/runtime resources that KIT.CLOSURE proves are declared,
 # present, and probe-able from the selected install root.
 REQUIRED_RUNTIME_ENTRYPOINTS = ("validate_install.py", "preflight.py", "board.py", "board.sh")
+RUNTIME_RESOURCE_DECLARATIONS = (
+    ("nightshift-instructions.py", "PROTOCOL_FILES"),
+    ("nightshift-instructions.py", "VALIDATION_FILES"),
+)
 
 PLACEHOLDER_PROJECT_NAMES = {
     "", "my-app", "tram-tracker", "multi-stack-example", "change_me", "todo",
@@ -384,6 +388,59 @@ def _canonical_names() -> list[str]:
     return list(module.CANONICAL_PROTOCOL_FILES)
 
 
+def runtime_closure_gaps(install: Path, names: list[str]) -> list[str]:
+    """Derive entrypoint/import/shell/resource gaps from production sources.
+
+    ``names`` remains the sole release inventory.  Resource requirements are
+    read from the owning module's literal declarations rather than copied into
+    a second release list.
+    """
+    import ast
+
+    managed = set(names)
+    gaps = [f"runtime entrypoint missing from release set: {name}"
+            for name in REQUIRED_RUNTIME_ENTRYPOINTS if name not in managed]
+    gaps.extend(release.managed_import_gaps(install, names))
+
+    shell = install / "board.sh"
+    if "board.sh" in managed:
+        try:
+            shell_text = shell.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            shell_text = ""
+        if "board.py" in shell_text and "board.py" not in managed:
+            gaps.append("managed shell launcher board.sh invokes undeclared board.py")
+
+    for owner, variable in RUNTIME_RESOURCE_DECLARATIONS:
+        if owner not in managed:
+            continue
+        try:
+            tree = ast.parse((install / owner).read_text(encoding="utf-8"), filename=owner)
+        except (OSError, UnicodeError, SyntaxError):
+            gaps.append(f"runtime resource owner cannot be parsed: {owner}")
+            continue
+        values: list[str] | None = None
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == variable for target in node.targets):
+                try:
+                    literal = ast.literal_eval(node.value)
+                except (ValueError, TypeError):
+                    literal = None
+                if isinstance(literal, (list, tuple)) and all(isinstance(item, str) for item in literal):
+                    values = list(literal)
+                break
+        if values is None:
+            # Retained prior releases and minimal test installs may carry an
+            # older owner that never declared this resource family.  Closure is
+            # forward-looking: once the declaration exists, every literal is
+            # required; absence is not retroactively interpreted as a list.
+            continue
+        for resource in values:
+            if resource not in managed:
+                gaps.append(f"runtime resource missing from release set: {owner} opens {resource}")
+    return sorted(set(gaps))
+
+
 def check_kit_marker_and_payload_canonical(ctx: ValidationContext) -> None:
     marker_inv = Invariant("KIT.MARKER", "payload", required=True)
     payload_inv = Invariant("KIT.PAYLOAD", "payload", required=True)
@@ -557,14 +614,19 @@ def check_kit_closure(ctx: ValidationContext) -> None:
         names = _canonical_names() if ctx.profile == "canonical" else [
             entry["path"] for entry in provenance.retained_manifest(ctx.install).get("files", [])
         ]
-        gaps = release.managed_import_gaps(ctx.install, names)
+        gaps = runtime_closure_gaps(ctx.install, names)
     except (ConfigParseError, provenance.MetadataError, OSError):
         gaps = []
+    # Canonical validation proves new official entrypoints cannot ship without
+    # the terminal marker. Retained prior installs remain supported by their
+    # own exact manifest and are not retroactively required to contain code
+    # introduced by this release.
+    terminal_gaps = provenance.terminal_entrypoint_gaps(ctx.install) if ctx.profile == "canonical" else []
 
-    if missing or unprobeable or gaps:
+    if missing or unprobeable or gaps or terminal_gaps:
         inv.set(
             "fail",
-            observed={"missing": missing, "unprobeable": unprobeable, "import_gaps": len(gaps)},
+            observed={"missing": missing, "unprobeable": unprobeable, "import_gaps": len(gaps), "terminal_gate_gaps": terminal_gaps},
             expected="all-declared-present-and-probeable",
             owner="canonical-release-maintainer", remediation_code="NS-REM-CLOSURE-GAP",
             detail=("; ".join(gaps)[:300] if gaps else ""),
@@ -1249,10 +1311,23 @@ def main(argv: list[str] | None = None) -> int:
     if dest is None:
         admission, exit_code = ADMISSION_INDETERMINATE, 2
 
+    receipt_ref = None
+    receipt_sha256 = None
+    if admission == ADMISSION_ALLOW and dest is not None and digest is not None:
+        try:
+            receipt_ref, receipt_sha256 = provenance.write_integrity_receipt(
+                ctx.install,
+                spec_id=args.spec_id or "unselected",
+                invocation_id=invocation_id,
+                admitted_artifact_sha256=digest,
+            )
+        except Exception:  # noqa: BLE001 - receipt failure is fail-closed
+            admission, exit_code = ADMISSION_INDETERMINATE, 2
+
     label = {"allow": "ALLOW", "deny": "DENY", "indeterminate": "INDETERMINATE"}[admission]
     cov = artifact["coverage"]
     rel_dest = _rel(ctx.install, dest) if dest else "<unwritten>"
-    print(f"{label} checked={cov['checked']}/{cov['applicable']} failed={cov['failed']} warning={cov['warning']} unknown={cov['unknown']} artifact={rel_dest} sha256={digest or 'n/a'}")
+    print(f"{label} checked={cov['checked']}/{cov['applicable']} failed={cov['failed']} warning={cov['warning']} unknown={cov['unknown']} artifact={rel_dest} sha256={digest or 'n/a'} receipt={receipt_ref or 'n/a'} receipt_sha256={receipt_sha256 or 'n/a'}")
     rows = [i for i in artifact["invariants"] if i["status"] in ("fail", "warning", "unknown")][:5]
     for row in rows:
         print(f"  - {row['id']} [{row['status']}] owner={row['owner']} remedy={row['remediation_code']}")

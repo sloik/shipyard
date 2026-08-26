@@ -42,6 +42,7 @@ from integration_broker import IntegrationBroker
 from status_store import StatusStore
 from worktree_janitor import run_startup_janitor
 from verifier_feedback import FeedbackRuntimeAdapter, FeedbackState, reconcile_feedback
+import managed_payload_provenance
 from verification_report import validate_dispatch_identity
 
 try:
@@ -89,6 +90,10 @@ class SpecContractError(CoordinatorError):
 
 class ValidationError(CoordinatorError):
     """Raised when post-merge or cross-stack integration validation fails."""
+
+
+class ManagedPayloadIntegrityError(CoordinatorError):
+    """Raised when the admitted control-plane payload cannot be accepted."""
 
 
 class RunTokenCeilingExceeded(CoordinatorError):
@@ -991,6 +996,48 @@ class Coordinator:
         self.gap_reporter = GapReportGenerator(project_root / '.nightshift' / 'reports')
         self.integration_reporter = IntegrationFailureReportGenerator(project_root / 'reports' / '_wip')
         self.validator = PostMergeValidator(project_root, self.config)
+        self._integrity_receipts: Dict[str, Dict[str, Any]] = {}
+        self._shared_admission: Dict[str, Any] | None = None
+        self._shared_integrity_failed = False
+
+    def _install_root(self) -> Path:
+        installed = self.project_root / ".nightshift"
+        return installed if installed.is_dir() else Path(__file__).resolve().parent
+
+    def _admit_managed_payload(self, spec_id: str) -> Dict[str, Any]:
+        if run_install_admission is None:
+            raise ManagedPayloadIntegrityError(
+                "validate_install.py is unavailable; installation admission cannot run."
+            )
+        admission = run_install_admission(
+            spec_id, install_root=self._install_root(), invocation_kind="coordinator",
+            run_id=self.metrics.run_id,
+        )
+        if not admission.get("ok"):
+            raise ManagedPayloadIntegrityError(
+                admission.get("reason") or "Managed-payload admission is indeterminate."
+            )
+        if not admission.get("integrity_receipt_path") or not admission.get("integrity_receipt_sha256"):
+            raise ManagedPayloadIntegrityError("Managed-payload admission produced no integrity receipt.")
+        self._integrity_receipts[spec_id] = admission
+        return admission
+
+    def _accept_managed_payload(self, spec_id: str) -> Dict[str, Any]:
+        admission = self._integrity_receipts.get(spec_id)
+        if admission is None:
+            raise ManagedPayloadIntegrityError("Managed-payload integrity receipt is unavailable.")
+        result = managed_payload_provenance.verify_terminal_integrity(
+            self._install_root(),
+            spec_id=spec_id,
+            receipt_ref=str(admission["integrity_receipt_path"]),
+            receipt_sha256=str(admission["integrity_receipt_sha256"]),
+            run_id=str(admission.get("integrity_run_id") or self.metrics.run_id),
+        )
+        if not result.ok:
+            raise ManagedPayloadIntegrityError(
+                f"Managed-payload result acceptance denied ({result.reason_code}); preserve the divergent install and route the fix through canonical release."
+            )
+        return result.to_dict()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load config.yaml from project."""
@@ -1023,6 +1070,18 @@ class Coordinator:
         )
         main_branch = str((self.config.get("git") or {}).get("main_branch", "main"))
         store = StatusStore.for_specs_dir(specs_dir)
+
+        def admit_worker(spec_id, handle, _worker_run_id):
+            if self._shared_integrity_failed:
+                return {"ok": False, "admission": "deny", "reason": "shared managed payload integrity is untrusted"}
+            install = handle.worktree_path / ".nightshift"
+            if not install.is_dir():
+                install = Path(__file__).resolve().parent
+            return run_install_admission(
+                spec_id, install_root=install, invocation_kind="coordinator",
+                run_id=_worker_run_id,
+            )
+
         return BoundedWorktreeDispatcher(
             repo_root=repo_root,
             project_root=self.project_root,
@@ -1034,6 +1093,8 @@ class Coordinator:
             janitor=lambda: run_startup_janitor(
                 repo_root, self.project_root, main_branch=main_branch, status_store=store,
             ),
+            admit_worker=admit_worker,
+            dispatch_guard=lambda: not self._shared_integrity_failed,
         )
 
     def build_integration_queue(self, *, request_repair=None, dependency_graph=None) -> SerializedIntegrationQueue:
@@ -1061,6 +1122,42 @@ class Coordinator:
             output = error or metadata.get("output") or "main validation passed"
             return passed, output
 
+        def terminal_gate(handle):
+            # First prove the coordinator/shared control plane is still the
+            # admitted one.  A failure stops every integration decision.
+            if self._shared_admission is None:
+                self._shared_admission = run_install_admission(
+                    None, install_root=self._install_root(), invocation_kind="coordinator",
+                    run_id=f"{self.metrics.run_id}-shared",
+                )
+            shared = self._shared_admission
+            if not shared.get("ok"):
+                self._shared_integrity_failed = True
+                return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-SHARED-ADMISSION", "scope": "shared"}
+            shared_result = managed_payload_provenance.verify_terminal_integrity(
+                self._install_root(),
+                spec_id="unselected",
+                receipt_ref=str(shared.get("integrity_receipt_path")),
+                receipt_sha256=str(shared.get("integrity_receipt_sha256")),
+                run_id=str(shared.get("integrity_run_id") or f"{self.metrics.run_id}-shared"),
+            )
+            if not shared_result.ok:
+                self._shared_integrity_failed = True
+                return {**shared_result.to_dict(), "scope": "shared"}
+            install = handle.worktree_path / ".nightshift"
+            if not install.is_dir():
+                install = Path(__file__).resolve().parent
+            if not handle.integrity_receipt_path or not handle.integrity_receipt_sha256:
+                return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-RECEIPT-MISSING", "scope": "worker"}
+            worker_result = managed_payload_provenance.verify_terminal_integrity(
+                install,
+                spec_id=handle.spec_id,
+                receipt_ref=handle.integrity_receipt_path,
+                receipt_sha256=handle.integrity_receipt_sha256,
+                run_id=handle.integrity_run_id,
+            ).to_dict()
+            return {**worker_result, "scope": "worker"}
+
         return SerializedIntegrationQueue(
             repo_root=repo_root,
             main_branch=main_branch,
@@ -1070,6 +1167,7 @@ class Coordinator:
             dependency_graph=dependency_graph,
             max_repair_attempts=attempts,
             protected_surfaces=protected_surfaces,
+            terminal_gate=terminal_gate,
             evidence_path=self.project_root / "reports" / "_wip" / f"integration-queue-{self.metrics.run_id}.json",
         )
 
@@ -1157,6 +1255,7 @@ class Coordinator:
                 admission.get("reason")
                 or f"Installation admission gate result: {admission.get('admission', 'indeterminate')}."
             )
+        self._shared_admission = admission
 
         # Check git is clean
         if not git_is_clean(self.project_root):
@@ -1310,6 +1409,9 @@ class Coordinator:
             result = self._run_spec(child_spec_id, child_spec_file, child_frontmatter)
             child_results.append(result)
 
+        # Result acceptance owns the fresh post-work comparison.  It runs
+        # before integration validation or lifecycle terminalization.
+        self._accept_managed_payload(spec_id)
         related_stacks = self._detect_related_stacks(child_results)
         passed, error, metadata = self.validator.validate_integration(
             main_spec_id=spec_id,
@@ -1360,6 +1462,10 @@ class Coordinator:
         """
         self.metrics.data['specs_queued'] += 1
 
+        # Keep the exact admission receipt for this selected spec.  A later
+        # admission would bless changed bytes and is not a terminal check.
+        self._admit_managed_payload(spec_id)
+
         if frontmatter.get('type') == 'main':
             self._run_main_spec(spec_id, spec_file, frontmatter)
             return {
@@ -1390,6 +1496,14 @@ class Coordinator:
 
         # Step 5: Post-merge validation
         if agent_result['status'] == 'success':
+            acceptance = self._accept_managed_payload(spec_id)
+            self.metrics.data.setdefault('managed_payload_acceptance', []).append({
+                'spec_id': spec_id,
+                'outcome': acceptance['outcome'],
+                'reason_code': acceptance['reason_code'],
+                'artifact_path': acceptance['artifact_path'],
+                'artifact_sha256': acceptance['artifact_sha256'],
+            })
             try:
                 verification = verify_output_artifact(self.project_root, frontmatter)
             except SpecContractError as exc:

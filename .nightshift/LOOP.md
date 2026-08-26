@@ -109,6 +109,19 @@ This allows the loop to be **right-sized** for the task: research specs skip cod
 
 ## The 16-Step Cycle
 
+### Terminal managed-payload gate (all execution routes)
+
+Retain the integrity receipt emitted by the successful start admission. After
+worker execution, the coordinator calls
+`managed_payload_provenance.verify_terminal_integrity` using that same receipt
+before the first result-acceptance, lifecycle, merge, post-merge validation, or
+cleanup action. This applies to direct LOOP, inline run, kickoff, and copied-board
+instructions. A worker may return evidence but cannot run, suppress, approve, or
+replace this parent-owned decision. Deny/indeterminate preserves the branch,
+worktree, HEAD, index, project files, and divergent payload; only transitive
+dependents are held for worker-local drift, while shared-control-plane drift
+stops new dispatch and all integration.
+
 ### Resume from Checkpoint (if applicable)
 
 Before starting step 1, check for existing checkpoints for the current spec:

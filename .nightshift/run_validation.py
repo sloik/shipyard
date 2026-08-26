@@ -26,6 +26,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import managed_payload_provenance
+
 try:
     import yaml
 except ImportError:  # pragma: no cover
@@ -76,7 +78,13 @@ def parse_tests(output: str, exit_code: int) -> tuple[int, int, int]:
     return (passed + failed, passed, failed)
 
 
-def run_validation(spec_id: str, commands: dict, repo: Path) -> dict:
+def run_validation(
+    spec_id: str,
+    commands: dict,
+    repo: Path,
+    *,
+    terminal_integrity: dict | None = None,
+) -> dict:
     """Run each configured command; return the validation result mapping."""
     result: dict = {
         "spec_id": spec_id,
@@ -86,6 +94,19 @@ def run_validation(spec_id: str, commands: dict, repo: Path) -> dict:
         "commands": {},
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if terminal_integrity is not None:
+        acceptance = managed_payload_provenance.verify_terminal_integrity(
+            Path(terminal_integrity["install"]),
+            spec_id=spec_id,
+            receipt_ref=str(terminal_integrity["receipt_ref"]),
+            receipt_sha256=str(terminal_integrity["receipt_sha256"]),
+            run_id=terminal_integrity.get("run_id"),
+        ).to_dict()
+        result["managed_payload_acceptance"] = acceptance
+        if not acceptance["ok"]:
+            result["build_pass"] = False
+            result["commands_skipped_reason"] = "managed_payload_integrity"
+            return result
     test_timeout = commands.get("test_timeout_s", 300)
 
     for key in ("build", "test", "lint", "type_check"):
@@ -122,10 +143,28 @@ def main(argv=None) -> int:
     p.add_argument("--metrics-dir", default=".nightshift/metrics", type=Path)
     p.add_argument("--repo", default=".", type=Path)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--integrity-install", type=Path)
+    p.add_argument("--integrity-receipt")
+    p.add_argument("--integrity-receipt-sha256")
+    p.add_argument("--run-id")
     args = p.parse_args(argv)
 
+    integrity_values = (args.integrity_install, args.integrity_receipt, args.integrity_receipt_sha256)
+    if any(value is not None for value in integrity_values) and not all(value is not None for value in integrity_values):
+        p.error("terminal integrity requires --integrity-install, --integrity-receipt, and --integrity-receipt-sha256")
+    terminal_integrity = (
+        {
+            "install": args.integrity_install,
+            "receipt_ref": args.integrity_receipt,
+            "receipt_sha256": args.integrity_receipt_sha256,
+            "run_id": args.run_id,
+        }
+        if args.integrity_install is not None
+        else None
+    )
+
     commands = load_commands(args.config)
-    result = run_validation(args.spec_id, commands, args.repo)
+    result = run_validation(args.spec_id, commands, args.repo, terminal_integrity=terminal_integrity)
 
     if args.dry_run:
         print(json.dumps(result, indent=2))

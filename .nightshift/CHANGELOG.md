@@ -11,6 +11,23 @@
 
 ---
 
+## 3.6.7 (2026-08-27)
+
+### Fresh terminal integrity and shared-drift containment (SPEC-232)
+
+- Terminal managed-payload receipts now reject stale, future-dated, cross-run,
+  and cross-manifest reuse before any result authority action.
+- Inline/instruction and coordinator paths propagate the admitted run binding;
+  worker-local drift holds descendants while independent work remains eligible.
+- A shared control-plane integrity failure is retained once per run, stops later
+  dispatch and integration, and preserves already-running workers and evidence.
+- Runtime closure validation derives entrypoints, imports, shell launchers, and
+  declared dynamic resources from production sources and the release manifest.
+
+**Migration:** install the complete 3.6.7 kit payload. Receipts created by an
+earlier run or outside the bounded freshness window cannot authorize result
+acceptance and must not be replaced with a second admission after work.
+
 ## 3.6.6 (2026-08-26)
 
 ### Verifier/remediation identity interoperability (SPEC-235-002)

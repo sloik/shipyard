@@ -1,5 +1,16 @@
 # Orchestrator Protocol
 
+## Terminal managed-payload integrity ownership
+
+The orchestrator/coordinator is the sole owner of
+`managed_payload_provenance.verify_terminal_integrity`. It retains each
+successful admission receipt and consumes it exactly once after worker work and
+before terminal lifecycle, merge, post-merge validation, or cleanup. Never take
+a fresh admission in place of the comparison. Worker-local deny/indeterminate
+holds that result and transitive dependents while preserving its branch and
+worktree; a shared-install failure stops subsequent dispatch and all integration
+without misreporting already-running workers.
+
 ## Orchestrator Capability Requirements
 
 The orchestrator role requires a model capable of:
