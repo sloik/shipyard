@@ -11,6 +11,19 @@
 
 ---
 
+## 3.6.3 (2026-08-26)
+
+### Independent private experiment streams (SPEC-238)
+
+- Experiment event sequence-conflict checks are now scoped by experiment ID,
+  allowing multiple preregistered experiments in one enrolled project to each
+  begin at sequence one without weakening within-stream fork detection.
+- Added a regression test proving equal sequence numbers are accepted across
+  distinct experiments and rejected within the same experiment.
+
+**Migration:** none. Install the complete 3.6.3 kit payload. Existing event
+streams and quarantine records remain immutable.
+
 ## 3.6.2 (2026-08-26)
 
 ### Stable private reenrollment (SPEC-238)

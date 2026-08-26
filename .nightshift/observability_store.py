@@ -248,6 +248,23 @@ def _put(context: StoreContext, kind: str, object_id: str, payload: Mapping[str,
             existing_sequence = existing_payload.get("run_sequence")
             candidate_sequence = safe.get("run_sequence")
             if existing_sequence == candidate_sequence:
+                if kind == "experiment_event":
+                    existing_event = existing_payload.get("experiment_event")
+                    candidate_event = safe.get("experiment_event")
+                    existing_experiment = (
+                        existing_event.get("experiment_id")
+                        if isinstance(existing_event, dict) else None
+                    )
+                    candidate_experiment = (
+                        candidate_event.get("experiment_id")
+                        if isinstance(candidate_event, dict) else None
+                    )
+                    if (
+                        isinstance(existing_experiment, str)
+                        and isinstance(candidate_experiment, str)
+                        and existing_experiment != candidate_experiment
+                    ):
+                        continue
                 quarantine = target.parent.parent.parent / "quarantine" / f"{object_id}-{record['content_hash']}.json"
                 _atomic_create(quarantine, _canonical(record))
                 raise ObservabilityStoreError("stream sequence conflicts with immutable event; quarantined")
