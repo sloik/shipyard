@@ -1306,6 +1306,15 @@ automatic attempt. Normalized actor attempts remain distinct from lifecycle:
 `implementer_blocked` is recorded and terminally handled once but is not admitted
 for remediation until SPEC-235-001 extends the source-tagged seam.
 
+Verifier identity schema `1.0.0` separates the standalone surface's synthetic
+Git `head_commit` from the opaque 64-character `implementation_head_digest`.
+The parent recomputes the digest from its private exact candidate revision and
+the containment evidence; the verifier only copies the emitted values. Missing
+legacy identity is a controlled `legacy_verdict_identity` refusal. A remediation
+transition compares private Git revisions, prepares and validates a new surface,
+persists the new pair, and then requests the fresh verifier. Packet signatures,
+events and replay keys use the digest, never the Git object ID.
+
 **Purpose:** Prevent declaring a spec "complete" without verifying each Acceptance Criterion individually. Tests may pass without covering all ACs.
 
 **Critical Anti-Rationalization Rules:**

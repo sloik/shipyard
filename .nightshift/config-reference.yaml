@@ -96,7 +96,12 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.6.5"
+kit_version: "3.6.6"
+
+# Verifier/remediation identity schema 1.0.0 is protocol-owned, not configurable:
+# `head_commit` addresses the standalone sanitized Git surface while the opaque
+# 64-character `implementation_head_digest` binds coordinator remediation state.
+# The exact candidate Git revision remains parent-private.
 
 ---
 

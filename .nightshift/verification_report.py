@@ -31,6 +31,12 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "spec_id", "branch", "baseline_commit", "head_commit", "verdict",
     "acs", "suites", "git_footprint", "contamination",
 })
+VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
+SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
+CANDIDATE_REVISION_DOMAIN = b"nightshift.verifier.candidate-revision.v1\0"
+CONTAINMENT_BINDING_DOMAIN = b"nightshift.verifier.containment-binding.v1\0"
+IMPLEMENTATION_HEAD_DOMAIN = b"nightshift.verifier.implementation-head.v1\0"
 
 
 class VerifierSurfacePreparationError(RuntimeError):
@@ -51,21 +57,169 @@ class PreparedVerifierDispatch:
     evidence: dict[str, Any]
     evidence_sha256: str
     suite_commands: tuple[str, ...]
+    spec_id: str
+    run_id: str
 
     def public_plan(self) -> dict[str, Any]:
         commits = self.evidence["surface_commits"]
         return {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
+            "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
+            "spec_id": self.spec_id,
+            "run_id": self.run_id,
             "surface_kind": "standalone-sanitized-git",
             "repository": str(self.repository),
             "baseline_ref": "verifier-baseline",
             "head_ref": "verifier-head",
             "baseline_commit": commits["baseline"],
             "head_commit": commits["head"],
+            "implementation_head_digest": self.evidence["implementation_head_digest"],
             "brief_kind": "normal" if self.suite_commands else "no-test-suite",
             "suite_commands": list(self.suite_commands),
             "containment_evidence_sha256": self.evidence_sha256,
         }
+
+
+def _domain_digest(domain: bytes, *parts: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(domain)
+    for index, part in enumerate(parts):
+        if index:
+            digest.update(b"\0")
+        digest.update(part)
+    return digest.hexdigest()
+
+
+def candidate_revision_digest(candidate_revision: str) -> str:
+    """Return the protocol digest for one parent-private exact Git revision."""
+    if not isinstance(candidate_revision, str) or not GIT_OBJECT_ID_RE.fullmatch(
+        candidate_revision
+    ):
+        raise ValueError("candidate revision must be a lowercase Git object ID")
+    return _domain_digest(CANDIDATE_REVISION_DOMAIN, candidate_revision.encode("ascii"))
+
+
+def containment_prebinding_projection(
+    evidence: dict[str, Any], *, spec_id: str, run_id: str,
+    candidate_digest: str,
+) -> dict[str, Any]:
+    """Build the closed canonical projection used before final evidence hashing."""
+    if not isinstance(spec_id, str) or not spec_id or not isinstance(run_id, str) or not run_id:
+        raise ValueError("spec and run identity are required")
+    if not SHA256_HEX_RE.fullmatch(candidate_digest):
+        raise ValueError("candidate revision digest must be lowercase SHA-256")
+    excluded = evidence.get("excluded_paths")
+    probes = evidence.get("report_reachability")
+    if not isinstance(excluded, dict) or not isinstance(probes, list):
+        raise ValueError("containment evidence is incomplete")
+    excluded_set = sorted({
+        path
+        for values in excluded.values()
+        if isinstance(values, list)
+        for path in values
+        if isinstance(path, str)
+    })
+    normalized_probes = sorted(
+        (
+            {"ref": item.get("ref"), "path": item.get("path"),
+             "unreachable": item.get("unreachable")}
+            for item in probes if isinstance(item, dict)
+        ),
+        key=lambda item: (str(item["ref"]), str(item["path"])),
+    )
+    projection = {
+        "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
+        "spec_id": spec_id,
+        "run_id": run_id,
+        "candidate_revision_digest": candidate_digest,
+        "synthetic_head_tree": evidence.get("head_tree"),
+        "excluded_paths": excluded_set,
+        "report_reachability": normalized_probes,
+        "shared_object_database": evidence.get("shared_object_database"),
+    }
+    if not isinstance(projection["synthetic_head_tree"], str):
+        raise ValueError("synthetic head tree is missing")
+    if projection["shared_object_database"] is not False:
+        raise ValueError("verifier surface shares an object database")
+    return projection
+
+
+def derive_verifier_identity(
+    evidence: dict[str, Any], *, spec_id: str, run_id: str,
+    candidate_revision: str,
+) -> dict[str, str]:
+    """Derive the three ordered digests for the split identity contract."""
+    candidate_digest = candidate_revision_digest(candidate_revision)
+    projection = containment_prebinding_projection(
+        evidence, spec_id=spec_id, run_id=run_id,
+        candidate_digest=candidate_digest,
+    )
+    canonical_projection = json.dumps(
+        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    binding_digest = _domain_digest(CONTAINMENT_BINDING_DOMAIN, canonical_projection)
+    implementation_digest = _domain_digest(
+        IMPLEMENTATION_HEAD_DOMAIN,
+        candidate_digest.encode("ascii"),
+        binding_digest.encode("ascii"),
+    )
+    return {
+        "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
+        "candidate_revision_digest": candidate_digest,
+        "containment_binding_digest": binding_digest,
+        "implementation_head_digest": implementation_digest,
+    }
+
+
+def validate_dispatch_identity(
+    *, dispatch_plan: dict[str, Any], containment_evidence: dict[str, Any],
+    verdict: dict[str, Any], spec_id: str, run_id: str,
+    candidate_revision: str,
+) -> dict[str, str]:
+    """Validate the public/private identity pair at the parent admission seam."""
+    identity = derive_verifier_identity(
+        {
+            key: value for key, value in containment_evidence.items()
+            if key not in {
+                "spec_id", "run_id", "identity_schema_version",
+                "candidate_revision_digest", "containment_binding_digest",
+                "implementation_head_digest",
+            }
+        },
+        spec_id=spec_id,
+        run_id=run_id,
+        candidate_revision=candidate_revision,
+    )
+    evidence_bytes = (
+        json.dumps(containment_evidence, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    evidence_sha = hashlib.sha256(evidence_bytes).hexdigest()
+    surface_commits = containment_evidence.get("surface_commits")
+    expected_head = (
+        surface_commits.get("head") if isinstance(surface_commits, dict) else None
+    )
+    checks = (
+        dispatch_plan.get("schema_version") == "2.0.0",
+        dispatch_plan.get("identity_schema_version") == VERIFIER_IDENTITY_SCHEMA_VERSION,
+        containment_evidence.get("identity_schema_version") == VERIFIER_IDENTITY_SCHEMA_VERSION,
+        dispatch_plan.get("spec_id") == containment_evidence.get("spec_id") == spec_id,
+        dispatch_plan.get("run_id") == containment_evidence.get("run_id") == run_id,
+        dispatch_plan.get("head_commit") == expected_head == verdict.get("head_commit"),
+        dispatch_plan.get("implementation_head_digest")
+        == containment_evidence.get("implementation_head_digest")
+        == verdict.get("implementation_head_digest")
+        == identity["implementation_head_digest"],
+        containment_evidence.get("candidate_revision_digest")
+        == identity["candidate_revision_digest"],
+        containment_evidence.get("containment_binding_digest")
+        == identity["containment_binding_digest"],
+        dispatch_plan.get("containment_evidence_sha256") == evidence_sha,
+        verdict.get("identity_schema_version") == VERIFIER_IDENTITY_SCHEMA_VERSION,
+        verdict.get("spec_id") == spec_id,
+    )
+    if not all(checks):
+        raise ValueError("verifier dispatch identity mismatch")
+    return identity
 
 
 @dataclass(frozen=True)
@@ -320,6 +474,8 @@ def prepare_verifier_dispatch(
     head_ref: str,
     report_paths: Iterable[str],
     evidence_path: Path,
+    spec_id: str,
+    run_id: str,
     suite_commands: Iterable[str] = (),
 ) -> PreparedVerifierDispatch:
     """Prepare the sole verifier surface and emit a sanitized launch plan.
@@ -356,6 +512,27 @@ def prepare_verifier_dispatch(
             report_paths=normalized_reports,
             evidence_path=evidence_path,
         )
+        exact_candidate_revision = _run_git(
+            source_repository, "rev-parse", "--verify", f"{head_ref}^{{commit}}"
+        ).strip()
+        identity = derive_verifier_identity(
+            evidence,
+            spec_id=spec_id,
+            run_id=run_id,
+            candidate_revision=exact_candidate_revision,
+        )
+        evidence = {
+            **evidence,
+            "spec_id": spec_id,
+            "run_id": run_id,
+            **identity,
+        }
+        evidence_bytes_to_write = (
+            json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        evidence_tmp = evidence_path.with_suffix(evidence_path.suffix + ".tmp")
+        evidence_tmp.write_bytes(evidence_bytes_to_write)
+        os.replace(evidence_tmp, evidence_path)
         evidence_bytes = evidence_path.read_bytes()
         durable_evidence = json.loads(evidence_bytes)
         probes = durable_evidence.get("report_reachability")
@@ -403,6 +580,29 @@ def prepare_verifier_dispatch(
             and observed_retained == retained
             and isinstance(commits, dict)
             and set(commits) == {"baseline", "head"}
+            and durable_evidence.get("spec_id") == spec_id
+            and durable_evidence.get("run_id") == run_id
+            and all(
+                SHA256_HEX_RE.fullmatch(str(durable_evidence.get(key, "")))
+                for key in (
+                    "candidate_revision_digest",
+                    "containment_binding_digest",
+                    "implementation_head_digest",
+                )
+            )
+            and derive_verifier_identity(
+                {
+                    key: value for key, value in durable_evidence.items()
+                    if key not in {
+                        "spec_id", "run_id", "identity_schema_version",
+                        "candidate_revision_digest", "containment_binding_digest",
+                        "implementation_head_digest",
+                    }
+                },
+                spec_id=spec_id,
+                run_id=run_id,
+                candidate_revision=exact_candidate_revision,
+            ) == identity
             and _run_git(destination, "rev-parse", "verifier-baseline").strip() == commits["baseline"]
             and _run_git(destination, "rev-parse", "verifier-head").strip() == commits["head"]
         )
@@ -417,6 +617,8 @@ def prepare_verifier_dispatch(
         evidence=durable_evidence,
         evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
         suite_commands=suites,
+        spec_id=spec_id,
+        run_id=run_id,
     )
 
 
@@ -425,6 +627,14 @@ def validate_verifier_verdict_dict(data: dict[str, Any]) -> list[str]:
     errors = [f"missing top-level key '{key}'" for key in sorted(VERIFIER_VERDICT_REQUIRED_KEYS - data.keys())]
     if data.get("verdict") not in {"pass", "fail", "disputes_premise"}:
         errors.append(f"verdict not in enum: {data.get('verdict')!r}")
+    identity_present = any(
+        key in data for key in ("identity_schema_version", "implementation_head_digest")
+    )
+    if identity_present:
+        if data.get("identity_schema_version") != VERIFIER_IDENTITY_SCHEMA_VERSION:
+            errors.append("unknown verifier identity schema")
+        if not SHA256_HEX_RE.fullmatch(str(data.get("implementation_head_digest", ""))):
+            errors.append("invalid implementation_head_digest")
     return errors
 
 
@@ -454,12 +664,14 @@ def verifier_surface_self_test() -> dict[str, Any]:
             source, surface, baseline_ref=baseline, head_ref=head,
             report_paths=["canonical/reports/nightshift-report.md"],
             evidence_path=root / "containment.json",
+            spec_id="SMOKE", run_id="smoke-run",
             suite_commands=["python -m pytest -q"],
         )
         no_suite = prepare_verifier_dispatch(
             source, no_suite_surface, baseline_ref=baseline, head_ref=head,
             report_paths=["canonical/reports/nightshift-report.md"],
             evidence_path=root / "containment-no-suite.json",
+            spec_id="SMOKE", run_id="smoke-run-no-suite",
         )
         plan = prepared.public_plan()
         no_suite_plan = no_suite.public_plan()
@@ -478,7 +690,10 @@ def verifier_surface_self_test() -> dict[str, Any]:
         evidence = prepared.evidence
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
-            "head_commit": head, "verdict": "pass", "acs": [{"id": "AC1", "status": "pass", "evidence": "smoke"}],
+            "head_commit": plan["head_commit"],
+            "identity_schema_version": plan["identity_schema_version"],
+            "implementation_head_digest": plan["implementation_head_digest"],
+            "verdict": "pass", "acs": [{"id": "AC1", "status": "pass", "evidence": "smoke"}],
             "suites": [], "git_footprint": {"tree_before": evidence["head_tree"], "tree_after": evidence["head_tree"], "porcelain": ""},
         }
         missing_errors = validate_verifier_verdict_dict(verdict)
@@ -749,6 +964,8 @@ def main(argv: list[str] | None = None) -> int:
     dispatch.add_argument("--head", required=True)
     dispatch.add_argument("--report-path", action="append", required=True)
     dispatch.add_argument("--evidence", required=True, type=Path)
+    dispatch.add_argument("--spec-id", required=True)
+    dispatch.add_argument("--run-id", required=True)
     dispatch.add_argument("--suite-command", action="append", default=[])
     subparsers.add_parser("verifier-self-test")
     args = parser.parse_args(raw_argv)
@@ -764,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.source, args.destination, baseline_ref=args.baseline,
                 head_ref=args.head, report_paths=args.report_path,
                 evidence_path=args.evidence, suite_commands=args.suite_command,
+                spec_id=args.spec_id, run_id=args.run_id,
             )
         except VerifierSurfacePreparationError:
             print(json.dumps({

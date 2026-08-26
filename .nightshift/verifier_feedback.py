@@ -18,13 +18,18 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from verification_report import validate_verifier_verdict_dict
+from verification_report import (
+    VERIFIER_IDENTITY_SCHEMA_VERSION,
+    validate_dispatch_identity,
+    validate_verifier_verdict_dict,
+)
 
-PACKET_SCHEMA_VERSION = 1
+PACKET_SCHEMA_VERSION = 2
 MAX_PACKET_BYTES = 32_768
 MAX_ITEMS = 64
 MAX_TOKEN_LENGTH = 256
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
 IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 AC_RE = re.compile(r"AC[1-9][0-9]*")
 PRIVATE_PATH_PARTS = frozenset({"private", ".private", "_private"})
@@ -76,6 +81,8 @@ CONTROLLED_REASONS = frozenset(
         "budget_exhausted",
         "adapter_failure",
         "invalid_verdict",
+        "legacy_verdict_identity",
+        "verifier_identity_mismatch",
         "dispatch_failure",
         "unchanged_head",
         "remediation_failure",
@@ -90,7 +97,8 @@ CONTROLLED_REASONS = frozenset(
 def _human_action_for(reason: str, next_action: str) -> bool:
     """Derive escalation from controlled policy, including exhausted invalid verdicts."""
     return reason in HUMAN_ACTION_REASONS or (
-        reason == "invalid_verdict" and next_action == "operator_controller_action"
+        reason in {"invalid_verdict", "legacy_verdict_identity"}
+        and next_action == "operator_controller_action"
     )
 
 
@@ -140,6 +148,7 @@ class FeedbackPhase(str, Enum):
     PACKET_ADMITTED = "packet_admitted"
     REMEDIATION_DISPATCHING = "remediation_dispatching"
     REMEDIATION_RUNNING = "remediation_running"
+    AWAITING_FRESH_SURFACE = "awaiting_fresh_surface"
     AWAITING_FRESH_VERDICT = "awaiting_fresh_verdict"
     READY_FOR_INTEGRATION = "ready_for_integration"
     TERMINAL_DONE = "terminal_done"
@@ -156,9 +165,12 @@ class EvidenceReference:
 class RemediationFeedback:
     schema_version: int
     packet_type: str
+    identity_schema_version: str
     run_id: str
     spec_id: str
-    implementation_head: str
+    implementation_head_digest: str
+    verifier_head_commit: str
+    containment_binding_digest: str
     source_verdict_digest: str
     failed_ac_ids: tuple[str, ...]
     evidence: tuple[EvidenceReference, ...]
@@ -222,12 +234,15 @@ class FeedbackEffect:
 class FeedbackState:
     run_id: str
     spec_id: str
-    implementation_head: str
+    implementation_head_digest: str
     expected_ac_ids: tuple[str, ...]
     original_authority: tuple[str, ...]
     candidate_branch: str = ""
     candidate_worktree_ref: str = ""
     implementer_ids: tuple[str, ...] = ()
+    candidate_revision: str = ""
+    verifier_head_commit: str = ""
+    containment_binding_digest: str = ""
     controller_action_id: str | None = None
     prior_head_digest: str | None = None
     prior_verdict_digest: str | None = None
@@ -239,7 +254,10 @@ class FeedbackState:
     replacement_verifier_used: int = 0
     initial_verifier_id: str | None = None
     remediator_id: str | None = None
-    remediated_head: str | None = None
+    remediated_implementation_head_digest: str | None = None
+    remediated_candidate_revision: str | None = None
+    remediated_verifier_head_commit: str | None = None
+    remediated_containment_binding_digest: str | None = None
     processed_events: tuple[tuple[str, str], ...] = ()
     pending_effects: tuple[FeedbackEffect, ...] = ()
     delivered_effect_keys: tuple[str, ...] = ()
@@ -404,7 +422,12 @@ def validate_remediation_feedback(
         raise FeedbackValidationError("unknown remediation packet schema")
     _validate_identity(packet.run_id, "run_id")
     _validate_identity(packet.spec_id, "spec_id")
-    _validate_hash(packet.implementation_head, "implementation_head")
+    if packet.identity_schema_version != VERIFIER_IDENTITY_SCHEMA_VERSION:
+        raise FeedbackValidationError("unknown verifier identity schema")
+    _validate_hash(packet.implementation_head_digest, "implementation_head_digest")
+    if not GIT_OBJECT_ID_RE.fullmatch(packet.verifier_head_commit):
+        raise FeedbackValidationError("invalid verifier_head_commit")
+    _validate_hash(packet.containment_binding_digest, "containment_binding_digest")
     _validate_hash(packet.source_verdict_digest, "source_verdict_digest")
     if packet.causal_confidence not in CAUSAL_CONFIDENCE:
         raise FeedbackValidationError("unknown causal confidence")
@@ -475,9 +498,12 @@ def remediation_feedback_from_dict(data: Mapping[str, Any]) -> RemediationFeedba
         return RemediationFeedback(
             schema_version=data["schema_version"],
             packet_type=data["packet_type"],
+            identity_schema_version=data["identity_schema_version"],
             run_id=data["run_id"],
             spec_id=data["spec_id"],
-            implementation_head=data["implementation_head"],
+            implementation_head_digest=data["implementation_head_digest"],
+            verifier_head_commit=data["verifier_head_commit"],
+            containment_binding_digest=data["containment_binding_digest"],
             source_verdict_digest=data["source_verdict_digest"],
             failed_ac_ids=tuple(data["failed_ac_ids"]),
             evidence=tuple(EvidenceReference(**item) for item in data["evidence"]),
@@ -519,12 +545,15 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
         state = FeedbackState(
             run_id=data["run_id"],
             spec_id=data["spec_id"],
-            implementation_head=data["implementation_head"],
+            implementation_head_digest=data["implementation_head_digest"],
             expected_ac_ids=tuple(data["expected_ac_ids"]),
             original_authority=tuple(data["original_authority"]),
             candidate_branch=data["candidate_branch"],
             candidate_worktree_ref=data["candidate_worktree_ref"],
             implementer_ids=tuple(data["implementer_ids"]),
+            candidate_revision=data["candidate_revision"],
+            verifier_head_commit=data["verifier_head_commit"],
+            containment_binding_digest=data["containment_binding_digest"],
             controller_action_id=data["controller_action_id"],
             prior_head_digest=data["prior_head_digest"],
             prior_verdict_digest=data["prior_verdict_digest"],
@@ -540,7 +569,10 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
             replacement_verifier_used=data["replacement_verifier_used"],
             initial_verifier_id=data["initial_verifier_id"],
             remediator_id=data["remediator_id"],
-            remediated_head=data["remediated_head"],
+            remediated_implementation_head_digest=data["remediated_implementation_head_digest"],
+            remediated_candidate_revision=data["remediated_candidate_revision"],
+            remediated_verifier_head_commit=data["remediated_verifier_head_commit"],
+            remediated_containment_binding_digest=data["remediated_containment_binding_digest"],
             processed_events=tuple(tuple(item) for item in data["processed_events"]),
             pending_effects=effects,
             delivered_effect_keys=tuple(data["delivered_effect_keys"]),
@@ -553,7 +585,13 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
         raise FeedbackValidationError("invalid feedback state field types") from exc
     _validate_identity(state.run_id, "run id")
     _validate_identity(state.spec_id, "spec id")
-    _validate_hash(state.implementation_head, "implementation head")
+    _validate_hash(state.implementation_head_digest, "implementation head")
+    if state.candidate_revision and not GIT_OBJECT_ID_RE.fullmatch(state.candidate_revision):
+        raise FeedbackValidationError("invalid candidate revision")
+    if state.verifier_head_commit and not GIT_OBJECT_ID_RE.fullmatch(state.verifier_head_commit):
+        raise FeedbackValidationError("invalid verifier head commit")
+    if state.containment_binding_digest:
+        _validate_hash(state.containment_binding_digest, "containment binding digest")
     if state.controller_action_id is not None:
         _validate_identity(state.controller_action_id, "controller action id")
     for label, value in (
@@ -573,7 +611,8 @@ def validate_verifier_verdict(
     verdict: Mapping[str, Any],
     *,
     spec_id: str,
-    implementation_head: str,
+    implementation_head_digest: str,
+    verifier_head_commit: str,
     expected_ac_ids: Iterable[str],
     verifier_id: str,
     implementer_ids: Iterable[str] = (),
@@ -581,9 +620,13 @@ def validate_verifier_verdict(
     errors = validate_verifier_verdict_dict(dict(verdict))
     if errors:
         raise FeedbackValidationError("invalid verifier schema: " + "; ".join(errors))
+    if "implementation_head_digest" not in verdict:
+        raise FeedbackValidationError("legacy_verdict_missing_implementation_head_digest")
     if (
         verdict.get("spec_id") != spec_id
-        or verdict.get("head_commit") != implementation_head
+        or verdict.get("head_commit") != verifier_head_commit
+        or verdict.get("implementation_head_digest") != implementation_head_digest
+        or verdict.get("identity_schema_version") != VERIFIER_IDENTITY_SCHEMA_VERSION
     ):
         raise FeedbackValidationError("stale or mismatched verdict identity")
     if verdict.get("contamination") is not None:
@@ -620,7 +663,8 @@ def validate_failure_verdict(
     verdict: Mapping[str, Any],
     *,
     spec_id: str,
-    implementation_head: str,
+    implementation_head_digest: str,
+    verifier_head_commit: str,
     expected_ac_ids: Iterable[str],
     verifier_id: str,
     implementer_ids: Iterable[str] = (),
@@ -628,7 +672,8 @@ def validate_failure_verdict(
     validate_verifier_verdict(
         verdict,
         spec_id=spec_id,
-        implementation_head=implementation_head,
+        implementation_head_digest=implementation_head_digest,
+        verifier_head_commit=verifier_head_commit,
         expected_ac_ids=expected_ac_ids,
         verifier_id=verifier_id,
         implementer_ids=implementer_ids,
@@ -655,7 +700,10 @@ def create_remediation_feedback(
     *,
     run_id: str,
     spec_id: str,
-    implementation_head: str,
+    implementation_head_digest: str,
+    candidate_revision: str,
+    dispatch_plan: Mapping[str, Any],
+    containment_evidence: Mapping[str, Any],
     verdict: Mapping[str, Any],
     verifier_id: str,
     expected_ac_ids: Iterable[str],
@@ -671,10 +719,24 @@ def create_remediation_feedback(
     implementer_ids: Iterable[str] = (),
 ) -> RemediationFeedback:
     expected = tuple(expected_ac_ids)
+    if "implementation_head_digest" not in verdict:
+        raise FeedbackValidationError("legacy_verdict_identity")
+    try:
+        identity = validate_dispatch_identity(
+            dispatch_plan=dict(dispatch_plan),
+            containment_evidence=dict(containment_evidence),
+            verdict=dict(verdict),
+            spec_id=spec_id,
+            run_id=run_id,
+            candidate_revision=candidate_revision,
+        )
+    except ValueError as exc:
+        raise FeedbackValidationError("verifier_identity_mismatch") from exc
     failed = validate_failure_verdict(
         verdict,
         spec_id=spec_id,
-        implementation_head=implementation_head,
+        implementation_head_digest=implementation_head_digest,
+        verifier_head_commit=str(dispatch_plan.get("head_commit", "")),
         expected_ac_ids=expected,
         verifier_id=verifier_id,
         implementer_ids=implementer_ids,
@@ -696,9 +758,12 @@ def create_remediation_feedback(
     unsigned = RemediationFeedback(
         schema_version=PACKET_SCHEMA_VERSION,
         packet_type="remediation_feedback",
+        identity_schema_version=VERIFIER_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
         spec_id=spec_id,
-        implementation_head=implementation_head,
+        implementation_head_digest=implementation_head_digest,
+        verifier_head_commit=str(dispatch_plan["head_commit"]),
+        containment_binding_digest=identity["containment_binding_digest"],
         source_verdict_digest=_verdict_digest(verdict),
         failed_ac_ids=failed,
         evidence=tuple(evidence),
@@ -761,17 +826,20 @@ def resume_controller_action(
     expected_verdict = (
         prior.packet.source_verdict_digest if prior.packet else "0" * 64
     )
-    if prior_head_digest != prior.implementation_head or prior_verdict_digest != expected_verdict:
+    if prior_head_digest != prior.implementation_head_digest or prior_verdict_digest != expected_verdict:
         raise FeedbackValidationError("controller resume prior digest mismatch")
     return FeedbackState(
         run_id=run_id,
         spec_id=prior.spec_id,
-        implementation_head=prior.implementation_head,
+        implementation_head_digest=prior.implementation_head_digest,
         expected_ac_ids=prior.expected_ac_ids,
         original_authority=prior.original_authority,
         candidate_branch=prior.candidate_branch,
         candidate_worktree_ref=prior.candidate_worktree_ref,
         implementer_ids=prior.implementer_ids,
+        candidate_revision=prior.candidate_revision,
+        verifier_head_commit=prior.verifier_head_commit,
+        containment_binding_digest=prior.containment_binding_digest,
         controller_action_id=action_id,
         prior_head_digest=prior_head_digest,
         prior_verdict_digest=prior_verdict_digest,
@@ -843,7 +911,7 @@ def _effect(
         state.packet.source_verdict_digest if state.packet else "no-verdict"
     )
     key = (
-        f"feedback:{state.run_id}:{state.spec_id}:{state.implementation_head}:"
+        f"feedback:{state.run_id}:{state.spec_id}:{state.implementation_head_digest}:"
         f"{verdict_digest}:{suffix}"
     )
     return FeedbackEffect(key=key, kind=kind, payload=_json_safe(payload))
@@ -1058,16 +1126,26 @@ def reduce_feedback_event(
                 validate_verifier_verdict(
                     event.verdict,
                     spec_id=state.spec_id,
-                    implementation_head=event.head or state.implementation_head,
+                    implementation_head_digest=event.head or state.implementation_head_digest,
+                    verifier_head_commit=(
+                        state.remediated_verifier_head_commit
+                        if state.phase is FeedbackPhase.AWAITING_FRESH_VERDICT
+                        and state.remediated_verifier_head_commit
+                        else state.verifier_head_commit
+                    ),
                     expected_ac_ids=state.expected_ac_ids,
                     verifier_id=event.actor_id,
                     implementer_ids=state.implementer_ids,
                 )
                 valid = True
                 validation_error = "invalid_verdict"
-            except FeedbackValidationError:
+            except FeedbackValidationError as exc:
                 valid = False
-                validation_error = "invalid_verdict"
+                validation_error = (
+                    "legacy_verdict_identity"
+                    if str(exc) == "legacy_verdict_missing_implementation_head_digest"
+                    else "invalid_verdict"
+                )
 
         verdict_event = replace(event, reason="ordinary_progress", next_action="continue")
         replacement_available = (
@@ -1080,7 +1158,7 @@ def reduce_feedback_event(
         )
         rejection_event = replace(
             event,
-            reason="invalid_verdict",
+            reason=validation_error,
             next_action=(
                 "dispatch_replacement_verifier"
                 if replacement_available
@@ -1108,7 +1186,7 @@ def reduce_feedback_event(
                             "dispatch_verifier",
                             "replacement-verifier:1",
                             purpose="replacement",
-                            head=state.implementation_head,
+                            head=state.implementation_head_digest,
                             ordinal=1,
                         ),
                     )
@@ -1131,7 +1209,7 @@ def reduce_feedback_event(
                         ready,
                         "enqueue_integration_broker",
                         "integration",
-                        head=state.implementation_head,
+                        head=state.implementation_head_digest,
                         fresh_main_validation=True,
                         owner="coordinator",
                         broker_entrypoint="IntegrationBroker.integrate_completed",
@@ -1153,13 +1231,23 @@ def reduce_feedback_event(
                 packet = create_remediation_feedback(
                     run_id=state.run_id,
                     spec_id=state.spec_id,
-                    implementation_head=state.implementation_head,
+                    implementation_head_digest=state.implementation_head_digest,
                     verdict=event.verdict,
                     verifier_id=event.actor_id,
                     expected_ac_ids=state.expected_ac_ids,
                     parent_key=parent_key,
                     implementer_ids=state.implementer_ids,
-                    **packet_inputs,
+                    **{
+                        key: packet_inputs[key]
+                        for key in (
+                            "candidate_revision", "dispatch_plan",
+                            "containment_evidence", "evidence",
+                            "reproduction_commands", "verification_commands",
+                            "allowed_change_surface", "forbidden_surface",
+                            "guardrails", "causal_confidence", "project_root",
+                        )
+                        if key in packet_inputs
+                    },
                 )
             except FeedbackValidationError:
                 state = _record_actor_effect(state, rejection_event)
@@ -1176,7 +1264,7 @@ def reduce_feedback_event(
                             "dispatch_verifier",
                             "replacement-verifier:1",
                             purpose="replacement",
-                            head=state.implementation_head,
+                            head=state.implementation_head_digest,
                             ordinal=1,
                         ),
                     )
@@ -1219,7 +1307,7 @@ def reduce_feedback_event(
             if (
                 not valid
                 or event.verdict.get("verdict") != "pass"
-                or event.head != state.remediated_head
+                or event.head != state.remediated_implementation_head_digest
                 or event.actor_id in disallowed_verifiers
             ):
                 if valid:
@@ -1242,7 +1330,7 @@ def reduce_feedback_event(
                     ready,
                     "enqueue_integration_broker",
                     "integration",
-                    head=state.remediated_head,
+                    head=state.remediated_implementation_head_digest,
                     fresh_main_validation=True,
                     owner="coordinator",
                     broker_entrypoint="IntegrationBroker.integrate_completed",
@@ -1313,14 +1401,28 @@ def reduce_feedback_event(
                 next_action="authorize_scope",
             )
             return _terminal(state, "scope_refusal", human=True, event=blocked_event)
+        fresh_candidate_revision = (
+            packet_inputs.get("fresh_candidate_revision")
+            if packet_inputs is not None else None
+        )
+        fresh_dispatch_plan = (
+            packet_inputs.get("fresh_dispatch_plan")
+            if packet_inputs is not None else None
+        )
+        fresh_containment_evidence = (
+            packet_inputs.get("fresh_containment_evidence")
+            if packet_inputs is not None else None
+        )
         if (
             event.outcome != "completed"
             or not event.head
-            or event.head == state.implementation_head
+            or not isinstance(fresh_candidate_revision, str)
+            or not GIT_OBJECT_ID_RE.fullmatch(fresh_candidate_revision)
+            or fresh_candidate_revision == state.candidate_revision
         ):
             reason = (
                 "unchanged_head"
-                if event.head == state.implementation_head
+                if fresh_candidate_revision == state.candidate_revision
                 else "remediation_failure"
             )
             blocked_event = replace(
@@ -1344,6 +1446,27 @@ def reduce_feedback_event(
             )
         try:
             validate_changed_surface(state.packet, event.changed_paths)
+            if not isinstance(fresh_dispatch_plan, Mapping) or not isinstance(
+                fresh_containment_evidence, Mapping
+            ):
+                raise FeedbackValidationError("fresh verifier surface is missing")
+            identity = validate_dispatch_identity(
+                dispatch_plan=dict(fresh_dispatch_plan),
+                containment_evidence=dict(fresh_containment_evidence),
+                verdict={
+                    "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
+                    "spec_id": state.spec_id,
+                    "head_commit": fresh_dispatch_plan.get("head_commit"),
+                    "implementation_head_digest": fresh_dispatch_plan.get(
+                        "implementation_head_digest"
+                    ),
+                },
+                spec_id=state.spec_id,
+                run_id=state.run_id,
+                candidate_revision=fresh_candidate_revision,
+            )
+            if event.head != identity["implementation_head_digest"]:
+                raise FeedbackValidationError("remediation digest mismatch")
         except FeedbackValidationError:
             blocked_event = replace(
                 event,
@@ -1356,7 +1479,12 @@ def reduce_feedback_event(
         fresh = replace(
             state,
             phase=FeedbackPhase.AWAITING_FRESH_VERDICT,
-            remediated_head=event.head,
+            remediated_implementation_head_digest=event.head,
+            remediated_candidate_revision=fresh_candidate_revision,
+            remediated_verifier_head_commit=str(fresh_dispatch_plan["head_commit"]),
+            remediated_containment_binding_digest=identity[
+                "containment_binding_digest"
+            ],
             remediator_id=event.actor_id,
         )
         return _append_effects(
@@ -1367,6 +1495,7 @@ def reduce_feedback_event(
                 "fresh-verifier:1",
                 purpose="fresh",
                 head=event.head,
+                verifier_head_commit=fresh_dispatch_plan["head_commit"],
                 ordinal=1,
                 exclude_actor_ids=[state.initial_verifier_id, event.actor_id],
             ),

@@ -42,6 +42,7 @@ from integration_broker import IntegrationBroker
 from status_store import StatusStore
 from worktree_janitor import run_startup_janitor
 from verifier_feedback import FeedbackRuntimeAdapter, FeedbackState, reconcile_feedback
+from verification_report import validate_dispatch_identity
 
 try:
     from preflight import run_install_admission
@@ -1092,6 +1093,51 @@ class Coordinator:
         return reconcile_feedback(
             adapter, initial_state, parent_key=parent_key,
             events=events, packet_inputs=packet_inputs,
+        )
+
+    def initialize_verifier_feedback_state(
+        self, *, run_id: str, spec_id: str, candidate_revision: str,
+        dispatch_plan: Dict[str, Any], containment_evidence: Dict[str, Any],
+        expected_ac_ids: Tuple[str, ...], original_authority: Tuple[str, ...],
+        candidate_branch: str = "", candidate_worktree_ref: str = "",
+        implementer_ids: Tuple[str, ...] = (),
+    ) -> FeedbackState:
+        """Pin the private candidate revision to its public verifier identity.
+
+        Only the coordinator receives ``candidate_revision``.  The returned
+        durable state uses its opaque implementation digest for reducer/event
+        binding while retaining the exact revision solely for parent Git
+        comparisons during a possible remediation transition.
+        """
+        identity = validate_dispatch_identity(
+            dispatch_plan=dispatch_plan,
+            containment_evidence=containment_evidence,
+            verdict={
+                "spec_id": spec_id,
+                "identity_schema_version": dispatch_plan.get(
+                    "identity_schema_version"
+                ),
+                "head_commit": dispatch_plan.get("head_commit"),
+                "implementation_head_digest": dispatch_plan.get(
+                    "implementation_head_digest"
+                ),
+            },
+            spec_id=spec_id,
+            run_id=run_id,
+            candidate_revision=candidate_revision,
+        )
+        return FeedbackState(
+            run_id=run_id,
+            spec_id=spec_id,
+            implementation_head_digest=identity["implementation_head_digest"],
+            expected_ac_ids=expected_ac_ids,
+            original_authority=original_authority,
+            candidate_branch=candidate_branch,
+            candidate_worktree_ref=candidate_worktree_ref,
+            implementer_ids=implementer_ids,
+            candidate_revision=candidate_revision,
+            verifier_head_commit=str(dispatch_plan["head_commit"]),
+            containment_binding_digest=identity["containment_binding_digest"],
         )
 
     def preflight(self) -> None:

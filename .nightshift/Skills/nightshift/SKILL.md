@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.6.5
+version: 3.6.6
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1346,6 +1346,7 @@ the run worktree or a parent self-check.
 DISPATCH_PLAN=$(python3 .nightshift/verification_report.py prepare-dispatch \
   --source <run-worktree> --destination <new-empty-verifier-repository> \
   --baseline <baseline-commit> --head <candidate-commit> \
+  --spec-id <spec-id> --run-id <run-id> \
   --report-path <repo-relative-run-report> \
   --evidence .nightshift/reports/<spec-id>/verifier-surface.json \
   [--suite-command <exact-configured-command> ...]) || {
@@ -1360,6 +1361,13 @@ JSON and require its exact schema before composing the brief. Use only its
 `repository`, `verifier-baseline`/`verifier-head`, suite tuple, and synthetic commit
 IDs in the verifier assignment. The source/report arguments above remain
 parent-private preparation inputs and must not be copied into the brief.
+
+The versioned dispatch identity has two non-interchangeable values. `head_commit`
+is the synthetic Git object ID used only inside the standalone repository.
+`implementation_head_digest` is an opaque lowercase SHA-256 binding over the
+parent-private candidate revision and containment projection. Copy both unchanged
+into the verifier verdict. Never derive one from the other or expose the exact
+candidate revision.
 
 Collect `git_footprint.tree_before`, `git_footprint.tree_after`, and
 `git_footprint.porcelain` from this standalone surface only. The source run
@@ -1656,6 +1664,8 @@ carries evidence; an empty array is not a schema gap to work around:
   "branch": "nightshift/SPEC-XXX-<run-id>",
   "baseline_commit": "<sha>",
   "head_commit": "<sha>",
+  "identity_schema_version": "1.0.0",
+  "implementation_head_digest": "<lowercase-sha256>",
   "verdict": "pass | fail | disputes_premise",
   "acs": [
     {"id": "AC1", "status": "pass | fail | unverifiable", "evidence": "<command + observed result>"}
@@ -1714,8 +1724,10 @@ import json, re, sys
 def die(msg): print("SCHEMA:     reject: " + msg); print("GATE:       reject"); sys.exit(1)
 
 v = json.load(open(sys.argv[1]))
-for k in ("spec_id","branch","baseline_commit","head_commit","verdict","acs","suites","git_footprint","contamination"):
+for k in ("spec_id","branch","baseline_commit","head_commit","identity_schema_version","implementation_head_digest","verdict","acs","suites","git_footprint","contamination"):
     if k not in v: die("missing top-level key '%s'" % k)
+if v["identity_schema_version"] != "1.0.0": die("unsupported verifier identity schema")
+if not re.fullmatch(r"[0-9a-f]{64}", v["implementation_head_digest"]): die("invalid implementation_head_digest")
 if v["verdict"] not in ("pass","fail","disputes_premise"): die("verdict not in enum: %r" % v["verdict"])
 
 # R5 — disputes_premise must carry its evidence, or it is just an opinion.
@@ -1801,6 +1813,15 @@ parent-signed packet. The parent selects exactly one remediation mode
 requires a newly independent verifier on the changed head before integration.
 The verifier and remediation actor never communicate directly, mutate lifecycle,
 merge, or self-accept.
+
+Packet admission recomputes the containment binding from the parent-private exact
+candidate revision, then requires the verdict's synthetic `head_commit` and opaque
+`implementation_head_digest` to equal the dispatch plan and evidence. A legacy
+failure verdict without the digest is rejected as `legacy_verdict_identity`.
+After remediation, compare exact private Git revisions first, prepare a new
+contained surface, validate its new identity pair, persist it, and only then
+request the fresh verifier. Reducer events and replay keys use the digest, not the
+Git object ID.
 
 Invalid/contaminated verdicts create no packet and permit only one replacement
 verifier on the unchanged head. Remediation or dispatch failure, unchanged head,

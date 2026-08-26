@@ -11,6 +11,24 @@
 
 ---
 
+## 3.6.6 (2026-08-26)
+
+### Verifier/remediation identity interoperability (SPEC-235-002)
+
+- Standalone verifier dispatch now emits a versioned synthetic Git head and a
+  distinct SHA-256 implementation binding derived from private candidate and
+  containment evidence.
+- Parent remediation admission validates both identities without rewriting the
+  independent verdict; fresh remediation surfaces persist a new pair before the
+  one fresh-verifier request.
+- Legacy failure verdicts without the new digest fail closed with the controlled
+  `legacy_verdict_identity` migration reason. Ordinary pass auditing remains
+  compatible.
+
+**Migration:** install the complete 3.6.6 kit payload. In-flight legacy failure
+verdicts must be independently re-dispatched under identity schema 1.0.0 before
+they can enter remediation.
+
 ## 3.6.5 (2026-08-26)
 
 ### Complete installation admission coverage (SPEC-229-001)

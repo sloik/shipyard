@@ -191,6 +191,14 @@ A nonzero exit or invalid plan forbids the Agent call and becomes the controlled
 evidence-gap reason `verifier_surface_unavailable`. Lifecycle, merge, watchdog
 cleanup, and terminal resolution remain parent-owned.
 
+The dispatch plan uses identity schema `1.0.0` and carries both a synthetic
+`head_commit` for Git commands in the standalone surface and an opaque
+`implementation_head_digest` for remediation binding. Preparation accepts the
+spec/run IDs and derives the latter from a domain-separated digest of the private
+candidate revision plus a digest of the canonical containment projection. The
+exact candidate revision never enters the plan or verifier brief. The verifier
+must copy both public values unchanged into its verdict.
+
 Every `git status`, tree-hash, and diff command used for the verifier footprint
 assertion must name the standalone surface. The source run worktree and parent
 checkout are outside the verifier capability boundary and their dirtiness cannot
@@ -294,6 +302,15 @@ unavailability, unchanged head, remediation failure, or a fresh valid failure
 resolves `blocked` with one controlled next action. Invalid/contaminated initial
 verdicts create no packet and receive at most one replacement verifier on the
 unchanged head; a second invalid verdict terminates with human action required.
+
+At admission the parent recomputes the binding and validates the verdict against
+the dispatch plan and full containment evidence. Missing or contradictory split
+identity fields yield `legacy_verdict_identity` or `verifier_identity_mismatch`
+and create no packet. For a completed remediation, the coordinator first proves
+the exact private Git revision changed, prepares and validates a new contained
+surface, persists its synthetic-head/digest pair, and only then emits the one
+fresh-verifier request. Events, signatures and replay keys bind to the digest;
+Git revision comparisons remain private coordinator operations.
 
 Adapters translate callbacks, polling, cancellation and liveness into normalized
 events and execute keyed effects; they contain no lifecycle or eligibility
