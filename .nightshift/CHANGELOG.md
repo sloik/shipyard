@@ -11,6 +11,20 @@
 
 ---
 
+## 3.6.2 (2026-08-26)
+
+### Stable private reenrollment (SPEC-238)
+
+- Reenrolling a known checkout after its Git head advances now reuses and
+  verifies the first immutable origin observation instead of attempting a
+  divergent rewrite and quarantining normal repository progress.
+- Added a live-regression test that advances a repository, reenrolls it, and
+  proves project identity, checkout identity, origin bytes, and quarantine
+  state remain stable.
+
+**Migration:** none. Install the complete 3.6.2 kit payload. Existing origin
+records remain authoritative and are not rewritten.
+
 ## 3.6.1 (2026-08-26)
 
 ### Private-sink outage continuity (SPEC-238)

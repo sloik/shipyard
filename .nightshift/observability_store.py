@@ -159,11 +159,28 @@ def enroll(config_path: Path, repo: Path, *, now: datetime | None = None) -> Sto
         project_id = str(uuid.uuid4())
         _atomic_create(registry, _canonical({"schema_version": SCHEMA_VERSION, "project_id": project_id, "common_fingerprint": common_fp}))
     context = StoreContext(root, repo, project_id, common_fp, checkout_fp)
-    origin = _origin_payload(context, repo, now=now)
-    # A project can legitimately be observed from several linked or moved
-    # checkouts.  Keep each provenance observation immutable rather than
-    # treating a new checkout fingerprint as a divergent rewrite of origin.
-    _put(context, "origin", checkout_fp, origin)
+    existing_origins = read_artifacts(context, kind="origin")
+    existing_origin = next(
+        (record for record in existing_origins if record.get("artifact_id") == checkout_fp),
+        None,
+    )
+    if existing_origin is None:
+        origin = _origin_payload(context, repo, now=now)
+        # A project can legitimately be observed from several linked or moved
+        # checkouts. Keep each checkout's first provenance observation immutable.
+        _put(context, "origin", checkout_fp, origin)
+    else:
+        origin = existing_origin.get("payload")
+        expected_identity = {
+            "project_id": project_id,
+            "common_fingerprint": common_fp,
+            "checkout_fingerprint": checkout_fp,
+            "source_locator": f"git-common:{common_fp}",
+        }
+        if not isinstance(origin, dict) or any(
+            origin.get(key) != expected for key, expected in expected_identity.items()
+        ):
+            raise ObservabilityStoreError("private origin identity does not match enrollment")
     _put(context, "location", checkout_fp, {"checkout_fingerprint": checkout_fp, "observed_at": origin["created_at"]})
     return context
 

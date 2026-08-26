@@ -8,7 +8,7 @@
 # This file is a valid YAML document that can be loaded and parsed. It serves
 # as both documentation and a complete example of a multi-stack project config.
 #
-# Kit Version: 3.6.1 (2026-08-26)
+# Kit Version: 3.6.2 (2026-08-26)
 # Schema Version: 3.0.0 (multi-stack support)
 #
 # Backward compatibility:
@@ -48,6 +48,7 @@ schema_version: "3.0.0"
 # Used by the loop and tooling to enable/disable features and validate schema.
 #
 # Version history:
+#   3.6.2: Preserve immutable origin evidence across reenrollment (SPEC-238).
 #   3.6.1: Preserve experiment event chains across private-sink outages (SPEC-238).
 #   3.6.0: Evidence-backed real-use experiments and package lifecycle instrumentation (SPEC-238).
   # 2.67.3: Canonical payload copy, then separate project config migration.
@@ -94,7 +95,7 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.6.1"
+kit_version: "3.6.2"
 
 ---
 
