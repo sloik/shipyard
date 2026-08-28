@@ -23,6 +23,18 @@ from verification_report import (
     validate_dispatch_identity,
     validate_verifier_verdict_dict,
 )
+from lifecycle import attempt_requires_delivery_assessment
+from recovery_convergence import (
+    BlockedAttemptAssessment,
+    BlockedAttemptDiagnosis,
+    DiagnosisClass,
+    RecoveryConvergenceError,
+    RepairRoute,
+    RepairSelection,
+    assess_blocked_attempt,
+    blocked_attempt_from_dict,
+    select_repair_route,
+)
 
 PACKET_SCHEMA_VERSION = 2
 MAX_PACKET_BYTES = 32_768
@@ -58,7 +70,9 @@ FORBIDDEN_PACKET_KEYS = frozenset(
 )
 CAUSAL_CONFIDENCE = frozenset({"demonstrated", "supported", "not_established"})
 REMEDIATION_MODES = frozenset({"resume_original", "fresh_worker"})
-ACTOR_ROLES = frozenset({"implementer", "verifier", "remediator", "parent"})
+ACTOR_ROLES = frozenset({
+    "implementer", "diagnostician", "repairer", "verifier", "remediator", "parent"
+})
 ACTOR_OUTCOMES = frozenset(
     {
         "completed",
@@ -88,6 +102,10 @@ CONTROLLED_REASONS = frozenset(
         "remediation_failure",
         "fresh_verifier_failure",
         "implementer_blocked",
+        "ambiguous_blocker",
+        "actor_unavailable",
+        "repair_rejected",
+        "repair_exhausted",
         "unknown_recovery_source",
         "contradictory_duplicate",
     }
@@ -107,6 +125,8 @@ NEXT_ACTIONS = frozenset(
         "continue",
         "dispatch_replacement_verifier",
         "dispatch_remediation",
+        "dispatch_read_only_diagnostician",
+        "dispatch_repair",
         "dispatch_fresh_verifier",
         "serial_integration",
         "operator_controller_action",
@@ -129,6 +149,10 @@ HUMAN_ACTION_REASONS = frozenset(
         "fresh_verifier_failure",
         "contradictory_duplicate",
         "unknown_recovery_source",
+        "ambiguous_blocker",
+        "actor_unavailable",
+        "repair_rejected",
+        "repair_exhausted",
     }
 )
 
@@ -150,6 +174,11 @@ class FeedbackPhase(str, Enum):
     REMEDIATION_RUNNING = "remediation_running"
     AWAITING_FRESH_SURFACE = "awaiting_fresh_surface"
     AWAITING_FRESH_VERDICT = "awaiting_fresh_verdict"
+    DIAGNOSTICIAN_DISPATCHING = "diagnostician_dispatching"
+    DIAGNOSTICIAN_RUNNING = "diagnostician_running"
+    REPAIR_SELECTION = "repair_selection"
+    REPAIR_DISPATCHING = "repair_dispatching"
+    REPAIR_RUNNING = "repair_running"
     READY_FOR_INTEGRATION = "ready_for_integration"
     TERMINAL_DONE = "terminal_done"
     TERMINAL_BLOCKED = "terminal_blocked"
@@ -197,9 +226,10 @@ class RemediationFeedback:
 @dataclass(frozen=True)
 class RecoveryAdmission:
     source: RecoverySource | None
-    packet: RemediationFeedback | None
+    packet: RemediationFeedback | BlockedAttemptDiagnosis | None
     admitted: bool
     reason: str
+    assessment: BlockedAttemptAssessment | None = None
 
 
 @dataclass(frozen=True)
@@ -210,9 +240,12 @@ class NormalizedFeedbackEvent:
     outcome: str
     source: str | None = None
     head: str | None = None
+    applied_revision: str | None = None
     actor_id: str | None = None
     verdict: Mapping[str, Any] | None = None
     remediation_mode: str | None = None
+    repair_route: str | None = None
+    diagnosis_facts: tuple[str, ...] = ()
     candidate_refs: tuple[EvidenceReference, ...] = ()
     changed_paths: tuple[str, ...] = ()
     duration_s: float = 0.0
@@ -248,6 +281,17 @@ class FeedbackState:
     prior_verdict_digest: str | None = None
     phase: FeedbackPhase = FeedbackPhase.AWAITING_VERDICT
     packet: RemediationFeedback | None = None
+    blocked_attempt: BlockedAttemptDiagnosis | None = None
+    assessment: BlockedAttemptAssessment | None = None
+    repair_selection: RepairSelection | None = None
+    recovery_source: str | None = None
+    diagnostician_used: int = 0
+    diagnostician_limit: int = 1
+    repair_used: int = 0
+    repair_limit: int = 1
+    repair_route: str | None = None
+    diagnostician_id: str | None = None
+    repairer_id: str | None = None
     remediation_mode: str | None = None
     remediation_used: int = 0
     remediation_limit: int = 1
@@ -275,7 +319,19 @@ class FeedbackRuntimeAdapter(Protocol):
     def poll_events(self, run_id: str) -> Iterable[NormalizedFeedbackEvent]: ...
     def execute_effect(
         self, effect: FeedbackEffect, *, idempotency_key: str
-    ) -> None: ...
+    ) -> NormalizedFeedbackEvent | None: ...
+
+    def load_integration_receipt(
+        self, idempotency_key: str
+    ) -> Mapping[str, Any] | None: ...
+
+    def compare_and_set_integration_receipt(
+        self,
+        idempotency_key: str,
+        *,
+        expected_phase: str | None,
+        receipt: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
 
 
 KNOWN_EVENT_KINDS = frozenset({
@@ -287,6 +343,11 @@ KNOWN_EVENT_KINDS = frozenset({
     "dispatch_failed",
     "integration_result",
     "recovery_admission",
+    "diagnostician_dispatched",
+    "diagnostician_result",
+    "select_repair",
+    "repair_dispatched",
+    "repair_result",
 })
 
 # The complete persistence/effect boundary inventory owned by this reducer.  Tests
@@ -299,6 +360,15 @@ OWNED_REPLAY_BOUNDARIES = (
     ("remediation_result", FeedbackPhase.AWAITING_FRESH_VERDICT, "dispatch_verifier"),
     ("integration_enqueue", FeedbackPhase.READY_FOR_INTEGRATION, "enqueue_integration_broker"),
     ("terminal_result", FeedbackPhase.TERMINAL_DONE, "terminal_resolution"),
+)
+
+IMPLEMENTER_RECOVERY_REPLAY_BOUNDARIES = (
+    ("assessment_persist", FeedbackPhase.REPAIR_SELECTION, "persist_blocked_diagnosis"),
+    ("repair_dispatch", FeedbackPhase.REPAIR_DISPATCHING, "dispatch_repair"),
+    ("repair_dispatch_result", FeedbackPhase.REPAIR_RUNNING, None),
+    ("repair_result", FeedbackPhase.AWAITING_FRESH_VERDICT, "dispatch_verifier"),
+    ("independent_check", FeedbackPhase.READY_FOR_INTEGRATION, "enqueue_integration_broker"),
+    ("application_result", FeedbackPhase.TERMINAL_DONE, "terminal_resolution"),
 )
 
 
@@ -329,7 +399,11 @@ def _packet_unsigned(packet: RemediationFeedback) -> dict[str, Any]:
 
 
 def _validate_identity(value: str, label: str) -> None:
-    if not isinstance(value, str) or not IDENTITY_RE.fullmatch(value):
+    if (
+        not isinstance(value, str)
+        or not IDENTITY_RE.fullmatch(value)
+        or FORBIDDEN_TEXT_RE.search(value)
+    ):
         raise FeedbackValidationError(f"invalid {label}")
 
 
@@ -532,10 +606,62 @@ def feedback_state_record(state: FeedbackState) -> dict[str, Any]:
 def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
     """Restore a closed durable state record produced by :func:`feedback_state_record`."""
     expected = set(FeedbackState.__dataclass_fields__)
-    if set(data) != expected:
+    convergence_fields = {
+        "blocked_attempt", "assessment", "repair_selection", "recovery_source",
+        "diagnostician_used", "diagnostician_limit", "repair_used", "repair_limit",
+        "repair_route", "diagnostician_id", "repairer_id",
+    }
+    if frozenset(data) not in {frozenset(expected), frozenset(expected - convergence_fields)}:
         raise FeedbackValidationError("feedback state fields mismatch")
+    data = {
+        **{
+            "blocked_attempt": None,
+            "assessment": None,
+            "repair_selection": None,
+            "recovery_source": None,
+            "diagnostician_used": 0,
+            "diagnostician_limit": 1,
+            "repair_used": 0,
+            "repair_limit": 1,
+            "repair_route": None,
+            "diagnostician_id": None,
+            "repairer_id": None,
+        },
+        **dict(data),
+    }
     try:
         packet_data = data.get("packet")
+        blocked_data = data.get("blocked_attempt")
+        blocked_attempt = None
+        assessment = None
+        if blocked_data is not None:
+            blocked_attempt = blocked_attempt_from_dict(
+                blocked_data,
+                run_id=data["run_id"],
+                spec_id=data["spec_id"],
+                candidate_revision=data["candidate_revision"],
+                implementation_head_digest=data["implementation_head_digest"],
+                known_ac_ids=data["expected_ac_ids"],
+                changed_paths=[item["path"] for item in blocked_data["partial_work"]],
+            )
+            assessment = assess_blocked_attempt(blocked_attempt)
+            if data.get("assessment") != assessment.record():
+                raise FeedbackValidationError("assessment does not match blocked evidence")
+        selection_data = data.get("repair_selection")
+        repair_selection = None
+        if selection_data is not None:
+            if assessment is None:
+                raise FeedbackValidationError("repair selection lacks assessment")
+            repair_selection = select_repair_route(
+                assessment,
+                route=RepairRoute(selection_data["route"]).value,
+                files=selection_data["files"],
+                ac_ids=selection_data["ac_ids"],
+                capability=selection_data["capability"],
+                active_surfaces=(),
+            )
+            if [list(item) for item in repair_selection.probes] != selection_data["probes"]:
+                raise FeedbackValidationError("repair selection probes do not match assessment")
         effects = tuple(
             FeedbackEffect(
                 key=item["key"], kind=item["kind"], payload=dict(item["payload"])
@@ -563,6 +689,17 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
                 if packet_data is not None
                 else None
             ),
+            blocked_attempt=blocked_attempt,
+            assessment=assessment,
+            repair_selection=repair_selection,
+            recovery_source=data["recovery_source"],
+            diagnostician_used=data["diagnostician_used"],
+            diagnostician_limit=data["diagnostician_limit"],
+            repair_used=data["repair_used"],
+            repair_limit=data["repair_limit"],
+            repair_route=data["repair_route"],
+            diagnostician_id=data["diagnostician_id"],
+            repairer_id=data["repairer_id"],
             remediation_mode=data["remediation_mode"],
             remediation_used=data["remediation_used"],
             remediation_limit=data["remediation_limit"],
@@ -600,6 +737,11 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
     ):
         if value is not None:
             _validate_hash(value, label)
+    if not (
+        0 <= state.diagnostician_used <= state.diagnostician_limit == 1
+        and 0 <= state.repair_used <= state.repair_limit == 1
+    ):
+        raise FeedbackValidationError("implementer recovery allowance is invalid")
     return state
 
 
@@ -789,9 +931,13 @@ def create_remediation_feedback(
 
 
 def admit_recovery(
-    source: str, *, packet: RemediationFeedback | None
+    source: str,
+    *,
+    packet: RemediationFeedback | None,
+    blocked_attempt: BlockedAttemptDiagnosis | None = None,
+    assessment: BlockedAttemptAssessment | None = None,
 ) -> RecoveryAdmission:
-    """The source-neutral seam.  Only verifier failures are admitted by SPEC-235."""
+    """Admit either source through one typed, parent-owned recovery seam."""
     try:
         typed = RecoverySource(source)
     except ValueError:
@@ -799,6 +945,16 @@ def admit_recovery(
     if typed is RecoverySource.VERIFIER_FAILURE and packet is not None:
         return RecoveryAdmission(typed, packet, True, "ordinary_progress")
     if typed is RecoverySource.IMPLEMENTER_BLOCKED:
+        if blocked_attempt is not None and assessment is not None and assessment.eligible:
+            return RecoveryAdmission(
+                typed, blocked_attempt, True, "ordinary_progress", assessment
+            )
+        if assessment is not None:
+            reason = {
+                DiagnosisClass.EXTERNAL_INPUT: "external_input",
+                DiagnosisClass.SAFETY_OR_SCOPE: "scope_refusal",
+            }.get(assessment.classification, "ambiguous_blocker")
+            return RecoveryAdmission(typed, blocked_attempt, False, reason, assessment)
         return RecoveryAdmission(typed, None, False, "implementer_blocked")
     return RecoveryAdmission(typed, None, False, "invalid_verdict")
 
@@ -901,6 +1057,25 @@ def normalized_outcome_record(
         "terminal_outcome": terminal_outcome,
         "human_action_required": derived_human_action,
         "next_action": event.next_action,
+        "recovery_source": state.recovery_source,
+        "diagnosis_class": (
+            state.assessment.classification.value if state.assessment else None
+        ),
+        "causal_confidence": state.assessment.confidence if state.assessment else None,
+        "candidate_preserved": bool(
+            state.candidate_branch or state.candidate_worktree_ref or state.blocked_attempt
+        ),
+        "repair_route": state.repair_route,
+        "diagnostician_allowance": {
+            "used": state.diagnostician_used,
+            "limit": state.diagnostician_limit,
+        },
+        "repair_allowance": {
+            "used": state.repair_used,
+            "limit": state.repair_limit,
+        },
+        "operator_action": event.next_action if derived_human_action else None,
+        "delivery_phase": state.phase.value,
     }
 
 
@@ -910,9 +1085,17 @@ def _effect(
     verdict_digest = (
         state.packet.source_verdict_digest if state.packet else "no-verdict"
     )
+    assessment_digest = state.assessment.digest() if state.assessment else "no-assessment"
+    recovery_identity = ":".join((
+        state.recovery_source or "verifier_failure",
+        assessment_digest,
+        state.candidate_revision or "no-candidate",
+        state.repair_route or state.remediation_mode or "no-route",
+        str(max(state.repair_used, state.remediation_used, 0)),
+    ))
     key = (
         f"feedback:{state.run_id}:{state.spec_id}:{state.implementation_head_digest}:"
-        f"{verdict_digest}:{suffix}"
+        f"{verdict_digest}:{recovery_identity}:{suffix}"
     )
     return FeedbackEffect(key=key, kind=kind, payload=_json_safe(payload))
 
@@ -966,6 +1149,16 @@ def _terminal(
                 "used": state.remediation_used,
                 "limit": state.remediation_limit,
             },
+            diagnostician_allowance={
+                "used": state.diagnostician_used,
+                "limit": state.diagnostician_limit,
+            },
+            repair_allowance={
+                "used": state.repair_used,
+                "limit": state.repair_limit,
+            },
+            assessment=(state.assessment.record() if state.assessment else None),
+            repair_route=state.repair_route,
             preserved_candidate={
                 "branch": state.candidate_branch,
                 "worktree_ref": state.candidate_worktree_ref,
@@ -999,6 +1192,17 @@ def _event_expected(state: FeedbackState, event: NormalizedFeedbackEvent) -> boo
         "dispatch_failed": active,
         "integration_result": {FeedbackPhase.READY_FOR_INTEGRATION},
         "recovery_admission": active,
+        "diagnostician_dispatched": {FeedbackPhase.DIAGNOSTICIAN_DISPATCHING},
+        "diagnostician_result": {
+            FeedbackPhase.DIAGNOSTICIAN_DISPATCHING,
+            FeedbackPhase.DIAGNOSTICIAN_RUNNING,
+        },
+        "select_repair": {FeedbackPhase.REPAIR_SELECTION},
+        "repair_dispatched": {FeedbackPhase.REPAIR_DISPATCHING},
+        "repair_result": {
+            FeedbackPhase.REPAIR_DISPATCHING,
+            FeedbackPhase.REPAIR_RUNNING,
+        },
     }
     return state.phase in allowed.get(event.kind, set())
 
@@ -1015,6 +1219,123 @@ def _record_actor_effect(
             record=normalized_outcome_record(state, event),
         ),
     )
+
+
+def _assessment_terminal(
+    state: FeedbackState,
+    event: NormalizedFeedbackEvent,
+    assessment: BlockedAttemptAssessment,
+) -> FeedbackState:
+    if assessment.classification is DiagnosisClass.EXTERNAL_INPUT:
+        reason, next_action = "external_input", "provide_external_input"
+    elif assessment.classification is DiagnosisClass.SAFETY_OR_SCOPE:
+        reason, next_action = "scope_refusal", "authorize_scope"
+    else:
+        reason, next_action = "ambiguous_blocker", "operator_controller_action"
+    return _terminal(
+        state,
+        reason,
+        human=True,
+        event=replace(
+            event,
+            role="parent",
+            outcome="blocked",
+            reason=reason,
+            next_action=next_action,
+        ),
+    )
+
+
+def _open_blocked_assessment(
+    state: FeedbackState,
+    event: NormalizedFeedbackEvent,
+    *,
+    packet_inputs: Mapping[str, Any] | None,
+) -> FeedbackState:
+    """Preserve and classify an attempt without turning actor status into lifecycle."""
+    raw = packet_inputs.get("blocked_attempt_diagnosis") if packet_inputs else None
+    try:
+        if not state.candidate_branch or not state.candidate_worktree_ref:
+            raise RecoveryConvergenceError("candidate preservation identity is missing")
+        _validate_safe_text(state.candidate_branch, "candidate branch")
+        _validate_relative_path(state.candidate_worktree_ref, "candidate worktree reference")
+        packet = blocked_attempt_from_dict(
+            raw,
+            run_id=state.run_id,
+            spec_id=state.spec_id,
+            candidate_revision=state.candidate_revision,
+            implementation_head_digest=state.implementation_head_digest,
+            known_ac_ids=state.expected_ac_ids,
+            changed_paths=event.changed_paths,
+        )
+        assessment = assess_blocked_attempt(packet)
+        admission = admit_recovery(
+            RecoverySource.IMPLEMENTER_BLOCKED.value,
+            packet=None,
+            blocked_attempt=packet,
+            assessment=assessment,
+        )
+    except (RecoveryConvergenceError, TypeError):
+        failed = replace(state, recovery_source=RecoverySource.IMPLEMENTER_BLOCKED.value)
+        return _terminal(
+            failed,
+            "ambiguous_blocker",
+            human=True,
+            event=replace(
+                event,
+                role="parent",
+                outcome="blocked",
+                reason="ambiguous_blocker",
+                next_action="operator_controller_action",
+            ),
+        )
+    assessed = replace(
+        state,
+        blocked_attempt=packet,
+        assessment=assessment,
+        recovery_source=RecoverySource.IMPLEMENTER_BLOCKED.value,
+    )
+    assessed = _append_effects(
+        assessed,
+        _effect(
+            assessed,
+            "preserve_candidate",
+            "preserve-candidate",
+            branch=state.candidate_branch,
+            worktree_ref=state.candidate_worktree_ref,
+            candidate_revision=state.candidate_revision,
+            partial_work=[asdict(item) for item in packet.partial_work],
+        ),
+        _effect(
+            assessed,
+            "persist_blocked_diagnosis",
+            "persist-diagnosis",
+            diagnosis=packet.record(),
+            assessment=assessment.record(),
+        ),
+    )
+    if admission.admitted:
+        return replace(assessed, phase=FeedbackPhase.REPAIR_SELECTION)
+    if assessment.diagnostician_required and assessed.diagnostician_used == 0:
+        dispatching = replace(
+            assessed,
+            phase=FeedbackPhase.DIAGNOSTICIAN_DISPATCHING,
+            diagnostician_used=1,
+        )
+        return _append_effects(
+            dispatching,
+            _effect(
+                dispatching,
+                "dispatch_diagnostician",
+                "diagnostician:1",
+                read_only=True,
+                ordinal=1,
+                assessment=assessment.record(),
+                allowed_files=list(assessment.next_task.files if assessment.next_task else ()),
+                allowed_ac_ids=list(assessment.next_task.ac_ids if assessment.next_task else ()),
+            ),
+        )
+    return _assessment_terminal(assessed, event, assessment)
 
 
 def reduce_feedback_event(
@@ -1085,22 +1406,258 @@ def reduce_feedback_event(
                 human=True,
                 event=replace(event, role="parent", outcome="blocked"),
             )
-        if event.role == "implementer" and event.outcome == "blocked":
-            admission = admit_recovery(
-                RecoverySource.IMPLEMENTER_BLOCKED.value, packet=None
-            )
-            assert not admission.admitted
-            return _terminal(
-                state,
-                admission.reason,
-                human=False,
-                event=replace(
-                    event,
-                    reason="implementer_blocked",
-                    next_action="operator_controller_action",
-                ),
+        if attempt_requires_delivery_assessment(event.role, event.outcome):
+            return _open_blocked_assessment(
+                state, event, packet_inputs=packet_inputs
             )
         return state
+
+    if event.kind == "diagnostician_dispatched":
+        if event.role != "parent":
+            return _assessment_terminal(
+                state,
+                event,
+                state.assessment or assess_blocked_attempt(state.blocked_attempt),
+            )
+        return replace(state, phase=FeedbackPhase.DIAGNOSTICIAN_RUNNING)
+
+    if event.kind == "diagnostician_result":
+        state = _record_actor_effect(state, event)
+        if (
+            event.role != "diagnostician"
+            or event.outcome != "completed"
+            or not event.actor_id
+            or not event.candidate_refs
+            or state.blocked_attempt is None
+            or state.diagnostician_used != 1
+        ):
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="actor_unavailable", next_action="operator_controller_action",
+            )
+            return _terminal(state, "actor_unavailable", human=True, event=blocked)
+        raw = state.blocked_attempt.record()
+        raw["blocker_facts"] = list(event.diagnosis_facts)
+        raw["artifact_refs"] = [
+            *raw["artifact_refs"],
+            *[asdict(item) for item in event.candidate_refs],
+        ]
+        packet = state.blocked_attempt
+        try:
+            packet = blocked_attempt_from_dict(
+                raw,
+                run_id=state.run_id,
+                spec_id=state.spec_id,
+                candidate_revision=state.candidate_revision,
+                implementation_head_digest=state.implementation_head_digest,
+                known_ac_ids=state.expected_ac_ids,
+                changed_paths=tuple(item.path for item in state.blocked_attempt.partial_work),
+            )
+            assessment = assess_blocked_attempt(packet)
+            admission = admit_recovery(
+                RecoverySource.IMPLEMENTER_BLOCKED.value,
+                packet=None,
+                blocked_attempt=packet,
+                assessment=assessment,
+            )
+        except RecoveryConvergenceError:
+            assessment = state.assessment
+            admission = RecoveryAdmission(
+                RecoverySource.IMPLEMENTER_BLOCKED,
+                state.blocked_attempt,
+                False,
+                "ambiguous_blocker",
+                assessment,
+            )
+        diagnosed = replace(
+            state,
+            blocked_attempt=packet,
+            assessment=assessment,
+            diagnostician_id=event.actor_id,
+        )
+        if admission.admitted:
+            return replace(diagnosed, phase=FeedbackPhase.REPAIR_SELECTION)
+        return _assessment_terminal(diagnosed, event, assessment)
+
+    if event.kind == "select_repair":
+        if (
+            event.role != "parent"
+            or state.assessment is None
+            or state.repair_used != 0
+            or packet_inputs is None
+            or not isinstance(packet_inputs.get("repair_selection"), Mapping)
+        ):
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="repair_exhausted", next_action="operator_controller_action",
+            )
+            return _terminal(state, "repair_exhausted", human=True, event=blocked)
+        raw_selection = packet_inputs["repair_selection"]
+        try:
+            selection = select_repair_route(
+                state.assessment,
+                route=event.repair_route or "",
+                files=raw_selection.get("files", ()),
+                ac_ids=raw_selection.get("ac_ids", ()),
+                capability=raw_selection.get("capability", ""),
+                active_surfaces=raw_selection.get("active_surfaces", ()),
+            )
+        except RecoveryConvergenceError:
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="scope_refusal", next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked)
+        selected = replace(
+            state,
+            phase=FeedbackPhase.REPAIR_DISPATCHING,
+            repair_selection=selection,
+            repair_route=selection.route.value,
+            repair_used=1,
+        )
+        return _append_effects(
+            selected,
+            _effect(
+                selected,
+                "dispatch_repair",
+                "repair:1",
+                route=selection.route.value,
+                ordinal=1,
+                files=list(selection.files),
+                ac_ids=list(selection.ac_ids),
+                capability=selection.capability,
+                probes=[list(item) for item in selection.probes],
+                candidate_revision=state.candidate_revision,
+                lifecycle_authority=False,
+                integration_authority=False,
+                self_approval=False,
+            ),
+        )
+
+    if event.kind == "repair_dispatched":
+        if event.role != "parent":
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="scope_refusal", next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked)
+        return replace(state, phase=FeedbackPhase.REPAIR_RUNNING)
+
+    if event.kind == "repair_result":
+        state = _record_actor_effect(state, event)
+        fresh_candidate_revision = (
+            packet_inputs.get("fresh_candidate_revision") if packet_inputs else None
+        )
+        fresh_dispatch_plan = packet_inputs.get("fresh_dispatch_plan") if packet_inputs else None
+        fresh_containment_evidence = (
+            packet_inputs.get("fresh_containment_evidence") if packet_inputs else None
+        )
+        expected_role = (
+            "implementer" if state.repair_route == "resume_original" else "repairer"
+        )
+        actor_matches_route = (
+            event.role == expected_role
+            and bool(event.actor_id)
+            and (
+                event.actor_id in state.implementer_ids
+                if expected_role == "implementer"
+                else event.actor_id not in {
+                    *state.implementer_ids,
+                    state.diagnostician_id,
+                }
+            )
+        )
+        if not actor_matches_route:
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="repair_rejected", next_action="operator_controller_action",
+            )
+            return _terminal(state, "repair_rejected", human=True, event=blocked)
+        if event.outcome != "completed":
+            reason = "actor_unavailable" if event.outcome == "unavailable" else "repair_rejected"
+            blocked = replace(
+                event, role="parent", outcome="blocked", reason=reason,
+                next_action="operator_controller_action",
+            )
+            return _terminal(state, reason, human=True, event=blocked)
+        if (
+            state.repair_selection is None
+            or not event.head
+            or not isinstance(fresh_candidate_revision, str)
+            or not GIT_OBJECT_ID_RE.fullmatch(fresh_candidate_revision)
+        ):
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="repair_rejected", next_action="operator_controller_action",
+            )
+            return _terminal(state, "repair_rejected", human=True, event=blocked)
+        if fresh_candidate_revision == state.candidate_revision:
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="unchanged_head", next_action="operator_controller_action",
+            )
+            return _terminal(state, "unchanged_head", human=True, event=blocked)
+        try:
+            for path in event.changed_paths:
+                _validate_relative_path(path, "repair changed path")
+            changed = tuple(event.changed_paths)
+            if not changed or not set(changed) <= set(state.repair_selection.files):
+                raise FeedbackValidationError("repair changed undeclared files")
+            if not isinstance(fresh_dispatch_plan, Mapping) or not isinstance(
+                fresh_containment_evidence, Mapping
+            ):
+                raise FeedbackValidationError("fresh verifier surface is missing")
+            identity = validate_dispatch_identity(
+                dispatch_plan=dict(fresh_dispatch_plan),
+                containment_evidence=dict(fresh_containment_evidence),
+                verdict={
+                    "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
+                    "spec_id": state.spec_id,
+                    "head_commit": fresh_dispatch_plan.get("head_commit"),
+                    "implementation_head_digest": fresh_dispatch_plan.get(
+                        "implementation_head_digest"
+                    ),
+                },
+                spec_id=state.spec_id,
+                run_id=state.run_id,
+                candidate_revision=fresh_candidate_revision,
+            )
+            if event.head != identity["implementation_head_digest"]:
+                raise FeedbackValidationError("repair digest mismatch")
+        except FeedbackValidationError:
+            blocked = replace(
+                event, role="parent", outcome="blocked",
+                reason="scope_refusal", next_action="authorize_scope",
+            )
+            return _terminal(state, "scope_refusal", human=True, event=blocked)
+        fresh = replace(
+            state,
+            phase=FeedbackPhase.AWAITING_FRESH_VERDICT,
+            remediated_implementation_head_digest=event.head,
+            remediated_candidate_revision=fresh_candidate_revision,
+            remediated_verifier_head_commit=str(fresh_dispatch_plan["head_commit"]),
+            remediated_containment_binding_digest=identity["containment_binding_digest"],
+            repairer_id=event.actor_id,
+        )
+        excluded = [
+            *state.implementer_ids,
+            state.diagnostician_id,
+            event.actor_id,
+            state.initial_verifier_id,
+        ]
+        return _append_effects(
+            fresh,
+            _effect(
+                fresh,
+                "dispatch_verifier",
+                "fresh-verifier:1",
+                purpose="fresh",
+                head=event.head,
+                verifier_head_commit=fresh_dispatch_plan["head_commit"],
+                ordinal=1,
+                exclude_actor_ids=[item for item in excluded if item],
+            ),
+        )
 
     if event.kind == "recovery_admission":
         admission = admit_recovery(event.source or "", packet=state.packet)
@@ -1209,7 +1766,10 @@ def reduce_feedback_event(
                         ready,
                         "enqueue_integration_broker",
                         "integration",
+                        spec_id=state.spec_id,
                         head=state.implementation_head_digest,
+                        candidate_revision=state.candidate_revision,
+                        revision_kind="candidate",
                         fresh_main_validation=True,
                         owner="coordinator",
                         broker_entrypoint="IntegrationBroker.integrate_completed",
@@ -1303,6 +1863,8 @@ def reduce_feedback_event(
                 *state.implementer_ids,
                 state.initial_verifier_id,
                 state.remediator_id,
+                state.diagnostician_id,
+                state.repairer_id,
             }
             if (
                 not valid
@@ -1330,7 +1892,11 @@ def reduce_feedback_event(
                     ready,
                     "enqueue_integration_broker",
                     "integration",
+                    spec_id=state.spec_id,
                     head=state.remediated_implementation_head_digest,
+                    candidate_revision=state.remediated_candidate_revision,
+                    remediated_candidate_revision=state.remediated_candidate_revision,
+                    revision_kind="remediated",
                     fresh_main_validation=True,
                     owner="coordinator",
                     broker_entrypoint="IntegrationBroker.integrate_completed",
@@ -1525,6 +2091,42 @@ def reduce_feedback_event(
             )
             return _terminal(state, "scope_refusal", human=True, event=blocked_event)
         if event.outcome == "completed":
+            verified_head = (
+                state.remediated_implementation_head_digest
+                or state.implementation_head_digest
+            )
+            verified_revision = state.remediated_candidate_revision
+            if verified_revision is not None and (
+                not GIT_OBJECT_ID_RE.fullmatch(verified_revision)
+                or event.applied_revision != verified_revision
+            ):
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason="verifier_identity_mismatch",
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state, "verifier_identity_mismatch", human=False,
+                    event=blocked_event,
+                )
+            if event.head != verified_head and (
+                event.head is not None or state.blocked_attempt is not None
+            ):
+                blocked_event = replace(
+                    event,
+                    role="parent",
+                    outcome="blocked",
+                    reason="verifier_identity_mismatch",
+                    next_action="operator_controller_action",
+                )
+                return _terminal(
+                    state,
+                    "verifier_identity_mismatch",
+                    human=False,
+                    event=blocked_event,
+                )
             done = replace(
                 state,
                 phase=FeedbackPhase.TERMINAL_DONE,
@@ -1576,7 +2178,7 @@ def _deliver_pending_effects(
         ):
             continue
         try:
-            adapter.execute_effect(effect, idempotency_key=effect.key)
+            result_event = adapter.execute_effect(effect, idempotency_key=effect.key)
         except Exception:  # noqa: BLE001 - adapters may surface provider-neutral exceptions.
             state = replace(
                 state,
@@ -1603,6 +2205,12 @@ def _deliver_pending_effects(
                 item for item in state.pending_effects if item.key != effect.key
             ),
         )
+        if result_event is not None:
+            if not isinstance(result_event, NormalizedFeedbackEvent):
+                raise FeedbackValidationError("adapter returned invalid result event")
+            state = reduce_feedback_event(
+                state, result_event, parent_key=parent_key
+            )
         adapter.save_state(state)
     return state
 

@@ -25,6 +25,10 @@ board.pid
 *.tmp
 .DS_Store
 
+# Python bytecode is derived runtime state, never Nightshift payload.
+__pycache__/
+*.py[co]
+
 # Private observational-extension spool, inputs, state, and artifacts.
 .extension-private/
 

@@ -45,6 +45,9 @@ BLOCKER_CLASSES = frozenset({
     "technical_infeasibility", "safety_constraint", "evidence_unavailable",
     "critical_external_constraint", "unknown_critical_failure",
 })
+ATTEMPT_OUTCOMES_REQUIRING_ASSESSMENT = frozenset({
+    "blocked", "failed", "refused", "stalled", "unavailable",
+})
 ORDINARY_EVIDENCE_WAIT_FAILURES = {
     "missing_browser_runtime": ("test_runtime", "browser_runtime"),
     "missing_api_runtime": ("api_runtime", "api_runtime"),
@@ -57,6 +60,13 @@ LIFECYCLE_TRANSITIONS = {
     "in_progress": frozenset({"ready", "done", "blocked"}),
     "blocked": frozenset({"draft", "planned", "ready", "superseded"}),
 }
+
+
+def attempt_requires_delivery_assessment(role: str, outcome: str) -> bool:
+    """Keep an implementer terminal attempt distinct from parent delivery closure."""
+    return role == "implementer" and outcome in ATTEMPT_OUTCOMES_REQUIRING_ASSESSMENT
+
+
 ORDINARY_BLOCKER_PATTERNS = (
     "waiting for spec-", "waiting on spec-", "missing work", "planned scheduling",
     "intentionally future", "time gated", "temporary external", "awaiting external",

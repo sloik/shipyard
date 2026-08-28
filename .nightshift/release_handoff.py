@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Collection, Iterable, Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -19,11 +20,43 @@ HANDOFF_DIR = "release-handoffs"
 DELIVERY_RECEIPT_SCHEMA_VERSION = 1
 DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+# The spelling ``managed_paths`` used for the same surface before SPEC-230 made
+# the skill an ordinary manifest entry, and the closed set of handoffs sealed
+# while it was the managed spelling.  Both are frozen history: nothing new may
+# join the set, and no other parent-directory escape is ever accepted.
+LEGACY_SKILL_PATH = "../Skills/nightshift/SKILL.md"
+LEGACY_SKILL_PATH_SPEC_IDS = frozenset(
+    {"SPEC-203", "SPEC-207", "SPEC-208", "SPEC-225", "SPEC-226", "SPEC-228"}
+)
 RELEASE_HANDOFF_DECLARATION_POLICY_DATE = date(2026, 8, 8)
 CURRENT_SPEC_TEMPLATE_VERSION = 8
 MISSING_RELEASE_HANDOFF_DECLARATION_ERROR = (
     "release_handoff declaration required: choose impact: required "
     "or impact: exempt with a reason"
+)
+# A pending handoff whose target manifest was superseded before delivery can
+# never complete as written: ``complete_pending_handoffs`` skips it by
+# fingerprint forever.  It is a distinct situation from "authored against the
+# current manifest but not delivered yet" and from "delivered at an earlier
+# version", and it gets its own diagnostic so a reader can tell the three apart.
+STRANDED_PENDING_HANDOFF_ERROR = (
+    "release handoff is stranded: its pending target manifest was superseded "
+    "before delivery"
+)
+# Handoff validation is otherwise driven from the spec side, so an artifact no
+# spec declares is reachable by nothing: never validated, never completed, and
+# never reported.  These three name what the directory-level sweep can find.
+# An orphan and a doubly-declared artifact are different failures of the same
+# reachability invariant and get separate diagnostics.
+ORPHANED_HANDOFF_ARTIFACT_ERROR = (
+    "orphaned release handoff artifact: no spec declares it, so nothing validates it"
+)
+AMBIGUOUS_HANDOFF_ARTIFACT_ERROR = (
+    "ambiguous release handoff artifact: more than one spec declares it"
+)
+UNTRACKED_HANDOFF_ARTIFACT_ERROR = (
+    "untracked release handoff artifact: it is absent from committed content, so "
+    "a working-tree measurement and a checkout disagree about the corpus"
 )
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 _PRIVATE_KEYS = frozenset(
@@ -59,7 +92,30 @@ def managed_paths(manifest: Mapping[str, Any]) -> set[str]:
     paths.update({"config.yaml", "config-reference.yaml", "release-manifest.json"})
     # Hooks predate the manifest contract. The active skill is now an ordinary
     # exact manifest path; never represent it through a parent-directory escape.
+    # Records sealed before that move spelled it as an escape and are read
+    # through ``accepted_artifact_paths``, never through this membership.
     paths.update({"hooks/commit-msg", "hooks/pre-commit"})
+    return paths
+
+
+def accepted_artifact_paths(manifest: Mapping[str, Any], *, spec_id: str) -> set[str]:
+    """Managed paths, plus the retired spelling the enumerated records sealed.
+
+    SPEC-230 moved the delivered skill into the manifest as
+    ``SKILL_MANAGED_PATH``.  Until then ``managed_paths`` named the same surface
+    through ``LEGACY_SKILL_PATH``, and the handoffs in
+    ``LEGACY_SKILL_PATH_SPEC_IDS`` recorded what was managed on the day they
+    shipped.  A sealed record is judged on its own terms (SPEC-244), so the
+    retired spelling stays readable for exactly those records rather than
+    rewriting history to today's spelling.
+
+    The admission is an enumeration, not a relaxation: ``managed_paths`` still
+    refuses the escape for every other record, only this one spelling is
+    accepted, and it holds only while the surface it renames is managed today.
+    """
+    paths = managed_paths(manifest)
+    if spec_id in LEGACY_SKILL_PATH_SPEC_IDS and SKILL_MANAGED_PATH in paths:
+        paths.add(LEGACY_SKILL_PATH)
     return paths
 
 
@@ -74,6 +130,52 @@ def _manifest_sha256(manifest: Mapping[str, Any]) -> dict[str, str]:
         for entry in manifest.get("files", [])
         if isinstance(entry, Mapping)
     }
+
+
+def _semver(value: Any) -> tuple[int, int, int] | None:
+    """Parse a SemVer string through the module's single version grammar."""
+    text = str(value)
+    if not _SEMVER.fullmatch(text):
+        return None
+    major, minor, patch = text.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def _is_stranded(artifact: Mapping[str, Any], manifest: Mapping[str, Any]) -> bool:
+    """True when an undelivered record targets a manifest already superseded."""
+    target = _semver(artifact.get("target_version"))
+    current = _semver(manifest.get("kit_version"))
+    return target is not None and current is not None and target < current
+
+
+def _sealed_record_errors(artifact: Mapping[str, Any]) -> list[str]:
+    """Validate a completed handoff against the record it sealed at delivery.
+
+    A completed handoff is a historical delivery record.  It names the kit
+    version and fingerprint it shipped against, so those fields are checked for
+    internal consistency — never against whatever manifest happens to be checked
+    out now, which is a question history cannot answer.
+    """
+    errors: list[str] = []
+    sealed_fingerprint = artifact.get("manifest_fingerprint")
+    if not isinstance(sealed_fingerprint, str) or not sealed_fingerprint:
+        errors.append("completed release handoff requires a sealed manifest_fingerprint")
+    receipt = artifact.get("delivery_receipt")
+    # Historical completed records predate the receipt schema and carry a
+    # ``release_report`` token instead; ``validate_positive_delivery`` is the
+    # stricter surface that requires a structured receipt.  When one is present
+    # it must agree with the record it seals.
+    if isinstance(receipt, Mapping):
+        if receipt.get("kit_version") != artifact.get("target_version"):
+            errors.append(
+                "delivery receipt kit version does not match the sealed target_version"
+            )
+        if receipt.get("manifest_fingerprint") != sealed_fingerprint:
+            errors.append(
+                "delivery receipt fingerprint does not match the sealed "
+                "manifest_fingerprint"
+            )
+    return errors
 
 
 def build_delivery_receipt(
@@ -123,10 +225,25 @@ def validate_artifact(
         errors.append("release handoff spec_id does not match spec")
     if not _SEMVER.fullmatch(str(artifact.get("target_version", ""))):
         errors.append("release handoff target_version must be SemVer")
-    if artifact.get("target_version") != manifest.get("kit_version"):
-        errors.append("release handoff target_version does not match manifest version")
-    if artifact.get("manifest_fingerprint") != fingerprint(manifest):
-        errors.append("release handoff manifest fingerprint does not match manifest")
+    if artifact.get("status") == "completed":
+        # Delivered: judge the sealed record, not today's manifest.
+        errors.extend(_sealed_record_errors(artifact))
+    elif _is_stranded(artifact, manifest):
+        # Undelivered and unreachable: name that, rather than reusing the
+        # not-yet-delivered messages below.
+        errors.append(
+            f"{STRANDED_PENDING_HANDOFF_ERROR} "
+            f"(target {artifact.get('target_version')}, "
+            f"current {manifest.get('kit_version')})"
+        )
+    else:
+        # Undelivered and still reachable: it must target the current manifest.
+        if artifact.get("target_version") != manifest.get("kit_version"):
+            errors.append(
+                "release handoff target_version does not match manifest version"
+            )
+        if artifact.get("manifest_fingerprint") != fingerprint(manifest):
+            errors.append("release handoff manifest fingerprint does not match manifest")
     changed = artifact.get("changed_managed_paths")
     if (
         not isinstance(changed, list)
@@ -134,7 +251,9 @@ def validate_artifact(
         or not all(isinstance(path, str) for path in changed)
     ):
         errors.append("release handoff requires changed_managed_paths")
-    elif unknown := sorted(set(changed) - managed_paths(manifest)):
+    elif unknown := sorted(
+        set(changed) - accepted_artifact_paths(manifest, spec_id=spec_id)
+    ):
         errors.append("release handoff names unmanaged paths: " + ", ".join(unknown))
     if (
         not isinstance(artifact.get("canonical_commit_range"), str)
@@ -312,6 +431,50 @@ def validate_spec_handoff(
     return validate_artifact(
         data, spec_id=str(frontmatter.get("id", "")), manifest=manifest
     )
+
+
+def sweep_handoff_directory(
+    canonical: Path,
+    declaring_spec_ids: Iterable[str],
+    *,
+    tracked_paths: Collection[str] | None = None,
+) -> dict[str, list[str]]:
+    """Judge the handoff directory from the artifact side.
+
+    ``validate_spec_handoff`` resolves an artifact only after reading a spec's
+    declaration, so it structurally cannot see an artifact that no spec
+    declares.  This sweep walks the directory instead and reports each finding
+    against the artifact's own repository-relative path, because for an orphan
+    there is by definition no spec ID to attribute it to.
+
+    ``declaring_spec_ids`` is supplied by the caller — the module stays free of
+    spec parsing — and may repeat an ID, which is how a doubly-declared
+    artifact is detected.  ``tracked_paths`` holds canonical-relative paths that
+    git reports as tracked; ``None`` means tracking could not be judged here (no
+    repository, or a deliberately ignored private install) and the assertion is
+    skipped rather than reported as a finding against every artifact.
+    """
+    directory = canonical / HANDOFF_DIR
+    if not directory.is_dir():
+        return {}
+    declared = Counter(str(spec_id) for spec_id in declaring_spec_ids)
+    findings: dict[str, list[str]] = {}
+    for path in sorted(directory.glob("*.json")):
+        relative = f"{HANDOFF_DIR}/{path.name}"
+        errors: list[str] = []
+        declarations = declared[path.stem]
+        if declarations == 0:
+            errors.append(f"{relative}: {ORPHANED_HANDOFF_ARTIFACT_ERROR}")
+        elif declarations > 1:
+            errors.append(
+                f"{relative}: {AMBIGUOUS_HANDOFF_ARTIFACT_ERROR} "
+                f"({declarations} specs declare {path.stem})"
+            )
+        if tracked_paths is not None and relative not in tracked_paths:
+            errors.append(f"{relative}: {UNTRACKED_HANDOFF_ARTIFACT_ERROR}")
+        if errors:
+            findings[relative] = errors
+    return findings
 
 
 def complete_pending_handoffs(

@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.6.7
+version: 3.8.3
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -150,8 +150,10 @@ If the canonical path is not accessible (e.g., running outside Argo Home, differ
 **Copy the entire canonical kit:**
 
 ```bash
-# Copy all protocol files, templates, and scaffolding
-cp -r "$CANONICAL/" .nightshift/
+# Copy all protocol files, templates, and scaffolding. Python bytecode is
+# machine-specific derived state and must never enter an install.
+rsync -a --exclude='__pycache__/' --exclude='*.py[co]' \
+  "$CANONICAL/" .nightshift/
 ```
 
 This copies:
@@ -1333,16 +1335,24 @@ path defined in Step 6's `Nightshift-Resolution-Kind` documentation, reserved fo
 baseline commit, the declared suites, and the spec's ACs verbatim — and **no worker
 conclusions**, so the verifier cannot inherit them. Use this template verbatim:
 
-**Canonical verifier-gate boundary (SPEC-228; applies to both briefs below).**
+**Canonical verifier-gate boundary (SPEC-228, SPEC-239; applies to both briefs below).**
 Before composing either brief, materialize one standalone sanitized Git repository
 with `.nightshift/verification_report.py prepare-dispatch`. This repository is the
 sole verifier read surface. It has its own object database and contains synthetic
 `verifier-baseline` and `verifier-head` refs with every tracked branch path except
-the recognized report roots and the explicit run-report path. A linked worktree,
+three withheld classes of report: the explicit run-report paths, every report whose
+path or content names the spec under verification (same-spec reports, SPEC-239), and
+every remaining report the candidate added, removed, or changed. Reports belonging to
+other specs and unchanged across both arms are deliberately **retained**, because
+canonical tests consume them as fixtures — so the surface is scoped by subject
+matter, not swept clean of report roots. A linked worktree,
 sparse checkout, deleted checkout file, or prompt-only prohibition is not an
 eligible substitute because the source object database would keep report blobs
-reachable. The command must write durable containment evidence and succeed only
-when `git cat-file -e` fails for the report path at both refs. The command emits one
+reachable. The command must write durable containment evidence — which records the
+three withheld classes separately, plus the content hash of every retained report —
+and succeed only when `git cat-file -e` fails for every withheld path at both refs.
+It exits nonzero with `verifier_surface_unavailable` rather than emitting a surface
+whose same-spec scope could not be computed. The command emits one
 sanitized JSON dispatch plan containing only the standalone repository, its synthetic
 refs/commits, neutral suite tuple/brief kind, and containment-evidence digest. It does
 not emit the source checkout, report paths, or parent-owned evidence path. Dispatch is
@@ -1409,9 +1419,14 @@ Rules:
    merge, rebase, stash, or change lifecycle state. Apply the Canonical
    verifier-gate boundary above; a non-empty verifier-surface footprint voids
    your verdict.
-2. The run report and progress artifacts are structurally absent and unreachable.
-   Do not access any source checkout outside the assigned surface. If any author
-   conclusion is nevertheless observed, record it in `contamination` and continue.
+2. This run's report, its progress artifacts, and every other report that names this
+   spec are structurally absent and unreachable from the assigned surface. That is
+   the whole of the guarantee. Reports belonging to other specs may still be present
+   as test fixtures, and any file may quote a conclusion in passing. Do not access
+   any source checkout outside the assigned surface. If you nevertheless observe an
+   author conclusion about this spec — in a retained fixture, a path name, a commit
+   message, or anywhere else — record it in `contamination` and continue, including
+   whether you saw it before or after deriving the same result yourself.
 3. Sample, do not take single draws. For any suite marked flaky-suspected — and for
    any suite whose two arms disagree at all — run it at least 3 times per arm and
    report every sample. A difference seen in one draw per arm is not a regression.
@@ -1462,9 +1477,14 @@ Rules:
    delete, stage, commit, merge, rebase, stash, or change lifecycle state. Apply
    the Canonical verifier-gate boundary above; a non-empty verifier-surface
    footprint voids your verdict.
-2. The run report and progress artifacts are structurally absent and unreachable.
-   Do not access any source checkout outside the assigned surface. If any author
-   conclusion is nevertheless observed, record it in `contamination` and continue.
+2. This run's report, its progress artifacts, and every other report that names this
+   spec are structurally absent and unreachable from the assigned surface. That is
+   the whole of the guarantee. Reports belonging to other specs may still be present
+   as test fixtures, and any file may quote a conclusion in passing. Do not access
+   any source checkout outside the assigned surface. If you nevertheless observe an
+   author conclusion about this spec — in a retained fixture, a path name, a commit
+   message, or anywhere else — record it in `contamination` and continue, including
+   whether you saw it before or after deriving the same result yourself.
 3. For each AC, gather evidence yourself: read `git diff verifier-baseline..verifier-head`
    for the files it names, open the changed file(s) at `verifier-head` and check the
    actual content/config/schema the AC describes — grep for the exact string,
@@ -1837,8 +1857,16 @@ verifier on the unchanged head. Remediation or dispatch failure, unchanged head,
 a second invalid verdict, or a fresh valid failure exhausts the bounded path and
 resolves through controlled blocked policy. Record each actor attempt separately
 from the parent delivery result via the configured SPEC-224 adapter. The typed
-admission seam admits `verifier_failure` only; `implementer_blocked` remains an
-attempt plus existing terminal-policy input until SPEC-235-001.
+admission seam handles both sources without adding another lifecycle owner
+(SPEC-235-001).
+`implementer_blocked` is an attempt fact that opens a parent-owned assessment:
+retain and hash-inventory the candidate, validate the closed diagnosis envelope,
+classify mechanical evidence, use at most one read-only diagnostician for safe
+uncertainty, and dispatch at most one bounded `resume_original` or
+`fresh_specialist` repair. Reuse keyed effects after callback loss, polling, or
+restart; never renew allowances on reconnect. A changed repair must pass a newly
+independent verifier and the coordinator's serialized fresh-main integration
+before delivery may close.
 
 After the verdict validator has produced the auditable verdict, publish the
 actual verification outcome exactly once. Map `pass` to `passed`, `fail` to

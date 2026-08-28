@@ -14,7 +14,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -47,9 +47,12 @@ _FIXTURE_ANCHOR_BASENAME = re.compile(r"^test_[A-Za-z0-9_]+\.py$")
 # Project-owned Nightshift state is outside the canonical managed-payload
 # contract.  This closed fallback is consulted only when the release marker is
 # unreadable, so config/spec/report work remains possible while every unknown
-# payload-shaped path fails closed.
+# payload-shaped path fails closed.  ``board-reads.json`` is the deployed
+# board's own write-state, which SPEC-229's KIT.CLOSURE invariant already
+# excludes from the payload; naming it here keeps the fallback's classification
+# identical to the marker-readable one (SPEC-241).
 PROJECT_OWNED_NIGHTSHIFT_EXACT = frozenset(
-    {"config.yaml", "projects-registry.json", "STOP", ".gitignore"}
+    {"config.yaml", "projects-registry.json", "STOP", ".gitignore", "board-reads.json"}
 )
 PROJECT_OWNED_NIGHTSHIFT_PREFIXES = (
     "specs/",
@@ -71,6 +74,20 @@ def _potential_managed_stage(path: str) -> bool:
     if not path.startswith(prefix):
         return False
     relative = path[len(prefix) :]
+    try:
+        from release import is_ignored_python_cache_path
+    except ImportError:
+        # The narrow Cortex scanner copy intentionally ships without the full
+        # Nightshift release graph. Keep identical fallback semantics there.
+        candidate = PurePosixPath(relative.replace("\\", "/"))
+        is_cache = "__pycache__" in candidate.parts or candidate.suffix in {
+            ".pyc",
+            ".pyo",
+        }
+    else:
+        is_cache = is_ignored_python_cache_path(relative)
+    if is_cache:
+        return False
     return relative not in PROJECT_OWNED_NIGHTSHIFT_EXACT and not relative.startswith(
         PROJECT_OWNED_NIGHTSHIFT_PREFIXES
     )

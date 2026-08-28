@@ -7,9 +7,12 @@ for parallel spec execution with git worktree-based isolation.
 """
 
 import enum
+import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 import uuid
 import time
 from dataclasses import dataclass, field, asdict
@@ -31,6 +34,9 @@ from worktree_paths import (
     assert_worktree_owner,
     worktree_path,
 )
+
+
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +144,10 @@ class WorktreeHandle:
     integrity_receipt_sha256: Optional[str] = None
     integrity_run_id: Optional[str] = None
     integrity_acceptance: Optional[Dict[str, Any]] = None
+    # Parent-private immutable object accepted by independent verification.
+    # When present, the serialized queue must apply this object rather than the
+    # mutable branch ref and must refuse any branch-tip drift.
+    verified_revision: Optional[str] = None
 
 
 @dataclass
@@ -486,6 +496,7 @@ class QueueDecision:
     reserved_surfaces: List[str] = field(default_factory=list)
     overlap_kind: str = "none"
     human_status_ping_required: bool = False
+    applied_revision: str = ""
 
 
 @dataclass
@@ -497,6 +508,16 @@ class IntegrationQueueResult:
     reverted: List[str] = field(default_factory=list)
     decisions: List[QueueDecision] = field(default_factory=list)
     integrity_failures: List[Dict[str, str]] = field(default_factory=list)
+
+
+def _queue_result_from_record(record: Dict[str, Any]) -> IntegrationQueueResult:
+    return IntegrationQueueResult(
+        accepted=list(record.get("accepted", [])),
+        held=list(record.get("held", [])),
+        reverted=list(record.get("reverted", [])),
+        decisions=[QueueDecision(**item) for item in record.get("decisions", [])],
+        integrity_failures=list(record.get("integrity_failures", [])),
+    )
 
 
 class SerializedIntegrationQueue:
@@ -564,8 +585,39 @@ class SerializedIntegrationQueue:
         """Release a terminal reservation without touching a worker tree."""
         self._reservations.pop(spec_id, None)
 
-    def integrate(self, handles: Iterable[WorktreeHandle]) -> IntegrationQueueResult:
+    def integrate(
+        self,
+        handles: Iterable[WorktreeHandle],
+        *,
+        operation_key: str | None = None,
+        operation_digest: str | None = None,
+    ) -> IntegrationQueueResult:
         """Integrate compatible completed handles in deterministic spec-ID order."""
+        materialized = list(handles)
+        if (operation_key is None) != (operation_digest is None):
+            raise ValueError("integration operation identity is incomplete")
+        if operation_key is not None and self.evidence_path is None:
+            raise ValueError("durable queue evidence is required for keyed integration")
+        if operation_key is not None and len(materialized) != 1:
+            raise ValueError("keyed integration requires exactly one handle")
+        prepared: Dict[str, Any] | None = None
+        if operation_key is not None and self.evidence_path is not None:
+            prior = _read_keyed_queue_record(
+                self.evidence_path, operation_key, operation_digest
+            )
+            if prior is not None:
+                if prior.get("phase") == "terminal":
+                    return _queue_result_from_record(prior)
+                if prior.get("phase") != "prepared":
+                    raise ValueError("durable integration queue phase is invalid")
+                prepared = prior
+                reconciled = self._reconcile_prepared_operation(
+                    materialized[0], prior,
+                    operation_key=operation_key,
+                    operation_digest=operation_digest,
+                )
+                if reconciled is not None:
+                    return reconciled
         result = IntegrationQueueResult()
         accepted_files: Set[str] = set()
         accepted_declared: Set[str] = set()
@@ -573,7 +625,7 @@ class SerializedIntegrationQueue:
             self._shared_integrity_failure["reason_code"]
             if self._shared_integrity_failure is not None else None
         )
-        for handle in sorted((h for h in handles if h.status == "completed"), key=lambda h: h.spec_id):
+        for handle in sorted((h for h in materialized if h.status == "completed"), key=lambda h: h.spec_id):
             queued_at = time.monotonic()
             before = self._head()
             if shared_integrity_failure is not None:
@@ -600,6 +652,14 @@ class SerializedIntegrationQueue:
                 result.held.append(handle.spec_id)
                 result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, reason=str(exc), reserved_surfaces=reserved))
                 continue
+            revision_error = self._verified_revision_error(handle)
+            if revision_error:
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(
+                    handle.spec_id, "held", before, before,
+                    reason=revision_error, reserved_surfaces=reserved,
+                ))
+                continue
             if self.terminal_gate is not None:
                 acceptance = self.terminal_gate(handle)
                 handle.integrity_acceptance = acceptance
@@ -617,7 +677,11 @@ class SerializedIntegrationQueue:
                     else:
                         self._block_dependents(handle.spec_id)
                     continue
-            observed = self._changed_files(handle.branch_name)
+            integration_ref = handle.verified_revision or handle.branch_name
+            resolved_integration_revision = self._git(
+                ["rev-parse", "--verify", f"{integration_ref}^{{commit}}"]
+            ).stdout.strip()
+            observed = self._changed_files(integration_ref)
             protected = sorted(set(observed) & self.protected_surfaces)
             intents = {str(intent.get("path", "")) for intent in handle.release_intents if isinstance(intent, dict)}
             if protected and not set(protected).issubset(intents):
@@ -638,7 +702,31 @@ class SerializedIntegrationQueue:
                 result.decisions.append(QueueDecision(handle.spec_id, "held", before, before, observed, reason, reserved_surfaces=reserved, overlap_kind="declared_or_observed"))
                 continue
 
-            rebased, rebase_outcome = self._rebase(handle)
+            if operation_key is not None and self.evidence_path is not None:
+                intent = {
+                    "phase": "prepared",
+                    "operation_key": operation_key,
+                    "operation_digest": operation_digest,
+                    "spec_id": handle.spec_id,
+                    "main_before": before,
+                    "candidate_revision": resolved_integration_revision,
+                    "declared_surfaces": sorted(handle.declared_touches),
+                    "observed_files": observed,
+                    "reserved_surfaces": reserved,
+                }
+                if prepared is not None and prepared != intent:
+                    raise ValueError("divergent prepared integration operation")
+                if prepared is None:
+                    write_prepared_integration_intent(intent, self.evidence_path)
+                    prepared = intent
+
+            # A verified Git object is already the content accepted by the
+            # independent checker.  Rebasing would manufacture a different
+            # object; merge that immutable object directly into fresh main.
+            if handle.verified_revision:
+                rebased, rebase_outcome = True, "verified_revision_pinned"
+            else:
+                rebased, rebase_outcome = self._rebase(handle)
             if not rebased:
                 repaired = False
                 if self.max_repair_attempts and self.request_repair:
@@ -661,7 +749,14 @@ class SerializedIntegrationQueue:
                 result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed, "reconciliation failed", reserved_surfaces=reserved, rebase_outcome=rebase_outcome, repair_result="requested" if repaired else "failed", human_status_ping_required=True))
                 continue
 
-            accepted = self._merge_validate_or_revert(handle, before, observed, result, queue_wait_s=time.monotonic() - queued_at, head_drift=before != self._head(), rebase_outcome=rebase_outcome, reserved_surfaces=reserved)
+            accepted = self._merge_validate_or_revert(
+                handle, before, observed, result,
+                queue_wait_s=time.monotonic() - queued_at,
+                head_drift=before != self._head(),
+                rebase_outcome=rebase_outcome,
+                reserved_surfaces=reserved,
+                applied_revision=resolved_integration_revision,
+            )
             if accepted:
                 accepted_files.update(observed)
                 accepted_declared.update(declared)
@@ -670,13 +765,123 @@ class SerializedIntegrationQueue:
             [self._shared_integrity_failure] if self._shared_integrity_failure else []
         )
         if self.evidence_path is not None:
-            write_integration_queue_result(result, self.evidence_path)
+            write_integration_queue_result(
+                result,
+                self.evidence_path,
+                operation_key=operation_key,
+                operation_digest=operation_digest,
+            )
+        return result
+
+    def _reconcile_prepared_operation(
+        self, handle: WorktreeHandle, intent: Dict[str, Any], *,
+        operation_key: str, operation_digest: str | None,
+    ) -> IntegrationQueueResult | None:
+        """Recover a keyed merge whose terminal queue evidence was interrupted."""
+        revision = handle.verified_revision
+        observed = intent.get("observed_files")
+        if not isinstance(observed, list) or not all(
+            isinstance(path, str) for path in observed
+        ):
+            raise ValueError("prepared integration observed surfaces are invalid")
+        expected = {
+            "operation_key": operation_key,
+            "operation_digest": operation_digest,
+            "spec_id": handle.spec_id,
+            "candidate_revision": revision,
+            "declared_surfaces": sorted(handle.declared_touches),
+        }
+        if any(intent.get(key) != value for key, value in expected.items()):
+            raise ValueError("divergent prepared integration operation")
+        before = intent.get("main_before")
+        if not isinstance(before, str) or not GIT_COMMIT_RE.fullmatch(before):
+            raise ValueError("prepared integration main identity is invalid")
+        current = self._head()
+        if current == before:
+            return None
+        first_parent = self._git(["rev-parse", "HEAD^1"])
+        second_parent = self._git(["rev-parse", "HEAD^2"])
+        exactly_applied = (
+            revision is not None
+            and first_parent.returncode == 0
+            and second_parent.returncode == 0
+            and first_parent.stdout.strip() == before
+            and second_parent.stdout.strip() == revision
+        )
+        if exactly_applied:
+            passed, output = self.validate_main(handle)
+            if passed:
+                handle.status = "accepted"
+                self._set_status(
+                    handle.spec_id, "done",
+                    "accepted by recovered serialized integration queue",
+                )
+                _cleanup_single_worktree(handle, self.repo_root)
+                self.release(handle.spec_id)
+                result = IntegrationQueueResult(
+                    accepted=[handle.spec_id],
+                    decisions=[QueueDecision(
+                        handle.spec_id, "accepted", before, current, observed,
+                        validation_output=output,
+                        rebase_outcome="verified_revision_pinned",
+                        reserved_surfaces=list(intent.get("reserved_surfaces", [])),
+                        applied_revision=revision,
+                    )],
+                )
+                assert self.evidence_path is not None
+                write_integration_queue_result(
+                    result, self.evidence_path,
+                    operation_key=operation_key,
+                    operation_digest=operation_digest,
+                )
+                return result
+            reverted = self._git(["revert", "-m", "1", "HEAD", "--no-edit"])
+            if reverted.returncode == 0:
+                handle.status = "failed"
+                self._set_status(
+                    handle.spec_id, "blocked",
+                    "recovered integration failed fresh-main validation",
+                    output,
+                )
+                self._block_dependents(handle.spec_id)
+                result = IntegrationQueueResult(
+                    reverted=[handle.spec_id],
+                    decisions=[QueueDecision(
+                        handle.spec_id, "reverted", before, self._head(), observed,
+                        reason="recovered_main_validation_failed",
+                        validation_output=output,
+                        rebase_outcome="verified_revision_pinned",
+                        reserved_surfaces=list(intent.get("reserved_surfaces", [])),
+                    )],
+                )
+                assert self.evidence_path is not None
+                write_integration_queue_result(
+                    result, self.evidence_path,
+                    operation_key=operation_key,
+                    operation_digest=operation_digest,
+                )
+                return result
+        result = IntegrationQueueResult(
+            held=[handle.spec_id],
+            decisions=[QueueDecision(
+                handle.spec_id, "held", before, current, observed,
+                reason="prepared_integration_state_ambiguous",
+                reserved_surfaces=list(intent.get("reserved_surfaces", [])),
+            )],
+        )
+        assert self.evidence_path is not None
+        write_integration_queue_result(
+            result, self.evidence_path,
+            operation_key=operation_key,
+            operation_digest=operation_digest,
+        )
         return result
 
     def _merge_validate_or_revert(self, handle: WorktreeHandle, before: str, observed: List[str], result: IntegrationQueueResult, **evidence: Any) -> bool:
         attempts = 0
         while True:
-            merge = self._git(["merge", "--no-ff", handle.branch_name])
+            integration_ref = handle.verified_revision or handle.branch_name
+            merge = self._git(["merge", "--no-ff", integration_ref])
             if merge.returncode != 0:
                 self._git(["merge", "--abort"], check=False)
                 result.held.append(handle.spec_id)
@@ -696,7 +901,8 @@ class SerializedIntegrationQueue:
             # merge before asking the originating worker for a bounded repair.
             self._git(["revert", "-m", "1", "HEAD", "--no-edit"])
             attempts += 1
-            if attempts <= self.max_repair_attempts and self.request_repair and self.request_repair(handle, output):
+            if (not handle.verified_revision and attempts <= self.max_repair_attempts
+                    and self.request_repair and self.request_repair(handle, output)):
                 rebased, rebase_outcome = self._rebase(handle)
                 if not rebased:
                     result.held.append(handle.spec_id)
@@ -724,8 +930,22 @@ class SerializedIntegrationQueue:
         subprocess.run(["git", "rebase", "--abort"], cwd=str(handle.worktree_path), capture_output=True, text=True, check=False)
         return False, "conflict"
 
-    def _changed_files(self, branch_name: str) -> List[str]:
-        diff = self._git(["diff", "--name-only", f"{self.main_branch}...{branch_name}"])
+    def _verified_revision_error(self, handle: WorktreeHandle) -> str:
+        revision = handle.verified_revision
+        if revision is None:
+            return ""
+        if not GIT_COMMIT_RE.fullmatch(revision):
+            return "verified_revision_invalid"
+        verified = self._git(["rev-parse", "--verify", f"{revision}^{{commit}}"])
+        branch = self._git(["rev-parse", "--verify", f"{handle.branch_name}^{{commit}}"])
+        if verified.returncode != 0 or verified.stdout.strip() != revision:
+            return "verified_revision_unavailable"
+        if branch.returncode != 0 or branch.stdout.strip() != revision:
+            return "verified_revision_drift"
+        return ""
+
+    def _changed_files(self, integration_ref: str) -> List[str]:
+        diff = self._git(["diff", "--name-only", f"{self.main_branch}...{integration_ref}"])
         return sorted(path for path in diff.stdout.splitlines() if path)
 
     @staticmethod
@@ -762,17 +982,96 @@ class SerializedIntegrationQueue:
             self._set_status(spec_id, "blocked", f"blocked by {failed_spec_id}")
 
 
-def write_integration_queue_result(result: IntegrationQueueResult, output_path: Path) -> Path:
+def write_integration_queue_result(
+    result: IntegrationQueueResult,
+    output_path: Path,
+    *,
+    operation_key: str | None = None,
+    operation_digest: str | None = None,
+) -> Path:
     """Persist auditable queue decisions as a machine-readable artifact."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps({
+    result_record = {
+        "phase": "terminal",
+        "operation_key": operation_key,
+        "operation_digest": operation_digest,
         "accepted": result.accepted,
         "held": result.held,
         "reverted": result.reverted,
         "decisions": [asdict(decision) for decision in result.decisions],
         "integrity_failures": result.integrity_failures,
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    _write_queue_record(output_path, result_record)
     return output_path
+
+
+def write_prepared_integration_intent(
+    intent: Mapping[str, Any], output_path: Path
+) -> Path:
+    """Fsync a closed keyed intent before the serialized queue mutates Git."""
+    if intent.get("phase") != "prepared":
+        raise ValueError("integration intent must be prepared")
+    _write_queue_record(output_path, dict(intent))
+    return output_path
+
+
+def _write_queue_record(output_path: Path, operation: Dict[str, Any]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    operations: Dict[str, Any] = {}
+    if output_path.is_file():
+        try:
+            prior = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(prior.get("operations"), dict):
+                operations = dict(prior["operations"])
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("durable integration queue evidence is unreadable") from exc
+    operation_key = operation.get("operation_key")
+    if operation_key is not None:
+        operations[hashlib.sha256(operation_key.encode("utf-8")).hexdigest()] = operation
+    record = {**operation, "operations": operations}
+    body = (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output_path)
+        directory = os.open(output_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _read_keyed_queue_record(
+    output_path: Path, operation_key: str, operation_digest: str | None
+) -> Dict[str, Any] | None:
+    if not output_path.is_file():
+        return None
+    try:
+        record = json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("durable integration queue evidence is unreadable") from exc
+    operations = record.get("operations")
+    operation = None
+    if isinstance(operations, dict):
+        operation = operations.get(
+            hashlib.sha256(operation_key.encode("utf-8")).hexdigest()
+        )
+    if operation is None and record.get("operation_key") == operation_key:
+        operation = record
+    if not isinstance(operation, dict):
+        return None
+    if operation.get("operation_key") != operation_key:
+        raise ValueError("durable integration queue identity collision")
+    if operation.get("operation_digest") != operation_digest:
+        raise ValueError("divergent integration queue operation reuse")
+    return operation
 
 
 def integration_metrics_summary(result: IntegrationQueueResult) -> Dict[str, Any]:

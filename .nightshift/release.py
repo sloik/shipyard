@@ -8,9 +8,10 @@ import json
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MARKER = "release-marker.json"
+PYTHON_CACHE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 CANONICAL_SUITE = {
     "runner": "uv",
@@ -35,6 +36,31 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def is_ignored_python_cache_path(path: str | os.PathLike[str]) -> bool:
+    """Return whether *path* is disposable Python bytecode cache."""
+    candidate = PurePosixPath(str(path).replace("\\", "/"))
+    return (
+        "__pycache__" in candidate.parts
+        or candidate.suffix in PYTHON_CACHE_SUFFIXES
+    )
+
+
+def release_entries(manifest: dict) -> list[dict]:
+    """Return payload entries after enforcing the no-cache invariant."""
+    entries = list(manifest.get("files", []))
+    cache = [
+        entry.get("path")
+        for entry in entries
+        if is_ignored_python_cache_path(str(entry.get("path", "")))
+    ]
+    if cache:
+        raise ValueError(
+            "release manifest contains ignored Python cache: "
+            + ", ".join(sorted(map(str, cache)))
+        )
+    return entries
+
+
 def kit_version(canonical: Path) -> str:
     match = re.search(
         r'^kit_version:\s*"([^"]+)"',
@@ -49,6 +75,8 @@ def kit_version(canonical: Path) -> str:
 def manifest_files(canonical: Path, names: list[str]) -> list[dict]:
     entries = []
     for name in sorted(names):
+        if is_ignored_python_cache_path(name):
+            continue
         path = canonical / name
         if not path.is_file():
             raise ValueError(f"managed file missing: {name}")
@@ -95,6 +123,180 @@ def managed_import_gaps(canonical: Path, names: list[str]) -> list[str]:
                     gaps.append(
                         f"managed import missing from release set: {name} imports {local}"
                     )
+    return sorted(set(gaps))
+
+
+def _module_relative_resources(tree: ast.AST) -> set[PurePosixPath]:
+    """Return literal non-Python resources read below a module directory.
+
+    This intentionally implements a small static data-flow model instead of
+    guessing from filenames.  It follows the common ``Path(__file__)`` forms,
+    local aliases, helper return values, and literal ``/`` joins, then records
+    paths passed to ``open``/``read_text``/``read_bytes``.
+    """
+    module_file = ("file", PurePosixPath("."))
+    function_returns: dict[str, set[tuple[str, PurePosixPath]]] = {}
+
+    def resolve(
+        expression: ast.AST,
+        bindings: dict[str, set[tuple[str, PurePosixPath]]],
+    ) -> set[tuple[str, PurePosixPath]]:
+        if isinstance(expression, ast.Name):
+            return bindings.get(expression.id, set())
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id == "Path"
+            and len(expression.args) == 1
+            and isinstance(expression.args[0], ast.Name)
+            and expression.args[0].id == "__file__"
+        ):
+            return {module_file}
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id in function_returns
+        ):
+            return function_returns[expression.func.id]
+        if isinstance(expression, ast.Attribute):
+            bases = resolve(expression.value, bindings)
+            if expression.attr == "parent":
+                return {
+                    ("dir", path if kind == "file" else path.parent)
+                    for kind, path in bases
+                }
+            return set()
+        if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Attribute):
+            bases = resolve(expression.func.value, bindings)
+            if expression.func.attr in {"resolve", "absolute"} and not expression.args:
+                return bases
+            if (
+                expression.func.attr == "with_name"
+                and len(expression.args) == 1
+                and isinstance(expression.args[0], ast.Constant)
+                and isinstance(expression.args[0].value, str)
+            ):
+                return {
+                    ("dir", path.parent / expression.args[0].value)
+                    for kind, path in bases
+                    if kind == "file"
+                }
+            return set()
+        if (
+            isinstance(expression, ast.BinOp)
+            and isinstance(expression.op, ast.Div)
+            and isinstance(expression.right, ast.Constant)
+            and isinstance(expression.right.value, str)
+        ):
+            return {
+                ("dir", path / expression.right.value)
+                for kind, path in resolve(expression.left, bindings)
+                if kind == "dir"
+            }
+        if isinstance(expression, ast.BoolOp):
+            return set().union(*(resolve(value, bindings) for value in expression.values))
+        if isinstance(expression, ast.IfExp):
+            return resolve(expression.body, bindings) | resolve(expression.orelse, bindings)
+        return set()
+
+    resources: set[PurePosixPath] = set()
+
+    def scan(
+        statements: list[ast.stmt],
+        inherited: dict[str, set[tuple[str, PurePosixPath]]],
+    ) -> None:
+        bindings = dict(inherited)
+        for statement in statements:
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                value = statement.value
+                targets = (
+                    statement.targets
+                    if isinstance(statement, ast.Assign)
+                    else [statement.target]
+                )
+                resolved = resolve(value, bindings) if value is not None else set()
+                for target in targets:
+                    if isinstance(target, ast.Name) and resolved:
+                        bindings[target.id] = resolved
+
+            nodes = [
+                node
+                for node in ast.walk(statement)
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                or node is statement
+            ]
+            for node in nodes:
+                opened: set[tuple[str, PurePosixPath]] = set()
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "open"
+                    and node.args
+                ):
+                    opened = resolve(node.args[0], bindings)
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"open", "read_text", "read_bytes"}
+                ):
+                    opened = resolve(node.func.value, bindings)
+                for kind, path in opened:
+                    if (
+                        kind == "dir"
+                        and path.suffix != ".py"
+                        and path.name
+                        and ".." not in path.parts
+                    ):
+                        resources.add(path)
+
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_bindings = dict(bindings)
+                positional = [*statement.args.posonlyargs, *statement.args.args]
+                defaults = statement.args.defaults
+                for argument, default in zip(positional[-len(defaults) :], defaults):
+                    resolved = resolve(default, bindings)
+                    if resolved:
+                        function_bindings[argument.arg] = resolved
+                returned = set().union(
+                    *(
+                        resolve(node.value, function_bindings)
+                        for node in ast.walk(statement)
+                        if isinstance(node, ast.Return) and node.value is not None
+                    ),
+                    set(),
+                )
+                if returned:
+                    function_returns[statement.name] = returned
+                scan(statement.body, function_bindings)
+
+    scan(tree.body if isinstance(tree, ast.Module) else [], {})
+    return resources
+
+
+def managed_local_resource_gaps(canonical: Path, names: list[str]) -> list[str]:
+    """Report module-relative non-Python reads absent from the managed set."""
+    managed = set(names)
+    gaps: list[str] = []
+    for name in sorted(managed):
+        if not name.endswith(".py"):
+            continue
+        source = canonical / name
+        try:
+            tree = ast.parse(source.read_text(), filename=str(source))
+        except SyntaxError:
+            # ``managed_import_gaps`` already reports this parse failure.
+            continue
+        for resource in sorted(_module_relative_resources(tree)):
+            relative = str(resource)
+            if relative in {"board-reads.json", "release-manifest.json"}:
+                # Runtime board state is project-owned. The manifest cannot
+                # contain its own digest recursively. Neither is a data source.
+                continue
+            if (canonical / resource).is_file() and relative not in managed:
+                gaps.append(
+                    f"managed local resource missing from release set: "
+                    f"{name} opens {relative}"
+                )
     return sorted(set(gaps))
 
 
@@ -179,12 +381,17 @@ def validate_manifest(
     ):
         errors.append("managed release payload cannot contain production .nsext packages")
     errors.extend(managed_import_gaps(canonical, names))
+    errors.extend(managed_local_resource_gaps(canonical, names))
     return not errors, errors, manifest
 
 
 def verify_install(install: Path, manifest: dict) -> tuple[bool, list[str]]:
     errors = []
-    for entry in manifest["files"]:
+    try:
+        entries = release_entries(manifest)
+    except ValueError as exc:
+        return False, [str(exc)]
+    for entry in entries:
         path = install / entry["path"]
         if not path.is_file() or sha256(path) != entry["sha256"]:
             errors.append(f"managed file mismatch: {entry['path']}")
@@ -209,15 +416,19 @@ def apply_install(
     canonical: Path, install: Path, manifest: dict, *, dry_run: bool = False
 ) -> tuple[bool, list[str]]:
     """Copy whole managed set, verify it, then write marker last. No partial mode."""
+    try:
+        entries = release_entries(manifest)
+    except ValueError as exc:
+        return False, [str(exc)]
     if dry_run:
-        return True, [f"would copy {len(manifest['files'])} managed files"]
-    for entry in manifest["files"]:
+        return True, [f"would copy {len(entries)} managed files"]
+    for entry in entries:
         dst = install / entry["path"]
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes((canonical / entry["path"]).read_bytes())
         os.chmod(dst, 0o755 if entry["executable"] else 0o644)
     # Verify content before the marker exists; marker is deliberately final.
-    for entry in manifest["files"]:
+    for entry in entries:
         if sha256(install / entry["path"]) != entry["sha256"]:
             return False, [f"copy verification failed: {entry['path']}"]
     (install / MARKER).write_text(
@@ -248,7 +459,10 @@ def managed_drift(install: Path, manifest: dict) -> list[str]:
     )
     if result.returncode:
         return []
-    managed = {entry["path"] for entry in manifest["files"]} | {MARKER}
+    try:
+        managed = {entry["path"] for entry in release_entries(manifest)} | {MARKER}
+    except ValueError:
+        return []
     return sorted(
         {
             line[3:]

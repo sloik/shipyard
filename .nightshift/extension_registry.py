@@ -11,7 +11,7 @@ import uuid
 import zipfile
 from collections import Counter
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from extension_package import PackageError, inspect_package
@@ -29,6 +29,15 @@ from extension_protocol import (
     semantic_version,
     sha256_bytes,
 )
+
+try:
+    from release import is_ignored_python_cache_path
+except ImportError:
+    # Extension packages also run as a deliberately narrow standalone bundle.
+    def is_ignored_python_cache_path(path: str | os.PathLike[str]) -> bool:
+        candidate = PurePosixPath(str(path).replace("\\", "/"))
+        return "__pycache__" in candidate.parts or candidate.suffix in {".pyc", ".pyo"}
+
 
 SOURCES = frozenset({"project", "user"})
 MANIFEST_FIELDS = {
@@ -627,7 +636,9 @@ class ExtensionPackageManager:
             if path.is_symlink():
                 raise PackageError("installed package contains symlink")
             if path.is_file():
-                files.append(path.relative_to(owned).as_posix())
+                relative = path.relative_to(owned).as_posix()
+                if not is_ignored_python_cache_path(relative):
+                    files.append(relative)
         return self._remember_plan(
             {
                 "operation": "remove",
@@ -909,6 +920,8 @@ class ExtensionPackageManager:
                 raise PackageError("installed package contains symlink")
             if path.is_file():
                 relative = path.relative_to(root).as_posix()
+                if is_ignored_python_cache_path(relative):
+                    continue
                 data = path.read_bytes()
                 inventory.append(
                     {

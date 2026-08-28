@@ -5,6 +5,9 @@
 #        board.sh stop
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Deployed board starts must not materialise interpreter bytecode beside the
+# immutable managed payload. Keep this scoped to board.sh's process tree.
+export PYTHONDONTWRITEBYTECODE=1
 PID_FILE="$DIR/board.pid"
 LOG_FILE="$DIR/board.restart.log"
 STOP_COMMAND="$0 stop"

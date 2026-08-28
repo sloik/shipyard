@@ -53,6 +53,40 @@ handoff is fulfilled only by the serialized `/nightshift release` coordinator
 after its canonical preflight, whole-kit rollout, verification, and durable
 release report. Dirty and opted-out installs are visible safe skips.
 
+### Retired managed-path spellings in sealed handoffs (SPEC-250)
+
+Six handoffs sealed before SPEC-230 — SPEC-203, SPEC-207, SPEC-208, SPEC-225,
+SPEC-226, SPEC-228 — record the delivered skill as
+`../Skills/nightshift/SKILL.md`, the spelling `managed_paths` itself used while
+the skill sat outside the release manifest. They are historically accurate: the
+surface was renamed beneath them, so each reported a permanent
+`names unmanaged paths` finding it could never fix.
+
+**Chosen — read the retired spelling for those enumerated records, edit no
+artifact.** `release_handoff.accepted_artifact_paths` admits
+`LEGACY_SKILL_PATH` for the closed set `LEGACY_SKILL_PATH_SPEC_IDS`, and only
+while `SKILL_MANAGED_PATH` is itself managed by the current manifest. Reason:
+SPEC-244 established that a delivered handoff is a sealed statement about the
+past, judged on its own terms. A rename of the managed surface is a fact about
+the validator's world, so the validator learns the rename; the record stays as
+sealed.
+
+**Rejected — normalise the six records to `Skills/nightshift/SKILL.md`.** It
+would leave no permanent table in code, which is its one real advantage. It was
+rejected because it edits five `completed` delivery records and one `pending`
+record to claim a manifest path that was not managed at their target versions
+(2.67.3 through 3.2.0), falsifying them in the single dimension a sealed
+artifact exists to preserve, and because it sets the precedent that the next
+managed-surface rename rewrites history again rather than recording it.
+
+The enumeration never widens. `managed_paths` still refuses every
+parent-directory escape; any other unmanaged path inside an enumerated record
+still fails; the same spelling inside any other record still fails; and no new
+spec ID may join the set. Admission at the validator is also not admission at
+delivery: `build_delivery_receipt` cannot hash a path the manifest does not
+name, so `validate_positive_delivery` refuses to complete such a record and it
+stays `pending`.
+
 ## Kickoff Parent Progress Contract
 
 ## Kickoff Spec-Ownership Claims (SPEC-178)
@@ -327,9 +361,24 @@ Adapters translate callbacks, polling, cancellation and liveness into normalized
 events and execute keyed effects; they contain no lifecycle or eligibility
 policy. Actor-attempt outcomes are recorded separately from the parent delivery
 decision through the configured SPEC-224 adapter. The typed admission seam is
-source tagged: this release admits only `verifier_failure`. A pre-verifier
-`implementer_blocked` result preserves candidate evidence and reaches existing
-terminal policy once; SPEC-235-001 owns its later diagnosis and admission.
+source tagged. `verifier_failure` retains the signed remediation packet path.
+`implementer_blocked` enters SPEC-235-001's source-specific, schema-checked
+diagnosis path inside the same reducer: preserve the candidate; inventory all
+changed paths and ACs; mechanically classify the blocker; optionally launch one
+read-only diagnostician only for safe uncertainty; then select exactly one
+bounded `resume_original` or `fresh_specialist` repair. Implementer explanations
+never establish causality. External input/authority, protected or destructive
+scope, irreducible ambiguity, actor unavailability, unchanged/rejected repair,
+exhausted allowance, or later independent failure produces one evidenced
+parent-owned block and safe operator action. Successful repair still requires a
+newly independent verifier, the existing integration broker, and a distinct
+fresh-main validation.
+
+Effect identities include the recovery source, assessment digest, private
+candidate revision, selected route, and ordinal. Callback delivery, polling,
+restart, and acknowledgement loss therefore reconcile existing actors and
+effects rather than launching duplicates. A recovery holds dependents and
+overlapping surfaces while unrelated work may advance under NFR-001.
 
 **When to use orchestrator mode:**
 - 3+ specs are ready (`config.yaml` → `runner.mode: "orchestrator"`)

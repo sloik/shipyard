@@ -8,9 +8,10 @@ inspection result.
 from __future__ import annotations
 
 import json
+import os
 import stat
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from extension_protocol import (
@@ -24,6 +25,15 @@ from extension_protocol import (
     semantic_version,
     sha256_bytes,
 )
+
+try:
+    from release import is_ignored_python_cache_path
+except ImportError:
+    # Extension packages also run as a deliberately narrow standalone bundle.
+    def is_ignored_python_cache_path(path: str | os.PathLike[str]) -> bool:
+        candidate = PurePosixPath(str(path).replace("\\", "/"))
+        return "__pycache__" in candidate.parts or candidate.suffix in {".pyc", ".pyo"}
+
 
 PACKAGE_SCHEMA_VERSION = "1.0.0"
 CATALOGUE_SCHEMA_VERSION = "1.0.0"
@@ -304,6 +314,8 @@ def build_package(
         if path.is_dir():
             continue
         relative = path.relative_to(source).as_posix()
+        if is_ignored_python_cache_path(relative):
+            continue
         try:
             safe_relative(relative)
         except ProtocolError as exc:

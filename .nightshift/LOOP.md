@@ -1315,9 +1315,18 @@ An invalid or contaminated initial verdict creates no feedback packet and may
 trigger one replacement verifier on the unchanged head. A second invalid
 verdict, an unchanged/failed remediation, dispatch unavailability, or a fresh
 valid failure resolves through parent-owned blocked policy without another
-automatic attempt. Normalized actor attempts remain distinct from lifecycle:
-`implementer_blocked` is recorded and terminally handled once but is not admitted
-for remediation until SPEC-235-001 extends the source-tagged seam.
+automatic attempt. Normalized actor attempts remain distinct from lifecycle. The
+source tag is `implementer_blocked`. An
+implementer `blocked`, `failed`, `refused`, `stalled`, or `unavailable` result
+opens the SPEC-235-001 assessment obligation; it does not close delivery. The
+parent retains the candidate and validates one `blocked_attempt_diagnosis`
+envelope. Mechanical evidence selects one of seven controlled classes. Only safe
+uncertainty may dispatch one read-only diagnostician. An eligible assessment
+selects exactly one `resume_original` or `fresh_specialist` repair with explicit
+file, AC, capability, and probe limits. One changed repair revision then rejoins
+the same fresh independent verifier and coordinator-owned serial integration
+path. Polling and reconnecting reuse keyed effects and never renew the `1/1`
+diagnostician or `1/1` repair allowances.
 
 Verifier identity schema `1.0.0` separates the standalone surface's synthetic
 Git `head_commit` from the opaque 64-character `implementation_head_digest`.

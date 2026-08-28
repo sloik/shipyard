@@ -304,7 +304,7 @@ Role-aware attempt and parent-delivery records use controlled fields only:
 
 | Field | Type | Contract |
 | --- | --- | --- |
-| `role` | enum | `implementer`, `verifier`, `remediator`, or `parent` |
+| `role` | enum | `implementer`, `diagnostician`, `repairer`, `verifier`, `remediator`, or `parent` |
 | `agent_outcome` | enum | `completed`, `blocked`, `refused`, `failed`, `stalled`, `unavailable`, `passed`, or `cancelled` |
 | `reason` | enum | Controlled reducer reason; never prose conclusions |
 | `head_digest` | string/null | Exact candidate Git digest |
@@ -314,6 +314,15 @@ Role-aware attempt and parent-delivery records use controlled fields only:
 | `duration_s` | number | Measured non-negative duration |
 | `human_action_required` | boolean | True only for external authority/input, safety/scope refusal, exhausted budgets, or adapter failure |
 | `next_action` | enum | Controlled controller/operator action |
+| `recovery_source` | enum/null | `verifier_failure`, `implementer_blocked`, or null |
+| `diagnosis_class` | enum/null | One of the seven SPEC-235-001 controlled classes |
+| `causal_confidence` | enum/null | `demonstrated`, `supported`, `uncertain`, or null |
+| `candidate_preserved` | boolean | Whether retained candidate identity/evidence is present |
+| `repair_route` | enum/null | `resume_original`, `fresh_specialist`, or null |
+| `diagnostician_allowance` | object | Exact `{used, limit}` with limit fixed at one |
+| `repair_allowance` | object | Exact `{used, limit}` with limit fixed at one |
+| `operator_action` | enum/null | Safe controlled action when human input is required |
+| `delivery_phase` | enum | Current parent-owned durable reducer phase |
 
 Actor outcomes never copy directly into spec lifecycle. The parent terminal row
 is a separate delivery decision. Packet bodies, verdict prose, logs, prompts,

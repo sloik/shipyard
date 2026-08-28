@@ -36,9 +36,14 @@ import yaml
 from parallel_executor import (
     BoundedWorktreeDispatcher,
     SerializedIntegrationQueue,
+    WorktreeHandle,
     parallel_worker_limit,
 )
-from integration_broker import IntegrationBroker
+from integration_broker import (
+    DurableIntegrationReceiptAdapter,
+    IntegrationBroker,
+    IntegrationBrokerFeedbackAdapter,
+)
 from status_store import StatusStore
 from worktree_janitor import run_startup_janitor
 from verifier_feedback import FeedbackRuntimeAdapter, FeedbackState, reconcile_feedback
@@ -1180,16 +1185,39 @@ class Coordinator:
     def reconcile_verifier_feedback(
         self, adapter: FeedbackRuntimeAdapter, initial_state: FeedbackState, *,
         parent_key: bytes, events=None, packet_inputs=None,
+        integration_handles: Dict[str, WorktreeHandle] | None = None,
+        integration_broker: IntegrationBroker | None = None,
     ) -> FeedbackState:
-        """Execute SPEC-235 through the existing parent coordinator authority.
+        """Execute SPEC-235/235-001 through the existing parent authority.
 
         The reducer owns policy and the supplied adapter owns only durable state,
-        normalized polling, and keyed effect execution.  Integration effects must
+        normalized polling, and keyed effect execution. Implementer-blocked
+        diagnosis remains a source-specific admission inside that same reducer;
+        it does not create another scheduler or lifecycle owner. Integration effects must
         still enter :meth:`build_integration_broker`; this method does not expose
         merge or lifecycle authority to a worker or verifier.
         """
+        receipt_namespace = hashlib.sha256(
+            f"{initial_state.run_id}:{initial_state.spec_id}".encode("utf-8")
+        ).hexdigest()
+        durable_adapter = DurableIntegrationReceiptAdapter(
+            adapter,
+            store_root=(
+                self.project_root / "reports" / "_wip"
+                / "integration-receipts" / receipt_namespace
+            ),
+        )
+        brokered_adapter = IntegrationBrokerFeedbackAdapter(
+            durable_adapter,
+            broker_factory=(
+                (lambda: integration_broker)
+                if integration_broker is not None
+                else self.build_integration_broker
+            ),
+            handles=integration_handles or {},
+        )
         return reconcile_feedback(
-            adapter, initial_state, parent_key=parent_key,
+            brokered_adapter, initial_state, parent_key=parent_key,
             events=events, packet_inputs=packet_inputs,
         )
 

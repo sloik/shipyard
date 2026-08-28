@@ -15,6 +15,7 @@ Usage:
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -432,6 +433,56 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
         if isinstance(parsed, dict) and parsed.get("id"):
             loaded.append(parsed)
     return loaded
+
+
+def declaring_handoff_spec_ids(frontmatters: list[dict]) -> list[str]:
+    """Return the spec IDs whose declaration resolves a handoff artifact.
+
+    Only ``impact: required`` reaches ``validate_artifact``; an ``exempt``
+    declaration names no artifact, so an artifact sitting beside an exempt spec
+    is still validated by nothing.  IDs repeat when two spec files share one
+    ``id`` — fleet uniqueness is warning-only — and the sweep needs that count.
+    """
+    ids = []
+    for frontmatter in frontmatters:
+        declaration = frontmatter.get("release_handoff")
+        if isinstance(declaration, dict) and declaration.get("impact") == "required":
+            ids.append(str(frontmatter.get("id", "")))
+    return ids
+
+
+def _git(canonical: Path, *args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(canonical), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def handoff_tracked_paths(canonical: Path) -> set[str] | None:
+    """Return canonical-relative tracked artifact paths, or None if unjudgeable.
+
+    Returning ``None`` is deliberate rather than an empty set: outside a
+    repository, or under a path git is told to ignore — which is every private
+    install, whose kit directory is never committed — "untracked" is the
+    designed state and reporting it against every artifact would be noise.
+    """
+    if not (canonical / release_handoff.HANDOFF_DIR).is_dir():
+        return None
+    inside = _git(canonical, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    ignored = _git(canonical, "check-ignore", "-q", release_handoff.HANDOFF_DIR)
+    if ignored is None or ignored.returncode == 0:
+        return None
+    listed = _git(canonical, "ls-files", "-z", "--", release_handoff.HANDOFF_DIR)
+    if listed is None or listed.returncode != 0:
+        return None
+    return {path for path in listed.stdout.split("\0") if path}
 
 
 def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str]]:
@@ -1033,6 +1084,19 @@ def validate_directory(specs_dir: Path) -> dict:
     )
     for name, warnings in fleet_findings.items():
         results.setdefault(name, []).extend(warnings)
+
+    # SPEC-252: the per-spec pass above can only reach an artifact a spec
+    # declares.  Sweep the sibling handoff directory from the artifact side so
+    # an orphaned or untracked artifact is reported against its own path
+    # instead of being invisible.  Only artifacts with findings get a key, so a
+    # clean directory does not inflate the validated-file count.
+    canonical_root = specs_dir.parent
+    for name, findings in release_handoff.sweep_handoff_directory(
+        canonical_root,
+        declaring_handoff_spec_ids(all_specs),
+        tracked_paths=handoff_tracked_paths(canonical_root),
+    ).items():
+        results.setdefault(name, []).extend(findings)
 
     # SPEC-071 R9a: validate the sibling projects-registry.json when present
     # (specs_dir is typically `.nightshift/specs`; the registry is its sibling).

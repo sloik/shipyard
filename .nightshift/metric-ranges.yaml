@@ -1,0 +1,35 @@
+# metric-ranges.yaml — SPEC-047 / Phase 10
+#
+# Per-domain expected phase duration ranges used by metrics_fidelity.py.
+# `min_s` is the "suspicious-if-faster" floor (→ duration_impossibly_fast).
+# `max_s` is informational (not currently enforced as a warning).
+# `typical_s`, when set and < 300, suppresses `duration_round` for that
+# phase (a 5-minute duration on a sub-5-minute phase is the suspicious
+# pattern — phases that normally take 5+ minutes land on round numbers
+# legitimately).
+#
+# Projects may ship their own metric-ranges.yaml under `.nightshift/` to
+# override these defaults for project-specific domains. Keys follow the
+# phase names used in metrics/_SCHEMA.md (snake_case).
+
+code:
+  preflight:        {min_s: 1,   max_s: 600,   typical_s: 10}
+  context_load:     {min_s: 5,   max_s: 600,   typical_s: 60}
+  test_planning:    {min_s: 1,   max_s: 600,   typical_s: 30}
+  test_writing:     {min_s: 5,   max_s: 1800,  typical_s: 120}
+  implementation:   {min_s: 30,  max_s: 1800,  typical_s: 120}
+  review:           {min_s: 1,   max_s: 600,   typical_s: 60}
+  validation:       {min_s: 5,   max_s: 600,   typical_s: 60}
+  completion_verification: {min_s: 1, max_s: 300, typical_s: 30}
+
+research:
+  preflight:        {min_s: 1,   max_s: 600}
+  context_load:     {min_s: 10,  max_s: 1800, typical_s: 180}
+  implementation:   {min_s: 60,  max_s: 3600, typical_s: 600}
+  validation:       {min_s: 5,   max_s: 600}
+
+analysis:
+  preflight:        {min_s: 1,   max_s: 600}
+  context_load:     {min_s: 5,   max_s: 1800, typical_s: 180}
+  implementation:   {min_s: 30,  max_s: 3600, typical_s: 300}
+  validation:       {min_s: 5,   max_s: 600}

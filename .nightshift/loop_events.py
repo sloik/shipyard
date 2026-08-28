@@ -72,7 +72,9 @@ RECOVERY_OUTCOMES = frozenset({"passed", "failed", "skipped", "succeeded", "exha
 # SPEC-235 actor-attempt events remain distinct from the parent lifecycle
 # decision.  Payloads contain controlled values and hash-bound relative refs;
 # conclusions and raw execution data stay outside the run stream.
-FEEDBACK_ROLES = frozenset({"implementer", "verifier", "remediator", "parent"})
+FEEDBACK_ROLES = frozenset({
+    "implementer", "diagnostician", "repairer", "verifier", "remediator", "parent"
+})
 FEEDBACK_OUTCOMES = frozenset({
     "completed", "blocked", "refused", "failed", "stalled", "unavailable",
     "passed", "cancelled",
@@ -80,12 +82,19 @@ FEEDBACK_OUTCOMES = frozenset({
 
 
 def emit_feedback_outcome(log: "RunEventLog", record: Dict) -> None:
-    from verifier_feedback import CONTROLLED_REASONS, NEXT_ACTIONS, SHA256_RE, _validate_relative_path
+    from recovery_convergence import DiagnosisClass, RepairRoute
+    from verifier_feedback import (
+        CONTROLLED_REASONS, NEXT_ACTIONS, SHA256_RE, FeedbackPhase,
+        RecoverySource, _validate_relative_path,
+    )
 
     allowed = {
         "schema_version", "spec_id", "run_id", "role", "agent_outcome", "reason",
         "head_digest", "artifact_refs", "idempotency_key", "attempt_ordinal",
         "duration_s", "terminal_outcome", "human_action_required", "next_action",
+        "recovery_source", "diagnosis_class", "causal_confidence",
+        "candidate_preserved", "repair_route", "diagnostician_allowance",
+        "repair_allowance", "operator_action", "delivery_phase",
     }
     if set(record) != allowed:
         raise ValueError("feedback outcome fields do not match the closed schema")
@@ -99,6 +108,28 @@ def emit_feedback_outcome(log: "RunEventLog", record: Dict) -> None:
         _validate_relative_path(item["path"], "feedback artifact reference")
         if not SHA256_RE.fullmatch(item["sha256"]):
             raise ValueError("invalid feedback artifact digest")
+    for key in ("diagnostician_allowance", "repair_allowance"):
+        allowance = record[key]
+        if (
+            set(allowance) != {"used", "limit"}
+            or allowance["limit"] != 1
+            or allowance["used"] not in {0, 1}
+        ):
+            raise ValueError("invalid feedback allowance")
+    if record["recovery_source"] not in {None, *(item.value for item in RecoverySource)}:
+        raise ValueError("invalid feedback recovery source")
+    if record["diagnosis_class"] not in {None, *(item.value for item in DiagnosisClass)}:
+        raise ValueError("invalid feedback diagnosis class")
+    if record["causal_confidence"] not in {None, "demonstrated", "supported", "uncertain"}:
+        raise ValueError("invalid feedback causal confidence")
+    if record["repair_route"] not in {None, *(item.value for item in RepairRoute)}:
+        raise ValueError("invalid feedback repair route")
+    if not isinstance(record["candidate_preserved"], bool):
+        raise ValueError("candidate_preserved must be boolean")
+    if record["operator_action"] not in {None, *NEXT_ACTIONS}:
+        raise ValueError("invalid feedback operator action")
+    if record["delivery_phase"] not in {item.value for item in FeedbackPhase}:
+        raise ValueError("invalid feedback delivery phase")
     log.emit("agent_outcome", spec_id=record["spec_id"], **{
         key: value for key, value in record.items() if key != "spec_id"
     })

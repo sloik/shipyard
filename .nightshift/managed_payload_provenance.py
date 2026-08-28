@@ -24,6 +24,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+try:
+    from release import is_ignored_python_cache_path
+except ImportError:
+    # Narrow scanner/provenance deployments may intentionally omit the release
+    # module. Keep the canonical policy exact in that supported standalone shape.
+    def is_ignored_python_cache_path(path: str | os.PathLike[str]) -> bool:
+        candidate = PurePosixPath(str(path).replace("\\", "/"))
+        return "__pycache__" in candidate.parts or candidate.suffix in {".pyc", ".pyo"}
+
 
 EXACT_CURRENT = "exact-current"
 RETAINED_PRIOR_RELEASE = "retained-prior-release"
@@ -42,6 +51,10 @@ SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 ALLOW = "allow"
 DENY = "deny"
 INDETERMINATE = "indeterminate"
+
+INSTALL_PATH_MANAGED = "managed-payload"
+INSTALL_PATH_UNCLAIMED = "unclaimed"
+INSTALL_PATH_IGNORED = "ignored-generated-cache"
 
 REASON_CLEAN = "NS-MPI-CLEAN"
 REASON_PAYLOAD_DRIFT = "NS-MPI-PAYLOAD-DRIFT"
@@ -212,7 +225,21 @@ def managed_payload_paths(manifest: Mapping[str, Any]) -> frozenset[str]:
     ``_manifest_index`` keeps the same validation boundary as provenance
     admission: corrupt metadata cannot silently broaden an exemption.
     """
-    return frozenset(_manifest_index(manifest, label="managed payload manifest"))
+    return frozenset(
+        path
+        for path in _manifest_index(manifest, label="managed payload manifest")
+        if not is_ignored_python_cache_path(path)
+    )
+
+
+def classify_install_path(path: str, manifest: Mapping[str, Any]) -> str:
+    """Classify a path without inventing mutable bytecode ownership."""
+    relative = path.removeprefix(".nightshift/")
+    if is_ignored_python_cache_path(relative):
+        return INSTALL_PATH_IGNORED
+    if relative in managed_payload_paths(manifest):
+        return INSTALL_PATH_MANAGED
+    return INSTALL_PATH_UNCLAIMED
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> bytes:
@@ -234,6 +261,7 @@ def _manifest_inventory(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "executable": bool(entry.get("executable", False)),
             }
             for entry in manifest["files"]
+            if not is_ignored_python_cache_path(str(entry["path"]))
         ),
         key=lambda entry: entry["path"],
     )
@@ -456,7 +484,7 @@ def _observe_payload(install: Path, manifest: Mapping[str, Any]) -> tuple[list[d
 
 
 def _release_owned_aliases(install: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Detect undeclared symlink/hardlink aliases to release-owned files."""
+    """Detect aliases to release-owned files while ignoring Python cache."""
     managed = set(managed_payload_paths(manifest))
     managed_targets = {(install / path).resolve(strict=False): path for path in managed}
     managed_inodes: dict[tuple[int, int], str] = {}
@@ -474,9 +502,16 @@ def _release_owned_aliases(install: Path, manifest: Mapping[str, Any]) -> list[d
         relative_root = Path(root).relative_to(install)
         if relative_root == Path("."):
             dirs[:] = [name for name in dirs if name not in mutable_roots]
+        dirs[:] = [
+            name
+            for name in dirs
+            if not is_ignored_python_cache_path((relative_root / name).as_posix())
+        ]
         for name in [*dirs, *files]:
             candidate = Path(root) / name
             relative = candidate.relative_to(install).as_posix()
+            if is_ignored_python_cache_path(relative):
+                continue
             if relative in managed or not candidate.is_symlink():
                 if relative in managed or not candidate.is_file():
                     continue

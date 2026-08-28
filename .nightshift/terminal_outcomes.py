@@ -26,6 +26,9 @@ AGENT_OUTCOME_FIELDS = (
     "schema_version", "spec_id", "run_id", "role", "agent_outcome", "reason",
     "head_digest", "artifact_refs", "idempotency_key", "attempt_ordinal",
     "duration_s", "terminal_outcome", "human_action_required", "next_action",
+    "recovery_source", "diagnosis_class", "causal_confidence",
+    "candidate_preserved", "repair_route", "diagnostician_allowance",
+    "repair_allowance", "operator_action", "delivery_phase",
 )
 AGENT_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}")
 FORBIDDEN_AGENT_FIELD_RE = re.compile(

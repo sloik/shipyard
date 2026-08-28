@@ -32,6 +32,8 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "acs", "suites", "git_footprint", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
+CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.1.0"
+SPEC_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
 CANDIDATE_REVISION_DOMAIN = b"nightshift.verifier.candidate-revision.v1\0"
@@ -286,6 +288,105 @@ def is_verifier_report_path(path: str, *, explicit: Iterable[str] = ()) -> bool:
     return normalised in exact or normalised.startswith(VERIFIER_REPORT_ROOTS)
 
 
+def normalise_spec_identity(spec_id: str) -> str:
+    """Return the spec identity used to scope same-spec containment.
+
+    Deliberately strict and deliberately raising.  Same-spec exclusion cannot be
+    computed without an identity to compare against, and SPEC-239 R5 requires that
+    case to fail closed rather than emit a surface with the weaker guarantee.
+    """
+    candidate = spec_id.strip() if isinstance(spec_id, str) else ""
+    if not SPEC_IDENTITY_RE.fullmatch(candidate):
+        raise ValueError(
+            "same-spec containment requires a spec identifier, got: " f"{spec_id!r}"
+        )
+    return candidate
+
+
+def _git_batch_blobs(repository: Path, object_ids: Iterable[str]) -> dict[str, bytes]:
+    """Read many blobs through one ``git cat-file --batch`` process.
+
+    Content-based same-spec detection reads every tracked report at both refs, and
+    the dispatch boundary recomputes it.  One subprocess per blob would put several
+    hundred process spawns on the live dispatch path of a repository that already
+    carries ~180 reports, several of them tens of kilobytes.
+    """
+    ids = sorted({object_id for object_id in object_ids})
+    if not ids:
+        return {}
+    result = subprocess.run(
+        ["git", "-C", str(repository), "cat-file", "--batch"],
+        input=("\n".join(ids) + "\n").encode("ascii"),
+        capture_output=True,
+        check=False,
+        env=_git_environment(),
+    )
+    if result.returncode:
+        raise RuntimeError(
+            result.stderr.decode("utf-8", "replace").strip()
+            or "git cat-file --batch failed"
+        )
+    bodies: dict[str, bytes] = {}
+    stream = result.stdout
+    offset = 0
+    for _ in ids:
+        newline = stream.find(b"\n", offset)
+        if newline < 0:
+            raise RuntimeError("truncated git cat-file --batch stream")
+        header = stream[offset:newline].decode("ascii", "replace").split()
+        if len(header) != 3 or header[1] != "blob":
+            raise RuntimeError(f"unexpected git cat-file --batch record: {header}")
+        size = int(header[2])
+        start = newline + 1
+        bodies[header[0]] = stream[start:start + size]
+        offset = start + size + 1
+    if set(bodies) != set(ids):
+        raise RuntimeError("git cat-file --batch did not return every requested blob")
+    return bodies
+
+
+def same_spec_report_exclusions(
+    source_repository: Path,
+    *,
+    spec_id: str,
+    report_objects: dict[str, dict[str, str]],
+) -> dict[str, str]:
+    """Return ``{path: rule}`` for tracked reports that identify *spec_id*.
+
+    Two rules, recorded separately so containment evidence stays auditable.
+    ``path`` catches the ordinary sibling — ``…-SPEC-235-001-unblock4.md`` — and
+    ``content`` catches the report whose filename says nothing but whose body
+    discusses the spec under verification.
+
+    Matching is substring, not exact-token, and that asymmetry is intentional.
+    Verifying ``SPEC-235`` withholds ``SPEC-235-001``'s reports as well; verifying
+    ``SPEC-235-001`` does not withhold ``SPEC-235``'s by path, and relies on the
+    content rule for the ones that actually discuss it.  Over-exclusion costs
+    reachability only for *related* specs, while R3's fixture guarantee is scoped
+    to unrelated ones.
+    """
+    token = normalise_spec_identity(spec_id).lower().encode("utf-8")
+    rules: dict[str, str] = {}
+    by_object: dict[str, set[str]] = {}
+    for objects in report_objects.values():
+        for path, object_id in objects.items():
+            if token in path.lower().encode("utf-8"):
+                rules[path] = "path"
+            else:
+                by_object.setdefault(object_id, set()).add(path)
+    pending = {
+        object_id: paths
+        for object_id, paths in by_object.items()
+        if any(path not in rules for path in paths)
+    }
+    bodies = _git_batch_blobs(source_repository, pending)
+    for object_id, paths in sorted(pending.items()):
+        if token in bodies[object_id].lower():
+            for path in paths:
+                rules.setdefault(path, "content")
+    return dict(sorted(rules.items()))
+
+
 def _clear_snapshot(destination: Path) -> None:
     for child in destination.iterdir():
         if child.name == ".git":
@@ -363,6 +464,7 @@ def prepare_verifier_surface(
     head_ref: str,
     report_paths: Iterable[str],
     evidence_path: Path,
+    spec_id: str,
 ) -> dict[str, Any]:
     """Build a standalone Git repo with candidate conclusions removed.
 
@@ -370,16 +472,43 @@ def prepare_verifier_surface(
     share the source object database and therefore leave excluded candidate
     report blobs reachable through Git even when absent from the checkout.
 
-    Explicit reports and every report added, removed, or changed by the
-    candidate are removed from both synthetic refs. Byte-identical historical
-    reports are retained so unchanged canonical tests may consume their own
-    fixtures; their exact content hashes are recorded in containment evidence.
+    Three rules withhold a tracked report, and containment evidence records each
+    one separately (``explicit_report_paths``, ``same_spec_excluded_paths``, and
+    the remainder of ``excluded_paths``):
+
+    * the explicit run-report paths;
+    * every report whose path or content identifies *spec_id* (SPEC-239) —
+      keyed on subject matter, not on whether the candidate touched the file,
+      because a sibling report from an earlier round of the same spec is
+      byte-identical across both arms and would otherwise be retained;
+    * every remaining report the candidate added, removed, or changed.
+
+    Byte-identical reports belonging to *other* specs are still retained so
+    unchanged canonical tests may consume their own fixtures; their exact
+    content hashes are recorded in containment evidence.
+
+    Same-spec resolution runs before the destination repository exists, so a
+    failure to compute it leaves no surface behind at all.
     """
     source_repository = source_repository.resolve()
     destination = destination.resolve()
     report_paths = tuple(sorted({_normalise_repo_path(path) for path in report_paths}))
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("verifier surface destination must be empty")
+    spec_id = normalise_spec_identity(spec_id)
+    baseline_report_objects = _tracked_report_objects(
+        source_repository, baseline_ref, report_paths=report_paths
+    )
+    head_report_objects = _tracked_report_objects(
+        source_repository, head_ref, report_paths=report_paths
+    )
+    same_spec_reports = same_spec_report_exclusions(
+        source_repository,
+        spec_id=spec_id,
+        report_objects={
+            "baseline": baseline_report_objects, "head": head_report_objects,
+        },
+    )
     destination.mkdir(parents=True, exist_ok=True)
     source_common = Path(_run_git(source_repository, "rev-parse", "--git-common-dir").strip())
     if not source_common.is_absolute():
@@ -395,21 +524,24 @@ def prepare_verifier_surface(
     _run_git(destination, "config", "user.name", "Nightshift verifier surface")
     _run_git(destination, "config", "user.email", "verifier@example.invalid")
     explicit_reports = set(report_paths)
-    baseline_report_objects = _tracked_report_objects(
-        source_repository, baseline_ref, report_paths=report_paths
-    )
-    head_report_objects = _tracked_report_objects(
-        source_repository, head_ref, report_paths=report_paths
-    )
+    # The three withholding rules are recorded as disjoint sets so a reader can
+    # reconstruct which one took which path. A run report that is also same-spec is
+    # attributed to the explicit rule, which is the narrower and older claim.
+    same_spec_exclusions = {
+        path: rule
+        for path, rule in same_spec_reports.items()
+        if path not in explicit_reports
+    }
     retained_reports = {
         path: object_id
         for path, object_id in baseline_report_objects.items()
-        if path not in explicit_reports and head_report_objects.get(path) == object_id
+        if path not in explicit_reports
+        and path not in same_spec_reports
+        and head_report_objects.get(path) == object_id
     }
+    retained_bodies = _git_batch_blobs(source_repository, retained_reports.values())
     retained_hashes = {
-        path: hashlib.sha256(
-            _git_bytes(source_repository, "cat-file", "blob", object_id)
-        ).hexdigest()
+        path: hashlib.sha256(retained_bodies[object_id]).hexdigest()
         for path, object_id in sorted(retained_reports.items())
     }
     refs = (("baseline", baseline_ref), ("head", head_ref))
@@ -451,11 +583,14 @@ def prepare_verifier_surface(
     if not probes or not all(probe["unreachable"] for probe in probes):
         raise RuntimeError("worker report remains reachable from verifier surface")
     evidence = {
-        "schema_version": "1.0.0",
+        "schema_version": CONTAINMENT_EVIDENCE_SCHEMA_VERSION,
         "surface_kind": "standalone-sanitized-git",
         "source_refs": {"baseline": baseline_ref, "head": head_ref},
         "surface_commits": commits,
         "excluded_paths": excluded_by_ref,
+        "explicit_report_paths": list(report_paths),
+        "same_spec_id": spec_id,
+        "same_spec_excluded_paths": same_spec_exclusions,
         "retained_historical_report_sha256": retained_hashes,
         "report_reachability": probes,
         "shared_object_database": False,
@@ -511,6 +646,7 @@ def prepare_verifier_dispatch(
             head_ref=head_ref,
             report_paths=normalized_reports,
             evidence_path=evidence_path,
+            spec_id=spec_id,
         )
         exact_candidate_revision = _run_git(
             source_repository, "rev-parse", "--verify", f"{head_ref}^{{commit}}"
@@ -560,6 +696,26 @@ def prepare_verifier_dispatch(
         } if isinstance(probes, list) else set()
         commits = durable_evidence.get("surface_commits")
         retained = durable_evidence.get("retained_historical_report_sha256")
+        # Recompute same-spec scope from the source rather than trusting the record
+        # the same call just wrote, and require it to be a strict subset of what the
+        # surface actually withheld.
+        same_spec = durable_evidence.get("same_spec_excluded_paths")
+        observed_same_spec = {
+            path: rule
+            for path, rule in same_spec_report_exclusions(
+                source_repository,
+                spec_id=spec_id,
+                report_objects={
+                    "baseline": _tracked_report_objects(
+                        source_repository, baseline_ref, report_paths=normalized_reports
+                    ),
+                    "head": _tracked_report_objects(
+                        source_repository, head_ref, report_paths=normalized_reports
+                    ),
+                },
+            ).items()
+            if path not in set(normalized_reports)
+        }
         observed_retained: dict[str, str] = {}
         if isinstance(retained, dict):
             for path in retained:
@@ -578,6 +734,12 @@ def prepare_verifier_dispatch(
             and observed_probes == expected_probes
             and isinstance(retained, dict)
             and observed_retained == retained
+            and isinstance(same_spec, dict)
+            and same_spec == observed_same_spec
+            and durable_evidence.get("same_spec_id")
+            == normalise_spec_identity(spec_id)
+            and set(same_spec) <= excluded_paths
+            and not set(same_spec) & set(retained)
             and isinstance(commits, dict)
             and set(commits) == {"baseline", "head"}
             and durable_evidence.get("spec_id") == spec_id
@@ -650,11 +812,19 @@ def verifier_surface_self_test() -> dict[str, Any]:
         _run_git(source, "config", "user.name", "Nightshift smoke")
         _run_git(source, "config", "user.email", "smoke@example.invalid")
         (source / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
-        _run_git(source, "add", "code.py")
+        # An earlier round of the spec under verification and an unrelated spec's
+        # fixture, both byte-identical across the two arms. The smoke contract is
+        # that the first is withheld and the second stays reachable (SPEC-239).
+        sibling = source / "canonical/reports/SMOKE/earlier-round.md"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_text("earlier SMOKE conclusion\n", encoding="utf-8")
+        unrelated = source / "canonical/reports/OTHER-SPEC/fixture.md"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("unrelated fixture\n", encoding="utf-8")
+        _run_git(source, "add", "-A")
         _run_git(source, "commit", "-qm", "baseline")
         baseline = _run_git(source, "rev-parse", "HEAD").strip()
         report = source / "canonical/reports/nightshift-report.md"
-        report.parent.mkdir(parents=True)
         report.write_text("worker conclusion\n", encoding="utf-8")
         (source / "code.py").write_text("VALUE = 2\n", encoding="utf-8")
         _run_git(source, "add", "-A")
@@ -688,6 +858,16 @@ def verifier_surface_self_test() -> dict[str, Any]:
         ):
             raise RuntimeError("normal/no-test-suite dispatch plan contract failed")
         evidence = prepared.evidence
+        if evidence["same_spec_excluded_paths"] != {
+            "canonical/reports/SMOKE/earlier-round.md": "path"
+        } or set(evidence["retained_historical_report_sha256"]) != {
+            "canonical/reports/OTHER-SPEC/fixture.md"
+        }:
+            raise RuntimeError("same-spec containment smoke contract failed")
+        if (surface / "canonical/reports/SMOKE/earlier-round.md").exists() or not (
+            surface / "canonical/reports/OTHER-SPEC/fixture.md"
+        ).exists():
+            raise RuntimeError("same-spec containment surface contract failed")
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
             "head_commit": plan["head_commit"],
@@ -957,6 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--head", required=True)
     prepare.add_argument("--report-path", action="append", required=True)
     prepare.add_argument("--evidence", required=True, type=Path)
+    prepare.add_argument("--spec-id", required=True)
     dispatch = subparsers.add_parser("prepare-dispatch")
     dispatch.add_argument("--source", required=True, type=Path)
     dispatch.add_argument("--destination", required=True, type=Path)
@@ -973,6 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         prepare_verifier_surface(
             args.source, args.destination, baseline_ref=args.baseline,
             head_ref=args.head, report_paths=args.report_path, evidence_path=args.evidence,
+            spec_id=args.spec_id,
         )
         return 0
     if args.command == "prepare-dispatch":
