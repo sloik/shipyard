@@ -141,6 +141,36 @@ _ALLOWED_HISTORICAL_CHECKBOX_DISPOSITIONS = frozenset({
 })
 
 
+def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
+    """Detect changed AC text against the last ready revision, when available."""
+    try:
+        root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=spec_file.parent.parent, text=True, capture_output=True, check=True).stdout.strip())
+        relative = spec_file.resolve().relative_to(root)
+        prior = subprocess.run(["git", "log", "-G", r"^status: ready$", "--format=%H", "--", str(relative)], cwd=root, text=True, capture_output=True, check=True).stdout.splitlines()
+        if not prior:
+            return []
+        old = subprocess.run(["git", "show", f"{prior[0]}:{relative}"], cwd=root, text=True, capture_output=True)
+        if old.returncode:
+            return []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    def acs(text: str) -> dict[str, str]:
+        block = re.search(r"^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)", text, re.MULTILINE)
+        items = re.findall(r"^- \[[ x]\]\s*(AC\d+[^\n]*)", block.group(1), re.MULTILINE) if block else []
+        return {re.match(r"AC\d+", item).group(0): item for item in items}
+    current, previous = acs(content), acs(old.stdout)
+    deleted = sorted(set(previous) - set(current))
+    changed = [key for key in sorted(set(previous) & set(current)) if previous[key] != current[key]]
+    amendment = re.search(r"^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
+    table = amendment.group(1) if amendment else ""
+    findings = [f"ac_amendment_deleted: {previous[key]}" for key in deleted]
+    for key in changed:
+        old_text, new_text = previous[key], current[key]
+        if old_text not in table or new_text not in table:
+            findings.append(f"ac_amendment_undocumented: {new_text}")
+    return findings
+
+
 def _historical_checkbox_disposition(
     spec_file: Path, findings: list[dict]
 ) -> str | None:
@@ -759,6 +789,7 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
         project_root = spec_file.parent.parent if spec_file.parent.name == "specs" else spec_file.parent
         errors.extend(validate_decision_briefs(body, project_root))
     errors.extend(validate_reuse_gate(body))
+    errors.extend(validate_ac_amendments(content, spec_file))
 
     # Required fields
     if "id" not in fm:

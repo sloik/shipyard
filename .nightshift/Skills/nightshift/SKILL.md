@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.9.1
+version: 3.10.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -43,7 +43,124 @@ configured threshold.
 
 ## How This Skill Works
 
-The skill provides 7 commands. When the user's request matches one, follow that command's flow. When the request is ambiguous, use context to pick the right command — or ask.
+<!-- nightshift-commands-registry -->
+```yaml
+commands:
+  - name: tutorial
+    one_liner: Learn which Nightshift command fits before changing anything.
+    options: ["[command]", "alias: help [command]"]
+    when_to_use: Read a harness-aware, read-only overview or focused command guide.
+    side_effects: None; it only reads this registry and renders guidance.
+    not_when: You already know the command and need it executed.
+    asks: Nothing; choose an optional command name for focused help.
+    example: "SPEC-267: inspect `tutorial unblock` before choosing SPEC-259's drive-to-done path."
+  - name: init
+    one_liner: Start Nightshift in a new or empty project.
+    options: []
+    when_to_use: Bootstrap a project that has no existing implementation to analyse.
+    side_effects: Creates .nightshift configuration, copied canonical protocol, and optional hook files.
+    not_when: The project already has code and needs its conventions captured first.
+    asks: Project identity, commands, conventions, review personas, and runner mode.
+    example: "SPEC-230: initialize a fresh fixture install before proving checkpoint behavior."
+  - name: retrofit
+    one_liner: Add Nightshift to an existing codebase after mapping it.
+    options: []
+    when_to_use: Adopt Nightshift in a project with existing code, conventions, and tests.
+    side_effects: Creates .nightshift files plus baseline and gap specs after analysis.
+    not_when: The project is new or empty; use init instead.
+    asks: Confirmation of detected architecture, conventions, tests, and known gotchas.
+    example: "SPEC-153: inspect an existing managed project before aligning its canonical integration."
+  - name: spec
+    one_liner: Create or amend a testable, dependency-aware specification.
+    options: []
+    when_to_use: Define or edit requirements and acceptance criteria before implementation.
+    side_effects: Writes or updates spec files after user confirmation and validation.
+    not_when: You need to execute an already-ready spec; use run or kickoff.
+    asks: Problem, requirements, acceptance criteria, context, dependencies, and scope boundaries.
+    example: "SPEC-260: define the AC-review agent and amendment-gate acceptance criteria."
+  - name: sync
+    one_liner: Compare done specs against their current implementation.
+    options: []
+    when_to_use: Check whether documented behavior and shipped code have drifted apart.
+    side_effects: Read-only analysis unless the user approves suggested spec updates.
+    not_when: You need to validate install mechanics rather than behavior; use validate.
+    asks: Approval before applying any suggested spec changes.
+    example: "SPEC-258: confirm a documentation correction did not change executable test behavior."
+  - name: status
+    one_liner: See the spec queue, dependency graph, health, and warnings.
+    options: []
+    when_to_use: Get a concise project-level view before selecting work.
+    side_effects: Read-only dashboard and duplicate-spec scan.
+    not_when: You need a full protocol/config command check; use validate.
+    asks: Nothing.
+    example: "SPEC-252: inspect queue and prior run outcome before resolving a terminal lifecycle state."
+  - name: doctor
+    one_liner: Diagnose reachability, payload provenance, and broken installs safely.
+    options: ["[project]", "--fleet", "--fix"]
+    when_to_use: An install is broken, invisible, stale, or needs a bounded mechanical repair.
+    side_effects: Read-only by default; --fix performs only declared mechanical repairs.
+    not_when: You only need local protocol/config validation; use validate.
+    asks: Whether to permit the bounded --fix repair when findings support it.
+    example: "SPEC-203: audit managed-payload provenance without inferring ownership from timestamps."
+  - name: validate
+    one_liner: Check protocol files, config, commands, specs, dependencies, and Git setup.
+    options: []
+    when_to_use: Verify an install is structurally ready before a run or after setup changes.
+    side_effects: Runs declared validation commands but does not intentionally mutate project state.
+    not_when: You need external reachability or fleet provenance diagnosis; use doctor.
+    asks: Nothing.
+    example: "SPEC-243-001-001: verify root-relative canonical-suite execution from a fresh dispatch."
+  - name: knowledge
+    one_liner: Add, update, review, or import reusable project knowledge.
+    options: ["add <topic>", "update <file>", review, import]
+    when_to_use: Capture conventions, lessons, or report-derived knowledge for later runs.
+    side_effects: Writes knowledge files for add, update, and import.
+    not_when: You are defining requirements for a feature; use spec.
+    asks: Topic scope, patterns, and review-persona ownership when creating an entry.
+    example: "SPEC-280: record the cache-boundary lesson after the Python-bytecode policy change."
+  - name: release
+    one_liner: Publish and roll out one exact, validated canonical kit.
+    options: ["--dry-run", "--apply"]
+    when_to_use: Release an approved canonical managed payload to eligible installs.
+    side_effects: --apply can copy payloads and create guarded local commits; it never pushes.
+    not_when: You are implementing one spec or need a file-only sync.
+    asks: Operator review of dry-run coverage and authorization before apply.
+    example: "SPEC-280: roll out the cache-ignore policy only after whole-kit validation."
+  - name: unblock
+    one_liner: Recover an evidence-blocked spec, optionally driving it toward done.
+    options: ["<spec-id>", "--to-done", "--from-rung <2-4>", "--dry-run"]
+    when_to_use: A spec is blocked and retained evidence supports the controller-backed recovery path.
+    side_effects: Records controlled unblock attempts; --to-done may launch bounded recovery work.
+    not_when: The spec is ready and has not yet run; use run or kickoff.
+    asks: Authorization only when the ladder reaches a human-only rung.
+    example: "SPEC-259: use `unblock SPEC-259 --to-done` to drive to done after cache-integrity evidence."
+  - name: kickoff
+    one_liner: Start the parent-monitored autonomous loop for one spec.
+    options: ["[spec-id]"]
+    when_to_use: Run a ready spec with a parent-owned lifecycle, heartbeat, and integration flow.
+    side_effects: Marks lifecycle state, launches a worker, records evidence, and may merge an accepted candidate.
+    not_when: You only need direct execution guidance without the board-style parent wrapper; use run.
+    asks: Nothing unless a genuine ambiguity or missing prerequisite prevents dispatch.
+    example: "SPEC-252: launch a monitored parent kickoff with durable terminal-resolution evidence."
+  - name: run
+    one_liner: Execute the autonomous spec loop directly with the same evidence gates.
+    options: ["[spec-id]"]
+    when_to_use: Implement a ready spec through the normal isolated-worker workflow.
+    side_effects: Marks lifecycle state, launches a worker, records evidence, and may merge an accepted candidate.
+    not_when: You need to inspect or edit the spec before execution; use spec.
+    asks: Nothing unless a genuine ambiguity or missing prerequisite prevents dispatch.
+    example: "SPEC-260: run the AC-review amendment gate through independent verification."
+  - name: address-issues
+    one_liner: Consolidate and resolve embedded questions from draft or blocked specs.
+    options: []
+    when_to_use: Draft or blocked specs contain explicit or implied decisions that need resolution.
+    side_effects: Writes a persistent QUESTIONS spec and, after decisions, updates eligible source specs.
+    not_when: A ready spec has no unresolved question; use run or kickoff.
+    asks: One material decision at a time, with options and evidence where needed.
+    example: "SPEC-241: resolve a bounded unblock question without rewriting the done source spec."
+```
+
+The skill provides the commands above. When the user's request matches one, follow that command's flow. When the request is ambiguous, use context to pick the right command — or ask.
 
 ### Invocation syntax by harness
 
@@ -74,8 +191,30 @@ for its own built-in commands and reports that input as unrecognized.
 - User wants to diagnose or safely repair a broken/invisible install → `/nightshift doctor`
 - User wants to manage knowledge/ entries → `/nightshift knowledge`
 - User wants to surface and resolve open questions embedded in draft specs → `/nightshift address-issues`
+- User wants a read-only guide to commands or options → `/nightshift tutorial [command]` (alias: `/nightshift help [command]`)
 
 Before running any command, check: does `.nightshift/` exist in the project? If the user's request assumes it does but it doesn't, suggest `init` or `retrofit` first.
+
+---
+
+## `/nightshift tutorial [command]` — Read-only Command Guide
+
+Render this guide from the fenced `commands` registry above; it is the source of
+truth for tutorial text and is deliberately separate from the detailed command
+sections below. The `help` alias has identical behavior. This route reads only:
+it writes no files, changes no lifecycle state, and dispatches no agents.
+
+For an executable rendering in a shell or test harness, run:
+
+```bash
+python3 canonical/skill_tutorial.py [command] --harness <codex|claude|other>
+```
+
+With no command, render the overview: description, lifecycle, table of every
+registry command and options, and decision tree. With a command, render its
+purpose, when not to use it, options, side effects, user prompts, and worked
+example. Use `$nightshift …` in Codex and `/nightshift …` in Claude Code or other
+slash-command harnesses; the renderer enforces that distinction.
 
 ---
 
@@ -649,12 +788,43 @@ hashes, prior attempts, guardrails, and verification gate.
 `<spec-file>` may be project-relative even when `--root` is absolute; the
 controller resolves it against that root, never the caller's current directory.
 
+The default command is **unblock**: one bounded repair whose only lifecycle
+success is `blocked -> ready`. The opt-in `--to-done` mode is **drive to done**:
+the parent advances a sequential evidence ladder toward the ordinary fresh-main
+`done` gate without giving workers lifecycle or merge authority.
+
+| Option | Meaning |
+|---|---|
+| `--to-done` | Opt into drive to done: bounded repair, work-to-done, per-AC coverage/runtime capture, gated AC review, then human authorization. |
+| `--from-rung <2-4>` | Begin drive to done at an explicitly selected rung; no prior failure is fabricated. |
+| `--dry-run` | Print the ladder plan and admission verdict without mutation, worker launch, or commit. |
+
+Drive to done calls `unblock_ladder.py`, which in turn calls `unblock_spec.py`.
+Rung 1 is the default unblock flow. A failed or skipped rung 1 enters rung 2;
+rung 2 gives an evidence-only implementer the blocker packet, prior attempts,
+and resilience ladder. Rung 3 records per-AC `covered-by` or
+`runtime-captured` evidence without changing AC text. Rung 4 calls the SPEC-260
+AC-review agent when available; until then it records `unavailable` and routes
+to rung 5. Rung 5 stops and asks the user to authorize. Every entered rung emits
+an `unblock_rung` event, and the terminal lifecycle commit records
+`Nightshift-Unblock-Rung: <n>`.
+
+Rung 4 dispatches the independent `nightshift-ac-reviewer` with the proposed
+per-AC changes, blocker packet, attempt history, and rung-3 evidence—not the
+implementer's narrative. It writes `reports/<SPEC>/ac-review.json`, which must
+pass `ac_review.py validate`. A veto (or invalid verdict) followed by continued
+failure routes to rung 5; the parent never loosens an AC past a veto.
+
 `prepare` is the admission gate. A non-blocked, invalid, missing-evidence, stale,
 or unchanged-fingerprint spec is reported as ineligible: no worker/worktree is launched.
 An `eligibility: skipped` packet is recorded with `record_attempt` as a
 controlled escalation; external input, credentials, product decisions,
 security/safety, destructive work, scope changes, and ambiguous causality never
 dispatch automatically.
+
+Under drive to done only, skipped rung-1 eligibility carries `escalate: true`
+and enters rung 2. Without `--to-done`, skipped eligibility ends unblock exactly
+as before.
 
 For an eligible packet, the parent may launch exactly one isolated, bounded worker.
 Its brief contains the packet verbatim: exact blocker, evidence paths and hashes,
@@ -677,6 +847,12 @@ rebind probe if the original process is stale. The parent alone owns lifecycle
 and integration; replacement workers return evidence only. Do not terminally
 block on a single cached tool failure: `evidence_gap` requires recorded viable
 alternatives that were unsafe, ineligible, externally authorized, or exhausted.
+Inside an ordinary kickoff, the parent also exhausts the SPEC-266 in-loop
+resilience ladder before terminal `blocked`: verifier failures require measured
+failed-AC shrinkage before a second remediation; premise disputes scan coverage
+and runtime gates before independent AC review; a done-claim evidence gap gets
+one read-only collection pass; and a changed tool/fresh worker may use one more
+transport rebind. Each rung is run-id keyed and recorded as `resilience_rung`.
 When private Dropbox projection is configured, project only the hash-based run
 manifest and approved relative references. `awaiting_sync` is observable but
 does not alter the evidence gate or lifecycle result.
@@ -1935,7 +2111,7 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel) &&
 |---|---|
 | `pass` | continue to Step 6; check 5 of the evidence gate is satisfied |
 | `fail` | do not merge; Step 6's controller-backed unblock path |
-| `disputes_premise` with `premise_dispute.spec_defect: true` | **not a failure**, and never a merge on the verifier's authority. The verifier's own R2 field says a requirement or AC of *this spec* is wrong or unmeetable. Record the dispute verbatim in the run report and the parent progress artifact, then resolve the premise **within this same resolution pass**: either amend the spec's expectation (`/nightshift spec`), re-run the gate and continue to `done`; or keep the original expectation with a written reason and mark the spec `blocked` with `Nightshift-Blocker-Class: evidence_gap`. The dispute is evidence for a parent decision, never the decision itself — but it must still land on one of the two terminal states. Leaving the spec at `in_progress` while the premise is "under discussion" violates the status discipline in Step 6 and is not a permitted outcome. A `blocked` here records an unresolved expectation, not a failed implementation. |
+| `disputes_premise` with `premise_dispute.spec_defect: true` | **not a failure**, and never a merge on the verifier's authority. The verifier's own R2 field says a requirement or AC of *this spec* is wrong or unmeetable. Record the dispute verbatim in the run report and parent progress artifact, then submit any loosened AC to the independent `nightshift-ac-reviewer`, retain its valid `reports/<SPEC>/ac-review.json`, and add the approved old → new row to `## AC Amendments`; re-run the gate and continue to `done`. A veto leaves the expectation intact and routes to blocked/user authorization. The dispute is evidence for a parent decision, never the decision itself. |
 | `disputes_premise` with `premise_dispute.spec_defect: false` | **not a failure, and not an unresolved spec expectation** (SPEC-ARGO-049 R1/R3). The verifier's own R2 field says no requirement or AC of this spec is in question — the dispute is against something else (an enforcement gate, a tool, a parent-level claim outside the spec). There is no spec expectation to amend, and `blocked`/`evidence_gap` stays reserved for a genuinely unresolved **spec** expectation (R3), so it does not apply here either. Record the dispute verbatim in the run report and the parent progress artifact, file it as follow-up work (a new spec or TODO item — cite the ID once created), and continue to the ordinary evidence gate: once the follow-up is filed, this verdict satisfies check 5 (Step 6). |
 | missing / `GATE: reject` | treat as `evidence_gap`; do not merge |
 
@@ -2072,6 +2248,7 @@ Nightshift-Blocker-Class: none
 Nightshift-Blocker-Scope: none
 Nightshift-Unblock-Attempts: 0
 Nightshift-Unblock-Limit: 1
+Nightshift-Unblock-Rung: <0|1|2|3|4|5>
 Nightshift-Parent-Tool-Calls: <N>
 Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
 Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
@@ -2088,6 +2265,8 @@ If a controller-backed recovery was required, set
 same. These trailers are consumed mechanically by `record_metrics.py
 --mark-commit`. The matching `in_progress` commit becomes the stable `run_id`,
 so a blocked transition and a later recovery remain one analyzable run.
+Set `Nightshift-Unblock-Rung` to `0` when no drive-to-done rung was entered, or
+to the final entered rung (`1` through `5`) when the ladder ran.
 
 In `private-local`, do not make a lifecycle commit. After the same evidence gate
 and serialized application merge, call `transition_private_state(..., "done",
@@ -2166,6 +2345,7 @@ speculative explanation of why it worked.
    Nightshift-Blocker-Scope: <in_scope|out_of_scope|mixed|unknown>
    Nightshift-Unblock-Attempts: <0|1>
    Nightshift-Unblock-Limit: 1
+   Nightshift-Unblock-Rung: <0|1|2|3|4|5>
    Nightshift-Parent-Tool-Calls: <N>
    Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
    Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>

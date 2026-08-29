@@ -3669,6 +3669,27 @@ function captureColOrder(listEl) {
   cardOrder[colId] = [...listEl.querySelectorAll('.card')].map(c => c.dataset.id).filter(Boolean);
 }
 
+// SPEC-281: extract the server's specific refusal reason (if any) from a
+// non-2xx status-write response so toasts can surface it instead of a
+// generic message. Returns null on any parse failure (missing body, not
+// JSON, no string `detail`) so callers always have a safe fallback path.
+async function statusWriteErrorDetail(r) {
+  if (!r) return null;
+  try {
+    const body = await r.json();
+    if (body && typeof body.detail === 'string' && body.detail.trim()) {
+      return body.detail;
+    }
+  } catch (e) {
+    // Not JSON or no body — fall through to null.
+  }
+  return null;
+}
+
+function statusWriteFailureToastText(specId, detail) {
+  return detail ? `⚠ ${specId}: ${detail}` : `⚠ ${specId}: status write failed`;
+}
+
 function onCardDrop(evt) {
   isDragging = false;
   const wasPending = renderBoardQueued;
@@ -3719,9 +3740,10 @@ function onCardDrop(evt) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: newStatus }),
-  }).then(r => {
+  }).then(async r => {
     if (!r.ok) {
       // Revert
+      const detail = await statusWriteErrorDetail(r);
       if (spec) spec.status = oldStatus;
       if (wasPending) {
         // evt.item and evt.from are orphaned (renderBoard removed them); re-render.
@@ -3732,7 +3754,7 @@ function onCardDrop(evt) {
         evt.from.appendChild(evt.item);
         updateColumnCounts();
       }
-      showToast(`⚠ ${specId}: status write failed`);
+      showToast(statusWriteFailureToastText(specId, detail));
       return;
     }
     // On a successful move into done, bump local _mtime so the auto-sort
@@ -3756,7 +3778,9 @@ function onCardDrop(evt) {
       evt.from.appendChild(evt.item);
       updateColumnCounts();
     }
-    showToast(`⚠ ${specId}: status write failed`);
+    // Network error / thrown before a response existed — no body to read, so
+    // fall back to the generic message (R2).
+    showToast(statusWriteFailureToastText(specId, null));
   });
 }
 
@@ -3967,15 +3991,22 @@ async function changeSpecStatus(specId, newStatus) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: newStatus }),
     });
-    if (!r.ok) throw new Error('write failed');
+    if (!r.ok) {
+      const detail = await statusWriteErrorDetail(r);
+      if (sel) { sel.value = oldStatus; sel.dataset.status = oldStatus; }
+      showToast(statusWriteFailureToastText(specId, detail));
+      return;
+    }
     await loadSpecs();
     if (sel) sel.dataset.status = newStatus;
     expandColumnForStatus(newStatus);
     if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
     showToast(`✓ ${specId} → ${newStatus}`);
   } catch {
+    // Network error / thrown before a response existed — no body to read, so
+    // fall back to the generic message (R2).
     if (sel) { sel.value = oldStatus; sel.dataset.status = oldStatus; }
-    showToast(`⚠ ${specId}: status write failed`);
+    showToast(statusWriteFailureToastText(specId, null));
   }
 }
 

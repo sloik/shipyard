@@ -72,7 +72,8 @@ def _load_attempts(root: Path, spec_id: str) -> list[dict[str, Any]]:
     return attempts
 
 
-def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override: bool = False) -> dict[str, Any]:
+def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override: bool = False,
+            allow_escalation: bool = False) -> dict[str, Any]:
     """Validate a blocked spec and return a pinned packet without mutating it."""
     spec_file, project_root = Path(spec_file), Path(project_root)
     project_root = project_root.resolve()
@@ -104,7 +105,7 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
     if not retry_override and any(a.get("fingerprint") == fingerprint and a.get("automatic") for a in prior):
         raise UnblockError("automatic attempt already recorded for unchanged blocker fingerprint")
     eligibility = "eligible" if blocker_class in SAFE_CLASSES else "skipped"
-    return {
+    packet = {
         "schema_version": 1, "packet_id": f"{run_id}:{fm['id']}:{fingerprint[:12]}",
         "run_id": run_id, "spec_id": fm["id"], "spec_path": str(spec_file.relative_to(project_root)),
         "source_blocked_since": fm["blocked_since"], "blocker_class": blocker_class,
@@ -116,6 +117,9 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
         "verification_gate": "linked before/after evidence and explicit command result",
         "retry_override": bool(retry_override),
     }
+    if allow_escalation and eligibility == "skipped":
+        packet["escalate"] = True
+    return packet
 
 
 def _validate_causal(outcome: str, causal: Mapping[str, Any], verification: Mapping[str, Any]) -> None:
@@ -207,8 +211,11 @@ def main() -> int:
     parser.add_argument("spec_file", type=Path)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--allow-escalation", action="store_true")
     ns = parser.parse_args()
-    print(json.dumps(prepare(ns.spec_file, ns.root, ns.run_id), indent=2))
+    print(json.dumps(prepare(
+        ns.spec_file, ns.root, ns.run_id, allow_escalation=ns.allow_escalation,
+    ), indent=2))
     return 0
 
 

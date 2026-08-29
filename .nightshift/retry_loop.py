@@ -43,6 +43,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+try:
+    from resilience_ladder import (
+        ResilienceDecision, consume_keyed_effect, decide_from_parent_context,
+        keyed_effect_key,
+    )
+except ImportError:  # pragma: no cover - partial deployments retain old routing
+    ResilienceDecision = Any  # type: ignore[misc,assignment]
+    consume_keyed_effect = None  # type: ignore[assignment]
+    decide_from_parent_context = None  # type: ignore[assignment]
+    keyed_effect_key = None  # type: ignore[assignment]
+
+try:
+    from loop_events import emit_resilience_rung
+except ImportError:  # pragma: no cover
+    emit_resilience_rung = None  # type: ignore[assignment]
+
 from outcome_router import (
     Outcome,
     OutcomePolicy,
@@ -116,10 +132,16 @@ def execute_with_retry(
     attempt_context: Optional[Dict[str, Any]] = None,
     spec_file: Optional[Path] = None,
     session_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     prior_attempts_recorder: Optional[
         Callable[[Path, Dict[str, Any]], Dict[str, Any]]
     ] = None,
     max_prior_attempts: int = DEFAULT_MAX_PRIOR_ATTEMPTS,
+    resilience_decider: Optional[Callable[[Any, Dict[str, Any]], ResilienceDecision]] = None,
+    resilience_effects: Optional[Dict[str, Any]] = None,
+    resilience_effect_executor: Optional[
+        Callable[[ResilienceDecision, Dict[str, Any]], Optional[Dict[str, Any]]]
+    ] = None,
 ) -> RetryLoopResult:
     """Run ``attempt_fn`` under outcome-router policies until a terminal action.
 
@@ -173,6 +195,8 @@ def execute_with_retry(
     RetryLoopResult
     """
     context: Dict[str, Any] = dict(attempt_context or {})
+    effects = resilience_effects if resilience_effects is not None else {}
+    resilience_run_id = run_id or session_id or context.get("run_id")
 
     decisions: list = []
     handler_outcomes: list = []
@@ -265,6 +289,52 @@ def execute_with_retry(
                 exhausted=False,
             )
         if action in (RoutingAction.ABORT, RoutingAction.BLOCK):
+            # SPEC-266: the parent may authorize exactly one recorded,
+            # class-specific recovery effect before a terminal block.  This
+            # generic driver never selects or executes a worker itself.
+            if action == RoutingAction.BLOCK:
+                decider = resilience_decider
+                if decider is None and decide_from_parent_context is not None:
+                    decider = decide_from_parent_context
+                resilience = decider(handler_outcome, context) if decider is not None else None
+                fresh = (
+                    resilience is not None
+                    and resilience_run_id is not None
+                    and consume_keyed_effect is not None
+                    and consume_keyed_effect(effects, resilience, run_id=resilience_run_id)
+                )
+                if resilience is not None:
+                    # Re-entry sees the same allowance key and must surface
+                    # its exhaustion, never re-advertise a spent rung as a
+                    # fresh dispatch.
+                    outcome = "blocked" if resilience.terminal == "blocked" or not fresh else "dispatched"
+                    if emit_resilience_rung is not None and events_logger is not None:
+                        emit_resilience_rung(
+                            events_logger, spec_id or "unknown", failure_class=resilience.failure_class,
+                            rung=resilience.rung, outcome=outcome,
+                            evidence_refs=list(resilience.evidence_refs),
+                        )
+                    if fresh and resilience.terminal is None:
+                        effect_key = keyed_effect_key(resilience_run_id, resilience)
+                        effects[effect_key] = {"used": True}
+                        context["resilience_action"] = resilience.action
+                        context["resilience_effect_key"] = effect_key
+                        # The parent owns actual dispatch: remediation, AC
+                        # review, read-only evidence collection, or transport
+                        # rebind. The retry driver records and invokes that
+                        # bounded effect but never takes lifecycle ownership.
+                        execution_failed = False
+                        updates = None
+                        if resilience_effect_executor is not None:
+                            try:
+                                updates = resilience_effect_executor(resilience, context)
+                            except Exception as exc:  # fail closed after recording the spent rung
+                                context["resilience_execution_error"] = type(exc).__name__
+                                execution_failed = True
+                            if updates:
+                                context.update(updates)
+                        if not execution_failed:
+                            continue
             _emit(
                 events_logger,
                 "spec_aborted",

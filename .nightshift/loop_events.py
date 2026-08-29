@@ -68,6 +68,8 @@ RECOVERY_EVENT_TYPES = frozenset({
     "run_resolved",
 })
 RECOVERY_OUTCOMES = frozenset({"passed", "failed", "skipped", "succeeded", "exhausted"})
+RESILIENCE_CLASSES = frozenset({"verifier_fail", "premise_dispute", "evidence_gap", "transport_stall"})
+RESILIENCE_OUTCOMES = frozenset({"continue", "dispatched", "blocked", "done", "exhausted"})
 
 # SPEC-235 actor-attempt events remain distinct from the parent lifecycle
 # decision.  Payloads contain controlled values and hash-bound relative refs;
@@ -112,8 +114,10 @@ def emit_feedback_outcome(log: "RunEventLog", record: Dict) -> None:
         allowance = record[key]
         if (
             set(allowance) != {"used", "limit"}
-            or allowance["limit"] != 1
-            or allowance["used"] not in {0, 1}
+            or allowance["limit"] not in {1, 2}
+            or not isinstance(allowance["used"], int)
+            or allowance["used"] < 0
+            or allowance["used"] > allowance["limit"]
         ):
             raise ValueError("invalid feedback allowance")
     if record["recovery_source"] not in {None, *(item.value for item in RecoverySource)}:
@@ -164,6 +168,24 @@ def emit_recovery_event(log: "RunEventLog", event_type: str, spec_id: str, **pay
     """Append one validated recovery observation to the existing RunEventLog."""
     validate_recovery_event(event_type, {"spec_id": spec_id, **payload})
     log.emit(event_type, spec_id=spec_id, **payload)
+
+
+def emit_resilience_rung(
+    log: "RunEventLog", spec_id: str, *, failure_class: str, rung: int,
+    outcome: str, evidence_refs: list[str] | None = None,
+) -> None:
+    """Record one privacy-safe, class-specific recovery rung (SPEC-266)."""
+    if failure_class not in RESILIENCE_CLASSES:
+        raise ValueError("unknown resilience class")
+    if not isinstance(rung, int) or isinstance(rung, bool) or rung < 0:
+        raise ValueError("resilience rung must be a non-negative integer")
+    if outcome not in RESILIENCE_OUTCOMES:
+        raise ValueError("unknown resilience outcome")
+    refs = evidence_refs or []
+    if not all(isinstance(item, str) and "/" not in item and "\\" not in item for item in refs):
+        raise ValueError("resilience evidence refs must be controlled identifiers")
+    log.emit("resilience_rung", spec_id=spec_id, resilience_class=failure_class,
+             rung=rung, outcome=outcome, evidence_refs=refs)
 
 
 def record_official_followup_decisions(

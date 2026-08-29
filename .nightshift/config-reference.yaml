@@ -96,7 +96,7 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.9.1"
+kit_version: "3.10.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -485,6 +485,22 @@ run_token_ceiling: 90000000
 ---
 
 # =============================================================================
+# Drive-to-done unblock ladder (SPEC-259)
+# =============================================================================
+# The ordinary unblock command ignores this section and remains one bounded
+# blocked-to-ready repair. `to_done` is opt-in and parent-owned; workers return
+# evidence only. `dry_run` may be overridden by the CLI `--dry-run` option.
+
+unblock:
+  ac_review:
+    max_loosened_per_pass: 2       # maximum AC criteria loosened in a reviewer pass
+  to_done:
+    max_rung: 5                    # integer, 1..5; default 5
+    dry_run: false                 # boolean; default false
+
+---
+
+# =============================================================================
 # Parallel Admission
 # =============================================================================
 # The dynamic frontier planner reads durable spec state and declared `touches:`
@@ -518,6 +534,27 @@ parallel_integration:
   # Parent-owned release surfaces. Workers emit intents; the integration broker
   # serializes their application after code integration.
   protected_release_surfaces: ["CHANGELOG.md", "VERSION", "release-handoff.md"]
+
+---
+
+# =============================================================================
+# Resilience Ladder (SPEC-266)
+# =============================================================================
+# Bounded recovery before a parent records terminal blocked. Budgets are keyed
+# to the run id; polling, reconnecting, and re-entering a step never renew one.
+resilience:
+  verifier_fail:
+    # Maximum remediation rounds; round 2 requires a strictly smaller failed-AC set.
+    max_rounds: 2
+  premise:
+    # Scan coverage/runtime gates and submit an independent AC-review proposal.
+    enabled: true
+  evidence_gap:
+    # One read-only named-artifact collection pass after a done claim.
+    max_passes: 1
+  transport:
+    # A changed tool or fresh worker can consume a second rebind.
+    max_rebinds: 2
 
 ---
 

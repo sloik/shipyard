@@ -682,12 +682,15 @@ def derive_resolution(
     unblock_limit = _bounded_int(
         commit_trailer(repo, mark_commit, "Nightshift-Unblock-Limit")
     )
+    unblock_rung = _bounded_int(
+        commit_trailer(repo, mark_commit, "Nightshift-Unblock-Rung")
+    )
 
     started = datetime.fromisoformat(commit_iso(repo, run_id).replace("Z", "+00:00"))
     completed = datetime.fromisoformat(
         commit_iso(repo, mark_commit).replace("Z", "+00:00")
     )
-    return {
+    resolution = {
         "run_id": run_id,
         "stage": stage,
         "attempt": current_index + 1,
@@ -706,6 +709,9 @@ def derive_resolution(
         "later_session_required": stage == "recovery",
         "resolution_latency_s": max(0.0, (completed - started).total_seconds()),
     }
+    if 1 <= unblock_rung <= 5:
+        resolution["unblock_rung"] = unblock_rung
+    return resolution
 
 
 def derive_local_resolution(

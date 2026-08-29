@@ -246,6 +246,16 @@ Before asking the user any questions, the agent should:
 
 ## Phase 4: Acceptance Criteria
 
+### AC Amendments
+
+New specs include an empty `## AC Amendments` table. It becomes mandatory when
+an acceptance criterion changes after the spec was last `ready`. Each row names
+the date, AC identifier, complete old → new text, justification, and reviewer
+run ID (or explicit user approval). Kinds are `loosened`, `covered-by`,
+`runtime-captured`, and `moved-to`. A loosened criterion requires an independent
+AC-review verdict; it is never deleted. `validate_specs.py` reports
+`ac_amendment_undocumented` when a changed criterion lacks a matching row.
+
 **Agent's Task:** Extract concrete, testable criteria that prove the requirements work. This is the most critical phase.
 
 **Say to the user:**

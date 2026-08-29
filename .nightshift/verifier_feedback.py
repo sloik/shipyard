@@ -35,6 +35,7 @@ from recovery_convergence import (
     blocked_attempt_from_dict,
     select_repair_route,
 )
+from resilience_ladder import ResilienceDecision, decide_verifier_fail
 
 PACKET_SCHEMA_VERSION = 2
 MAX_PACKET_BYTES = 32_768
@@ -232,6 +233,22 @@ class RecoveryAdmission:
     assessment: BlockedAttemptAssessment | None = None
 
 
+def verifier_failure_resilience(
+    packet: RemediationFeedback, verdict: Mapping[str, Any], *, max_rounds: int = 2,
+) -> ResilienceDecision:
+    """Derive the only permitted second verifier-failure remediation decision.
+
+    The original packet's failed AC ids are immutable.  A later verdict earns
+    round two only when its failed set is a strict subset; no prose or polling
+    can renew that keyed effect.
+    """
+    current = tuple(
+        str(item.get("id")) for item in verdict.get("acs", ())
+        if isinstance(item, Mapping) and item.get("status") == "fail"
+    )
+    return decide_verifier_fail(packet.failed_ac_ids, current, max_rounds=max_rounds)
+
+
 @dataclass(frozen=True)
 class NormalizedFeedbackEvent:
     key: str
@@ -294,7 +311,7 @@ class FeedbackState:
     repairer_id: str | None = None
     remediation_mode: str | None = None
     remediation_used: int = 0
-    remediation_limit: int = 1
+    remediation_limit: int = 2
     replacement_verifier_used: int = 0
     initial_verifier_id: str | None = None
     remediator_id: str | None = None
@@ -1868,7 +1885,7 @@ def reduce_feedback_event(
             }
             if (
                 not valid
-                or event.verdict.get("verdict") != "pass"
+                or event.verdict.get("verdict") not in {"pass", "fail"}
                 or event.head != state.remediated_implementation_head_digest
                 or event.actor_id in disallowed_verifiers
             ):
@@ -1884,6 +1901,53 @@ def reduce_feedback_event(
                 return _terminal(
                     state, "fresh_verifier_failure", human=True, event=blocked_event
                 )
+            if event.verdict.get("verdict") == "fail":
+                if state.packet is None:
+                    blocked_event = replace(event, role="parent", outcome="blocked", reason="fresh_verifier_failure", next_action="operator_controller_action")
+                    return _terminal(state, "fresh_verifier_failure", human=True, event=blocked_event)
+                resilience = verifier_failure_resilience(
+                    state.packet, event.verdict, max_rounds=state.remediation_limit
+                )
+                state = _record_actor_effect(state, verdict_event)
+                rung = _effect(
+                    state, "resilience_rung", f"resilience:{resilience.effect_key}",
+                    failure_class=resilience.failure_class, rung=resilience.rung,
+                    outcome=("dispatched" if resilience.terminal is None else "blocked"),
+                    evidence_refs=list(resilience.evidence_refs),
+                )
+                if resilience.terminal is not None or state.remediation_used >= state.remediation_limit:
+                    blocked_event = replace(event, role="parent", outcome="blocked", reason="fresh_verifier_failure", next_action="operator_controller_action")
+                    return _append_effects(_terminal(state, "fresh_verifier_failure", human=True, event=blocked_event), rung)
+                # A new packet is deliberately required for the changed head;
+                # the parent supplies fresh containment/dispatch evidence.
+                if packet_inputs is None:
+                    blocked_event = replace(event, role="parent", outcome="blocked", reason="fresh_verifier_failure", next_action="operator_controller_action")
+                    return _append_effects(_terminal(state, "fresh_verifier_failure", human=True, event=blocked_event), rung)
+                try:
+                    fresh_inputs = dict(packet_inputs)
+                    for base in ("candidate_revision", "dispatch_plan", "containment_evidence"):
+                        fresh = f"fresh_{base}"
+                        if fresh in fresh_inputs:
+                            fresh_inputs[base] = fresh_inputs[fresh]
+                    packet = create_remediation_feedback(
+                        run_id=state.run_id, spec_id=state.spec_id,
+                        implementation_head_digest=state.remediated_implementation_head_digest,
+                        verdict=event.verdict, verifier_id=event.actor_id,
+                        expected_ac_ids=state.expected_ac_ids, parent_key=parent_key,
+                        implementer_ids=state.implementer_ids,
+                        **{key: fresh_inputs[key] for key in (
+                            "candidate_revision", "dispatch_plan", "containment_evidence", "evidence",
+                            "reproduction_commands", "verification_commands", "allowed_change_surface",
+                            "forbidden_surface", "guardrails", "causal_confidence", "project_root",
+                        ) if key in fresh_inputs},
+                    )
+                except FeedbackValidationError:
+                    blocked_event = replace(event, role="parent", outcome="blocked", reason="fresh_verifier_failure", next_action="operator_controller_action")
+                    return _append_effects(_terminal(state, "fresh_verifier_failure", human=True, event=blocked_event), rung)
+                admitted = replace(state, phase=FeedbackPhase.PACKET_ADMITTED, packet=packet,
+                    remediation_mode=None, initial_verifier_id=event.actor_id)
+                return _append_effects(admitted, rung, _effect(admitted, "persist_packet",
+                    f"packet:{packet.source_verdict_digest}:2", packet=packet.record()))
             state = _record_actor_effect(state, verdict_event)
             ready = replace(state, phase=FeedbackPhase.READY_FOR_INTEGRATION)
             return _append_effects(
@@ -1910,7 +1974,7 @@ def reduce_feedback_event(
         if (
             event.role != "parent"
             or event.remediation_mode not in REMEDIATION_MODES
-            or state.remediation_mode is not None
+            or state.remediation_used >= state.remediation_limit
         ):
             blocked_event = replace(
                 event,
@@ -1924,14 +1988,14 @@ def reduce_feedback_event(
             state,
             phase=FeedbackPhase.REMEDIATION_DISPATCHING,
             remediation_mode=event.remediation_mode,
-            remediation_used=1,
+            remediation_used=state.remediation_used + 1,
         )
         return _append_effects(
             selected,
             _effect(
                 selected,
                 "dispatch_remediation",
-                "remediation:1",
+                f"remediation:{state.remediation_used + 1}",
                 mode=event.remediation_mode,
                 packet=state.packet.record() if state.packet else None,
                 original_authority=list(state.original_authority),

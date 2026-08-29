@@ -25,10 +25,48 @@ from observability_store import ObservabilityStoreError, StoreContext, enroll
 MANAGED_PUBLIC_PREFIXES = (
     ".nightshift/hooks/", ".nightshift/prompts/", ".nightshift/scenarios/",
 )
+# Kept in sync with CANONICAL_PROTOCOL_FILES in nightshift-sync.py (SPEC-191
+# follow-up): that list is the single source of truth for what ships as
+# public kit payload.  A file missing from here is classified "unknown" and
+# blocks every audit/migrate run until someone resolves it, so update both
+# lists together when the kit gains a new managed file.
 MANAGED_PUBLIC_FILES = {
-    ".nightshift/config.yaml", ".nightshift/BOOTSTRAP.md", ".nightshift/LOOP.md",
-    ".nightshift/ORCHESTRATOR.md", ".nightshift/REVIEW.md", ".nightshift/GIT.md",
-    ".nightshift/SPEC-GUIDE.md", ".nightshift/WATCHER.md", ".nightshift/STOP",
+    ".nightshift/config.yaml", ".nightshift/STOP",
+    ".nightshift/.gitignore", ".nightshift/BOOTSTRAP.md", ".nightshift/CHANGELOG.md",
+    ".nightshift/README.md",
+    ".nightshift/EXTENSIONS.md", ".nightshift/GIT.md", ".nightshift/HUMAN-REVIEW.md",
+    ".nightshift/LOOP-DOMAIN-MAP.md", ".nightshift/LOOP.md", ".nightshift/ORCHESTRATOR.md",
+    ".nightshift/REVIEW.md", ".nightshift/SPEC-GUIDE.md", ".nightshift/Skills/nightshift/SKILL.md",
+    ".nightshift/VOCABULARY.md", ".nightshift/WATCHER.md", ".nightshift/ac_review.py",
+    ".nightshift/analyze_metrics.py", ".nightshift/argo_home.py", ".nightshift/audit_nfr.py",
+    ".nightshift/board.py", ".nightshift/board.sh", ".nightshift/check_followup_spec.py",
+    ".nightshift/checkpoint.py", ".nightshift/circuit_breaker.py", ".nightshift/config-reference.yaml",
+    ".nightshift/dependency_registry.py", ".nightshift/dispatch.py", ".nightshift/execution_history.py",
+    ".nightshift/experiment_evidence.py", ".nightshift/experiment_protocol.py", ".nightshift/extension_checkpoint.py",
+    ".nightshift/extension_checkpoint.sh", ".nightshift/extension_package.py", ".nightshift/extension_protocol.py",
+    ".nightshift/extension_registry.py", ".nightshift/extension_runtime.py", ".nightshift/extension_sandbox.py",
+    ".nightshift/failure_persistence.py", ".nightshift/fleet_metrics.py", ".nightshift/followup_decisions.py",
+    ".nightshift/followup_metrics.py", ".nightshift/followup_processor.py", ".nightshift/goal_gate.py",
+    ".nightshift/handler_registry.py", ".nightshift/hooks/commit-msg", ".nightshift/hooks/pre-commit",
+    ".nightshift/integration_broker.py", ".nightshift/kickoff_reconciliation.py", ".nightshift/lifecycle.py",
+    ".nightshift/loop_events.py", ".nightshift/loop_observability.py", ".nightshift/managed_payload_provenance.py",
+    ".nightshift/metric-ranges.yaml", ".nightshift/metrics-schema.md", ".nightshift/metrics/_SCHEMA.md",
+    ".nightshift/metrics_fidelity.py", ".nightshift/migrate_paths.py", ".nightshift/model_stylesheet.py",
+    ".nightshift/nightshift-dag.py", ".nightshift/nightshift-instructions.py", ".nightshift/nightshift_coordinator.py",
+    ".nightshift/observability_enroll.py", ".nightshift/observability_store.py", ".nightshift/outcome_router.py",
+    ".nightshift/parallel_executor.py", ".nightshift/path_vars.py", ".nightshift/preflight.py",
+    ".nightshift/private_state.py", ".nightshift/propagate_scores.py", ".nightshift/record_metrics.py",
+    ".nightshift/recovery_convergence.py", ".nightshift/red_proof.py", ".nightshift/reflexion_producer.py",
+    ".nightshift/release-manifest-unretained.json", ".nightshift/release.py", ".nightshift/release_coordinator.py",
+    ".nightshift/release_handoff.py", ".nightshift/replay.py", ".nightshift/retry_loop.py",
+    ".nightshift/run_validation.py", ".nightshift/scanner.py", ".nightshift/skill_tutorial.py",
+    ".nightshift/source_fingerprints.py", ".nightshift/spec_frontmatter.py", ".nightshift/status_store.py",
+    ".nightshift/synthesis_gate.py", ".nightshift/terminal_outcomes.py", ".nightshift/trace_export.py",
+    ".nightshift/unblock_ladder.py", ".nightshift/unblock_spec.py", ".nightshift/validate_install.py",
+    ".nightshift/validate_metrics.py", ".nightshift/validate_specs.py", ".nightshift/verification_report.py",
+    ".nightshift/verifier_feedback.py", ".nightshift/vocabulary-registry.yaml", ".nightshift/vocabulary.py",
+    ".nightshift/watchdog_cleanup.py", ".nightshift/worktree_janitor.py", ".nightshift/worktree_paths.py",
+    ".nightshift/release-marker.json",
 }
 PRIVATE_PREFIXES = (
     ".nightshift/reports/", ".nightshift/metrics/", ".nightshift/knowledge/",

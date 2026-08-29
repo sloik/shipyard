@@ -23,5 +23,6 @@
   {"version": "3.8.0", "reason": "Release predates manifest retention introduced in 3.8.5."},
   {"version": "3.8.1", "reason": "Release predates manifest retention introduced in 3.8.5."},
   {"version": "3.8.2", "reason": "Release predates manifest retention introduced in 3.8.5."},
-  {"version": "3.8.3", "reason": "Release predates manifest retention introduced in 3.8.5."}
+  {"version": "3.8.3", "reason": "Release predates manifest retention introduced in 3.8.5."},
+  {"version": "3.9.2", "reason": "Superseded by 3.9.3 before a non-recursive historical snapshot could be retained."}
 ]

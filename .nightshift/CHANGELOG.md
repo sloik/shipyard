@@ -6,10 +6,68 @@
 > - **Patch** — bug fixes, wording clarifications, no config/protocol changes
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
+
+## [Unreleased]
+
+## 3.10.0 (2026-08-29)
+
+### In-loop resilience ladder (SPEC-266)
+
+- Added parent-owned, run-id-keyed recovery decisions for verifier failure,
+  premise dispute, evidence gap, and transport stall before terminal blocked.
+- Added `resilience.*` defaults and controlled `resilience_rung` telemetry.
+
+## 3.9.3 (2026-08-29)
+
+### Harness-aware command tutorial (SPEC-267)
+
+- Added a fenced YAML `commands` registry to the Nightshift skill and a
+  read-only `skill_tutorial.py` renderer for `tutorial [command]` and its
+  `help [command]` alias. It presents every command, its options and decision
+  tree, then provides focused purpose, limits, side effects, prompts, and
+  real-repository examples.
+- Rendering uses `$nightshift …` under Codex and `/nightshift …` elsewhere.
+  The registry-consistency test rejects both missing registry rows and missing
+  command headings before the guide can drift.
+
+### AC-review amendment gate (SPEC-260)
+
+- Added independent AC-review validation, mandatory AC Amendments documentation,
+  and rung-4 veto escalation to user authorization.
+
+### Drive-to-done recovery ladder (SPEC-259)
+
+- Added the opt-in `/nightshift unblock <spec-id> --to-done` ladder with
+  `--from-rung <2-4>` and mutation-free `--dry-run` planning.
+- Preserved ordinary unblock packet and attempt behavior; only opt-in skipped
+  admission adds `escalate: true`.
+- Added parent-owned `unblock_rung` evidence events and terminal
+  `Nightshift-Unblock-Rung` metrics ingestion. Workers remain evidence-only.
+- Documented the drive-to-done defaults and the pre-SPEC-260 rung-4
+  `unavailable` route to human authorization.
+
 > The `runtime.loop_version` field (date-based) tracks when the LOOP.md was last touched
 > and is used for metrics comparison — it is NOT the authoritative version.
 
 ---
+
+## 3.9.2 (2026-08-29)
+
+### Board toast surfaces the real status-write failure reason (SPEC-281)
+
+- `PUT /api/spec/{id}/status` already returned a specific, actionable `detail`
+  string on refusal (NFR/handoff/promotion-gap validation), but all three
+  frontend failure sites in `board.py` — the drag-end handler's not-ok
+  branch, its network-error `.catch`, and the detail-panel status dropdown's
+  handler — discarded that body and always showed a generic
+  "status write failed" toast.
+- All three sites now show the server's exact `detail` text when present.
+  A missing/non-JSON body or a network error (no response to read) still
+  falls back to the generic message; nothing renders as `undefined` or
+  `[object Object]`.
+
+**Migration:** install the complete 3.9.2 payload. No configuration or schema
+migration is required.
 
 ## 3.9.1 (2026-08-29)
 

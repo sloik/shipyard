@@ -1632,6 +1632,23 @@ Note: SPEC-046 is **forward-only** — it does not retroactively backfill
 These events are consumed by the SPEC-040 history DB ingest at Step 16 for
 cross-run retrospective analysis.
 
+**SPEC-266 — in-loop resilience ladder.** Before the parent records terminal
+`blocked`, it evaluates the class-specific, run-id-keyed recovery allowance.
+Each consumed allowance emits `resilience_rung` with its class, rung, outcome,
+and controlled evidence identifiers; polling or reconnecting cannot renew it.
+
+| Class | Bounded extra recovery | Exhaustion rule |
+|---|---|---|
+| `verifier_fail` | A second remediation/fresh-verifier round only when the failed-AC set strictly shrank. | `resilience.verifier_fail.max_rounds` (2). |
+| `premise_dispute` | Scan done/in-progress coverage and runtime gates, then submit the AC-review proposal. | Reviewer veto/no evidence blocks. |
+| `evidence_gap` | One read-only named-command/artifact collection pass, then re-run the gate. | `resilience.evidence_gap.max_passes` (1). |
+| `transport_stall` | A different tool or fresh worker gets one additional rebind. | Two consecutive identical failures block. |
+
+Only the parent supplies and executes a resilience decision; workers, verifiers,
+and the retry driver cannot alter lifecycle state or merge. Every changed head
+still requires a fresh independent verifier. Terminal lifecycle recording cites
+the final `Nightshift-Resilience-Rung: <class>/<n>` trailer.
+
 **Reporting integration.** When `spec_escalated` is emitted, the run report
 (Step 14) must surface the spec under a "Needs Human Review" section. When
 `spec_aborted` is emitted with a non-circuit-breaker reason, the BLOCKED
