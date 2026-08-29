@@ -314,6 +314,23 @@ not vague like 'works well' or 'is fast', but measurable:
 
 **After Phase 4:** Agent should have a complete list of acceptance criteria that can be turned into test cases or validation checklists.
 
+### Verifier observability guardrail
+
+An acceptance criterion must not name a working-tree-only condition as its
+subject. `verification_report.py prepare-dispatch` builds the standard verifier
+surface from the baseline and candidate commits; an untracked file, an
+uncommitted deletion, or another working-tree-only action cannot be observed
+there. This is the mechanism exposed by SPEC-252's amended AC4/AC5, not a reason
+to accept a vacuous proof.
+
+Instead, assert a property of committed content. If an operator still must take
+a working-tree action, route that action to a recorded-resolution clause and
+require its decision and reason in a verifier-readable committed location such
+as the spec body, `CHANGELOG.md`, or another tracked artifact. A same-spec run
+report may summarize the action, but report-only reasoning does not satisfy the
+criterion because `prepare-dispatch` withholds that report material from the
+standard verifier surface.
+
 ---
 
 ## Phase 5: Context & Constraints

@@ -20,14 +20,6 @@ HANDOFF_DIR = "release-handoffs"
 DELIVERY_RECEIPT_SCHEMA_VERSION = 1
 DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
-# The spelling ``managed_paths`` used for the same surface before SPEC-230 made
-# the skill an ordinary manifest entry, and the closed set of handoffs sealed
-# while it was the managed spelling.  Both are frozen history: nothing new may
-# join the set, and no other parent-directory escape is ever accepted.
-LEGACY_SKILL_PATH = "../Skills/nightshift/SKILL.md"
-LEGACY_SKILL_PATH_SPEC_IDS = frozenset(
-    {"SPEC-203", "SPEC-207", "SPEC-208", "SPEC-225", "SPEC-226", "SPEC-228"}
-)
 RELEASE_HANDOFF_DECLARATION_POLICY_DATE = date(2026, 8, 8)
 CURRENT_SPEC_TEMPLATE_VERSION = 8
 MISSING_RELEASE_HANDOFF_DECLARATION_ERROR = (
@@ -98,25 +90,45 @@ def managed_paths(manifest: Mapping[str, Any]) -> set[str]:
     return paths
 
 
-def accepted_artifact_paths(manifest: Mapping[str, Any], *, spec_id: str) -> set[str]:
-    """Managed paths, plus the retired spelling the enumerated records sealed.
+def accepted_artifact_paths(manifest: Mapping[str, Any]) -> set[str]:
+    """Return the exact managed paths of the manifest being judged."""
+    return managed_paths(manifest)
 
-    SPEC-230 moved the delivered skill into the manifest as
-    ``SKILL_MANAGED_PATH``.  Until then ``managed_paths`` named the same surface
-    through ``LEGACY_SKILL_PATH``, and the handoffs in
-    ``LEGACY_SKILL_PATH_SPEC_IDS`` recorded what was managed on the day they
-    shipped.  A sealed record is judged on its own terms (SPEC-244), so the
-    retired spelling stays readable for exactly those records rather than
-    rewriting history to today's spelling.
 
-    The admission is an enumeration, not a relaxation: ``managed_paths`` still
-    refuses the escape for every other record, only this one spelling is
-    accepted, and it holds only while the surface it renames is managed today.
-    """
-    paths = managed_paths(manifest)
-    if spec_id in LEGACY_SKILL_PATH_SPEC_IDS and SKILL_MANAGED_PATH in paths:
-        paths.add(LEGACY_SKILL_PATH)
-    return paths
+def resolve_manifest_membership(
+    artifact: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Resolve path-membership evidence without falling back to present data."""
+    version = str(artifact.get("target_version", ""))
+    sealed_fingerprint = str(artifact.get("manifest_fingerprint", ""))
+    if (
+        manifest.get("kit_version") == version
+        and fingerprint(manifest) == sealed_fingerprint
+    ):
+        return {"outcome": "current", "manifest": manifest, "reason": ""}
+    for retained in manifest.get("retained_manifests", []):
+        if not isinstance(retained, Mapping):
+            continue
+        if (
+            retained.get("kit_version") == version
+            and fingerprint(retained) == sealed_fingerprint
+        ):
+            return {"outcome": "retained", "manifest": retained, "reason": ""}
+    for entry in manifest.get("unretained_manifests", []):
+        if not isinstance(entry, Mapping) or entry.get("version") != version:
+            continue
+        reason = str(entry.get("reason", "")).strip()
+        if reason:
+            return {
+                "outcome": "explicitly-unretained",
+                "manifest": None,
+                "reason": reason,
+            }
+    return {
+        "outcome": "missing",
+        "manifest": None,
+        "reason": "target release is neither retained nor explicitly unretained",
+    }
 
 
 def release_impact(changed_paths: list[str], manifest: Mapping[str, Any]) -> list[str]:
@@ -141,11 +153,31 @@ def _semver(value: Any) -> tuple[int, int, int] | None:
     return int(major), int(minor), int(patch)
 
 
+def _matches_current_manifest_fingerprint(
+    artifact: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> bool:
+    """Return the coordinator's completion-eligibility fingerprint predicate."""
+    return artifact.get("manifest_fingerprint") == fingerprint(manifest)
+
+
 def _is_stranded(artifact: Mapping[str, Any], manifest: Mapping[str, Any]) -> bool:
-    """True when an undelivered record targets a manifest already superseded."""
+    """True when a pending record can no longer complete against this manifest."""
+    return artifact.get("status") == "pending" and not (
+        _matches_current_manifest_fingerprint(artifact, manifest)
+    )
+
+
+def _stranded_disposition(
+    artifact: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> str:
+    """Describe how the target version relates to its superseding manifest."""
     target = _semver(artifact.get("target_version"))
     current = _semver(manifest.get("kit_version"))
-    return target is not None and current is not None and target < current
+    if target is not None and target == current:
+        return "same version re-fingerprinted"
+    if target is not None and current is not None and target < current:
+        return "older target version"
+    return "version relationship unavailable"
 
 
 def _sealed_record_errors(artifact: Mapping[str, Any]) -> list[str]:
@@ -234,7 +266,8 @@ def validate_artifact(
         errors.append(
             f"{STRANDED_PENDING_HANDOFF_ERROR} "
             f"(target {artifact.get('target_version')}, "
-            f"current {manifest.get('kit_version')})"
+            f"current {manifest.get('kit_version')}; "
+            f"{_stranded_disposition(artifact, manifest)})"
         )
     else:
         # Undelivered and still reachable: it must target the current manifest.
@@ -251,10 +284,29 @@ def validate_artifact(
         or not all(isinstance(path, str) for path in changed)
     ):
         errors.append("release handoff requires changed_managed_paths")
-    elif unknown := sorted(
-        set(changed) - accepted_artifact_paths(manifest, spec_id=spec_id)
-    ):
-        errors.append("release handoff names unmanaged paths: " + ", ".join(unknown))
+    else:
+        resolution = resolve_manifest_membership(artifact, manifest)
+        membership_manifest = resolution["manifest"]
+        if isinstance(membership_manifest, Mapping):
+            unknown = sorted(
+                set(changed) - accepted_artifact_paths(membership_manifest)
+            )
+            if unknown:
+                errors.append(
+                    "release handoff names unmanaged paths: " + ", ".join(unknown)
+                )
+        elif (
+            resolution["outcome"] == "missing"
+            and artifact.get("status") != "completed"
+        ):
+            # Pending records are present-tense release inputs.  A historical
+            # resolution applies only when they explicitly target an older,
+            # unretained release; otherwise retain the existing current gate.
+            unknown = sorted(set(changed) - accepted_artifact_paths(manifest))
+            if unknown:
+                errors.append(
+                    "release handoff names unmanaged paths: " + ", ".join(unknown)
+                )
     if (
         not isinstance(artifact.get("canonical_commit_range"), str)
         or not artifact["canonical_commit_range"]
@@ -491,9 +543,9 @@ def complete_pending_handoffs(
         return completed
     for path in sorted(directory.glob("*.json")):
         data = json.loads(path.read_text())
-        if data.get("status") != "pending" or data.get(
-            "manifest_fingerprint"
-        ) != fingerprint(manifest):
+        if data.get("status") != "pending" or not (
+            _matches_current_manifest_fingerprint(data, manifest)
+        ):
             continue
         if validate_artifact(
             data, spec_id=str(data.get("spec_id", "")), manifest=manifest

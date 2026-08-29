@@ -1980,6 +1980,15 @@ print(f"Cleaned up {deleted} checkpoint files for {current_spec_id}")
 
 **MANDATORY. This step cannot be skipped.** A run without a human review report is an incomplete run. Do not proceed to Step 15 until the report file exists on disk.
 
+**Keep acceptance-criterion decisions verifier-readable (SPEC-274, derived from
+SPEC-252).** When an acceptance criterion requires a decision or its reason to
+be "recorded," the authoritative record must live in the committed tree that
+the verifier can read: for example, the spec body, `CHANGELOG.md`, or another
+tracked artifact. The run report alone is insufficient. `prepare-dispatch`
+constructs the verifier surface from the baseline and candidate commits and
+withholds same-spec report material, so working-tree-only state and report-only
+reasoning are unavailable to the standard verification gate by construction.
+
 **What to do:**
 0. **Append production-resource evidence when the spec opted in (SPEC-157).**
    Load the Step 2 snapshot, capture a second stat-only snapshot, and append the

@@ -301,7 +301,12 @@ def managed_local_resource_gaps(canonical: Path, names: list[str]) -> list[str]:
 
 
 def build_manifest(
-    canonical: Path, names: list[str], *, smoke_checks: list[str] | None = None
+    canonical: Path,
+    names: list[str],
+    *,
+    smoke_checks: list[str] | None = None,
+    retained_manifests: list[dict] | None = None,
+    unretained_manifests: list[dict] | None = None,
 ) -> dict:
     payload = {
         "kit_version": kit_version(canonical),
@@ -323,12 +328,92 @@ def build_manifest(
         "canonical_suite": CANONICAL_SUITE,
         "migration_checks": ["python3 validate_specs.py specs/"],
     }
-    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return {**payload, "fingerprint": hashlib.sha256(normalized).hexdigest()}
+    if unretained_manifests is None:
+        registry = canonical / "release-manifest-unretained.json"
+        unretained_manifests = (
+            json.loads(registry.read_text()) if registry.is_file() else []
+        )
+    return build_manifest_from_payload(
+        payload,
+        retained_manifests=retained_manifests or [],
+        unretained_manifests=unretained_manifests,
+    )
+
+
+def build_manifest_from_payload(
+    payload: dict,
+    *,
+    retained_manifests: list[dict],
+    unretained_manifests: list[dict],
+) -> dict:
+    """Bind historical evidence into a manifest and recompute its fingerprint."""
+    current = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"fingerprint", "retained_manifests", "unretained_manifests"}
+    }
+    current["retained_manifests"] = sorted(
+        retained_manifests,
+        key=lambda item: (str(item.get("kit_version", "")), str(item.get("fingerprint", ""))),
+    )
+    current["unretained_manifests"] = sorted(
+        unretained_manifests,
+        key=lambda item: str(item.get("version", "")),
+    )
+    normalized = json.dumps(current, sort_keys=True, separators=(",", ":")).encode()
+    return {**current, "fingerprint": hashlib.sha256(normalized).hexdigest()}
+
+
+def resolve_retained_manifest(
+    manifest: dict, *, version: str, fingerprint: str
+) -> dict | None:
+    """Recover the exact current or retained release named by both identifiers."""
+    if (
+        manifest.get("kit_version") == version
+        and manifest.get("fingerprint") == fingerprint
+    ):
+        return manifest
+    for retained in manifest.get("retained_manifests", []):
+        if not isinstance(retained, dict):
+            continue
+        if (
+            retained.get("kit_version") == version
+            and retained.get("fingerprint") == fingerprint
+        ):
+            return retained
+    return None
 
 
 def write_manifest(canonical: Path, names: list[str]) -> dict:
-    manifest = build_manifest(canonical, names)
+    previous: dict | None = None
+    path = canonical / "release-manifest.json"
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            previous = loaded
+    retained = list(previous.get("retained_manifests", [])) if previous else []
+    unretained = (
+        list(previous["unretained_manifests"])
+        if previous and "unretained_manifests" in previous
+        else None
+    )
+    if previous and previous.get("kit_version") != kit_version(canonical):
+        identity = (previous.get("kit_version"), previous.get("fingerprint"))
+        if not any(
+            (item.get("kit_version"), item.get("fingerprint")) == identity
+            for item in retained
+            if isinstance(item, dict)
+        ):
+            retained.append(previous)
+    manifest = build_manifest(
+        canonical,
+        names,
+        retained_manifests=retained,
+        unretained_manifests=unretained,
+    )
     (canonical / "release-manifest.json").write_text(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n"
     )
@@ -346,7 +431,11 @@ def validate_manifest(
     except json.JSONDecodeError:
         return False, ["release manifest invalid JSON"], None
     expected = build_manifest(
-        canonical, names, smoke_checks=manifest.get("smoke_checks")
+        canonical,
+        names,
+        smoke_checks=manifest.get("smoke_checks"),
+        retained_manifests=manifest.get("retained_manifests", []),
+        unretained_manifests=manifest.get("unretained_manifests", []),
     )
     errors = []
     for key in (
@@ -356,6 +445,8 @@ def validate_manifest(
         "smoke_checks",
         "canonical_suite",
         "migration_checks",
+        "retained_manifests",
+        "unretained_manifests",
         "fingerprint",
     ):
         if manifest.get(key) != expected.get(key):

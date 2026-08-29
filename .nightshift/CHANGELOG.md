@@ -11,6 +11,108 @@
 
 ---
 
+## 3.9.1 (2026-08-29)
+
+### Release-suite timeout tracks measured healthy runtime (SPEC-279-001)
+
+- The canonical-suite release guard remains finite and fail-closed, but now
+  allows 600 seconds instead of 300 seconds. The exact declared suite measured
+  305.25 seconds wall time at 3.9.0, so the former threshold rejected healthy
+  work before any fleet write.
+- Timeout failures retain the `canonical_preflight` classification, attempted
+  command and configured duration, zero completed suite runs, and the existing
+  no-write guarantee.
+
+**Migration:** install the complete 3.9.1 payload. No configuration or schema
+migration is required.
+
+## 3.9.0 (2026-08-29)
+
+### Durable pre-fix red-proof artifacts (SPEC-279)
+
+- A red run can now commit a structured artifact binding its baseline revision,
+  exact test-file SHA-256, and exact failing pytest node IDs.
+- Later post-fix integration records a mechanical reassertion without reverting
+  code. A byte-identical test is explicitly inherited evidence; a missing or
+  changed test reports `not_re_derivable` with a machine-readable reason.
+- SPEC-239 is the first backfill: baseline `1bd395c`, the independently matched
+  `51293f5f…` test content, and its observed seven-test failure set.
+
+**Migration:** install the complete 3.9.0 payload. Existing projects need no
+configuration migration; new red-proof evidence is committed under each
+project's `.nightshift/red-proofs/` directory.
+
+## 3.8.7 (2026-08-28)
+
+### Canonical suite command is repository-root-relative (SPEC-243-001-001)
+
+- The dependency-complete `commands.test` declaration now selects
+  `canonical/tests` when executed verbatim from the repository root used by
+  preflight and standalone verifier dispatch.
+- Live subprocess regressions cover both root preflight and an automatically
+  derived verifier command in its sanitized standalone repository.
+
+**Migration:** install the complete 3.8.7 payload. Projects with their own
+`.nightshift/config.yaml` keep their project-owned command unchanged.
+
+## 3.8.6 (2026-08-28)
+
+### Teardown tolerates an already-exited process group (SPEC-273)
+
+- `extension_runtime.ExtensionSupervisor._terminate_group` no longer treats a
+  `PermissionError` from `os.killpg` as fatal when this same `Popen` handle has
+  already observed the child as reaped (`proc.poll() is not None`). Under
+  machine load, `killpg` against a pid/pgid the kernel has recycled to an
+  unrelated process returns `EPERM` rather than the expected `ESRCH`; that is
+  the kernel's real response to pid reuse, not an anomaly, and teardown must
+  not raise on it.
+- A `PermissionError` against a group this handle still considers live
+  (`proc.poll()` is `None`) is a genuine permission failure and still
+  propagates — the tolerance is not a blanket except-and-pass, and a live
+  group is still terminated with no surviving descendants.
+- Root cause of `test_ac7_hostile_consumer_matrix_does_not_delay_independent_work`
+  and `test_ac3_official_cli_end_to_end_five_checkpoints[kickoff]` intermittently
+  failing on unrelated teardown noise, filed by the SPEC-252 kickoff run.
+
+**Migration:** install the complete 3.8.6 payload. No configuration or schema
+migration is required.
+
+## 3.8.5 (2026-08-28)
+
+### Historical release manifests are retained for sealed handoffs (SPEC-257)
+
+- Each new manifest retains the exact preceding release manifest and carries
+  older retained evidence forward, keyed by kit version and fingerprint.
+- Handoff path membership is resolved against that exact historical surface.
+  Versions released before retention are listed explicitly with a reason; they
+  never fall back silently to the current managed-path set.
+- The six-ID retired skill-path enumeration is removed. Historical records now
+  pass through release evidence, while a path absent from its retained manifest
+  remains an unmanaged-path failure.
+
+**Migration:** install the complete 3.8.5 payload. No configuration or schema
+migration is required.
+
+## 3.8.4 (2026-08-28)
+
+### Acceptance-criterion reasons must survive verifier containment (SPEC-274)
+
+- When an acceptance criterion requires a decision or reason to be recorded,
+  its authoritative record must now live in verifier-readable committed content,
+  such as the spec body, `CHANGELOG.md`, or another tracked artifact. A same-spec
+  run report may summarize the outcome but cannot satisfy the criterion alone.
+- Spec authors must not make a working-tree-only condition the subject of an
+  acceptance criterion. `prepare-dispatch` constructs its sanitized surface from
+  the baseline and candidate commits, so untracked files and uncommitted actions
+  are absent by construction. Such work belongs under a recorded-resolution
+  clause whose decision and reason are committed.
+- The guidance codifies the verifier-observability lesson from SPEC-252's
+  amended AC4 and AC5. It does not change report exclusion or any other
+  `verification_report.py` behavior.
+
+**Migration:** install the complete 3.8.4 payload. No configuration or schema
+migration is required.
+
 ## 3.8.3 (2026-08-28)
 
 ### Python bytecode cache is ignored across payload integration (SPEC-280)

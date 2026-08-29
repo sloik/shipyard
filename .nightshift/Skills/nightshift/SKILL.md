@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.8.3
+version: 3.9.1
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1283,6 +1283,47 @@ a clean result.
 > a hung run will block the parent — state that limitation to the user before
 > proceeding rather than pretending the run is monitored.
 
+### Durable pre-fix red proofs (SPEC-279)
+
+When an acceptance criterion depends on a regression test having failed before
+the fix, report prose is not sufficient evidence. The run that observes the red
+result records the baseline revision, exact test-file bytes, and exact failing
+pytest node IDs in a committed project-local artifact:
+
+```bash
+python3 .nightshift/red_proof.py record \
+  --root "$PROJECT_ROOT" \
+  --artifact "$PROJECT_ROOT/.nightshift/red-proofs/{SPEC_ID}.json" \
+  --spec-id "{SPEC_ID}" --baseline-revision "{RED_BASELINE}" \
+  --test-file "{REPOSITORY_RELATIVE_TEST_FILE}" \
+  --failing-test "{EXACT_FAILING_NODE_ID}" [...]
+```
+
+The run agent must use the failures actually observed in that red execution,
+inspect the emitted JSON, and commit the artifact before publishing `work.completed`.
+The artifact belongs to project history; a same-spec report may summarize it but
+does not replace it. Never place it under `reports/`, whose same-spec content is
+intentionally withheld from the independent verifier.
+
+When a later post-fix or integration run relies on that proof, the run agent
+mechanically re-asserts it and commits the structured result before returning:
+
+```bash
+python3 .nightshift/red_proof.py reassert \
+  --root "$PROJECT_ROOT" \
+  --artifact "$PROJECT_ROOT/.nightshift/red-proofs/{SPEC_ID}.json" \
+  --result "$PROJECT_ROOT/.nightshift/red-proofs/{SPEC_ID}-reassertion.json"
+```
+
+`reasserted` means only that the current test file is byte-identical to the file
+bound into the committed observation. The result therefore says
+`evidence_mode: inherited_committed_artifact` and
+`red_execution_performed: false`; it never claims the post-fix run observed red.
+This check must not revert or reconstruct pre-fix code. A missing or changed test
+file is a successful evidence check with status `not_re_derivable` and an explicit
+reason, not a stale pass and not a controller crash. The parent verifies that the
+expected artifact/result is committed and verifier-readable before dispatch.
+
 ### Step 5c: Independent verification pass (before the merge decision)
 
 When this gate was reached from a worker completion that produced an
@@ -1375,7 +1416,12 @@ DISPATCH_PLAN=$(python3 .nightshift/verification_report.py prepare-dispatch \
 ```
 
 Repeat `--suite-command` once per exact configured suite command for the normal
-brief and omit it entirely for the no-test-suite brief. Parse `DISPATCH_PLAN` as
+brief and omit it entirely for the no-test-suite brief. When no `--suite-command`
+is given, `prepare-dispatch` derives one default from the source project's own
+`commands.test` (SPEC-243-001) and fails closed to the no-test-suite brief when
+that value is absent, empty, or malformed rather than fabricating suite evidence
+— explicit `--suite-command` still always wins and is never merged with the
+config-derived default. Parse `DISPATCH_PLAN` as
 JSON and require its exact schema before composing the brief. Use only its
 `repository`, `verifier-baseline`/`verifier-head`, suite tuple, and synthetic commit
 IDs in the verifier assignment. The source/report arguments above remain
@@ -1445,9 +1491,12 @@ Rules:
 ```
 
 **a-alt. No-test-suite verifier brief (docs/protocol-type specs, SPEC-ARGO-061 R2).**
-Dispatch is unconditional (R1, SPEC-ARGO-061 Decision) even when
-`.nightshift/config.yaml`'s `commands.test` is `null` — most specs in this project
-are `domain: protocol` / `type: docs` with nothing a suite command can run. Only
+Dispatch is unconditional (R1, SPEC-ARGO-061 Decision) even when a project's
+`config.yaml`'s `commands.test` is absent, empty, or malformed — most `domain:
+protocol` / `type: docs` specs have nothing a suite command can run, regardless
+of whether the project otherwise declares one (SPEC-243-001; this project's own
+`config.yaml` now declares a dependency-complete `commands.test`, so most of its
+specs still route here on doc/protocol grounds, not on a missing command). Only
 the brief's shape and the resulting `suites` field change; dispatch, the footprint
 assertion, and the validator all stay the same. Use this template verbatim in place
 of (a) whenever `{suite_commands}` would otherwise be empty/`null`:
@@ -1460,8 +1509,9 @@ this code and you are not told what its author concluded.
 Inputs (the only four you get):
 - Branch content under test: {branch}, materialized as `verifier-head` in the assigned standalone verifier surface
 - Baseline content: {baseline_commit}, materialized as `verifier-baseline` in that surface
-- Declared suites: none — this spec has no `commands.test`; verify each AC by
-  direct inspection of the diff and the changed files' committed content.
+- Declared suites: none — no suite command applies to this spec's changes;
+  verify each AC by direct inspection of the diff and the changed files'
+  committed content.
 - Acceptance criteria, verbatim from the spec:
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-BEGIN -->
 {acceptance_criteria_verbatim}

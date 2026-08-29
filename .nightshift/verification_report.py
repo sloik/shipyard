@@ -18,6 +18,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:  # pragma: no cover - deployed install may be incomplete
+    from preflight import KitRootError, load_commands, resolve_kit_root
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    KitRootError = None  # type: ignore[assignment,misc]
+    load_commands = None  # type: ignore[assignment]
+    resolve_kit_root = None  # type: ignore[assignment]
+
 SEVERITIES = {"CRITICAL", "WARNING", "SUGGESTION"}
 DIMENSIONS = {"completeness", "correctness", "coherence"}
 FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
@@ -27,12 +34,17 @@ FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
 # ``graphify-out/`` exclusion would hide verifier writes to other artifacts.
 VERIFIER_FOOTPRINT_EXCLUSIONS = frozenset({"graphify-out/graph.html"})
 VERIFIER_REPORT_ROOTS = ("reports/", ".nightshift/reports/", "canonical/reports/")
+# Metrics artifacts are never withheld wholesale (unlike reports): an unrelated
+# spec's metrics file is ordinary tracked content and must stay reachable (R2).
+# Only the subset identified as belonging to the spec under verification is
+# withheld, through the same same-spec identity rule already used for reports.
+VERIFIER_METRICS_ROOTS = ("metrics/", ".nightshift/metrics/", "canonical/metrics/")
 VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "spec_id", "branch", "baseline_commit", "head_commit", "verdict",
     "acs", "suites", "git_footprint", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
-CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.1.0"
+CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.2.0"
 SPEC_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
@@ -288,6 +300,17 @@ def is_verifier_report_path(path: str, *, explicit: Iterable[str] = ()) -> bool:
     return normalised in exact or normalised.startswith(VERIFIER_REPORT_ROOTS)
 
 
+def is_verifier_metrics_path(path: str) -> bool:
+    """Return whether a tracked path is a per-run metrics artifact.
+
+    Unlike reports, metrics have no explicit-report analogue and no blanket
+    withholding: every metrics path stays reachable unless it is separately
+    identified as belonging to the spec under verification.
+    """
+    normalised = _normalise_repo_path(path)
+    return normalised.startswith(VERIFIER_METRICS_ROOTS) and normalised.endswith(".yaml")
+
+
 def normalise_spec_identity(spec_id: str) -> str:
     """Return the spec identity used to scope same-spec containment.
 
@@ -397,13 +420,13 @@ def _clear_snapshot(destination: Path) -> None:
             shutil.rmtree(child)
 
 
-def _tracked_report_objects(
+def _tracked_objects_matching(
     source_repository: Path,
     ref: str,
     *,
-    report_paths: Iterable[str],
+    predicate,
 ) -> dict[str, str]:
-    """Return tracked report paths and blob IDs for one trusted ref."""
+    """Return tracked ``{path: blob_id}`` pairs at one trusted ref matching *predicate*."""
     objects: dict[str, str] = {}
     entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
     for raw in entries:
@@ -412,9 +435,29 @@ def _tracked_report_objects(
         metadata, raw_path = raw.split(b"\t", 1)
         _mode, kind, object_id = metadata.decode("ascii").split()
         path = _normalise_repo_path(raw_path.decode("utf-8", "surrogateescape"))
-        if kind == "blob" and is_verifier_report_path(path, explicit=report_paths):
+        if kind == "blob" and predicate(path):
             objects[path] = object_id
     return objects
+
+
+def _tracked_report_objects(
+    source_repository: Path,
+    ref: str,
+    *,
+    report_paths: Iterable[str],
+) -> dict[str, str]:
+    """Return tracked report paths and blob IDs for one trusted ref."""
+    return _tracked_objects_matching(
+        source_repository, ref,
+        predicate=lambda path: is_verifier_report_path(path, explicit=report_paths),
+    )
+
+
+def _tracked_metrics_objects(source_repository: Path, ref: str) -> dict[str, str]:
+    """Return tracked metrics paths and blob IDs for one trusted ref."""
+    return _tracked_objects_matching(
+        source_repository, ref, predicate=is_verifier_metrics_path,
+    )
 
 
 def _materialize_ref(
@@ -424,11 +467,13 @@ def _materialize_ref(
     *,
     report_paths: Iterable[str],
     retained_report_paths: Iterable[str] = (),
+    same_spec_metrics_paths: Iterable[str] = (),
 ) -> list[str]:
     """Materialize one tracked snapshot without sharing the source object DB."""
     _clear_snapshot(destination)
     excluded: list[str] = []
     retained = set(retained_report_paths)
+    same_spec_metrics = set(same_spec_metrics_paths)
     entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
     for raw in entries:
         if not raw:
@@ -436,6 +481,9 @@ def _materialize_ref(
         metadata, raw_path = raw.split(b"\t", 1)
         mode, kind, object_id = metadata.decode("ascii").split()
         path = _normalise_repo_path(raw_path.decode("utf-8", "surrogateescape"))
+        if path in same_spec_metrics:
+            excluded.append(path)
+            continue
         if is_verifier_report_path(path, explicit=report_paths) and path not in retained:
             excluded.append(path)
             continue
@@ -487,6 +535,12 @@ def prepare_verifier_surface(
     unchanged canonical tests may consume their own fixtures; their exact
     content hashes are recorded in containment evidence.
 
+    Metrics artifacts (SPEC-243-003) get a narrower, fourth rule recorded in
+    ``same_spec_excluded_metrics_paths``: a metrics file whose path or content
+    identifies *spec_id* is withheld the same way a same-spec report is.
+    Unlike reports, an unrelated spec's metrics file is never withheld and
+    needs no retention bookkeeping — it was never a candidate for exclusion.
+
     Same-spec resolution runs before the destination repository exists, so a
     failure to compute it leaves no surface behind at all.
     """
@@ -507,6 +561,15 @@ def prepare_verifier_surface(
         spec_id=spec_id,
         report_objects={
             "baseline": baseline_report_objects, "head": head_report_objects,
+        },
+    )
+    baseline_metrics_objects = _tracked_metrics_objects(source_repository, baseline_ref)
+    head_metrics_objects = _tracked_metrics_objects(source_repository, head_ref)
+    same_spec_metrics = same_spec_report_exclusions(
+        source_repository,
+        spec_id=spec_id,
+        report_objects={
+            "baseline": baseline_metrics_objects, "head": head_metrics_objects,
         },
     )
     destination.mkdir(parents=True, exist_ok=True)
@@ -558,6 +621,7 @@ def prepare_verifier_surface(
             ref,
             report_paths=report_paths,
             retained_report_paths=retained_reports,
+            same_spec_metrics_paths=same_spec_metrics,
         )
         _run_git(destination, "add", "-A")
         result = subprocess.run(
@@ -591,6 +655,7 @@ def prepare_verifier_surface(
         "explicit_report_paths": list(report_paths),
         "same_spec_id": spec_id,
         "same_spec_excluded_paths": same_spec_exclusions,
+        "same_spec_excluded_metrics_paths": dict(sorted(same_spec_metrics.items())),
         "retained_historical_report_sha256": retained_hashes,
         "report_reachability": probes,
         "shared_object_database": False,
@@ -599,6 +664,41 @@ def prepare_verifier_surface(
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return evidence
+
+
+def configured_suite_command(source_repository: Path) -> str | None:
+    """Read the declared canonical suite command for verifier dispatch (SPEC-243-001).
+
+    Resolves *source_repository*'s Nightshift kit root the same way the LOOP's
+    own command execution does (``preflight.resolve_kit_root``) and reads
+    ``commands.test`` from that project's ``config.yaml`` with the kit's one
+    shared multi-document config reader (``preflight.load_commands``) --
+    reusing both rather than adding a second, independently-drifting parser.
+
+    Fails closed to ``None`` on any absence or malformation: a missing kit
+    root, an unreadable/malformed config.yaml, or a ``commands.test`` value
+    that is missing, null, empty, or not a string. Callers must treat
+    ``None`` as "no configured suite" and select the no-test-suite dispatch
+    path rather than fabricate suite evidence (R3).
+    """
+    if load_commands is None or resolve_kit_root is None or KitRootError is None:
+        return None
+    try:
+        kit_root = resolve_kit_root(source_repository)
+    except KitRootError:
+        return None
+    except Exception:
+        return None
+    try:
+        commands = load_commands(kit_root / "config.yaml")
+    except Exception:
+        return None
+    if not isinstance(commands, dict):
+        return None
+    command = commands.get("test")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    return command.strip()
 
 
 def prepare_verifier_dispatch(
@@ -716,6 +816,15 @@ def prepare_verifier_dispatch(
             ).items()
             if path not in set(normalized_reports)
         }
+        same_spec_metrics = durable_evidence.get("same_spec_excluded_metrics_paths")
+        observed_same_spec_metrics = same_spec_report_exclusions(
+            source_repository,
+            spec_id=spec_id,
+            report_objects={
+                "baseline": _tracked_metrics_objects(source_repository, baseline_ref),
+                "head": _tracked_metrics_objects(source_repository, head_ref),
+            },
+        )
         observed_retained: dict[str, str] = {}
         if isinstance(retained, dict):
             for path in retained:
@@ -736,10 +845,14 @@ def prepare_verifier_dispatch(
             and observed_retained == retained
             and isinstance(same_spec, dict)
             and same_spec == observed_same_spec
+            and isinstance(same_spec_metrics, dict)
+            and same_spec_metrics == observed_same_spec_metrics
             and durable_evidence.get("same_spec_id")
             == normalise_spec_identity(spec_id)
             and set(same_spec) <= excluded_paths
+            and set(same_spec_metrics) <= excluded_paths
             and not set(same_spec) & set(retained)
+            and not set(same_spec_metrics) & set(retained)
             and isinstance(commits, dict)
             and set(commits) == {"baseline", "head"}
             and durable_evidence.get("spec_id") == spec_id
@@ -821,6 +934,14 @@ def verifier_surface_self_test() -> dict[str, Any]:
         unrelated = source / "canonical/reports/OTHER-SPEC/fixture.md"
         unrelated.parent.mkdir(parents=True)
         unrelated.write_text("unrelated fixture\n", encoding="utf-8")
+        # SPEC-243-003: a same-spec metrics artifact and an unrelated spec's
+        # metrics artifact, both present unmodified across both arms. The smoke
+        # contract is that the first is withheld and the second stays reachable.
+        same_spec_metrics_fixture = source / "canonical/metrics/2026-01-01_001_SMOKE.yaml"
+        same_spec_metrics_fixture.parent.mkdir(parents=True, exist_ok=True)
+        same_spec_metrics_fixture.write_text("task_id: SMOKE\nstatus: completed\n", encoding="utf-8")
+        unrelated_metrics_fixture = source / "canonical/metrics/2026-01-01_001_OTHER-SPEC.yaml"
+        unrelated_metrics_fixture.write_text("task_id: OTHER-SPEC\nstatus: completed\n", encoding="utf-8")
         _run_git(source, "add", "-A")
         _run_git(source, "commit", "-qm", "baseline")
         baseline = _run_git(source, "rev-parse", "HEAD").strip()
@@ -868,6 +989,22 @@ def verifier_surface_self_test() -> dict[str, Any]:
             surface / "canonical/reports/OTHER-SPEC/fixture.md"
         ).exists():
             raise RuntimeError("same-spec containment surface contract failed")
+        if evidence["same_spec_excluded_metrics_paths"] != {
+            "canonical/metrics/2026-01-01_001_SMOKE.yaml": "path"
+        }:
+            raise RuntimeError("same-spec metrics containment smoke contract failed")
+        if (surface / "canonical/metrics/2026-01-01_001_SMOKE.yaml").exists() or not (
+            surface / "canonical/metrics/2026-01-01_001_OTHER-SPEC.yaml"
+        ).exists():
+            raise RuntimeError("same-spec metrics containment surface contract failed")
+        for ref in ("verifier-baseline", "verifier-head"):
+            probe = subprocess.run(
+                ["git", "-C", str(surface), "cat-file", "-e",
+                 f"{ref}:canonical/metrics/2026-01-01_001_SMOKE.yaml"],
+                capture_output=True, check=False, env=_git_environment(),
+            )
+            if probe.returncode == 0:
+                raise RuntimeError("same-spec metrics blob remains reachable from verifier surface")
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
             "head_commit": plan["head_commit"],
@@ -1158,11 +1295,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "prepare-dispatch":
+        # R2/SPEC-243-001: when the caller supplies no explicit --suite-command,
+        # derive the default from the source project's own declared config
+        # rather than falling back silently to the no-test-suite brief.
+        suite_commands = list(args.suite_command)
+        if not suite_commands:
+            configured = configured_suite_command(args.source)
+            if configured is not None:
+                suite_commands = [configured]
         try:
             prepared = prepare_verifier_dispatch(
                 args.source, args.destination, baseline_ref=args.baseline,
                 head_ref=args.head, report_paths=args.report_path,
-                evidence_path=args.evidence, suite_commands=args.suite_command,
+                evidence_path=args.evidence, suite_commands=suite_commands,
                 spec_id=args.spec_id, run_id=args.run_id,
             )
         except VerifierSurfacePreparationError:

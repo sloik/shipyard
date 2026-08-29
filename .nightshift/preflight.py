@@ -44,6 +44,11 @@ try:
 except ImportError:  # pragma: no cover
     managed_payload_provenance = None  # type: ignore[assignment]
 
+try:
+    import worktree_paths
+except ImportError:  # pragma: no cover
+    worktree_paths = None  # type: ignore[assignment]
+
 
 RUNNABLE_STATUSES = frozenset({"ready", "in_progress", "active"})
 BLOCKING_COMMANDS = frozenset({"build", "test"})
@@ -277,6 +282,93 @@ def _command_state(commands: dict[str, Any], repo: Path) -> dict[str, Any]:
     return results
 
 
+class KitRootError(RuntimeError):
+    """Raised when no supported Nightshift kit-root layout resolves (R3)."""
+
+
+def resolve_kit_root(repo: Path, *, own_dir: Path | None = None) -> Path:
+    """Resolve this repository's Nightshift kit root layout (R1-R3).
+
+    Prefers the canonical in-repo kit root (``own_dir`` — this script's own
+    directory when it is literally named ``canonical`` and shaped like a kit)
+    and falls back to an ordinary installed project's ``.nightshift/``
+    directory. Fails closed — raises ``KitRootError`` — when neither layout
+    resolves, when both resolve to distinct locations (ambiguous), or when a
+    candidate belongs to a different Git project than ``repo``.
+
+    Reuses ``worktree_paths.git_common_dir``, the existing Git-project
+    ownership helper, rather than adding an independent path heuristic.
+    """
+    repo = repo.resolve()
+    own = (own_dir if own_dir is not None else Path(__file__).resolve().parent).resolve()
+    if worktree_paths is None:
+        raise KitRootError("worktree_paths.py is unavailable; kit-root ownership cannot be verified")
+    try:
+        repo_common = worktree_paths.git_common_dir(repo)
+    except worktree_paths.WorktreePathError as exc:
+        raise KitRootError(f"repo is not a Git repository: {exc}") from exc
+
+    def _shaped(path: Path) -> bool:
+        return path.is_dir() and (path / "config.yaml").is_file()
+
+    def _owned(path: Path) -> bool:
+        try:
+            return worktree_paths.git_common_dir(path) == repo_common
+        except worktree_paths.WorktreePathError:
+            return False
+
+    layouts: dict[str, Path | None] = {
+        "installed": repo / ".nightshift",
+        "canonical": own if own.name == "canonical" else None,
+    }
+    valid: dict[str, Path] = {}
+    foreign: dict[str, Path] = {}
+    for name, candidate in layouts.items():
+        if candidate is None or not _shaped(candidate):
+            continue
+        if _owned(candidate):
+            valid[name] = candidate
+        else:
+            foreign[name] = candidate
+
+    resolved = {path.resolve() for path in valid.values()}
+    if len(resolved) > 1:
+        detail = ", ".join(f"{name}={path}" for name, path in sorted(valid.items()))
+        raise KitRootError(f"ambiguous Nightshift kit root for {repo}: {detail}")
+    if resolved:
+        return resolved.pop()
+    if foreign:
+        detail = ", ".join(f"{name}={path}" for name, path in sorted(foreign.items()))
+        raise KitRootError(
+            f"Nightshift kit root candidate(s) belong to a different Git project than {repo}: {detail}"
+        )
+    raise KitRootError(
+        f"no supported Nightshift kit root found for {repo} "
+        "(expected .nightshift/ or a canonical/ kit directory)"
+    )
+
+
+def _kit_root_denial_result(spec_id: str, repo: Path, reason: str) -> dict[str, Any]:
+    """Blocking denial result when no Nightshift kit root resolves (R3/AC3).
+
+    Matches the shape of other preflight results: no successful admission is
+    ever minted, and the failure carries a controlled, deterministic reason.
+    """
+    return {
+        "schema_version": 1,
+        "spec_id": spec_id,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "repo": str(repo),
+        "checks": {
+            "kit_root": {"resolved": False, "reason": reason},
+            "install_admission": {"ok": False, "reason": reason, "admission": "deny"},
+        },
+        "blocking_failures": [reason],
+        "warnings": [],
+        "ok": False,
+    }
+
+
 def run_install_admission(
     spec_id: str | None,
     *,
@@ -451,19 +543,44 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Nightshift Step 1 preflight checks.")
     parser.add_argument("--spec-id", required=True)
     parser.add_argument("--repo", default=".", type=Path)
-    parser.add_argument("--specs-dir", default=".nightshift/specs", type=Path)
-    parser.add_argument("--config", default=".nightshift/config.yaml", type=Path)
-    parser.add_argument("--metrics-dir", default=".nightshift/metrics", type=Path)
+    parser.add_argument("--specs-dir", default=None, type=Path)
+    parser.add_argument("--config", default=None, type=Path)
+    parser.add_argument("--metrics-dir", default=None, type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    result = run_preflight(args.spec_id, args.repo, args.specs_dir, args.config)
+    repo = args.repo.resolve()
+
+    # R1/R2: resolve the supported kit-root layout (canonical/ or .nightshift/)
+    # only for whichever paths the caller did not explicitly override. An
+    # explicit --specs-dir/--config/--metrics-dir always wins, unchanged from
+    # prior behavior.
+    kit_root: Path | None = None
+    kit_root_error: str | None = None
+    if args.specs_dir is None or args.config is None or args.metrics_dir is None:
+        try:
+            kit_root = resolve_kit_root(repo)
+        except KitRootError as exc:
+            kit_root_error = str(exc)
+
+    if kit_root_error is not None:
+        # R3: fail closed, no manual fallback — mints no admission result.
+        result = _kit_root_denial_result(args.spec_id, repo, kit_root_error)
+    else:
+        specs_dir = args.specs_dir if args.specs_dir is not None else kit_root / "specs"
+        config_path = args.config if args.config is not None else kit_root / "config.yaml"
+        result = run_preflight(args.spec_id, repo, specs_dir, config_path)
 
     if args.dry_run:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["ok"] else 1
 
-    metrics_dir = args.metrics_dir if args.metrics_dir.is_absolute() else args.repo / args.metrics_dir
+    if args.metrics_dir is not None:
+        metrics_dir = args.metrics_dir if args.metrics_dir.is_absolute() else repo / args.metrics_dir
+    elif kit_root is not None:
+        metrics_dir = kit_root / "metrics"
+    else:
+        metrics_dir = repo / ".nightshift" / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     out = metrics_dir / f"{args.spec_id}.preflight.json"
     result["artifact_path"] = str(out)

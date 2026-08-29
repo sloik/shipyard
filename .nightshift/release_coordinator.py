@@ -71,7 +71,7 @@ class RepositoryPlan:
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
 SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
-CANONICAL_SUITE_TIMEOUT_S = 300
+CANONICAL_SUITE_TIMEOUT_S = 600
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
 
 

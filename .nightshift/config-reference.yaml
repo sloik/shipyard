@@ -96,7 +96,7 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.8.3"
+kit_version: "3.9.1"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.

@@ -951,9 +951,23 @@ class ExtensionSupervisor:
 
     @staticmethod
     def _terminate_group(proc: subprocess.Popen[bytes]) -> None:
+        def _already_gone() -> bool:
+            # Our own Popen handle is the authority on whether this child has
+            # exited. A PermissionError against a pid/pgid this handle has
+            # already observed as reaped is pid/pgid reuse under load, not a
+            # live process we lack rights to signal. A PermissionError against
+            # a pid/pgid this handle still considers live is a genuine
+            # permission failure and must propagate.
+            return proc.poll() is not None
+
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
+            proc.wait()
+            return
+        except PermissionError:
+            if not _already_gone():
+                raise
             proc.wait()
             return
         try:
@@ -968,6 +982,9 @@ class ExtensionSupervisor:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if not _already_gone():
+                raise
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
