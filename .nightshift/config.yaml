@@ -1,4 +1,4 @@
-schema_version: "3.0.0"
+schema_version: "3.1.0"
 kit_version: "3.0.1"
 
 project:
@@ -161,3 +161,23 @@ comparison:
 #       requires: ["shellcheck"]
 #     conventions: "Use set -euo pipefail in all scripts."
 #     domain: "code"
+
+---
+
+# Opt-in drive-to-done ladder. The default unblock command does not read these
+# values and retains its one bounded repair / blocked-to-ready behavior.
+unblock:
+  ac_review:
+    max_loosened_per_pass: 2
+  to_done:
+    max_rung: 5
+    dry_run: false
+
+---
+
+# SPEC-266: class-specific recovery budgets are run-id keyed effects.
+resilience:
+  verifier_fail: {max_rounds: 2}
+  premise: {enabled: true}
+  evidence_gap: {max_passes: 1}
+  transport: {max_rebinds: 2}

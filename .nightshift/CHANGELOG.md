@@ -9,6 +9,118 @@
 
 ## [Unreleased]
 
+## 3.11.0 (2026-08-30)
+
+### Whole-kit release of the resilient-unblock kit with a registered config migration (SPEC-269)
+
+Bundles the fleet-facing release of the drive-to-done/resilience work landed across
+five prior specs, each already documented under its own heading below, plus this
+spec's own release-mechanics contribution:
+
+- SPEC-259 — the opt-in `/nightshift unblock <spec-id> --to-done` recovery ladder.
+- SPEC-260 — independent AC-review validation and rung-4 veto escalation.
+- SPEC-266 — the in-loop `resilience.*` recovery ladder (verifier_fail, premise,
+  evidence_gap, transport).
+- SPEC-267 — the machine-parseable, harness-aware command tutorial.
+- SPEC-268 — the board's drive-to-done copy prompt.
+
+Fleet installs previously received these changes only by reading the canonical
+repo's protocol docs; without a whole-kit release and a config migration, an
+install's `config.yaml` never gained the `resilience.*`/`unblock.*` blocks that
+SPEC-266/SPEC-259/SPEC-260 depend on, even after the kit's `config.yaml` schema
+carried them.
+
+- `config.yaml`/`config-reference.yaml` `schema_version` bumped `"3.0.0"` →
+  `"3.1.0"` (additive, non-breaking): the schema now formally documents the
+  `resilience.*` and `unblock.*` blocks that were already shipped as protocol
+  behavior but never reflected in the schema version.
+- Added `config_migrations.py`: a pure, idempotent, deterministic migration
+  (`add_resilience_and_unblock_blocks`) that adds the `resilience.*`/`unblock.*`
+  blocks with their documented starter defaults to an install's `config.yaml`
+  only when a block is absent, and bumps `schema_version` to `"3.1.0"`. A config
+  already at or above `"3.1.0"` is returned byte-identical (untouched); applying
+  the migration twice is identical to applying it once. This is "the registered
+  deterministic migration" `Skills/nightshift/SKILL.md` Step 3 (`/nightshift
+  release`) requires the coordinator's per-install migration workers to follow.
+- `release.py`'s manifest builder now reads `schema_version` from the canonical
+  `config.yaml` (falling back to `"3.0.0"` when absent, matching prior behavior)
+  instead of hard-coding `"3.0.0"` into every release manifest — the coordinator's
+  `_migration_needed()` check depends on this to ever flag an install as
+  requiring the SPEC-269 migration.
+- `release.py`'s `write_manifest()` no longer nests a retained manifest's own
+  `retained_manifests`/`unretained_manifests` inside the entry it retains. Each
+  nested copy duplicated a manifest already sitting beside it in the same flat
+  list, so every release doubled the manifest — 12KB at 3.8.4 growing to 60MB by
+  3.11.0 across eleven releases — while `resolve_retained_manifest()` never
+  recursed into the nested copies and so could never reach them. The 3.11.0
+  manifest is 221KB; all eleven retained releases keep their `kit_version`,
+  `fingerprint`, and complete `files` list. This also unblocks the release
+  itself: `release-marker.json` embeds the manifest, and a 29MB single-line
+  marker stalled content-scanning pre-commit hooks in the fleet for tens of
+  minutes per install.
+- `scanner.py` now recognizes every managed install staged in a repository
+  rather than only a root-level `.nightshift/`. New `staged_install_prefixes()`
+  derives each install prefix from the staged paths, and the managed-payload
+  guard, retained manifest, and exemption run once per install. A repository
+  with a nested install — Argo Home carries both `.nightshift/` and
+  `Skills/focus/.nightshift/` — previously had the nested install's verified
+  release bytes left outside the exemption, so a whole-kit release counted its
+  own payload toward the diff-size escalation (673 of 1,303 added lines) and
+  demanded a human sign-off on every release. Project-owned paths such as
+  `config.yaml` remain unexempted under every prefix.
+
+## 3.10.2 (2026-08-29)
+
+### Materialize both verifier suite arms before read-only dispatch (SPEC-282)
+
+- `prepare_verifier_surface()` now checks out each of `verifier-baseline` and
+  `verifier-head` into its own dedicated, already-runnable working directory
+  (linked worktrees of the standalone verifier repository only, never of the
+  source repository), instead of leaving both as bare tags inside a single
+  working tree checked out at head. Recorded in containment evidence as
+  `surface_repositories`; `containment_evidence_schema_version` bumped to
+  1.3.0 (additive field, not part of the closed identity projection).
+- `PreparedVerifierDispatch.public_plan()` gains `arm_working_directories`
+  (`{"baseline": ..., "head": ...}`) so the verifier brief can assign each arm
+  its own read-only working directory without any verifier-side checkout.
+- Added `capture_verifier_footprints()` / `verifier_footprint_errors_multi()`
+  to assert the read-only footprint gate over both assigned arm surfaces
+  (SPEC-228 R4): mutation or an unexpected generated artifact in either arm
+  voids the verdict.
+- `Skills/nightshift/SKILL.md` Step 5c: the dispatch boundary prose, the
+  verifier brief's assignment instructions, the footprint-capture snippet,
+  the verdict's `git_footprint` schema, and the embedded verdict validator
+  script now cover both materialized arms. The validator additionally rejects
+  a suite sample declaring `"executed": false`, a suite entry missing either
+  arm's samples, and a synthetic zero-count placeholder sample (zero passed,
+  zero failed, no failing names) — each as its own controlled evidence-gap
+  reason, never as an empty passing sample (SPEC-228, observed against
+  SPEC-279-001's verdict).
+
+
+## 3.10.1 (2026-08-29)
+
+### Board drive-to-done copy prompt (SPEC-268)
+
+- Added `⛒ COPY DRIVE-TO-DONE PROMPT`, visible only while the open spec is
+  `blocked` (hides `▶ COPY RUN PROMPT` in that state). `buildDriveToDonePrompt`
+  emits a harness-neutral body: `$nightshift unblock <id> --to-done` first,
+  with the `/nightshift` form for Claude Code / Hermes and other CLIs in
+  parentheses, plus a `--from-rung 3` hint when the blocker class is
+  `evidence_gap`.
+- `buildRunPrompt`'s kickoff line gained the same harness-syntax note.
+
+### Extend release-handoff hash coverage to non-manifest release inputs (SPEC-283)
+
+- `release_handoff._manifest_sha256()` now accepts an optional `canonical` root
+  and, when supplied, also hashes the current bytes of the non-manifest release
+  inputs `managed_paths()` accepts (`config.yaml`, `release-manifest.json`).
+- `build_delivery_receipt()` and `validate_positive_delivery()` accept and
+  thread through the same optional `canonical` parameter; `complete_pending_handoffs()`
+  now passes it. A handoff declaring `config.yaml`/`release-manifest.json` in
+  `changed_managed_paths` can now be positively verified and completed, instead
+  of staying `status: pending` forever.
+
 ## 3.10.0 (2026-08-29)
 
 ### In-loop resilience ladder (SPEC-266)

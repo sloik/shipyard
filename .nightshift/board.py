@@ -2816,6 +2816,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <div id="panel-reports-btn-wrap">
         <button class="btn" id="panel-reports-btn" onclick="openReportsView()">📋 REPORTS</button>
         <button class="btn" id="panel-run-prompt-btn" onclick="copyRunPrompt()" title="Copy a parent-agent prompt for kicking off and monitoring this Nightshift spec">▶ COPY RUN PROMPT</button>
+        <button class="btn" id="panel-drive-to-done-btn" onclick="copyDriveToDonePrompt()" title="Copy a parent-agent prompt to drive this blocked spec to done" style="display:none">⛒ COPY DRIVE-TO-DONE PROMPT</button>
         <button class="btn" id="panel-open-vscode-btn" onclick="openCurrentSpecInVSCode()" title="Open this spec in a new VS Code window">↗ OPEN/EDIT</button>
       </div>
       <hr class="panel-divider">
@@ -2925,6 +2926,7 @@ let graphNodesDataset = null;
 let openPanelId = null;       // spec id currently shown in detail panel
 let panelRequestVersion = 0;  // monotonically rejects a late prior selection
 let openPanelMtime = null;    // _mtime snapshot of spec currently shown in panel
+let openPanelBlockerClass = ''; // blocker_class of spec currently shown in panel (SPEC-268)
 let hiddenColumns = new Set(); // set of column ids hidden by user
 let columnWidths = {};         // { colId: widthPx }
 let collapsedColumns = new Set();
@@ -3897,6 +3899,13 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   attachSpecRefPreview(document.getElementById('panel-chips'));
   // SPEC-064: fill in external dep statuses from peer boards (async, best-effort)
   fillExternalChipStatuses(document.getElementById('panel-chips'));
+
+  // SPEC-268: the drive-to-done prompt replaces the run-kickoff prompt while a
+  // spec is blocked — the recovery it names only makes sense in that state.
+  const isBlocked = currentStatus === 'blocked';
+  document.getElementById('panel-run-prompt-btn').style.display = isBlocked ? 'none' : '';
+  document.getElementById('panel-drive-to-done-btn').style.display = isBlocked ? '' : 'none';
+  openPanelBlockerClass = fm.blocker_class || fm.block_reason || '';
 
   openPanelId = specId;
   openPanelMtime = fm._mtime || null;
@@ -5059,6 +5068,7 @@ function buildRunPrompt(specId, specTitle = '') {
     'Use the Nightshift kickoff command to run this spec:',
     '',
     `$nightshift kickoff ${specLabel}`,
+    `(Codex syntax. In Claude Code / Hermes and other CLIs type: /nightshift kickoff ${specLabel})`,
     '',
     'This is the parent kickoff flow. Use the Nightshift skill exactly.',
     'Do not implement, research, validate, or code the spec yourself. Launch and coordinate the orchestrator subagent through the skill flow, monitor progress, then autonomously resolve the run as the skill specifies: verify the evidence gate and merge if sufficient; if the orchestrator reports blocked/stuck, use the controller-backed unblock protocol. The observable packet/result must show eligibility, attempt result, causal confidence, evidence references, and whether human action is needed—never raw logs, secrets, or private-local paths. After the run report is written, process any "## Suggested Follow-up Specs" section per the skill (check_followup_spec.py conflict check).',
@@ -5071,6 +5081,42 @@ async function copyRunPrompt() {
   const copied = await copyText(buildRunPrompt(specId, specPromptTitle(specId)));
   if (copied) {
     showToast(`▶ run prompt copied for ${specId}`);
+  } else {
+    showToast('⚠ clipboard write failed');
+  }
+}
+
+function buildDriveToDonePrompt(specId, specTitle = '', blockerClass = '') {
+  const title = (specTitle || '').trim();
+  const regexChars = '.+*?^$()[]{}|\\\\';
+  const escapedSpecId = [...specId].map(ch => regexChars.includes(ch) ? `\\\\${ch}` : ch).join('');
+  const titleStartsWithSpecId = new RegExp(`^${escapedSpecId}(?:$|\\\\s|[—–-])`).test(title);
+  const specLabel = title && !titleStartsWithSpecId ? `${specId} ${title}` : (title || specId);
+  const lines = [
+    'Use the Nightshift unblock command in drive-to-done mode for this spec:',
+    '',
+    `$nightshift unblock ${specId} --to-done  (${specLabel})`,
+    `(Codex syntax. In Claude Code / Hermes and other CLIs type: /nightshift unblock ${specId} --to-done)`,
+  ];
+  if (blockerClass === 'evidence_gap') {
+    lines.push(
+      '',
+      `Blocker class evidence_gap: start the ladder partway up — add --from-rung 3 to the unblock command above.`
+    );
+  }
+  lines.push(
+    '',
+    'Work until the spec reaches status: done, following the drive-to-done ladder in the Nightshift skill exactly. Loosening an AC is a last resort and must pass the AC-review agent; if it is vetoed and you still cannot deliver, stop and ask before proceeding. Record every AC change in the AC Amendments section of the spec. Subagents and agent teams are allowed. Report: rung reached, attempt results, causal confidence, evidence references, and whether human action is needed — never raw logs, secrets, or private-local paths.'
+  );
+  return lines.join('\\n');
+}
+
+async function copyDriveToDonePrompt() {
+  if (!openPanelId) { showToast('no spec selected'); return; }
+  const specId = openPanelId;
+  const copied = await copyText(buildDriveToDonePrompt(specId, specPromptTitle(specId), openPanelBlockerClass));
+  if (copied) {
+    showToast(`⛒ drive-to-done prompt copied for ${specId}`);
   } else {
     showToast('⚠ clipboard write failed');
   }

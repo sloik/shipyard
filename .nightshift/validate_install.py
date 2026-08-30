@@ -119,7 +119,7 @@ REQUIRED_CONFIG_SECTIONS = (
     "project", "commands", "review", "runner", "git", "nightshift_state", "release_policy",
 )
 RUNNER_MODES = {"inline", "orchestrator"}
-SUPPORTED_SCHEMA_VERSIONS = {"3.0.0"}
+SUPPORTED_SCHEMA_VERSIONS = {"3.0.0", "3.1.0"}  # SPEC-269: registers 3.1.0 (resilience.*/unblock.* blocks)
 EFFECTIVE_DOMAINS = {"code", "research", "analysis"}
 REVIEW_MODES = {"self", "subagent", "hybrid"}
 REVIEW_PERSONAS = {"architect", "security", "performance", "domain", "quality", "user"}
@@ -128,6 +128,8 @@ KNOWN_TOP_LEVEL_KEYS = {
     "observability", "commands", "conventions", "review", "knowledge", "devkb", "metrics",
     "circuit_breaker", "git", "runner", "comparison", "watcher", "checkpointing", "stacks",
     "parallel_admission", "domain", "handlers", "outcomes", "outcome_routing",
+    # SPEC-266/SPEC-259/SPEC-260 config blocks; schema-documented as of SPEC-269 (3.1.0).
+    "resilience", "unblock", "parallel_integration", "run_token_ceiling",
 }
 SAFE_INVOCATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 SAFE_SPEC_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")

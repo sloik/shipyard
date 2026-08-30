@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import config_migrations
 import release
 import release_handoff
 from observability_enroll import release_disposition
@@ -437,6 +438,31 @@ def build_migration_request(
             manifest.get("migration_checks", ["python3 validate_specs.py specs/"])
         ),
         manifest_fingerprint=manifest["fingerprint"],
+    )
+
+
+def default_migration_runner(request: MigrationRequest) -> MigrationResult:
+    """Reference implementation of "the registered deterministic migration".
+
+    ``Skills/nightshift/SKILL.md`` Step 3 dispatches one fresh, worktree-isolated
+    subagent per install and gives it only the old/required schema and the
+    registered migration to follow — it does not call this function directly.
+    This is the testable, canonical implementation that dispatch instructs each
+    worker to reproduce exactly (``config_migrations.migrate``), and it is also a
+    valid ``migration_runner`` for a caller that wants that exact deterministic
+    behavior without spawning a subagent (e.g. a smoke test or a project with no
+    per-install customization to reconcile).
+    """
+    config_path = Path(request.install) / "config.yaml"
+    current_text = config_path.read_text() if config_path.is_file() else ""
+    migrated_text = config_migrations.migrate(
+        current_text, target=request.required_schema
+    )
+    return MigrationResult(
+        worker_id=request.worker_id,
+        changes={"config.yaml": migrated_text},
+        validation_passed=True,
+        isolation=request.isolation,
     )
 
 

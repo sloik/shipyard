@@ -8,13 +8,18 @@
 # This file is a valid YAML document that can be loaded and parsed. It serves
 # as both documentation and a complete example of a multi-stack project config.
 #
-# Kit Version: 3.6.3 (2026-08-26)
-# Schema Version: 3.0.0 (multi-stack support)
+# Kit Version: 3.11.0 (2026-08-30)
+# Schema Version: 3.1.0 (documented `resilience.*`/`unblock.*` blocks; multi-stack
+#   support unchanged)
 #
 # Backward compatibility:
 #   When the `stacks:` section is ABSENT, behavior is identical to v2.2.1.
 #   Single-stack projects require no migration and no version bump.
 #   The `stacks:` section requires schema_version: "3.0.0" or higher.
+#   Installs below schema_version "3.1.0" are brought up to date by the
+#   registered, idempotent migration in `config_migrations.py` (SPEC-269),
+#   which adds the `resilience.*`/`unblock.*` blocks with their documented
+#   defaults only when they are absent.
 #
 # =============================================================================
 
@@ -25,15 +30,17 @@
 # =============================================================================
 # Type:     string (SemVer)
 # Required: yes
-# Default:  "3.0.0"
+# Default:  "3.1.0"
 #
 # The SemVer version of the config schema itself. This is distinct from
 # kit_version, which tracks the Nightshift protocol/runtime bundle.
 #
-# 3.0.0 adds multi-stack support. The `stacks:` section is optional; projects
-# without it keep flat-command behavior.
+# 3.1.0 documents the `resilience.*` (SPEC-266) and `unblock.*` (SPEC-259,
+# SPEC-260) blocks in the schema and registers their deterministic install
+# migration (SPEC-269). 3.0.0 adds multi-stack support. The `stacks:` section
+# is optional; projects without it keep flat-command behavior.
 
-schema_version: "3.0.0"
+schema_version: "3.1.0"
 
 ---
 
@@ -48,6 +55,9 @@ schema_version: "3.0.0"
 # Used by the loop and tooling to enable/disable features and validate schema.
 #
 # Version history:
+#   3.11.0: Whole-kit release for the resilient-unblock kit (SPEC-259, SPEC-260,
+#           SPEC-266..268) with the registered `resilience.*`/`unblock.*` config
+#           schema migration (SPEC-269).
 #   3.6.3: Scope private experiment sequences per experiment (SPEC-238).
 #   3.6.2: Preserve immutable origin evidence across reenrollment (SPEC-238).
 #   3.6.1: Preserve experiment event chains across private-sink outages (SPEC-238).
@@ -96,7 +106,7 @@ schema_version: "3.0.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.10.0"
+kit_version: "3.11.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.

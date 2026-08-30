@@ -72,6 +72,21 @@ def kit_version(canonical: Path) -> str:
     return match.group(1)
 
 
+def schema_version(canonical: Path) -> str:
+    """Return the canonical config schema version (SPEC-269).
+
+    Falls back to ``"3.0.0"`` when ``config.yaml`` has no ``schema_version``
+    field, matching this module's historical hard-coded manifest value so
+    fixtures that omit the field keep their prior behavior unchanged.
+    """
+    match = re.search(
+        r'^schema_version:\s*"([^"]+)"',
+        (canonical / "config.yaml").read_text(),
+        re.MULTILINE,
+    )
+    return match.group(1) if match else "3.0.0"
+
+
 def manifest_files(canonical: Path, names: list[str]) -> list[dict]:
     entries = []
     for name in sorted(names):
@@ -310,7 +325,7 @@ def build_manifest(
 ) -> dict:
     payload = {
         "kit_version": kit_version(canonical),
-        "schema_version": "3.0.0",
+        "schema_version": schema_version(canonical),
         "files": manifest_files(canonical, names),
         "smoke_checks": smoke_checks
         or [
@@ -340,6 +355,27 @@ def build_manifest(
     )
 
 
+HISTORY_KEYS = frozenset({"retained_manifests", "unretained_manifests"})
+
+
+def flatten_retained(entry: dict) -> dict:
+    """Empty a retained manifest's own history before it is retained again.
+
+    A retained entry that carries its own ``retained_manifests`` duplicates
+    manifests that already sit beside it in the same list, so each release
+    doubles the file (measured: 12KB at 3.8.4 to 29MB at 3.11.0 across eleven
+    releases). ``resolve_retained_manifest`` scans the list without recursing,
+    so the nested copies were never reachable evidence in the first place.
+    The keys are emptied rather than dropped so a retained entry keeps the
+    shape of the manifest it came from.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    if not any(entry.get(key) for key in HISTORY_KEYS):
+        return entry
+    return {**entry, **{key: [] for key in HISTORY_KEYS}}
+
+
 def build_manifest_from_payload(
     payload: dict,
     *,
@@ -350,10 +386,10 @@ def build_manifest_from_payload(
     current = {
         key: value
         for key, value in payload.items()
-        if key not in {"fingerprint", "retained_manifests", "unretained_manifests"}
+        if key not in {"fingerprint"} | HISTORY_KEYS
     }
     current["retained_manifests"] = sorted(
-        retained_manifests,
+        (flatten_retained(item) for item in retained_manifests),
         key=lambda item: (str(item.get("kit_version", "")), str(item.get("fingerprint", ""))),
     )
     current["unretained_manifests"] = sorted(

@@ -8,6 +8,7 @@ pending handoff after a successful full-kit rollout.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -136,12 +137,42 @@ def release_impact(changed_paths: list[str], manifest: Mapping[str, Any]) -> lis
     return sorted(path for path in changed_paths if path in known)
 
 
-def _manifest_sha256(manifest: Mapping[str, Any]) -> dict[str, str]:
-    return {
+# Non-manifest release inputs named by ``managed_paths()`` (see its docstring)
+# that never appear in ``manifest["files"]``: ``config.yaml`` is project-owned
+# per install and deliberately excluded from the shipped payload list;
+# ``release-manifest.json`` is canonical-only release bookkeeping, never
+# copied to fleet installs. ``config-reference.yaml`` is not listed here
+# because it already appears in ``manifest["files"]`` as an ordinary
+# ``CANONICAL_PROTOCOL_FILES`` entry.
+_NON_MANIFEST_HASHED_INPUTS = ("config.yaml", "release-manifest.json")
+
+
+def _manifest_sha256(
+    manifest: Mapping[str, Any], canonical: Path | None = None
+) -> dict[str, str]:
+    """Return verifiable SHA-256 hashes for manifest-listed and named inputs.
+
+    ``manifest["files"]`` covers the ordinary managed payload. When
+    ``canonical`` is supplied, also hash the current bytes of the
+    non-manifest release inputs ``managed_paths()`` accepts
+    (``config.yaml``, ``release-manifest.json``) so that a handoff naming
+    them can be positively verified, exactly as it can be for a
+    manifest-listed path. A path already present from ``manifest["files"]``
+    is never overwritten by this step.
+    """
+    hashes = {
         str(entry.get("path")): str(entry.get("sha256"))
         for entry in manifest.get("files", [])
         if isinstance(entry, Mapping)
     }
+    if canonical is not None:
+        for name in _NON_MANIFEST_HASHED_INPUTS:
+            if name in hashes:
+                continue
+            candidate = canonical / name
+            if candidate.is_file():
+                hashes[name] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return hashes
 
 
 def _semver(value: Any) -> tuple[int, int, int] | None:
@@ -214,9 +245,16 @@ def build_delivery_receipt(
     artifact: Mapping[str, Any],
     manifest: Mapping[str, Any],
     release_result: Mapping[str, Any],
+    *,
+    canonical: Path | None = None,
 ) -> dict[str, Any]:
-    """Project coordinator state into a portable per-handoff receipt."""
-    hashes = _manifest_sha256(manifest)
+    """Project coordinator state into a portable per-handoff receipt.
+
+    ``canonical``, when supplied, lets the receipt's hash source also cover
+    the non-manifest release inputs named in ``changed_managed_paths`` (see
+    ``_manifest_sha256``).
+    """
+    hashes = _manifest_sha256(manifest, canonical)
     changed = artifact.get("changed_managed_paths", [])
     receipt = {
         "schema_version": DELIVERY_RECEIPT_SCHEMA_VERSION,
@@ -336,13 +374,23 @@ def validate_artifact(
 
 
 def validate_positive_delivery(
-    artifact: Mapping[str, Any], *, spec_id: str, manifest: Mapping[str, Any]
+    artifact: Mapping[str, Any],
+    *,
+    spec_id: str,
+    manifest: Mapping[str, Any],
+    canonical: Path | None = None,
 ) -> list[str]:
     """Require coordinator-authored positive delivery proof for a completed handoff.
 
     ``validate_artifact`` deliberately remains compatible with historical completed
     records whose ``release_report`` is a string token.  Call this stricter validator
     anywhere a positive managed-install delivery must be proven.
+
+    ``canonical``, when supplied, extends the exact-hash check to the
+    non-manifest release inputs ``managed_paths()`` accepts (``config.yaml``,
+    ``release-manifest.json``) by hashing their actual current bytes under
+    ``canonical`` (see ``_manifest_sha256``). Without it, those two paths keep
+    their prior behavior of never satisfying the exact-hash check.
     """
     errors = validate_artifact(artifact, spec_id=spec_id, manifest=manifest)
     receipt = artifact.get("delivery_receipt")
@@ -390,7 +438,7 @@ def validate_positive_delivery(
 
     changed = artifact.get("changed_managed_paths")
     changed_paths = changed if isinstance(changed, list) else []
-    expected_hashes = _manifest_sha256(manifest)
+    expected_hashes = _manifest_sha256(manifest, canonical)
     expected = {
         path: expected_hashes[path] for path in changed_paths if path in expected_hashes
     }
@@ -555,10 +603,13 @@ def complete_pending_handoffs(
         candidate["status"] = "completed"
         candidate["release_report"] = DELIVERY_RECEIPT_REPORT
         candidate["delivery_receipt"] = build_delivery_receipt(
-            candidate, manifest, release_result
+            candidate, manifest, release_result, canonical=canonical
         )
         if validate_positive_delivery(
-            candidate, spec_id=str(candidate.get("spec_id", "")), manifest=manifest
+            candidate,
+            spec_id=str(candidate.get("spec_id", "")),
+            manifest=manifest,
+            canonical=canonical,
         ):
             continue
         path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")

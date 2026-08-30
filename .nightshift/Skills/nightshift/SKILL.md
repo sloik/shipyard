@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.10.0
+version: 3.11.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -712,7 +712,12 @@ code-writing subagent in an isolated worktree. Bound concurrency to at most four
 workers and give each worker only:
 
 - that one install and its old/required schemas;
-- the registered deterministic migration;
+- the registered deterministic migration — `canonical/config_migrations.py`'s
+  `MIGRATIONS` registry, keyed by target `schema_version`
+  (`release_coordinator.default_migration_runner` is the reference caller: it
+  reads the install's `config.yaml`, applies `config_migrations.migrate()`, and
+  returns the result unmodified — a worker's transformation of `config.yaml`
+  must match that function's output exactly, never a freeform edit);
 - `config.yaml` plus the declared `.migrations/` output allowlist;
 - manifest fingerprint, relevant DevKB and migration validation commands.
 
@@ -1552,31 +1557,43 @@ path defined in Step 6's `Nightshift-Resolution-Kind` documentation, reserved fo
 baseline commit, the declared suites, and the spec's ACs verbatim — and **no worker
 conclusions**, so the verifier cannot inherit them. Use this template verbatim:
 
-**Canonical verifier-gate boundary (SPEC-228, SPEC-239; applies to both briefs below).**
-Before composing either brief, materialize one standalone sanitized Git repository
-with `.nightshift/verification_report.py prepare-dispatch`. This repository is the
-sole verifier read surface. It has its own object database and contains synthetic
-`verifier-baseline` and `verifier-head` refs with every tracked branch path except
-three withheld classes of report: the explicit run-report paths, every report whose
-path or content names the spec under verification (same-spec reports, SPEC-239), and
-every remaining report the candidate added, removed, or changed. Reports belonging to
-other specs and unchanged across both arms are deliberately **retained**, because
-canonical tests consume them as fixtures — so the surface is scoped by subject
-matter, not swept clean of report roots. A linked worktree,
-sparse checkout, deleted checkout file, or prompt-only prohibition is not an
-eligible substitute because the source object database would keep report blobs
-reachable. The command must write durable containment evidence — which records the
-three withheld classes separately, plus the content hash of every retained report —
-and succeed only when `git cat-file -e` fails for every withheld path at both refs.
-It exits nonzero with `verifier_surface_unavailable` rather than emitting a surface
-whose same-spec scope could not be computed. The command emits one
-sanitized JSON dispatch plan containing only the standalone repository, its synthetic
-refs/commits, neutral suite tuple/brief kind, and containment-evidence digest. It does
-not emit the source checkout, report paths, or parent-owned evidence path. Dispatch is
-forbidden when the command exits nonzero, the plan is invalid, or the harness cannot
-assign the emitted repository as the verifier's only working repository. Record that
-as controlled `evidence_gap` reason `verifier_surface_unavailable`; never substitute
-the run worktree or a parent self-check.
+**Canonical verifier-gate boundary (SPEC-228, SPEC-239, SPEC-282; applies to both
+briefs below).** Before composing either brief, materialize one standalone
+sanitized Git repository with `.nightshift/verification_report.py
+prepare-dispatch`. This repository is the sole verifier read surface. It has
+its own object database and contains synthetic `verifier-baseline` and
+`verifier-head` refs with every tracked branch path except three withheld
+classes of report: the explicit run-report paths, every report whose path or
+content names the spec under verification (same-spec reports, SPEC-239), and
+every remaining report the candidate added, removed, or changed. Reports
+belonging to other specs and unchanged across both arms are deliberately
+**retained**, because canonical tests consume them as fixtures — so the
+surface is scoped by subject matter, not swept clean of report roots. Beyond
+the refs, `prepare-dispatch` also checks out each ref into its own dedicated,
+already-runnable working directory inside that same standalone repository
+(SPEC-282, R1/R2) — a synthetic ref alone is not dispatchable, because a
+verifier confined to read-only commands could never turn a bare tag into a
+filesystem tree without violating its own capability boundary. A linked
+worktree of the *source* repository, sparse checkout, deleted checkout file,
+or prompt-only prohibition is not an eligible substitute because the source
+object database would keep report blobs reachable; the two arm working
+directories are themselves worktrees of the *standalone* repository only,
+never of the source. The command must write durable containment evidence —
+which records the three withheld classes separately, the content hash of
+every retained report, and the exact working-directory path assigned to each
+arm — and succeed only when `git cat-file -e` fails for every withheld path at
+both refs. It exits nonzero with `verifier_surface_unavailable` rather than
+emitting a surface whose same-spec scope could not be computed, or whose two
+arm working directories could not both be materialized. The command emits one
+sanitized JSON dispatch plan containing only the standalone repository, its
+synthetic refs/commits, the two arm working directories
+(`arm_working_directories.baseline`/`.head`), neutral suite tuple/brief kind,
+and containment-evidence digest. It does not emit the source checkout, report
+paths, or parent-owned evidence path. Dispatch is forbidden when the command
+exits nonzero, the plan is invalid, or the harness cannot assign both emitted
+arm directories as the verifier's only working directories. Record that as
+controlled `evidence_gap` reason `verifier_surface_unavailable`; never
+substitute the run worktree or a parent self-check.
 
 ```bash
 DISPATCH_PLAN=$(python3 .nightshift/verification_report.py prepare-dispatch \
@@ -1599,9 +1616,10 @@ that value is absent, empty, or malformed rather than fabricating suite evidence
 — explicit `--suite-command` still always wins and is never merged with the
 config-derived default. Parse `DISPATCH_PLAN` as
 JSON and require its exact schema before composing the brief. Use only its
-`repository`, `verifier-baseline`/`verifier-head`, suite tuple, and synthetic commit
-IDs in the verifier assignment. The source/report arguments above remain
-parent-private preparation inputs and must not be copied into the brief.
+`repository`, `arm_working_directories.baseline`/`.head`, `verifier-baseline`/
+`verifier-head`, suite tuple, and synthetic commit IDs in the verifier
+assignment. The source/report arguments above remain parent-private
+preparation inputs and must not be copied into the brief.
 
 The versioned dispatch identity has two non-interchangeable values. `head_commit`
 is the synthetic Git object ID used only inside the standalone repository.
@@ -1610,11 +1628,13 @@ parent-private candidate revision and containment projection. Copy both unchange
 into the verifier verdict. Never derive one from the other or expose the exact
 candidate revision.
 
-Collect `git_footprint.tree_before`, `git_footprint.tree_after`, and
-`git_footprint.porcelain` from this standalone surface only. The source run
-worktree and parent checkout are outside the verifier capability boundary after
-surface creation. The delimited, verbatim Acceptance Criteria quote is the
-current spec's complete AC set for this verdict — do not infer AC IDs elsewhere.
+Collect `git_footprint.baseline` and `git_footprint.head`, each with its own
+`tree_before`, `tree_after`, and `porcelain`, from that arm's assigned working
+directory only (R4) — never from `repository` or from the other arm's
+directory. The source run worktree and parent checkout are outside the
+verifier capability boundary after surface creation. The delimited, verbatim
+Acceptance Criteria quote is the current spec's complete AC set for this
+verdict — do not infer AC IDs elsewhere.
 Populate declared suites only from exact configured commands, using neutral
 generated labels (`suite-1`, `suite-2`, ...). Never add expected totals, pass/fail
 claims, comments, or worker-derived prose to a suite header or label.
@@ -1871,22 +1891,27 @@ touching — or being tempted to touch — the verbatim AC block R2 requires.
 > coverage is Out of Scope for SPEC-ARGO-048, which changes how the gate is
 > asserted, not what it checks.
 
-**b. Dispatch, with the read-only footprint asserted by hash (R6/AC1).** Capture the
-worktree tree hash before and after; assert equality rather than inspecting a diff:
+**b. Dispatch, with the read-only footprint asserted by hash, over both assigned
+arm surfaces (R4/R6/AC1/AC2).** Capture each arm's worktree tree hash before and
+after; assert equality rather than inspecting a diff. Mutation or an unexpected
+generated artifact in *either* arm voids the verdict — a clean baseline arm
+never masks a dirty head arm or vice versa:
 
 ```bash
 # NIGHTSHIFT-FOOTPRINT-BEGIN
-# usage: FOOTPRINT_BEFORE=$(footprint_before <worktree>)   # export/keep it in scope
+# usage: FOOTPRINT_BASELINE_BEFORE=$(footprint_before <baseline-worktree>)
+#        FOOTPRINT_HEAD_BEFORE=$(footprint_before <head-worktree>)   # export/keep both in scope
 #        ... dispatch the verifier ...
-#        footprint_after <worktree>
-# footprint_after compares against $FOOTPRINT_BEFORE, so that assignment is required.
+#        footprint_after <baseline-worktree> "$FOOTPRINT_BASELINE_BEFORE" baseline
+#        footprint_after <head-worktree> "$FOOTPRINT_HEAD_BEFORE" head
 footprint_before() { git -C "$1" rev-parse 'HEAD^{tree}'; }
 footprint_after() {
-  after=$(git -C "$1" rev-parse 'HEAD^{tree}')
-  dirty=$(git -C "$1" status --porcelain | grep -v 'graphify-out/graph\.html$')
-  if [ "$after" != "$FOOTPRINT_BEFORE" ]; then echo "FOOTPRINT: violated (tree $FOOTPRINT_BEFORE -> $after)"; return 1; fi
-  if [ -n "$dirty" ]; then echo "FOOTPRINT: violated (working tree dirty)"; return 1; fi
-  echo "FOOTPRINT: clean ($after)"; return 0
+  worktree="$1"; before="$2"; label="$3"
+  after=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
+  dirty=$(git -C "$worktree" status --porcelain | grep -v 'graphify-out/graph\.html$')
+  if [ "$after" != "$before" ]; then echo "FOOTPRINT[$label]: violated (tree $before -> $after)"; return 1; fi
+  if [ -n "$dirty" ]; then echo "FOOTPRINT[$label]: violated (working tree dirty)"; return 1; fi
+  echo "FOOTPRINT[$label]: clean ($after)"; return 0
 }
 # NIGHTSHIFT-FOOTPRINT-END
 ```
@@ -1895,18 +1920,24 @@ footprint_after() {
 Agent({
   description: "nightshift verify {spec-id}",
   subagent_type: "nightshift-verifier",
-  prompt: <composed verifier brief, beginning with the repository emitted in DISPATCH_PLAN as the mandatory workdir for every command>,
+  prompt: <composed verifier brief, naming DISPATCH_PLAN.arm_working_directories.baseline and .head as the two mandatory workdirs, one per arm, for every command>,
   mode: "bypassPermissions",
 })
 ```
 
 The verifier runs against the **standalone repository emitted in
-`DISPATCH_PLAN`**, never the existing run worktree. Every command in the brief
-must name that repository explicitly (for example with the tool's `workdir` or
-`git -C`). If the current harness cannot make that assignment, do not launch the
-verifier; resolve the controlled evidence gap instead. The parent retains the run
-worktree and both surfaces until after the verdict is validated, then performs
-parent-owned cleanup.
+`DISPATCH_PLAN`**, never the existing run worktree — and, since SPEC-282, that
+standalone repository already contains both arms pre-materialized as their own
+runnable, checked-out, read-only working directories at
+`DISPATCH_PLAN.arm_working_directories.baseline` and `.head`. The verifier
+never checks out a ref, creates a worktree, or materializes any file itself;
+it only names whichever of the two already-assigned directories a command
+targets (for example with the tool's `workdir` or `git -C`). Every command in
+the brief must name the correct arm's directory explicitly. If the current
+harness cannot make that assignment, do not launch the verifier; resolve the
+controlled evidence gap instead. The parent retains the run worktree and both
+arm surfaces until after the verdict is validated, then performs parent-owned
+cleanup.
 
 **c. Verdict schema.** The verifier writes one JSON object. Under the (a-alt)
 no-test-suite brief, `suites` is legitimately `[]` — the validator (below) never
@@ -1931,19 +1962,31 @@ carries evidence; an empty array is not a schema gap to work around:
       "command": "<exact command>",
       "flaky_suspected": true,
       "samples": {
-        "baseline": [{"failing": ["pkg/mod.py::test_a"], "failed": 1, "passed": 617}],
-        "head":     [{"failing": [], "failed": 0, "passed": 618}]
+        "baseline": [{"executed": true, "failing": ["pkg/mod.py::test_a"], "failed": 1, "passed": 617}],
+        "head":     [{"executed": true, "failing": [], "failed": 0, "passed": 618}]
       },
       "classification": {
         "regressed": [], "newly_flaky": [], "flaky_observed": ["pkg/mod.py::test_a"], "fixed": []
       }
     }
   ],
-  "git_footprint": {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain": ""},
+  "git_footprint": {
+    "baseline": {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain": ""},
+    "head":     {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain": ""}
+  },
   "premise_dispute": null,
   "contamination": null
 }
 ```
+
+A sample is evidence of an actual run, never a placeholder (R3, SPEC-282). The
+validator (below) rejects a sample that declares `"executed": false`, an arm
+with no samples at all, and a "zero-count placeholder" — a sample reporting
+zero passed, zero failed, and no failing names, which is indistinguishable
+from a suite that never ran. Each of the three is a controlled evidence-gap
+reason, not an empty passing sample. Do not fabricate a nonzero count to dodge
+this check; if an arm genuinely could not be run, that is exactly the
+evidence gap the validator exists to surface.
 
 When `verdict` is `disputes_premise`, `premise_dispute` is required and carries
 three fields: `claim`, `evidence` (both R5), and `spec_defect: true | false`
@@ -1993,15 +2036,20 @@ if v["verdict"] == "disputes_premise":
     if not d.get("claim") or not d.get("evidence"): die("disputes_premise without premise_dispute.claim + .evidence")
     if not isinstance(d.get("spec_defect"), bool): die("disputes_premise without premise_dispute.spec_defect (bool)")
 
-# R6 — read-only, asserted by hash. graphify-out/graph.html is excluded: a
-# background hook rewrites it after every commit in this repo, so its presence
-# in porcelain is pre-existing environmental noise, never something a verifier
-# caused — excluding it here (not upstream in footprint_after) keeps the
-# exclusion in exactly one place, auditable and narrow to this one known file.
-g = v["git_footprint"]
-if g.get("tree_before") != g.get("tree_after"): die("verifier mutated the repo (tree %s -> %s)" % (g.get("tree_before"), g.get("tree_after")))
-_dirty_lines = [l for l in (g.get("porcelain") or "").splitlines() if l.strip() and not l.strip().endswith("graphify-out/graph.html")]
-if _dirty_lines: die("verifier left the working tree dirty: " + "; ".join(_dirty_lines))
+# R4/R6 — read-only, asserted by hash, over BOTH assigned arm surfaces
+# (SPEC-282). A clean baseline arm never masks a dirty head arm or vice versa.
+# graphify-out/graph.html is excluded: a background hook rewrites it after
+# every commit in this repo, so its presence in porcelain is pre-existing
+# environmental noise, never something a verifier caused — excluding it here
+# (not upstream in footprint_after) keeps the exclusion in exactly one place,
+# auditable and narrow to this one known file.
+gf = v["git_footprint"]
+if not isinstance(gf, dict) or set(gf) != {"baseline","head"}: die("git_footprint must report both baseline and head arms")
+for arm_label in ("baseline","head"):
+    g = gf.get(arm_label) or {}
+    if g.get("tree_before") != g.get("tree_after"): die("%s: verifier mutated the repo (tree %s -> %s)" % (arm_label, g.get("tree_before"), g.get("tree_after")))
+    _dirty_lines = [l for l in (g.get("porcelain") or "").splitlines() if l.strip() and not l.strip().endswith("graphify-out/graph.html")]
+    if _dirty_lines: die("%s: verifier left the working tree dirty: %s" % (arm_label, "; ".join(_dirty_lines)))
 
 # R3 — per-AC status, and every AC in the spec covered.
 if not v["acs"]: die("no per-AC statuses")
@@ -2028,9 +2076,17 @@ for s in v["suites"]:
         smp = (s.get("samples") or {}).get(arm)
         if not smp: die("%s: no %s samples" % (s.get("name"), arm))
         for i, one in enumerate(smp):
+            # R3 (SPEC-282) — a sample is evidence of an actual run, never a
+            # placeholder. Reject an explicit non-execution marker...
+            if one.get("executed") is False: die("%s/%s[%d]: declared executed:false — controlled evidence gap, not a passing sample" % (s.get("name"), arm, i))
             # R3 — names, not totals.
             if not isinstance(one.get("failing"), list): die("%s/%s[%d]: totals-only verdict, no failing-name list" % (s.get("name"), arm, i))
             if "failed" in one and one["failed"] != len(one["failing"]): die("%s/%s[%d]: failed=%s but %d names" % (s.get("name"), arm, i, one["failed"], len(one["failing"])))
+            # ...and a synthetic zero-count placeholder: zero passed, zero
+            # failed, no failing names is indistinguishable from a suite that
+            # never ran.
+            if one.get("passed", 0) == 0 and one.get("failed", 0) == 0 and not one["failing"]:
+                die("%s/%s[%d]: zero-count placeholder — no evidence the suite actually ran" % (s.get("name"), arm, i))
         sets = [set(o["failing"]) for o in smp]
         arms[arm] = (set().union(*sets) if sets else set(), set.intersection(*sets) if sets else set(), len(sets))
     (b_any,b_all,b_n), (h_any,h_all,h_n) = arms["baseline"], arms["head"]

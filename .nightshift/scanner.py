@@ -69,8 +69,27 @@ PROJECT_OWNED_NIGHTSHIFT_PREFIXES = (
 PROTOCOL_ARCHIVE_PREFIX = ".argo/protocol-archive/"
 
 
-def _potential_managed_stage(path: str) -> bool:
-    prefix = ".nightshift/"
+INSTALL_MARKER = ".nightshift/"
+
+
+def staged_install_prefixes(paths: Iterable[str]) -> list[str]:
+    """Return every managed install prefix represented in *paths*.
+
+    A repository may carry more than one install — Argo Home has both
+    ``.nightshift/`` and ``Skills/focus/.nightshift/`` — and a whole-kit release
+    stages payload into all of them at once. Recognizing only a root-level
+    install left the other install's payload unexempted, so a release's own
+    verified bytes counted toward the diff-size escalation.
+    """
+    prefixes = set()
+    for path in paths:
+        index = path.find(INSTALL_MARKER)
+        if index != -1:
+            prefixes.add(path[: index + len(INSTALL_MARKER)])
+    return sorted(prefixes)
+
+
+def _potential_managed_stage(path: str, prefix: str = INSTALL_MARKER) -> bool:
     if not path.startswith(prefix):
         return False
     relative = path[len(prefix) :]
@@ -703,11 +722,15 @@ def main(argv: list[str] | None = None) -> int:
                 for path in staged_names.stdout.split(b"\0")
                 if path
             ]
-            staged_nightshift_paths = [path for path in staged_paths if path.startswith(".nightshift/")]
+            staged_nightshift_paths = [path for path in staged_paths if INSTALL_MARKER in path]
             archive_paths = verified_archive_snapshot_paths(staged_paths)
 
-    potential_managed_paths = [path for path in staged_nightshift_paths if _potential_managed_stage(path)]
-    if potential_managed_paths:
+    install_prefixes = [
+        prefix
+        for prefix in staged_install_prefixes(staged_nightshift_paths)
+        if any(_potential_managed_stage(path, prefix) for path in staged_nightshift_paths)
+    ]
+    if install_prefixes:
         # Import only on the installed hook path.  ``scan_diff`` is also used as
         # a standalone library by Cortex, whose intentionally narrow copy does
         # not own the Nightshift release/provenance helper graph.
@@ -719,27 +742,31 @@ def main(argv: list[str] | None = None) -> int:
             retained_manifest,
         )
 
-        try:
-            managed_rows = guard_staged_install(Path(".nightshift"))
-        except MetadataError as exc:
-            # With no trustworthy manifest, fail closed only for the staged
-            # Nightshift surface.  An application-only commit never enters this
-            # branch, so damaged metadata cannot freeze unrelated development.
-            print(f"[nightshift scanner] Managed payload metadata error: {exc}", file=sys.stderr)
-            print(format_guidance(), file=sys.stderr)
-            managed_payload_blocked = True
-        else:
+        exempt: set[str] = set()
+        for prefix in install_prefixes:
+            install = Path(prefix.rstrip("/"))
+            try:
+                managed_rows = guard_staged_install(install)
+            except MetadataError as exc:
+                # With no trustworthy manifest, fail closed only for the staged
+                # Nightshift surface.  An application-only commit never enters this
+                # branch, so damaged metadata cannot freeze unrelated development.
+                print(f"[nightshift scanner] Managed payload metadata error: {exc}", file=sys.stderr)
+                print(format_guidance(), file=sys.stderr)
+                managed_payload_blocked = True
+                continue
             if managed_rows:
                 print("[nightshift scanner] Managed payload edit rejected.", file=sys.stderr)
                 print(format_guidance(managed_rows), file=sys.stderr)
                 managed_payload_blocked = True
-            else:
-                # Preserve the repository-relative spelling emitted by git
-                # diff. The provenance module owns the release-relative list.
-                manifest = retained_manifest(Path(".nightshift"))
-                managed_paths = frozenset(
-                    f".nightshift/{path}" for path in managed_payload_paths(manifest)
-                )
+                continue
+            # Preserve the repository-relative spelling emitted by git
+            # diff. The provenance module owns the release-relative list.
+            manifest = retained_manifest(install)
+            exempt.update(
+                f"{prefix}{path}" for path in managed_payload_paths(manifest)
+            )
+        managed_paths = frozenset(exempt)
 
     diff_text = _staged_diff() if args.staged else args.diff_file.read_text(encoding="utf-8")
     report = scan_diff(

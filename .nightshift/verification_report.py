@@ -44,7 +44,7 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "acs", "suites", "git_footprint", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
-CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.2.0"
+CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.3.0"
 SPEC_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
@@ -76,6 +76,7 @@ class PreparedVerifierDispatch:
 
     def public_plan(self) -> dict[str, Any]:
         commits = self.evidence["surface_commits"]
+        surface_repositories = self.evidence["surface_repositories"]
         return {
             "schema_version": "2.0.0",
             "identity_schema_version": VERIFIER_IDENTITY_SCHEMA_VERSION,
@@ -87,6 +88,11 @@ class PreparedVerifierDispatch:
             "head_ref": "verifier-head",
             "baseline_commit": commits["baseline"],
             "head_commit": commits["head"],
+            # SPEC-282 (R1/R2/AC3): each arm is already materialized as its own
+            # runnable, read-only working directory under the same standalone
+            # surface -- the verifier never checks out or materializes a ref
+            # itself, it only names the already-assigned directory per arm.
+            "arm_working_directories": dict(surface_repositories),
             "implementation_head_digest": self.evidence["implementation_head_digest"],
             "brief_kind": "normal" if self.suite_commands else "no-test-suite",
             "suite_commands": list(self.suite_commands),
@@ -633,6 +639,21 @@ def prepare_verifier_surface(
         commits[label] = _run_git(destination, "rev-parse", "HEAD").strip()
         _run_git(destination, "tag", f"verifier-{label}")
 
+    # R1/R2 (SPEC-282): both refs so far exist only as tags inside the
+    # standalone repository's single working tree (left checked out at
+    # whichever ref was materialized last). A verifier confined to read-only
+    # commands cannot turn a tag into a runnable filesystem tree itself, so the
+    # parent-owned boundary must do it here, from the same sanitized
+    # containment projection and without touching the source repository's
+    # object database. Two linked worktrees of the standalone repo (not of the
+    # source) satisfy that: they share only the *standalone* repo's own object
+    # database with each other, never with `source_repository`.
+    surface_repositories: dict[str, str] = {}
+    for label in ("baseline", "head"):
+        arm_dir = destination / f"verifier-{label}"
+        _run_git(destination, "worktree", "add", "--detach", str(arm_dir), f"verifier-{label}")
+        surface_repositories[label] = str(arm_dir)
+
     probes = []
     excluded_paths = sorted(
         set(excluded_by_ref["baseline"]) | set(excluded_by_ref["head"])
@@ -651,6 +672,7 @@ def prepare_verifier_surface(
         "surface_kind": "standalone-sanitized-git",
         "source_refs": {"baseline": baseline_ref, "head": head_ref},
         "surface_commits": commits,
+        "surface_repositories": surface_repositories,
         "excluded_paths": excluded_by_ref,
         "explicit_report_paths": list(report_paths),
         "same_spec_id": spec_id,
@@ -880,6 +902,21 @@ def prepare_verifier_dispatch(
             ) == identity
             and _run_git(destination, "rev-parse", "verifier-baseline").strip() == commits["baseline"]
             and _run_git(destination, "rev-parse", "verifier-head").strip() == commits["head"]
+            # R1/R2 (SPEC-282): both arms must already be runnable, checked-out
+            # working directories -- not merely tags -- before dispatch, and each
+            # must actually resolve to its own arm's commit.
+            and isinstance(durable_evidence.get("surface_repositories"), dict)
+            and set(durable_evidence["surface_repositories"]) == {"baseline", "head"}
+            and all(
+                Path(durable_evidence["surface_repositories"][label]).is_dir()
+                for label in ("baseline", "head")
+            )
+            and all(
+                _run_git(
+                    Path(durable_evidence["surface_repositories"][label]), "rev-parse", "HEAD"
+                ).strip() == commits[label]
+                for label in ("baseline", "head")
+            )
         )
     except Exception as exc:
         raise VerifierSurfacePreparationError("verifier surface preparation failed") from exc
@@ -978,6 +1015,30 @@ def verifier_surface_self_test() -> dict[str, Any]:
             or no_suite_plan["suite_commands"]
         ):
             raise RuntimeError("normal/no-test-suite dispatch plan contract failed")
+        # R1/R2/AC1/AC3 (SPEC-282): each arm is its own already-materialized,
+        # runnable, checked-out working directory under the same standalone
+        # surface -- distinct from each other and from `repository` -- and a
+        # read-only command against each succeeds without any verifier-side
+        # checkout or file-materialization step.
+        for one_plan, one_surface in ((plan, surface), (no_suite_plan, no_suite_surface)):
+            arms = one_plan["arm_working_directories"]
+            if set(arms) != {"baseline", "head"}:
+                raise RuntimeError("dispatch plan did not assign both arm working directories")
+            head_dir = Path(arms["head"])
+            baseline_dir = Path(arms["baseline"])
+            if head_dir == baseline_dir:
+                raise RuntimeError("baseline and head arms resolved to the same directory")
+            if not head_dir.is_relative_to(one_surface.resolve()) or not baseline_dir.is_relative_to(
+                one_surface.resolve()
+            ):
+                raise RuntimeError("arm working directory escaped the standalone surface")
+            for label, workdir in (("baseline", baseline_dir), ("head", head_dir)):
+                probe = subprocess.run(
+                    ["git", "-C", str(workdir), "status", "--porcelain=v1"],
+                    capture_output=True, check=False, env=_git_environment(),
+                )
+                if probe.returncode:
+                    raise RuntimeError(f"read-only command failed against {label} arm surface")
         evidence = prepared.evidence
         if evidence["same_spec_excluded_paths"] != {
             "canonical/reports/SMOKE/earlier-round.md": "path"
@@ -1045,6 +1106,28 @@ def verifier_footprint_errors(before: GitFootprint, after: GitFootprint) -> list
     ]
     if dirty_paths:
         errors.append("verifier left the worktree dirty: " + "; ".join(dirty_paths))
+    return errors
+
+
+def capture_verifier_footprints(worktrees: dict[str, Path]) -> dict[str, GitFootprint]:
+    """Capture the footprint of every assigned arm surface (R4, SPEC-282)."""
+    return {label: capture_verifier_footprint(worktree) for label, worktree in worktrees.items()}
+
+
+def verifier_footprint_errors_multi(
+    before: dict[str, GitFootprint], after: dict[str, GitFootprint]
+) -> list[str]:
+    """Validate every assigned arm surface's read-only footprint (R4, SPEC-282).
+
+    Mutation or an unexpected generated artifact in *either* arm is an error;
+    a clean baseline arm never masks a dirty head arm or vice versa.
+    """
+    if set(before) != set(after):
+        return [f"footprint arms mismatch: before={sorted(before)} after={sorted(after)}"]
+    errors: list[str] = []
+    for label in sorted(before):
+        for message in verifier_footprint_errors(before[label], after[label]):
+            errors.append(f"{label}: {message}")
     return errors
 
 
