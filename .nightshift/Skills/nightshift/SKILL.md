@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.12.0
+version: 3.13.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1636,7 +1636,7 @@ frontmatter, as one entry of `context.required_inputs`, in this exact form:
 ```yaml
 context:
   required_inputs:
-  - external-evidence:/absolute/path/to/source-repository#repository/relative/path
+  - "external-evidence:{{ANCHOR}}/path/to/source-repository#repository/relative/path"
 ```
 
 Both halves are required. The left half names the source repository *root*; the
@@ -1644,6 +1644,31 @@ right half is a path relative to that root, never absolute and never containing
 `..`. Entries without the `external-evidence:` marker keep their existing
 meaning — ordinary upstream-artifact declarations — and are neither resolved nor
 projected. A declaration may name a single file or one bounded directory.
+
+*The root is anchored, not literal (SPEC-289).* A stored spec may not carry a
+host path — SPEC-071 refuses `/Users/...` as a leak — so the repository root is
+written with one of the three canonical path anchors, `{{PROJECT_ROOT}}`,
+`{{ARGO_HOME}}`, or `{{HOME}}`, and resolved at dispatch time by the same
+`path_vars` primitive the validator's vocabulary comes from. Resolution is
+fail-closed and its only context is the **subject project root** of the dispatch —
+the repository passed as `--source`, which in a real run is the *run worktree*, not
+the main checkout. `{{PROJECT_ROOT}}` is that worktree, so it reaches only content
+the dispatch's own checkout carries; an evidence repository sitting beside the main
+checkout is not there. Reach such a repository by `{{HOME}}` or `{{ARGO_HOME}}`.
+`{{ARGO_HOME}}` comes from `$ARGO_HOME` or
+the `session.md` walk-up *from that root*, and an anchor that does not resolve
+refuses the declaration as `anchor_resolution` before a single source byte is
+read. Quote the entry in YAML, and note three limits that are deliberate:
+
+- Only the **root** is resolved. A token in the right-hand path is not expanded;
+  it is a literal path component, and the declaration will be refused as
+  `missing`. Anchors choose a repository, never a member inside one.
+- There is **no literal escape**. A backtick-quoted or code-span token is left
+  verbatim by `path_vars` and then refused as `anchor_resolution` — it is not a
+  way to write a host path that the validator will not see.
+- `..` is not available. `{{PROJECT_ROOT}}/../other-repo` is rejected by spec
+  validation; reach a sibling repository through `{{HOME}}` or `{{ARGO_HOME}}`,
+  whichever actually contains it on every host that runs the spec.
 
 Four properties make this safe to expose to a verifier, and all four are enforced
 rather than assumed:
@@ -1693,7 +1718,8 @@ skip — and names both the declaration and the reason:
 | `same_spec_content` | a declared metrics artifact's content names this spec |
 | `absolute_path_escapes_source_repository` | the right-hand path is absolute |
 | `path_traversal` | the right-hand path contains `..` |
-| `not_a_git_repository` | the declared root is not a Git repository root |
+| `anchor_resolution` | the root's `{{ANCHOR}}` is unknown, unavailable from the subject project root, or survived resolution unresolved |
+| `not_a_git_repository` | the declared root resolved, but is not a Git repository root |
 | `symlink` / `symlink_member` | the path, its parent, or a directory member is a link |
 | `missing` | the declared path does not exist |
 | `untracked` / `untracked_member` | present but not committed at the source HEAD |
@@ -1713,6 +1739,57 @@ verifier so, without naming any source location: "Files under
 `.nightshift-verifier-inputs/` are read-only projections of predeclared external
 evidence, described in that directory's `MANIFEST.json`; they are not part of the
 repository under verification. Cite them from your assigned arm only."
+
+**Closure packet: SPEC-ARGO-067 (parent-owned, SPEC-289 R6).** 067 is the first
+consumer of this mechanism and was blocked twice — once by SPEC-288's absence, once
+by SPEC-289's anchor defect. Execute these steps in order; none of them loads a
+model, and none of them may be replaced by a parent self-check.
+
+1. **Declaration.** One entry, quoted, in 067's `context.required_inputs`:
+
+   ```yaml
+   context:
+     required_inputs:
+     - "external-evidence:{{HOME}}/Dropbox/Developer/ManagedProjects/Tools/benchmarks#results/2026-08-23T202546Z_agentic-unified-ctx131072"
+   ```
+
+   `{{HOME}}` is the anchor that resolves — the benchmarks repository is *not*
+   under Argo Home, so `{{ARGO_HOME}}` and `{{PROJECT_ROOT}}` cannot reach it and
+   `..` is forbidden. The run directory is admissible as measured on 2026-08-30:
+   57 tracked regular files, 2,504,722 bytes, clean at the source HEAD, no
+   symlinks — inside the 256-member and 8 MiB bounds, with no headroom to spare
+   if the declaration is widened to `results/`, which it must not be.
+2. **New baseline.** Both arms must carry an identical declaration, so 067's
+   historic baseline `14bdd483f5fb43dfd9bcd1d204645ca6da84934b` cannot be reused:
+   it predates the declaration and the arms would differ. Commit the declaration
+   edit *alone* on Argo `main` and use that commit as the new baseline.
+3. **New candidate.** The preserved evidence candidate
+   `nightshift/SPEC-ARGO-067-20260830` at `0672ea66` cannot be dispatched as-is
+   either. Rebase or recreate it on the new baseline so it carries the same
+   declaration, and change nothing else — the retained evidence, its report, and
+   its metrics stay byte-identical. Verify with a diff against `0672ea66` that
+   only the declaration line moved.
+4. **Dedicated run ID.** Allocate a new run ID for this dispatch. Do not reuse the
+   blocked runs' IDs; their durable records are evidence of the two refusals and
+   are not to be overwritten.
+5. **Rebuild the surface** with `prepare-dispatch` exactly as documented above,
+   passing `--spec-path` for 067's spec file (without it the declaration is inert
+   and the surface carries no evidence), a fresh empty destination, and a fresh
+   `--evidence` path under the new run ID. Confirm before dispatching that the
+   containment evidence records the input as `admitted` with `member_count` 57,
+   and that both arm directories contain the projection.
+6. **Dispatch the independent verifier** against the emitted plan, with the brief
+   addition above. The verifier reads the projection from its assigned arm; it is
+   never given the benchmarks path, and the parent never verifies 067 itself.
+7. **Terminalize only from the verdict.** A pass terminalizes 067 as `done`; a
+   fail returns it to the ladder with the verifier's findings. A refusal at step 5
+   is a controlled `evidence_gap` (`verifier_surface_unavailable`) — fix the
+   *declaration* and repeat from step 2. Never resolve 067 from the parent's own
+   reading of the evidence.
+8. **No rerun, ever.** This procedure loads no local model, starts no LM Studio
+   server, and re-executes no benchmark. The 2026-08-23 run is the evidence; the
+   projection is a copy of bytes already committed. If any step appears to require
+   sampling a model, the step is wrong — stop and report it.
 
 The versioned dispatch identity has two non-interchangeable values. `head_commit`
 is the synthetic Git object ID used only inside the standalone repository.

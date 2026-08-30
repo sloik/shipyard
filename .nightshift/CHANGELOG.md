@@ -9,6 +9,49 @@
 
 ## [Unreleased]
 
+## 3.13.0 (2026-08-30)
+
+### Resolve portable anchors in declared external verifier inputs (SPEC-289)
+
+SPEC-288's `external-evidence:<repository-root>#<repository-relative-path>` declarations
+could not both validate and execute: `validate_specs.py` (SPEC-071) correctly rejected a
+literal absolute repository root as a host-path leak and required a `{{ANCHOR}}`-relative
+token, while `verification_report.py::_resolve_one_declaration` called only
+`os.path.expanduser` on the root — which expands `~` but never resolves `{{ARGO_HOME}}`-style
+tokens — so the portable spelling was refused as `not_a_git_repository`. No declaration could
+satisfy both gates, blocking the motivating case, SPEC-ARGO-067.
+
+- `_resolve_declared_root` now routes only the repository-root component of a declaration
+  through the canonical `path_vars.resolve(..., mode="execute")` primitive, against the
+  subject project root supplied to verifier-surface construction — no second token parser.
+- New named refusal reason `anchor_resolution` (18 → 19) replaces the misleading
+  `not_a_git_repository` for an unknown or unresolvable anchor; refuses before any source
+  byte is read or any arm is created.
+- Every SPEC-288 containment property is unchanged: report-root/same-spec refusal still fires
+  after an anchor resolves, source object databases stay unreachable, inert (no-declaration)
+  dispatch is byte-identical to before.
+- `Skills/nightshift/SKILL.md` documents the anchor-capable declaration syntax and the
+  ordered SPEC-ARGO-067 closure packet (new declaration-only baseline, dedicated run ID,
+  independent verifier dispatch; explicitly no model or LM Studio command).
+
+### Ship the reviewer prompts LOOP.md dispatches against (BUG-015)
+
+`LOOP.md` Steps 7, 9.5, and 10 dispatch reviewers using three prompt files
+(`prompts/spec-reviewer.md`, `prompts/quality-reviewer.md`, `prompts/completion-checklist.md`)
+that existed nowhere in canonical's tracked history and were entirely absent from
+`release-manifest.json`'s managed scope — so a board configured `review.mode: subagent` or
+`hybrid` reached a missing file, and authoring the files in canonical alone would not have
+put them on any installed board.
+
+- The three files now exist in `canonical/prompts/`, sourced from the pre-relocation
+  canonical originals (verified against `LOOP.md`'s actual dispatch placeholders, not
+  assumed), and are managed release payload for the first time (101 → 104 files).
+- New guard `tests/test_canonical_prompt_assets.py` fails whenever a `.nightshift/prompts/<name>`
+  path referenced from a canonical `.md` file has no counterpart in `canonical/prompts/` or is
+  absent from the release manifest — the same-spirit sibling to the existing copy-drift guard.
+- The A/B prompt-variant registry already in `canonical/prompts/` is unaffected and remains
+  unmanaged, project-owned state.
+
 ## 3.12.0 (2026-08-30)
 
 ### Predeclared external evidence reaches the verifier, under containment (SPEC-288)

@@ -25,6 +25,16 @@ except Exception:  # pragma: no cover - deployed install may be incomplete
     load_commands = None  # type: ignore[assignment]
     resolve_kit_root = None  # type: ignore[assignment]
 
+# SPEC-289: the canonical, fail-closed anchor vocabulary shared with
+# validate_specs.py. It is imported, never reimplemented: a second token parser
+# is exactly how the two gates came to disagree about what a portable path is.
+# An install missing the module does not silently fall back to literal tokens --
+# `_resolve_declared_root` refuses any anchored declaration instead.
+try:  # pragma: no cover - deployed install may be incomplete
+    import path_vars
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    path_vars = None  # type: ignore[assignment]
+
 SEVERITIES = {"CRITICAL", "WARNING", "SUGGESTION"}
 DIMENSIONS = {"completeness", "correctness", "coherence"}
 FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
@@ -584,9 +594,65 @@ def _refuse(declaration: str, reason: str, detail: str) -> DeclaredInputRefusal:
     return DeclaredInputRefusal(declaration, reason, detail)
 
 
+def _resolve_declared_root(declaration: str, raw_root: str, project_root: Path) -> Path:
+    """Resolve the *repository-root component* of a declaration (SPEC-289 R1).
+
+    A stored spec may not carry a literal host path -- SPEC-071 rejects one as a
+    leak -- so the only portable spelling of a source repository is an anchored
+    token such as ``{{ARGO_HOME}}/...``. SPEC-288 expanded ``~`` and nothing else,
+    which made that spelling refusable as "not a Git repository" and left no form
+    that both gates accept. Resolution therefore goes through the same
+    ``path_vars`` primitive the validator's vocabulary comes from, in fail-closed
+    ``execute`` mode, against *project_root* -- never ``Path.home()``, never the
+    ambient working directory.
+
+    Scope is deliberately the root component only: the repository-relative half of
+    the declaration has already passed the absolute/traversal checks as a literal
+    string and is never token-expanded, so no anchor can move a member outside the
+    repository it was declared against.
+
+    Every failure is a refusal, named ``anchor_resolution`` so it is not confused
+    with a resolved root that turns out not to be a repository, and every detail is
+    built from the *declared* text: a refusal record must not publish the host path
+    an anchor would have resolved to.
+    """
+    if "{{" not in raw_root:
+        # Unanchored declaration: SPEC-288 behaviour, byte for byte.
+        return Path(os.path.expanduser(raw_root))
+    if path_vars is None:  # pragma: no cover - incomplete install
+        raise _refuse(
+            declaration, "anchor_resolution",
+            f"declared source repository {raw_root!r} is anchored, but this install "
+            "has no path_vars module to resolve it",
+        )
+    try:
+        resolved = path_vars.resolve(raw_root, project_root, mode="execute")
+    except path_vars.ResolutionError as exc:
+        raise _refuse(
+            declaration, "anchor_resolution",
+            f"declared source repository {raw_root!r} names anchor "
+            f"{{{{{exc.token}}}}}, which does not resolve from the subject project root",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - any resolver failure fails closed
+        raise _refuse(
+            declaration, "anchor_resolution",
+            f"declared source repository {raw_root!r} could not be resolved",
+        ) from exc
+    if "{{" in resolved:
+        # ``path_vars`` leaves tokens inside code fences/spans verbatim. A root
+        # that survives resolution with a token still in it is not an anchor, and
+        # admitting it literally would be the inline-token escape hatch R4 forbids.
+        raise _refuse(
+            declaration, "anchor_resolution",
+            f"declared source repository {raw_root!r} still holds an unresolved "
+            "token after anchor resolution",
+        )
+    return Path(os.path.expanduser(resolved))
+
+
 def _resolve_one_declaration(
     declaration: str, *, spec_id: str, report_paths: Iterable[str],
-    total_bytes: int,
+    total_bytes: int, project_root: Path,
 ) -> ResolvedExternalInput:
     """Resolve one declaration to pinned, projectable bytes, or refuse it.
 
@@ -594,6 +660,12 @@ def _resolve_one_declaration(
     a distinct reason. Declaration alone never overrides containment: the
     same-spec and report-root rules are applied first, so a declared own report is
     refused *as* an own report rather than admitted because it was declared (R3).
+
+    SPEC-289 adds one seam and moves nothing else: the repository-root component is
+    resolved through ``path_vars`` against *project_root* where SPEC-288 called
+    ``os.path.expanduser``. It sits after the containment rules and before the
+    first source read, so an anchor can neither buy its way past same-spec
+    withholding nor cause a byte to be read before it is known to be resolvable.
     """
     value = declaration[len(EXTERNAL_INPUT_PREFIX):].strip()
     if EXTERNAL_INPUT_SEPARATOR not in value:
@@ -635,7 +707,7 @@ def _resolve_one_declaration(
             f"declared path {relative_path!r} lies in a withheld report root",
         )
 
-    root = Path(os.path.expanduser(raw_root))
+    root = _resolve_declared_root(declaration, raw_root, project_root)
     if not root.is_absolute():
         raise _refuse(
             declaration, "not_a_git_repository",
@@ -787,6 +859,13 @@ def resolve_declared_external_inputs(
     declarations. They are left exactly as they were before SPEC-288 — not resolved,
     not projected, not recorded — so a dispatch that declares no external evidence
     is unchanged in every observable way.
+
+    *source_repository* is also the anchor-resolution context for SPEC-289: it is
+    the subject project root this dispatch was constructed against. It is derived
+    here rather than passed in, deliberately — the surface build and the after-the-
+    fact re-derivation that compares against the recorded rows both enter through
+    this function, and a resolution context they could supply separately is one
+    they could supply differently.
     """
     if spec_path is None:
         return [], []
@@ -821,7 +900,7 @@ def resolve_declared_external_inputs(
         try:
             item = _resolve_one_declaration(
                 declaration, spec_id=spec_id, report_paths=report_paths,
-                total_bytes=total,
+                total_bytes=total, project_root=source_repository,
             )
         except DeclaredInputRefusal as refusal:
             refusal.records = records + [{
