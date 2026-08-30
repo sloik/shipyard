@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.11.1
+version: 3.12.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1602,6 +1602,7 @@ DISPATCH_PLAN=$(python3 .nightshift/verification_report.py prepare-dispatch \
   --spec-id <spec-id> --run-id <run-id> \
   --report-path <repo-relative-run-report> \
   --evidence .nightshift/reports/<spec-id>/verifier-surface.json \
+  [--spec-path <repo-relative-spec-file>] \
   [--suite-command <exact-configured-command> ...]) || {
     echo 'verifier_surface_unavailable: do not call Agent' >&2
     exit 2
@@ -1621,6 +1622,98 @@ JSON and require its exact schema before composing the brief. Use only its
 assignment. The source/report arguments above remain parent-private
 preparation inputs and must not be copied into the brief.
 
+**Declared external evidence (SPEC-288).** Some specs cannot be verified from the
+subject repository alone: their durable evidence — a retained benchmark run, a
+held-out reference output — lives in a *different* repository. `--spec-path` is
+what lets such a spec's predeclared evidence reach its verifier, under
+containment, and it is the only route. Without `--spec-path`, `prepare-dispatch`
+behaves exactly as it did before SPEC-288, so no existing dispatch changes
+behaviour by upgrading the kit.
+
+*The declaration contract.* An external input is declared in the spec's own
+frontmatter, as one entry of `context.required_inputs`, in this exact form:
+
+```yaml
+context:
+  required_inputs:
+  - external-evidence:/absolute/path/to/source-repository#repository/relative/path
+```
+
+Both halves are required. The left half names the source repository *root*; the
+right half is a path relative to that root, never absolute and never containing
+`..`. Entries without the `external-evidence:` marker keep their existing
+meaning — ordinary upstream-artifact declarations — and are neither resolved nor
+projected. A declaration may name a single file or one bounded directory.
+
+Four properties make this safe to expose to a verifier, and all four are enforced
+rather than assumed:
+
+1. **Declaration, not capability.** Only a path already written into the spec is
+   eligible. The declaration is read from the spec file *as committed at each
+   verifier arm*, never from the working tree, and the two arms' declaration lists
+   must be identical. A candidate that adds, changes, or removes an
+   `external-evidence:` entry during its own run is refused before the verifier
+   launches; it cannot grant itself evidence authority mid-run.
+2. **Projection, not reference.** The bytes are read from the source repository's
+   Git object database at a pinned commit and *copied* into
+   `.nightshift-verifier-inputs/<source-repository-id>/<source-path>` inside
+   **both** arms, as regular read-only files. The verifier never receives a host
+   path, a symlink, or a shared object database; the projection keeps working if
+   the source checkout disappears, because the bytes are the surface's own.
+   Evidence provenance is identical in both arms by design — only the subject
+   repository content is supposed to differ between them.
+3. **Containment is not overridden by declaration.** A declared path that is, or
+   lies under, a report root — or that identifies the spec under verification — is
+   refused *even though it was declared*. SPEC-228/239 same-spec withholding is
+   unchanged, and a spec cannot hand its verifier its own report by declaring it.
+4. **Everything is recorded.** Containment evidence gains
+   `declared_external_inputs`: per input, the declaration, the source repository's
+   identity and pinned commit, the object ID, the projected path, a SHA-256 digest,
+   and the handling applied. Refusals are recorded the same way, in a durable
+   `refused-declared-external-input` evidence file, before the dispatch fails. The
+   verifier gets a sanitized copy at
+   `.nightshift-verifier-inputs/MANIFEST.json` — with the declaration string and
+   the source repository's filesystem location removed — which is how it tells a
+   projection from native subject-repository content.
+
+*The source repository need not be a managed Nightshift install.* It needs to be
+a Git repository whose declared content is committed and clean; nothing more. A
+`committed_kit: opt_out` project such as `Tools/benchmarks` is a valid evidence
+source, and no kit release, `.nightshift/` directory, or config is required of it.
+
+*Failure modes.* Every one fails closed — no surface, no partial import, no silent
+skip — and names both the declaration and the reason:
+
+| Reason | Condition |
+| --- | --- |
+| `declaration_not_identical` | the arms' `external-evidence:` lists differ |
+| `malformed_declaration` | missing `#`, or an empty repository root or path |
+| `same_spec_report` | the declared path identifies the spec under verification |
+| `report_root` | the declared path lies under a withheld report root |
+| `same_spec_content` | a declared metrics artifact's content names this spec |
+| `absolute_path_escapes_source_repository` | the right-hand path is absolute |
+| `path_traversal` | the right-hand path contains `..` |
+| `not_a_git_repository` | the declared root is not a Git repository root |
+| `symlink` / `symlink_member` | the path, its parent, or a directory member is a link |
+| `missing` | the declared path does not exist |
+| `untracked` / `untracked_member` | present but not committed at the source HEAD |
+| `mutable` | the declared path is dirty at the source |
+| `unsupported_entry_type` | the tracked entry is not a regular file |
+| `directory_bounds_exceeded` | over 256 members, or over 8 MiB projected in total |
+| `namespace_collision` | the subject repository tracks `.nightshift-verifier-inputs/` |
+| `projection_collision` | two declarations project to the same path (a directory and a file inside it) |
+
+A refusal surfaces as the ordinary controlled `evidence_gap` with reason
+`verifier_surface_unavailable`; read the evidence file for which declaration
+failed and why, fix the *declaration*, and re-dispatch. Never work around a
+refusal by handing the verifier the path directly.
+
+*Brief addition.* When the plan's surface carries projected evidence, tell the
+verifier so, without naming any source location: "Files under
+`.nightshift-verifier-inputs/` are read-only projections of predeclared external
+evidence, described in that directory's `MANIFEST.json`; they are not part of the
+repository under verification. Cite them from your assigned arm only."
+
 The versioned dispatch identity has two non-interchangeable values. `head_commit`
 is the synthetic Git object ID used only inside the standalone repository.
 `implementation_head_digest` is an opaque lowercase SHA-256 binding over the
@@ -1629,9 +1722,14 @@ into the verifier verdict. Never derive one from the other or expose the exact
 candidate revision.
 
 Collect `git_footprint.baseline` and `git_footprint.head`, each with its own
-`tree_before`, `tree_after`, and `porcelain`, from that arm's assigned working
-directory only (R4) — never from `repository` or from the other arm's
-directory. The source run worktree and parent checkout are outside the
+`tree_before`, `tree_after`, `porcelain_before`, and `porcelain_after`, from that
+arm's assigned working directory only (R4) — never from `repository` or from the
+other arm's directory. Both snapshots are required: the gate is a set comparison
+of what you returned against what you were handed, so a working tree that was
+already dirty when you received it is not your footprint, and the validator
+recomputes that comparison from these two fields rather than trusting a
+conclusion. Report the verbatim `status --porcelain=v1 --untracked-files=all`
+text, including when it is empty. The source run worktree and parent checkout are outside the
 verifier capability boundary after surface creation. The delimited, verbatim
 Acceptance Criteria quote is the current spec's complete AC set for this
 verdict — do not infer AC IDs elsewhere.
@@ -1892,10 +1990,12 @@ touching — or being tempted to touch — the verbatim AC block R2 requires.
 > asserted, not what it checks.
 
 **b. Dispatch, with the read-only footprint asserted by hash, over both assigned
-arm surfaces (R4/R6/AC1/AC2).** Capture each arm's worktree tree hash before and
-after; assert equality rather than inspecting a diff. Mutation or an unexpected
-generated artifact in *either* arm voids the verdict — a clean baseline arm
-never masks a dirty head arm or vice versa:
+arm surfaces (R4/R6/AC1/AC2).** Capture each arm's tree hash *and* its
+working-tree entries before and after; assert that the tree hash is equal and
+that the two sets of entries are equal. A worktree that was already dirty at
+dispatch is not the verifier's footprint — only what the set comparison shows it
+added or removed is. Mutation, or an entry gained or lost, in *either* arm voids
+the verdict; a clean baseline arm never masks a dirty head arm or vice versa:
 
 ```bash
 # NIGHTSHIFT-FOOTPRINT-BEGIN
@@ -1904,14 +2004,29 @@ never masks a dirty head arm or vice versa:
 #        ... dispatch the verifier ...
 #        footprint_after <baseline-worktree> "$FOOTPRINT_BASELINE_BEFORE" baseline
 #        footprint_after <head-worktree> "$FOOTPRINT_HEAD_BEFORE" head
-footprint_before() { git -C "$1" rev-parse 'HEAD^{tree}'; }
+# The captured value is the arm's tree hash on line 1 and its working-tree
+# entries below it, so `footprint_after` set-compares what the verifier returned
+# against what it was handed (SPEC-284). It is never a test of whether the
+# worktree happened to be clean at dispatch: an entry in both snapshots was
+# already there and is nobody's write, while an entry only after (added) or only
+# before (removed) is the verifier's, whatever the path is called.
+footprint_before() {
+  git -C "$1" rev-parse 'HEAD^{tree}'
+  git -C "$1" status --porcelain=v1 --untracked-files=all | LC_ALL=C sort
+}
 footprint_after() {
-  worktree="$1"; before="$2"; label="$3"
-  after=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
-  dirty=$(git -C "$worktree" status --porcelain | grep -v 'graphify-out/graph\.html$')
-  if [ "$after" != "$before" ]; then echo "FOOTPRINT[$label]: violated (tree $before -> $after)"; return 1; fi
-  if [ -n "$dirty" ]; then echo "FOOTPRINT[$label]: violated (working tree dirty)"; return 1; fi
-  echo "FOOTPRINT[$label]: clean ($after)"; return 0
+  local worktree="$1" before="$2" label="$3"
+  local before_tree after_tree before_dirt after_dirt added removed
+  before_tree=$(printf '%s\n' "$before" | head -n 1)
+  before_dirt=$(printf '%s\n' "$before" | tail -n +2 | grep -v '^[[:space:]]*$' | LC_ALL=C sort)
+  after_tree=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
+  after_dirt=$(git -C "$worktree" status --porcelain=v1 --untracked-files=all | grep -v '^[[:space:]]*$' | LC_ALL=C sort)
+  if [ "$after_tree" != "$before_tree" ]; then echo "FOOTPRINT[$label]: violated (tree $before_tree -> $after_tree)"; return 1; fi
+  added=$(comm -13 <(printf '%s\n' "$before_dirt") <(printf '%s\n' "$after_dirt") | grep -v '^[[:space:]]*$')
+  removed=$(comm -23 <(printf '%s\n' "$before_dirt") <(printf '%s\n' "$after_dirt") | grep -v '^[[:space:]]*$')
+  if [ -n "$added" ]; then echo "FOOTPRINT[$label]: violated (verifier added: $(echo $added))"; return 1; fi
+  if [ -n "$removed" ]; then echo "FOOTPRINT[$label]: violated (verifier removed: $(echo $removed))"; return 1; fi
+  echo "FOOTPRINT[$label]: clean ($after_tree)"; return 0
 }
 # NIGHTSHIFT-FOOTPRINT-END
 ```
@@ -1971,8 +2086,8 @@ carries evidence; an empty array is not a schema gap to work around:
     }
   ],
   "git_footprint": {
-    "baseline": {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain": ""},
-    "head":     {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain": ""}
+    "baseline": {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain_before": "", "porcelain_after": ""},
+    "head":     {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain_before": "", "porcelain_after": ""}
   },
   "premise_dispute": null,
   "contamination": null
@@ -2038,18 +2153,27 @@ if v["verdict"] == "disputes_premise":
 
 # R4/R6 — read-only, asserted by hash, over BOTH assigned arm surfaces
 # (SPEC-282). A clean baseline arm never masks a dirty head arm or vice versa.
-# graphify-out/graph.html is excluded: a background hook rewrites it after
-# every commit in this repo, so its presence in porcelain is pre-existing
-# environmental noise, never something a verifier caused — excluding it here
-# (not upstream in footprint_after) keeps the exclusion in exactly one place,
-# auditable and narrow to this one known file.
+# SPEC-284: the working-tree half is recomputed here as a set comparison of the
+# verdict's own porcelain_before against its porcelain_after, never an emptiness
+# test on porcelain_after. A worktree that was already dirty at dispatch is not
+# the verifier's footprint; an entry only in after (added) or only in before
+# (removed) is. That retires the single generated-artifact exclusion this block
+# used to carry — pre-existing generated output now cancels in every project,
+# with no project's tooling named here. Both fields are REQUIRED: a verdict
+# carrying only the old flat `porcelain` key has no before-set to compare
+# against, and is rejected rather than read as two empty sets, which would
+# accept real dirt.
 gf = v["git_footprint"]
 if not isinstance(gf, dict) or set(gf) != {"baseline","head"}: die("git_footprint must report both baseline and head arms")
 for arm_label in ("baseline","head"):
     g = gf.get(arm_label) or {}
     if g.get("tree_before") != g.get("tree_after"): die("%s: verifier mutated the repo (tree %s -> %s)" % (arm_label, g.get("tree_before"), g.get("tree_after")))
-    _dirty_lines = [l for l in (g.get("porcelain") or "").splitlines() if l.strip() and not l.strip().endswith("graphify-out/graph.html")]
-    if _dirty_lines: die("%s: verifier left the working tree dirty: %s" % (arm_label, "; ".join(_dirty_lines)))
+    if "porcelain_before" not in g or "porcelain_after" not in g: die("%s: footprint must record porcelain_before and porcelain_after" % arm_label)
+    _before = {l for l in (g.get("porcelain_before") or "").splitlines() if l.strip()}
+    _after = {l for l in (g.get("porcelain_after") or "").splitlines() if l.strip()}
+    _added, _removed = sorted(_after - _before), sorted(_before - _after)
+    if _added: die("%s: verifier added to the working tree: %s" % (arm_label, "; ".join(_added)))
+    if _removed: die("%s: verifier removed pre-existing working-tree state: %s" % (arm_label, "; ".join(_removed)))
 
 # R3 — per-AC status, and every AC in the spec covered.
 if not v["acs"]: die("no per-AC statuses")

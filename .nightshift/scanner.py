@@ -925,6 +925,13 @@ def _scan_line(text: str, location: str) -> list[tuple[Finding, str]]:
 
     SPEC-192 needs the digest to decide whether a human has already accepted this value,
     so it is produced where the match is, not reconstructed later from the line.
+
+    SPEC-287: the two context helpers below are given a per-line scan position instead of
+    re-reading the whole prefix for every match. Both used to slice `text[: match.start()]`,
+    so one line cost O(matches x line length) - a clean 4x per doubling of the input, and
+    an extrapolated ~57 minutes on one real 29 MB single-line file. Each helper now reads
+    only the text between the previous candidate and this one. Those windows are disjoint,
+    so a whole line costs one pass. No pattern and no detection rule changed.
     """
     findings: list[tuple[Finding, str]] = []
     for matched_class, pattern in SECRET_PATTERNS:
@@ -932,34 +939,142 @@ def _scan_line(text: str, location: str) -> list[tuple[Finding, str]]:
         if match:
             findings.append((Finding("secret", location, matched_class), value_digest(match.group(0))))
     for matched_class, pattern in PII_PATTERNS:
+        # SPEC-287: one memo per pattern, never shared. A second entry of the same class
+        # would restart at the top of the line, and a memo carried over from the previous
+        # entry would then be asked about a match behind its own scan position.
+        url_path = _UrlPathContext(text)
         for match in pattern.finditer(text):
             value = match.group(0)
             if matched_class == "credit_card" and _canonical_run_id_context(text, match):
                 continue
             # SPEC-183: a long digit run inside a URL path is a resource id, not a card.
             # A 19-digit tweet id happened to pass Luhn and blocked a commit.
-            if matched_class == "credit_card" and _url_path_context(text, match):
+            if matched_class == "credit_card" and url_path.holds(match):
                 continue
             if _valid_pii(matched_class, value):
                 findings.append((Finding("pii", location, matched_class), value_digest(value)))
     # SPEC-183: undelimited 10-digit runs are only PII beside a phone-context keyword.
+    scanned_to = 0
     for match in BARE_PHONE_PATTERN.finditer(text):
-        if _phone_context_ok(text, match) and _valid_pii("phone", match.group(1)):
+        if _phone_context_ok(text, match, scanned_to) and _valid_pii("phone", match.group(1)):
             findings.append((Finding("pii", location, "phone"), value_digest(match.group(0))))
+        scanned_to = match.end()
     return findings
 
 
-def _phone_context_ok(text: str, match: re.Match[str]) -> bool:
-    """Return whether an undelimited digit run is introduced by a phone keyword."""
-    return PHONE_CONTEXT_PATTERN.search(text[: match.start()]) is not None
+def _phone_context_ok(text: str, match: re.Match[str], floor: int = 0) -> bool:
+    """Return whether an undelimited digit run is introduced by a phone keyword.
+
+    `floor` is where the previous `BARE_PHONE_PATTERN` match on this line ended, or 0 for
+    the first one. SPEC-287: starting the search there instead of at the top of the line
+    is not a narrowing of what counts as phone context, and the proof is that
+    `PHONE_CONTEXT_PATTERN` cannot match a digit anywhere. Every alternative in it is
+    letters and every quantified class is whitespace, ":", "#", "," or "."; the previous
+    match ends on ten digits; so no match of this pattern can end at `match.start()` and
+    also reach back across `floor`. The pattern is untouched - its separator runs are
+    still unbounded, so a keyword thousands of separator characters ahead of the digits is
+    still found, which `tests/test_scanner.py` pins.
+
+    `search(text, floor, start)` rather than a slice, deliberately. `pos` only restricts
+    where a match may begin: `\\b` and lookbehind still read the real text before `floor`,
+    exactly as they would in `text[: start]`, and `endpos` makes `$` behave as it does at
+    the end of that slice, trailing-newline rule included. Same answer, no copy.
+    """
+    return PHONE_CONTEXT_PATTERN.search(text, floor, match.start()) is not None
+
+
+# SPEC-183/SPEC-287: a URL path segment ends at the first of these going backwards.
+_URL_TOKEN_DELIMITERS = (" ", "\t", "(", '"')
+_NON_SLASH = re.compile(r"[^/]")
+
+
+class _UrlPathContext:
+    """Streaming form of the "is this number inside a URL path" test (SPEC-287).
+
+    The rule is SPEC-183's and is unchanged: read back to the nearest space, tab, "(" or
+    double quote, and answer yes when the token that follows contains "://", starts with
+    "/", or holds a "/" that is not part of its trailing run of slashes.
+
+    What changed is that the token is no longer rebuilt per candidate. It used to be
+    `text[: match.start()]` sliced, four times rfind-ed, then sliced again, once for every
+    candidate on the line, which is O(candidates x line length). Candidates arrive in
+    `finditer` order, so each call now reads only `text[previous candidate : this one]`.
+    Those windows are disjoint, so the line costs one pass.
+
+    The state is the token's start, where its first "/" is, whether any non-"/" follows
+    that first "/", and whether "://" appears in it. Those four answers decide the rule,
+    and each is monotone while the token start holds still - a token only ever grows to
+    the right - so a window can be folded in rather than the token re-read. When a
+    delimiter does turn up in the window the token start moves, and everything is
+    recomputed from it; that recomputation is bounded by the same window.
+    """
+
+    __slots__ = ("_text", "_scanned_to", "_start", "_first_slash", "_slash_then_other", "_scheme")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._scanned_to = -1  # nothing read yet, and distinct from "read up to index 0"
+        self._start = 0
+        self._first_slash = -1
+        self._slash_then_other = False
+        self._scheme = False
+
+    def holds(self, match: re.Match[str]) -> bool:
+        """Return whether the candidate at `match` sits inside a URL path segment."""
+        end = match.start()
+        if self._scanned_to < 0:
+            self._restart(self._last_delimiter(0, end), end)
+        else:
+            boundary = self._last_delimiter(self._scanned_to, end)
+            if boundary < 0:
+                self._extend(end)
+            else:
+                self._restart(boundary, end)
+        self._scanned_to = end
+        return self._scheme or self._first_slash == self._start or self._slash_then_other
+
+    def _last_delimiter(self, low: int, high: int) -> int:
+        text = self._text
+        return max(text.rfind(delimiter, low, high) for delimiter in _URL_TOKEN_DELIMITERS)
+
+    def _restart(self, boundary: int, end: int) -> None:
+        """Recompute every flag for the token `text[boundary + 1 : end]`."""
+        text = self._text
+        self._start = boundary + 1
+        self._first_slash = text.find("/", self._start, end)
+        self._scheme = text.find("://", self._start, end) >= 0
+        self._slash_then_other = (
+            self._first_slash >= 0
+            and _NON_SLASH.search(text, self._first_slash + 1, end) is not None
+        )
+
+    def _extend(self, end: int) -> None:
+        """Fold `text[self._scanned_to : end]` in. The token start does not move."""
+        text = self._text
+        window = self._scanned_to
+        if not self._scheme:
+            # "://" can straddle the window edge, so re-read the two characters before it.
+            self._scheme = text.find("://", max(self._start, window - 2), end) >= 0
+        had_slash = self._first_slash >= 0
+        if not had_slash:
+            self._first_slash = text.find("/", window, end)
+        if not self._slash_then_other and self._first_slash >= 0:
+            # Only "/" has followed the first slash so far, so one non-"/" settles it -
+            # anywhere in this window, or anywhere after the slash if the slash is new.
+            self._slash_then_other = (
+                _NON_SLASH.search(text, window if had_slash else self._first_slash + 1, end)
+                is not None
+            )
 
 
 def _url_path_context(text: str, match: re.Match[str]) -> bool:
-    """Return whether a numeric candidate sits inside a URL path segment."""
-    prefix = text[: match.start()]
-    boundary = max(prefix.rfind(" "), prefix.rfind("\t"), prefix.rfind("("), prefix.rfind('"'))
-    token = prefix[boundary + 1 :]
-    return "://" in token or token.startswith("/") or "/" in token.rstrip("/")
+    """Return whether a numeric candidate sits inside a URL path segment.
+
+    Single-shot form, for a caller holding one match and no line state. `_scan_line` uses
+    `_UrlPathContext` directly instead: repeated single-shot calls down one line are the
+    quadratic SPEC-287 removed.
+    """
+    return _UrlPathContext(text).holds(match)
 
 
 def _canonical_run_id_context(text: str, match: re.Match[str]) -> bool:

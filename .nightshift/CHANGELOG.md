@@ -9,6 +9,160 @@
 
 ## [Unreleased]
 
+## 3.12.0 (2026-08-30)
+
+### Predeclared external evidence reaches the verifier, under containment (SPEC-288)
+
+A spec whose durable evidence lives in *another* repository was structurally
+unverifiable. `verification_report.py` built the standalone verifier surface from
+the subject repository alone and ignored `context.required_inputs` entirely, so
+SPEC-ARGO-067 — which needs the retained Hermes benchmark run in
+`Tools/benchmarks` — had no way to produce a verdict at all. Thirty-one Argo specs
+reference paths outside Argo Home, so this is a category, not one spec.
+
+The obvious fix is the dangerous one. Handing a verifier a declared host path
+would break the standalone containment model outright and would let a candidate
+point its verifier at its own report. This release instead *projects* the bytes
+and never exposes a path.
+
+- **`prepare-dispatch --spec-path <repo-relative-spec>`** (also on
+  `prepare-surface`) reads that spec's `context.required_inputs` from the commit
+  at **each** verifier arm. Entries of the form
+  `external-evidence:<repository-root>#<repository-relative-path>` are eligible;
+  every other entry keeps its existing meaning and is untouched.
+- **The two arms must declare identically.** The declaration is read from the
+  committed spec, never the working tree, and a candidate that adds, changes, or
+  removes an `external-evidence:` entry during its own run is refused before the
+  verifier launches rather than resolved in either arm's favour.
+- **Resolve, pin, project.** Each admitted input must be a regular tracked file,
+  or a bounded tracked directory (≤256 members, ≤8 MiB projected in total), that
+  is committed and clean at its source. Its bytes are read from the source
+  repository's Git object database at a pinned commit and copied into
+  `.nightshift-verifier-inputs/<source-repository-id>/<source-path>` inside both
+  arms as regular read-only files. No symlink, no shared object database, no host
+  path: the projection keeps working when the source checkout is gone.
+- **Declaration never overrides containment.** A declared path that lies under a
+  report root, or that identifies the spec under verification, is refused even
+  though it was declared. SPEC-228/239 same-spec withholding is unchanged.
+- **Fail closed, by name.** Eighteen reasons — `declaration_not_identical`,
+  `malformed_declaration`, `same_spec_report`, `report_root`, `same_spec_content`,
+  `absolute_path_escapes_source_repository`, `path_traversal`,
+  `not_a_git_repository`, `symlink`, `symlink_member`, `missing`, `untracked`,
+  `untracked_member`, `mutable`, `unsupported_entry_type`,
+  `directory_bounds_exceeded`, `namespace_collision`, `projection_collision` —
+  each writes durable refusal evidence and leaves no surface at all, so no
+  rejected byte can reach either arm.
+- **Recorded both sides.** Containment evidence gains `declared_external_inputs`
+  (declaration, source identity, pinned commit, object ID, projected path, digest,
+  handling). The verifier receives a sanitized `MANIFEST.json` inside the
+  namespace — no declaration string, no host path — which is how it distinguishes
+  a projection from native subject-repository content.
+- **The evidence source need not be a managed Nightshift install.** A
+  `committed_kit: opt_out` repository such as `Tools/benchmarks` is a valid
+  source; only Git-committed, clean content is required.
+
+`CONTAINMENT_EVIDENCE_SCHEMA_VERSION` is `1.6.0`. The identity projection is
+deliberately unchanged: projected bytes are already bound through
+`synthetic_head_tree`, and the records through `containment_evidence_sha256`, so
+`identity_schema_version` stays `1.0.0` and every existing digest is unaffected.
+
+**Migration: none.** Without `--spec-path` the mechanism is inert and a dispatch
+is byte-equivalent in surface shape to a 3.11.3 one, including projects whose
+specs already populate `context.required_inputs`.
+
+## 3.11.3 (2026-08-30)
+
+### One line is scanned in time linear in its length (SPEC-287)
+
+`scanner._scan_line` re-read the whole preceding text once per candidate. Two
+context helpers each sliced `text[: match.start()]` and scanned it —
+`_phone_context_ok`, which decides whether an undelimited digit run is introduced
+by a phone keyword, and `_url_path_context`, which decides whether a long digit
+run is a resource id inside a URL path. Candidate count grows with line length,
+so one line cost O(candidates × length).
+
+Measured on a release-marker-shaped single line: `_scan_line` took 3.07 s at
+100 KB, 12.04 s at 200 KB, 47.94 s at 400 KB and 192.86 s at 800 KB — a clean 4×
+per doubling, which extrapolates to hours for one 8 MB line and to roughly an
+hour per megabyte beyond that. A pre-commit gate on a repository holding any
+large single-line file could stall indefinitely with no finding to show for it.
+This was live in every install: `scanner.py` is release payload.
+
+- Both helpers now read only the text between the previous candidate and the
+  current one. Those windows are disjoint, so a whole line costs one pass. The
+  same corpora now take 0.06 s at 400 KB and 0.26 s at 1.6 MB, and one 8 MB line
+  scans in about 1.3 s.
+- **No detection rule, pattern or threshold changed.** `PHONE_CONTEXT_PATTERN` is
+  untouched, quantifiers included: its separator runs are still unbounded, so a
+  phone keyword thousands of separator characters ahead of the number is still
+  context, exactly as before. The narrower fixed-window alternative was rejected
+  for that reason and is recorded in the spec.
+- The phone rule is proved equivalent rather than assumed: the pattern cannot
+  match a digit anywhere, and the previous candidate ends on ten digits, so no
+  context match can end at this candidate and also reach back across it.
+  `Pattern.search(text, pos, endpos)` is used instead of a slice because `pos`
+  restricts only where a match may begin, while `\b` and lookbehind still read the
+  real text before it and `endpos` reproduces the slice's `$`.
+- The URL-path rule is carried by a small accumulator, `_UrlPathContext`, holding
+  the token start, its first `/`, whether a non-`/` follows that `/`, and whether
+  `://` appears. `_url_path_context` remains as the single-shot form.
+- Guards added to the canonical suite: an 8 MB line must scan in under 5 s, and
+  the cost ratio across a 4× step in line length must stay under 8 (linear is
+  about 4, the old quadratic about 16). Both are ratio- or budget-based rather
+  than wall-clock constants, so they survive different hardware. A seeded
+  differential test checks both helpers against the pre-change expressions,
+  which are kept verbatim in the test file as the oracle.
+
+**Migration:** none. Behaviour is identical; only the cost changed. Installs pick
+this up with the payload.
+
+## 3.11.2 (2026-08-30)
+
+### The verifier footprint is asserted by porcelain set comparison, not emptiness (SPEC-284)
+
+`verifier_footprint_errors(before, after)` accepted a `before` footprint and then
+discarded `before.porcelain`. Trees were compared correctly, but the working tree
+was tested for *emptiness* of `after.porcelain` — a test of whether the worktree
+happened to be clean when the verifier was handed it, not of what the verifier
+did. `capture_verifier_footprint` already recorded `porcelain` on both snapshots,
+so the data for a real comparison was collected and thrown away.
+
+The consequence was a gate firing on correct input. Any pre-existing dirt at
+dispatch — an untracked scratch file, a generated artifact, an unrelated modified
+file in the operator's checkout — made a verifier that wrote nothing report
+`FOOTPRINT: violated`, and the validator return `GATE: reject`. Measured on the
+Argo board on 2026-08-19: zero verifier writes, tree hash identical, verdict
+rejected.
+
+- The working-tree half is now a set comparison of the two snapshots. An entry in
+  both was already there and is not attributable to the verifier. An entry only
+  in `after` was added; an entry only in `before` was removed. Both are writes —
+  a verifier that tidies up after itself has still written to the worktree.
+- The comparison unit is the whole `XY path` status line, so a path present in
+  both snapshots under a changed status is still caught.
+- `VERIFIER_FOOTPRINT_EXCLUSIONS` and `is_excluded_verifier_footprint_path` are
+  retired. They hardcoded one project's generated artifact into the shared kit to
+  paper over the emptiness test. Under the set comparison that entry cancels on
+  its own, in every project, and no project-specific path remains.
+- The tree-hash assertion is unchanged and undiminished: a verifier that modifies
+  a tracked file, adds an untracked path, or removes a pre-existing one still
+  voids its verdict.
+
+**Verdict schema (additive).** Each `git_footprint` arm now carries
+`porcelain_before` alongside `porcelain_after`; the previous `porcelain` key is
+renamed to `porcelain_after` for symmetry. `identity_schema_version` is
+deliberately unchanged — it binds `implementation_head_digest` identity, not the
+footprint shape. `CONTAINMENT_EVIDENCE_SCHEMA_VERSION` moves 1.4.0 -> 1.5.0, and
+is outside the identity projection, so verifier identity digests are unchanged.
+
+**Migration.** Verifiers must report both fields per arm. The shipped
+`NIGHTSHIFT-VERDICT-VALIDATOR` recomputes the comparison from the verdict's own
+two sets and rejects an arm that records only the old flat `porcelain` key —
+reading a missing before-set as empty would silently accept real dirt. The
+`footprint_before` helper in the skill now emits the arm's tree hash followed by
+its working-tree entries, and `footprint_after` set-compares against it; both
+sides of the pair must be taken from the same release.
+
 ## 3.11.1 (2026-08-30)
 
 ### An absolute tracked symlink no longer makes the verifier surface unbuildable (SPEC-285)

@@ -29,10 +29,11 @@ SEVERITIES = {"CRITICAL", "WARNING", "SUGGESTION"}
 DIMENSIONS = {"completeness", "correctness", "coherence"}
 FINAL_ASSESSMENTS = {"pass", "pass_with_warnings", "fail"}
 
-# This is the only generated artifact that an independent verifier may ignore
-# when asserting its read-only Git footprint.  Keep the policy exact: a broad
-# ``graphify-out/`` exclusion would hide verifier writes to other artifacts.
-VERIFIER_FOOTPRINT_EXCLUSIONS = frozenset({"graphify-out/graph.html"})
+# SPEC-284 retired ``VERIFIER_FOOTPRINT_EXCLUSIONS`` from this module.  It named
+# a single project's generated artifact in order to paper over an emptiness test
+# on the *after* snapshot.  The before/after set comparison in
+# ``verifier_footprint_errors`` cancels pre-existing dirt of every kind, in every
+# project, without the shared kit hardcoding anyone's tooling.
 VERIFIER_REPORT_ROOTS = ("reports/", ".nightshift/reports/", "canonical/reports/")
 # Metrics artifacts are never withheld wholesale (unlike reports): an unrelated
 # spec's metrics file is ordinary tracked content and must stay reachable (R2).
@@ -44,7 +45,23 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "acs", "suites", "git_footprint", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
-CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.4.0"
+CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.6.0"
+# SPEC-288: the one declaration form that turns a `context.required_inputs` entry
+# into external evidence. Two parts, deliberately: the source repository root is
+# *declared*, not inferred from the path, so a human reading the spec sees which
+# repository is being trusted, and so "an absolute path escaping its source
+# repository" stays a constructible, separately-diagnosable refusal instead of
+# collapsing into "that directory is not a repository".
+EXTERNAL_INPUT_PREFIX = "external-evidence:"
+EXTERNAL_INPUT_SEPARATOR = "#"
+EXTERNAL_INPUT_NAMESPACE = ".nightshift-verifier-inputs"
+EXTERNAL_INPUT_MANIFEST = "MANIFEST.json"
+# Bounds for a declared directory snapshot. They exist so "a directory" can never
+# mean "an unbounded import"; a declaration needing more than this should name the
+# individual files its ACs actually read.
+EXTERNAL_INPUT_MAX_MEMBERS = 256
+EXTERNAL_INPUT_MAX_BYTES = 8 * 1024 * 1024
+EXTERNAL_SOURCE_DOMAIN = b"nightshift.verifier.external-source.v1\0"
 SPEC_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
@@ -416,6 +433,530 @@ def same_spec_report_exclusions(
     return dict(sorted(rules.items()))
 
 
+class DeclaredInputRefusal(ValueError):
+    """One predeclared external input that may not be materialized (SPEC-288 R3).
+
+    Carries the declaration, a stable machine reason, and the human detail, so a
+    refusal is never a bare "escapes" and never a silent skip. ``records`` holds
+    the containment-evidence rows computed up to and including the refusal, so the
+    caller can persist refusal evidence before failing the dispatch closed (R4).
+    """
+
+    def __init__(
+        self, declaration: str, reason: str, detail: str,
+        *, records: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.declaration = declaration
+        self.reason = reason
+        self.detail = detail
+        self.records = records or []
+        super().__init__(
+            f"declared external input refused: {declaration!r} [{reason}] {detail}"
+        )
+
+
+@dataclass(frozen=True)
+class ProjectedInputFile:
+    """One byte-exact projection target inside the verifier surface."""
+
+    path: str
+    body: bytes
+
+
+@dataclass(frozen=True)
+class ResolvedExternalInput:
+    """One admitted declaration: its evidence row and its projected bytes."""
+
+    record: dict[str, Any]
+    files: tuple[ProjectedInputFile, ...]
+
+
+def _unquote_yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return re.sub(r"\s+#.*$", "", text).strip()
+
+
+def _spec_frontmatter(spec_text: str) -> str:
+    lines = spec_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[1:index])
+    return ""
+
+
+def spec_required_inputs(spec_text: str) -> list[str]:
+    """Return ``context.required_inputs`` from one spec's frontmatter.
+
+    A deliberately small reader rather than a YAML dependency: this module already
+    runs in deployed installs that may not carry PyYAML, and the declaration it
+    must read is a flat list of scalars under one nested key. Anything it cannot
+    read is simply not a declaration, which fails closed — an entry this parser
+    drops is an entry that grants no evidence authority.
+    """
+    block: list[str] = []
+    inside = False
+    for line in _spec_frontmatter(spec_text).splitlines():
+        if not inside:
+            inside = line.rstrip() == "context:"
+            continue
+        if line.strip() and not line.startswith((" ", "\t")):
+            break
+        block.append(line)
+    items: list[str] = []
+    collecting = False
+    for line in block:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if collecting:
+            if stripped.startswith("- "):
+                items.append(_unquote_yaml_scalar(stripped[2:]))
+                continue
+            collecting = False
+        match = re.fullmatch(r"required_inputs:\s*(.*)", stripped)
+        if match is None:
+            continue
+        inline = match.group(1).strip()
+        if inline.startswith("[") and inline.endswith("]"):
+            items.extend(
+                _unquote_yaml_scalar(part)
+                for part in inline[1:-1].split(",")
+                if part.strip()
+            )
+        elif not inline:
+            collecting = True
+    return [item for item in items if item]
+
+
+def declared_external_inputs(spec_text: str) -> list[str]:
+    """Return the external-evidence declarations, in declaration order."""
+    return [
+        item for item in spec_required_inputs(spec_text)
+        if item.startswith(EXTERNAL_INPUT_PREFIX)
+    ]
+
+
+def _blob_text_at_ref(repository: Path, ref: str, path: str) -> str | None:
+    """Return one tracked file's text at *ref*, or None when it is not a blob."""
+    probe = subprocess.run(
+        ["git", "-C", str(repository), "cat-file", "-t", f"{ref}:{path}"],
+        capture_output=True, check=False, env=_git_environment(),
+    )
+    if probe.returncode or probe.stdout.decode("ascii", "replace").strip() != "blob":
+        return None
+    return _git_bytes(repository, "cat-file", "blob", f"{ref}:{path}").decode(
+        "utf-8", "surrogateescape"
+    )
+
+
+def _tracked_entries(repository: Path, ref: str) -> dict[str, tuple[str, str]]:
+    """Return ``{path: (mode, object_id)}`` for every tracked entry at *ref*."""
+    entries: dict[str, tuple[str, str]] = {}
+    for raw in _git_bytes(repository, "ls-tree", "-rz", ref).split(b"\0"):
+        if not raw:
+            continue
+        metadata, raw_path = raw.split(b"\t", 1)
+        mode, _kind, object_id = metadata.decode("ascii").split()
+        entries[raw_path.decode("utf-8", "surrogateescape")] = (mode, object_id)
+    return entries
+
+
+def _external_source_identity(repository: Path) -> str:
+    """Return a host-path-free identity for one external source repository.
+
+    Derived from the repository's root commit(s), so the same repository yields
+    the same identity from any checkout location and the identity discloses no
+    filesystem path to the verifier (R2/R4).
+    """
+    roots = sorted(_run_git(repository, "rev-list", "--max-parents=0", "HEAD").split())
+    if not roots:
+        raise ValueError("external source repository has no commits")
+    return _domain_digest(
+        EXTERNAL_SOURCE_DOMAIN, *(root.encode("ascii") for root in roots)
+    )[:16]
+
+
+def _refuse(declaration: str, reason: str, detail: str) -> DeclaredInputRefusal:
+    return DeclaredInputRefusal(declaration, reason, detail)
+
+
+def _resolve_one_declaration(
+    declaration: str, *, spec_id: str, report_paths: Iterable[str],
+    total_bytes: int,
+) -> ResolvedExternalInput:
+    """Resolve one declaration to pinned, projectable bytes, or refuse it.
+
+    Every exit that is not an admission raises :class:`DeclaredInputRefusal` with
+    a distinct reason. Declaration alone never overrides containment: the
+    same-spec and report-root rules are applied first, so a declared own report is
+    refused *as* an own report rather than admitted because it was declared (R3).
+    """
+    value = declaration[len(EXTERNAL_INPUT_PREFIX):].strip()
+    if EXTERNAL_INPUT_SEPARATOR not in value:
+        raise _refuse(
+            declaration, "malformed_declaration",
+            f"expected {EXTERNAL_INPUT_PREFIX}<repository-root>"
+            f"{EXTERNAL_INPUT_SEPARATOR}<repository-relative-path>",
+        )
+    raw_root, raw_path = value.split(EXTERNAL_INPUT_SEPARATOR, 1)
+    raw_root, raw_path = raw_root.strip(), raw_path.strip()
+    if not raw_root or not raw_path:
+        raise _refuse(declaration, "malformed_declaration", "empty repository root or path")
+    if PurePosixPath(raw_path).is_absolute():
+        raise _refuse(
+            declaration, "absolute_path_escapes_source_repository",
+            f"declared path {raw_path!r} is absolute and therefore names content "
+            "outside its declared source repository",
+        )
+    if ".." in PurePosixPath(raw_path).parts:
+        raise _refuse(
+            declaration, "path_traversal",
+            f"declared path {raw_path!r} traverses out of its source repository",
+        )
+    try:
+        relative_path = _normalise_repo_path(raw_path)
+    except ValueError as exc:
+        raise _refuse(declaration, "path_traversal", str(exc)) from exc
+
+    token = normalise_spec_identity(spec_id).lower()
+    if token in relative_path.lower():
+        raise _refuse(
+            declaration, "same_spec_report",
+            f"declared path {relative_path!r} identifies the spec under "
+            "verification; declaration does not override same-spec containment",
+        )
+    if is_verifier_report_path(relative_path, explicit=report_paths):
+        raise _refuse(
+            declaration, "report_root",
+            f"declared path {relative_path!r} lies in a withheld report root",
+        )
+
+    root = Path(os.path.expanduser(raw_root))
+    if not root.is_absolute():
+        raise _refuse(
+            declaration, "not_a_git_repository",
+            f"declared source repository {raw_root!r} is not an absolute path",
+        )
+    if not root.is_dir():
+        raise _refuse(
+            declaration, "not_a_git_repository",
+            f"declared source repository {raw_root!r} is not a directory",
+        )
+    try:
+        toplevel = Path(_run_git(root, "rev-parse", "--show-toplevel").strip()).resolve()
+    except Exception as exc:  # noqa: BLE001 - any git failure is the same refusal
+        raise _refuse(
+            declaration, "not_a_git_repository",
+            f"declared source repository {raw_root!r} is not a Git repository",
+        ) from exc
+    if toplevel != root.resolve():
+        raise _refuse(
+            declaration, "not_a_git_repository",
+            f"declared source repository {raw_root!r} is not a repository root",
+        )
+
+    absolute = root / relative_path
+    if absolute.is_symlink() or any(
+        (root / PurePosixPath(relative_path).parents[index]).is_symlink()
+        for index in range(len(PurePosixPath(relative_path).parents) - 1)
+    ):
+        raise _refuse(
+            declaration, "symlink",
+            f"declared path {relative_path!r} is, or is reached through, a symlink",
+        )
+
+    entries = _tracked_entries(root, "HEAD")
+    prefix = relative_path + "/"
+    members = {
+        path: entry for path, entry in entries.items() if path.startswith(prefix)
+    }
+    if relative_path not in entries and not members:
+        raise _refuse(
+            declaration,
+            "untracked" if absolute.exists() else "missing",
+            f"declared path {relative_path!r} is "
+            + ("not tracked at HEAD" if absolute.exists() else "absent"),
+        )
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all",
+         "--", relative_path],
+        capture_output=True, check=False, env=_git_environment(),
+    )
+    if status.returncode:
+        raise _refuse(declaration, "mutable", "could not read source repository status")
+    dirt = [line for line in status.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    if dirt:
+        untracked = [line for line in dirt if line.startswith("??")]
+        raise _refuse(
+            declaration,
+            "untracked_member" if untracked and relative_path not in entries else "mutable",
+            f"declared path {relative_path!r} is not immutable at HEAD: "
+            f"{(untracked or dirt)[0]}",
+        )
+
+    identity = _external_source_identity(root)
+    commit = _run_git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    namespace = f"{EXTERNAL_INPUT_NAMESPACE}/{identity}"
+    selected = (
+        {relative_path: entries[relative_path]} if relative_path in entries else members
+    )
+    kind = "file" if relative_path in entries else "directory"
+    if kind == "directory" and len(selected) > EXTERNAL_INPUT_MAX_MEMBERS:
+        raise _refuse(
+            declaration, "directory_bounds_exceeded",
+            f"declared directory {relative_path!r} has {len(selected)} tracked members, "
+            f"over the {EXTERNAL_INPUT_MAX_MEMBERS} bound",
+        )
+    files: list[ProjectedInputFile] = []
+    member_records: list[dict[str, Any]] = []
+    running = total_bytes
+    for path, (mode, object_id) in sorted(selected.items()):
+        if mode == "120000":
+            raise _refuse(
+                declaration, "symlink_member" if kind == "directory" else "symlink",
+                f"tracked entry {path!r} is a symlink and may not be projected",
+            )
+        if mode not in {"100644", "100755"}:
+            raise _refuse(
+                declaration, "unsupported_entry_type",
+                f"tracked entry {path!r} has unsupported mode {mode}",
+            )
+        body = _git_bytes(root, "cat-file", "blob", object_id)
+        running += len(body)
+        if running > EXTERNAL_INPUT_MAX_BYTES:
+            raise _refuse(
+                declaration, "directory_bounds_exceeded",
+                f"declared inputs exceed the {EXTERNAL_INPUT_MAX_BYTES}-byte projection bound",
+            )
+        if is_verifier_metrics_path(path) and token.encode("utf-8") in body.lower():
+            raise _refuse(
+                declaration, "same_spec_content",
+                f"tracked entry {path!r} is a metrics artifact whose content "
+                "identifies the spec under verification",
+            )
+        files.append(ProjectedInputFile(path=f"{namespace}/{path}", body=body))
+        member_records.append({
+            "source_path": path,
+            "object_id": object_id,
+            "projected_path": f"{namespace}/{path}",
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "byte_count": len(body),
+        })
+    record: dict[str, Any] = {
+        "declaration": declaration,
+        "source_repository": str(root.resolve()),
+        "source_repository_id": identity,
+        "source_commit": commit,
+        "source_path": relative_path,
+        "kind": kind,
+        "object_id": _run_git(root, "rev-parse", f"HEAD:{relative_path}").strip(),
+        "projected_path": f"{namespace}/{relative_path}",
+        "byte_count": sum(member["byte_count"] for member in member_records),
+        "handling": "admitted",
+    }
+    if kind == "file":
+        record["sha256"] = member_records[0]["sha256"]
+    else:
+        record["member_count"] = len(member_records)
+        record["members"] = member_records
+    return ResolvedExternalInput(record=record, files=tuple(files))
+
+
+def resolve_declared_external_inputs(
+    source_repository: Path,
+    *,
+    baseline_ref: str,
+    head_ref: str,
+    spec_path: str | None,
+    spec_id: str,
+    report_paths: Iterable[str] = (),
+) -> tuple[list[ResolvedExternalInput], list[dict[str, Any]]]:
+    """Resolve the spec's declared external inputs for one dispatch (R1/R2/R3).
+
+    The declaration is read from the *spec file as committed at each verifier
+    arm*, never from the working tree. Both arms must carry the identical
+    external-evidence declaration list: a candidate that adds, changes, or removes
+    one during its own run gains no evidence authority, and the disagreement is
+    refused before a surface exists rather than resolved in either arm's favour.
+
+    Entries without the ``external-evidence:`` marker are ordinary upstream-artifact
+    declarations. They are left exactly as they were before SPEC-288 — not resolved,
+    not projected, not recorded — so a dispatch that declares no external evidence
+    is unchanged in every observable way.
+    """
+    if spec_path is None:
+        return [], []
+    normalized_spec_path = _normalise_repo_path(spec_path)
+    baseline_text = _blob_text_at_ref(source_repository, baseline_ref, normalized_spec_path)
+    head_text = _blob_text_at_ref(source_repository, head_ref, normalized_spec_path)
+    baseline_declarations = declared_external_inputs(baseline_text or "")
+    head_declarations = declared_external_inputs(head_text or "")
+    if baseline_declarations != head_declarations:
+        raise DeclaredInputRefusal(
+            json.dumps(
+                {"baseline": baseline_declarations, "head": head_declarations},
+                sort_keys=True,
+            ),
+            "declaration_not_identical",
+            f"external-evidence declarations in {normalized_spec_path} differ between "
+            "the verifier arms; a candidate may not change its own spec's declared "
+            "inputs during its run",
+            records=[{
+                "declaration": declaration,
+                "handling": "refused",
+                "reason": "declaration_not_identical",
+                "arm": arm,
+            } for arm, declarations in (
+                ("baseline", baseline_declarations), ("head", head_declarations)
+            ) for declaration in declarations],
+        )
+    resolved: list[ResolvedExternalInput] = []
+    records: list[dict[str, Any]] = []
+    total = 0
+    for declaration in baseline_declarations:
+        try:
+            item = _resolve_one_declaration(
+                declaration, spec_id=spec_id, report_paths=report_paths,
+                total_bytes=total,
+            )
+        except DeclaredInputRefusal as refusal:
+            refusal.records = records + [{
+                "declaration": refusal.declaration,
+                "handling": "refused",
+                "reason": refusal.reason,
+                "detail": refusal.detail,
+            }]
+            raise
+        total += int(item.record["byte_count"])
+        claimed = {
+            projected.path for earlier in resolved for projected in earlier.files
+        } & {projected.path for projected in item.files}
+        if claimed:
+            # Two declarations that project to the same path -- a directory and a
+            # file inside it, most plausibly. Caught here, before the destination
+            # exists, rather than mid-materialization: a refusal must never leave a
+            # half-built surface behind.
+            refusal = _refuse(
+                declaration, "projection_collision",
+                f"declaration projects to {sorted(claimed)[0]!r}, which an earlier "
+                "declaration already claims",
+            )
+            refusal.records = records + [{
+                "declaration": refusal.declaration,
+                "handling": "refused",
+                "reason": refusal.reason,
+                "detail": refusal.detail,
+            }]
+            raise refusal
+        resolved.append(item)
+        records.append(item.record)
+    if resolved:
+        for label, ref in (("baseline", baseline_ref), ("head", head_ref)):
+            colliding = sorted(
+                path for path in _tracked_entries(source_repository, ref)
+                if path == EXTERNAL_INPUT_NAMESPACE
+                or path.startswith(EXTERNAL_INPUT_NAMESPACE + "/")
+            )
+            if colliding:
+                raise DeclaredInputRefusal(
+                    baseline_declarations[0], "namespace_collision",
+                    f"the subject repository tracks {colliding[0]!r} at {label}, which "
+                    f"would collide with the projected evidence namespace",
+                    records=records,
+                )
+    return resolved, records
+
+
+def external_input_manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the verifier-visible manifest for projected external evidence (R4).
+
+    Deliberately a *sanitized* view of the same rows the parent records: the
+    declaration string and the source repository's filesystem location are dropped,
+    because neither is needed to tell a projection from native subject-repository
+    content, and a host path in the surface is exactly what this mechanism must
+    never hand a verifier.
+    """
+    return {
+        "schema_version": "1.0.0",
+        "namespace": EXTERNAL_INPUT_NAMESPACE,
+        "note": (
+            "Files under this namespace are byte-exact projections of tracked, "
+            "committed content from another repository, declared in advance by "
+            "this spec's context.required_inputs and identical at both verifier "
+            "arms. They are not part of the subject repository under verification."
+        ),
+        "inputs": [
+            {
+                key: value for key, value in record.items()
+                if key not in {"declaration", "source_repository"}
+            }
+            for record in records
+            if record.get("handling") == "admitted"
+        ],
+    }
+
+
+def _project_external_inputs(
+    destination: Path, resolved: Iterable[ResolvedExternalInput],
+    records: list[dict[str, Any]],
+) -> list[str]:
+    """Write the projected evidence into one materialized arm snapshot (R2).
+
+    Only regular files are ever created, always beneath *destination*, and each
+    target is re-checked against the surface root after its parents exist. Nothing
+    here can produce a link the verifier could follow out of the surface.
+    """
+    items = list(resolved)
+    if not items:
+        return []
+    surface_root = destination.resolve()
+    written: list[str] = []
+    for item in items:
+        for projected in item.files:
+            target = destination / projected.path
+            if target.exists():
+                raise ValueError(
+                    f"projected external input collides inside the surface: {projected.path}"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not _within_surface(target.resolve(), surface_root):
+                raise ValueError(
+                    f"projected external input resolves outside the verifier surface: "
+                    f"{projected.path}"
+                )
+            target.write_bytes(projected.body)
+            target.chmod(0o644)
+            written.append(projected.path)
+    manifest = destination / EXTERNAL_INPUT_NAMESPACE / EXTERNAL_INPUT_MANIFEST
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(external_input_manifest(records), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest.chmod(0o644)
+    written.append(f"{EXTERNAL_INPUT_NAMESPACE}/{EXTERNAL_INPUT_MANIFEST}")
+    return sorted(written)
+
+
+def _seal_projected_inputs(roots: Iterable[Path], projected_paths: Iterable[str]) -> None:
+    """Make every projection read-only in every materialized location (AC2).
+
+    Runs last, after both arm working directories exist, so no snapshot rebuild
+    ever has to clear a read-only file. Git records only the executable bit, so
+    dropping write permission leaves both arms byte- and status-clean.
+    """
+    paths = list(projected_paths)
+    for root in roots:
+        for relative in paths:
+            candidate = root / relative
+            if candidate.is_file() and not candidate.is_symlink():
+                candidate.chmod(0o444)
+
+
 def _clear_snapshot(destination: Path) -> None:
     for child in destination.iterdir():
         if child.name == ".git":
@@ -585,6 +1126,7 @@ def prepare_verifier_surface(
     report_paths: Iterable[str],
     evidence_path: Path,
     spec_id: str,
+    spec_path: str | None = None,
 ) -> dict[str, Any]:
     """Build a standalone Git repo with candidate conclusions removed.
 
@@ -620,6 +1162,16 @@ def prepare_verifier_surface(
     materialized as a regular file holding the link text and recorded in
     ``transformed_symlinks`` (SPEC-285); a *relative* link that traverses out is
     still refused outright.
+
+    When *spec_path* names the spec under verification, its predeclared
+    external-evidence inputs are resolved before the destination exists, pinned to
+    the source repository's committed objects, and projected byte-exactly into
+    ``.nightshift-verifier-inputs/`` inside *both* arms (SPEC-288). Evidence
+    provenance is not an arm-dependent variable: only the subject repository
+    content differs between arms, so the same projection is committed to each. A
+    refusal writes durable refusal evidence and leaves no surface at all. Omitting
+    *spec_path* — or declaring no external evidence — leaves every byte of this
+    function's behaviour as it was.
     """
     source_repository = source_repository.resolve()
     destination = destination.resolve()
@@ -627,6 +1179,37 @@ def prepare_verifier_surface(
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("verifier surface destination must be empty")
     spec_id = normalise_spec_identity(spec_id)
+    try:
+        resolved_inputs, input_records = resolve_declared_external_inputs(
+            source_repository,
+            baseline_ref=baseline_ref,
+            head_ref=head_ref,
+            spec_path=spec_path,
+            spec_id=spec_id,
+            report_paths=report_paths,
+        )
+    except DeclaredInputRefusal as refusal:
+        # R4: a refused input is recorded, not merely raised. The record is durable
+        # before the failure propagates, and is deliberately not a surface: nothing
+        # of the refused source was read into a snapshot, so no rejected byte can
+        # reach either arm.
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            json.dumps({
+                "schema_version": CONTAINMENT_EVIDENCE_SCHEMA_VERSION,
+                "surface_kind": "refused-declared-external-input",
+                "same_spec_id": spec_id,
+                "spec_path": spec_path,
+                "refusal": {
+                    "declaration": refusal.declaration,
+                    "reason": refusal.reason,
+                    "detail": refusal.detail,
+                },
+                "declared_external_inputs": refusal.records,
+            }, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        raise
     baseline_report_objects = _tracked_report_objects(
         source_repository, baseline_ref, report_paths=report_paths
     )
@@ -686,6 +1269,7 @@ def prepare_verifier_surface(
     }
     refs = (("baseline", baseline_ref), ("head", head_ref))
     commits: dict[str, str] = {}
+    projected_paths: list[str] = []
     excluded_by_ref: dict[str, list[str]] = {}
     transformed_by_ref: dict[str, list[dict[str, str]]] = {}
     fixed_env = _git_environment(
@@ -700,6 +1284,9 @@ def prepare_verifier_surface(
             report_paths=report_paths,
             retained_report_paths=retained_reports,
             same_spec_metrics_paths=same_spec_metrics,
+        )
+        projected_paths = _project_external_inputs(
+            destination, resolved_inputs, input_records
         )
         _run_git(destination, "add", "-A")
         result = subprocess.run(
@@ -725,6 +1312,10 @@ def prepare_verifier_surface(
         arm_dir = destination / f"verifier-{label}"
         _run_git(destination, "worktree", "add", "--detach", str(arm_dir), f"verifier-{label}")
         surface_repositories[label] = str(arm_dir)
+    _seal_projected_inputs(
+        [destination, *(Path(path) for path in surface_repositories.values())],
+        projected_paths,
+    )
 
     probes = []
     excluded_paths = sorted(
@@ -760,6 +1351,13 @@ def prepare_verifier_surface(
         "shared_object_database": False,
         "head_tree": _run_git(destination, "rev-parse", "HEAD^{tree}").strip(),
     }
+    if input_records:
+        # SPEC-288 R4. Absent, not empty, when nothing was declared: a dispatch
+        # that imports no external evidence stays byte-identical to a pre-SPEC-288
+        # one, including this file and every digest derived from it.
+        evidence["declared_external_inputs"] = input_records
+        evidence["declared_external_input_spec_path"] = _normalise_repo_path(spec_path or "")
+        evidence["projected_external_input_paths"] = projected_paths
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return evidence
@@ -800,6 +1398,18 @@ def configured_suite_command(source_repository: Path) -> str | None:
     return command.strip()
 
 
+def _projection_is_contained(root: Path, relative: str, digest: str) -> bool:
+    """True when one projected input is a contained, read-only, byte-exact file."""
+    target = root / relative
+    return (
+        not target.is_symlink()
+        and target.is_file()
+        and _within_surface(target.resolve(), root.resolve())
+        and hashlib.sha256(target.read_bytes()).hexdigest() == digest
+        and not target.stat().st_mode & 0o222
+    )
+
+
 def prepare_verifier_dispatch(
     source_repository: Path,
     destination: Path,
@@ -811,6 +1421,7 @@ def prepare_verifier_dispatch(
     spec_id: str,
     run_id: str,
     suite_commands: Iterable[str] = (),
+    spec_path: str | None = None,
 ) -> PreparedVerifierDispatch:
     """Prepare the sole verifier surface and emit a sanitized launch plan.
 
@@ -846,6 +1457,7 @@ def prepare_verifier_dispatch(
             report_paths=normalized_reports,
             evidence_path=evidence_path,
             spec_id=spec_id,
+            spec_path=spec_path,
         )
         exact_candidate_revision = _run_git(
             source_repository, "rev-parse", "--verify", f"{head_ref}^{{commit}}"
@@ -934,8 +1546,55 @@ def prepare_verifier_dispatch(
                 if baseline_body != head_body:
                     raise ValueError("retained historical report differs between refs")
                 observed_retained[path] = hashlib.sha256(head_body).hexdigest()
+        # SPEC-288 R2/R4: recompute the declared-input resolution from the source
+        # instead of trusting the record this same call just wrote, then require the
+        # projection to be present, byte-exact, regular, read-only, and contained in
+        # *both* arms. A projection that cannot be re-derived is not evidence.
+        recorded_inputs = durable_evidence.get("declared_external_inputs")
+        observed_inputs, observed_records = resolve_declared_external_inputs(
+            source_repository,
+            baseline_ref=baseline_ref,
+            head_ref=head_ref,
+            spec_path=spec_path,
+            spec_id=spec_id,
+            report_paths=normalized_reports,
+        )
+        projection_ready = recorded_inputs is None and not observed_records
+        if not projection_ready:
+            arm_directories = [
+                Path(path)
+                for path in durable_evidence.get("surface_repositories", {}).values()
+            ]
+            expected_projection = {
+                projected.path: hashlib.sha256(projected.body).hexdigest()
+                for item in observed_inputs for projected in item.files
+            }
+            manifest_relative = f"{EXTERNAL_INPUT_NAMESPACE}/{EXTERNAL_INPUT_MANIFEST}"
+            projection_ready = (
+                recorded_inputs == observed_records
+                and bool(expected_projection)
+                and durable_evidence.get("projected_external_input_paths")
+                == sorted([*expected_projection, manifest_relative])
+                and len(arm_directories) == 2
+                and all(
+                    _projection_is_contained(arm, relative, digest)
+                    for arm in arm_directories
+                    for relative, digest in expected_projection.items()
+                )
+                and all(
+                    json.loads((arm / manifest_relative).read_text(encoding="utf-8"))
+                    == external_input_manifest(observed_records)
+                    for arm in arm_directories
+                )
+                and not any(
+                    entry.is_symlink()
+                    for arm in arm_directories
+                    for entry in (arm / EXTERNAL_INPUT_NAMESPACE).rglob("*")
+                )
+            )
         ready = (
-            durable_evidence == evidence
+            projection_ready
+            and durable_evidence == evidence
             and bool(normalized_reports)
             and durable_evidence.get("surface_kind") == "standalone-sanitized-git"
             and durable_evidence.get("shared_object_database") is False
@@ -1068,6 +1727,37 @@ def verifier_surface_self_test() -> dict[str, Any]:
         in_surface_link = source / "docs/AGENTS.md"
         in_surface_link.parent.mkdir(parents=True, exist_ok=True)
         os.symlink("../AGENTS.md", in_surface_link)
+        # SPEC-288: a second repository holding committed evidence, and the two
+        # spec files that declare it -- one admissible, one that declares a report
+        # path and must be refused even though it is declared. Both declarations
+        # are committed at the baseline, which is the whole point: a declaration
+        # the candidate could add mid-run would not be identical across the arms.
+        evidence_source = root / "evidence-source"
+        evidence_source.mkdir()
+        subprocess.run(["git", "init", "-q", str(evidence_source)], check=True)
+        _run_git(evidence_source, "config", "user.name", "Nightshift smoke evidence")
+        _run_git(evidence_source, "config", "user.email", "evidence@example.invalid")
+        (evidence_source / "results").mkdir()
+        (evidence_source / "results/run-manifest.json").write_text(
+            '{"run": "smoke", "models": 2}\n', encoding="utf-8"
+        )
+        _run_git(evidence_source, "add", "-A")
+        _run_git(evidence_source, "commit", "-qm", "retained evidence")
+        smoke_spec = source / "canonical/specs/SMOKE.md"
+        smoke_spec.parent.mkdir(parents=True, exist_ok=True)
+        smoke_spec.write_text(
+            "---\nid: SMOKE\ncontext:\n  required_inputs:\n"
+            f"  - {EXTERNAL_INPUT_PREFIX}{evidence_source}"
+            f"{EXTERNAL_INPUT_SEPARATOR}results/run-manifest.json\n---\n\n# smoke\n",
+            encoding="utf-8",
+        )
+        denied_spec = source / "canonical/specs/SMOKE-DENIED.md"
+        denied_spec.write_text(
+            "---\nid: SMOKE\ncontext:\n  required_inputs:\n"
+            f"  - {EXTERNAL_INPUT_PREFIX}{source}"
+            f"{EXTERNAL_INPUT_SEPARATOR}canonical/reports/OTHER-SPEC/fixture.md\n---\n",
+            encoding="utf-8",
+        )
         _run_git(source, "add", "-A")
         _run_git(source, "commit", "-qm", "baseline")
         baseline = _run_git(source, "rev-parse", "HEAD").strip()
@@ -1178,13 +1868,88 @@ def verifier_surface_self_test() -> dict[str, Any]:
             or os.readlink(arm_relative_link) != "../AGENTS.md"
         ):
             raise RuntimeError("tracked symlink materialization contract failed")
+        # SPEC-288: the declared-external-input contract, both halves. An admitted
+        # declaration is projected byte-exactly, read-only, into both arms and is
+        # described to the verifier without a host path; a declared report path is
+        # refused with durable refusal evidence and no surface at all.
+        external = prepare_verifier_dispatch(
+            source, root / "surface-external", baseline_ref=baseline, head_ref=head,
+            report_paths=["canonical/reports/nightshift-report.md"],
+            evidence_path=root / "containment-external.json",
+            spec_id="SMOKE", run_id="smoke-run-external",
+            spec_path="canonical/specs/SMOKE.md",
+        )
+        admitted = external.evidence.get("declared_external_inputs")
+        projected_relative = (
+            f"{EXTERNAL_INPUT_NAMESPACE}/{admitted[0]['source_repository_id']}"
+            "/results/run-manifest.json"
+        ) if isinstance(admitted, list) and admitted else ""
+        if (
+            not isinstance(admitted, list)
+            or len(admitted) != 1
+            or admitted[0].get("handling") != "admitted"
+            or admitted[0].get("sha256") != hashlib.sha256(
+                b'{"run": "smoke", "models": 2}\n'
+            ).hexdigest()
+            or admitted[0].get("projected_path") != projected_relative
+        ):
+            raise RuntimeError("declared external input evidence contract failed")
+        for label in ("baseline", "head"):
+            arm = Path(external.evidence["surface_repositories"][label])
+            projected = arm / projected_relative
+            manifest_path = arm / EXTERNAL_INPUT_NAMESPACE / EXTERNAL_INPUT_MANIFEST
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            if (
+                projected.is_symlink()
+                or not projected.is_file()
+                or projected.read_bytes() != b'{"run": "smoke", "models": 2}\n'
+                or projected.stat().st_mode & 0o222
+                or str(evidence_source) in manifest_text
+                or str(source) in manifest_text
+                or json.loads(manifest_text)["inputs"][0]["source_path"]
+                != "results/run-manifest.json"
+            ):
+                raise RuntimeError(
+                    f"projected external evidence contract failed in the {label} arm"
+                )
+        refused_surface = root / "surface-refused"
+        refused_evidence_path = root / "containment-refused.json"
+        try:
+            prepare_verifier_dispatch(
+                source, refused_surface, baseline_ref=baseline, head_ref=head,
+                report_paths=["canonical/reports/nightshift-report.md"],
+                evidence_path=refused_evidence_path,
+                spec_id="SMOKE", run_id="smoke-run-refused",
+                spec_path="canonical/specs/SMOKE-DENIED.md",
+            )
+        except VerifierSurfacePreparationError:
+            refusal = json.loads(refused_evidence_path.read_text(encoding="utf-8"))
+        else:
+            raise RuntimeError("declared report-root input was not refused")
+        if (
+            refusal.get("refusal", {}).get("reason") != "report_root"
+            or refusal.get("surface_kind") != "refused-declared-external-input"
+            or any(refused_surface.rglob("fixture.md"))
+        ):
+            raise RuntimeError("declared-input refusal contract failed")
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
             "head_commit": plan["head_commit"],
             "identity_schema_version": plan["identity_schema_version"],
             "implementation_head_digest": plan["implementation_head_digest"],
             "verdict": "pass", "acs": [{"id": "AC1", "status": "pass", "evidence": "smoke"}],
-            "suites": [], "git_footprint": {"tree_before": evidence["head_tree"], "tree_after": evidence["head_tree"], "porcelain": ""},
+            "suites": [],
+            # SPEC-284: per arm, both snapshots, so the managed smoke contract
+            # carries the exact shape the validator recomputes from.
+            "git_footprint": {
+                label: {
+                    "tree_before": evidence["head_tree"],
+                    "tree_after": evidence["head_tree"],
+                    "porcelain_before": "",
+                    "porcelain_after": "",
+                }
+                for label in ("baseline", "head")
+            },
         }
         missing_errors = validate_verifier_verdict_dict(verdict)
         verdict["contamination"] = None
@@ -1201,23 +1966,45 @@ def capture_verifier_footprint(worktree: Path) -> GitFootprint:
     )
 
 
-def is_excluded_verifier_footprint_path(path: str) -> bool:
-    """Return whether *path* is the one allowed generated-file artifact."""
-    return path.replace("\\", "/") in VERIFIER_FOOTPRINT_EXCLUSIONS
+def porcelain_entries(porcelain: str) -> set[str]:
+    """Split a ``status --porcelain=v1`` snapshot into comparable entries.
+
+    The unit of comparison is the whole ``XY path`` line, not the path alone: a
+    path present in both snapshots under a *different* status (untracked, then
+    staged) changed while the verifier held the worktree, and that is a write
+    even though the path itself cancels.
+    """
+    return {line for line in porcelain.splitlines() if line.strip()}
+
+
+def _footprint_paths(entries: Iterable[str]) -> list[str]:
+    """Name paths, not raw status lines, in a footprint diagnostic."""
+    return sorted(entry[3:] if len(entry) > 3 else entry.strip() for entry in entries)
 
 
 def verifier_footprint_errors(before: GitFootprint, after: GitFootprint) -> list[str]:
-    """Validate a verifier's worktree-local, read-only Git footprint."""
+    """Validate a verifier's worktree-local, read-only Git footprint (SPEC-284).
+
+    The working-tree half is a set comparison of the two snapshots, never an
+    emptiness test on *after*.  An entry in both was already there when the
+    verifier was handed the worktree and is not attributable to it.  An entry
+    only in *after* was added; an entry only in *before* was removed.  Both are
+    writes -- including by a verifier that tidies up after itself, which should
+    leave a symmetric snapshot rather than a shorter one.
+    """
     errors: list[str] = []
     if before.tree != after.tree:
         errors.append(f"verifier mutated the repo tree: {before.tree} -> {after.tree}")
-    dirty_paths = [
-        line[3:]
-        for line in after.porcelain.splitlines()
-        if line.strip() and not is_excluded_verifier_footprint_path(line[3:])
-    ]
-    if dirty_paths:
-        errors.append("verifier left the worktree dirty: " + "; ".join(dirty_paths))
+    before_entries = porcelain_entries(before.porcelain)
+    after_entries = porcelain_entries(after.porcelain)
+    added = _footprint_paths(after_entries - before_entries)
+    removed = _footprint_paths(before_entries - after_entries)
+    if added:
+        errors.append("verifier added to the worktree: " + "; ".join(added))
+    if removed:
+        errors.append(
+            "verifier removed pre-existing worktree state: " + "; ".join(removed)
+        )
     return errors
 
 
@@ -1231,8 +2018,10 @@ def verifier_footprint_errors_multi(
 ) -> list[str]:
     """Validate every assigned arm surface's read-only footprint (R4, SPEC-282).
 
-    Mutation or an unexpected generated artifact in *either* arm is an error;
-    a clean baseline arm never masks a dirty head arm or vice versa.
+    Mutation, or a working-tree entry either arm gained or lost while the
+    verifier held it, is an error; a clean baseline arm never masks a dirty head
+    arm or vice versa.  Each arm is compared against its own dispatch snapshot,
+    so one arm's pre-existing dirt is never charged to the other (SPEC-284).
     """
     if set(before) != set(after):
         return [f"footprint arms mismatch: before={sorted(before)} after={sorted(after)}"]
@@ -1470,6 +2259,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--report-path", action="append", required=True)
     prepare.add_argument("--evidence", required=True, type=Path)
     prepare.add_argument("--spec-id", required=True)
+    prepare.add_argument("--spec-path", default=None)
     dispatch = subparsers.add_parser("prepare-dispatch")
     dispatch.add_argument("--source", required=True, type=Path)
     dispatch.add_argument("--destination", required=True, type=Path)
@@ -1480,13 +2270,17 @@ def main(argv: list[str] | None = None) -> int:
     dispatch.add_argument("--spec-id", required=True)
     dispatch.add_argument("--run-id", required=True)
     dispatch.add_argument("--suite-command", action="append", default=[])
+    # SPEC-288: repository-relative path of the spec under verification. Supplying
+    # it is what permits that spec's predeclared external evidence to be projected;
+    # omitting it leaves the dispatch exactly as it was before SPEC-288.
+    dispatch.add_argument("--spec-path", default=None)
     subparsers.add_parser("verifier-self-test")
     args = parser.parse_args(raw_argv)
     if args.command == "prepare-surface":
         prepare_verifier_surface(
             args.source, args.destination, baseline_ref=args.baseline,
             head_ref=args.head, report_paths=args.report_path, evidence_path=args.evidence,
-            spec_id=args.spec_id,
+            spec_id=args.spec_id, spec_path=args.spec_path,
         )
         return 0
     if args.command == "prepare-dispatch":
@@ -1503,7 +2297,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.source, args.destination, baseline_ref=args.baseline,
                 head_ref=args.head, report_paths=args.report_path,
                 evidence_path=args.evidence, suite_commands=suite_commands,
-                spec_id=args.spec_id, run_id=args.run_id,
+                spec_id=args.spec_id, run_id=args.run_id, spec_path=args.spec_path,
             )
         except VerifierSurfacePreparationError:
             print(json.dumps({
