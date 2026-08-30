@@ -15,7 +15,7 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:  # pragma: no cover - deployed install may be incomplete
@@ -44,7 +44,7 @@ VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "acs", "suites", "git_footprint", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
-CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.3.0"
+CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.4.0"
 SPEC_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
@@ -426,6 +426,63 @@ def _clear_snapshot(destination: Path) -> None:
             shutil.rmtree(child)
 
 
+def _within_surface(candidate: Path, destination: Path) -> bool:
+    """True when *candidate* is *destination* itself or lives beneath it."""
+    try:
+        return Path(os.path.commonpath((destination, candidate))) == destination
+    except ValueError:
+        # Unrelated roots (or a relative/absolute mix) share no common path.
+        return False
+
+
+def _materialize_symlink(
+    link: str, *, target: Path, destination: Path, path: str
+) -> dict[str, str] | None:
+    """Materialize one tracked symlink into the surface, or refuse it (SPEC-285).
+
+    Three cases, and the distinction the previous single check could not draw:
+
+    * **Relative link text.** Resolved against the entry's own parent inside the
+      surface. This is the traversal the containment guard exists for, so a
+      resolution outside *destination* is still refused — fail-closed, with the
+      path and the link text named (R2/R5).
+    * **Absolute link text landing inside the surface.** Kept as a symlink; it
+      is already contained.
+    * **Absolute link text landing outside the surface.** Not a traversal
+      attempt but ordinary out-of-repo content — Argo Home's tracked
+      ``AGENTS.md -> ~/.claude/CLAUDE.md`` is the motivating case. Materialized
+      as a regular file holding the link text: the entry stays visible and the
+      verifier can see what it pointed at, while a plain file cannot be followed
+      anywhere, so containment holds trivially (R1/R3/R4).
+
+    ``(target.parent / link)`` is deliberately *not* used for an absolute link:
+    pathlib discards the left operand for an absolute right-hand side, which is
+    exactly how the old check came to reject every absolute target.
+
+    Returns the containment-evidence record for a transformed entry, or ``None``
+    when the entry was materialized as an ordinary symlink.
+    """
+    if not link:
+        raise ValueError(
+            f"unrepresentable tracked symlink for verifier surface: {path} "
+            f"(empty link target)"
+        )
+    if PurePosixPath(link).is_absolute():
+        if _within_surface(Path(link).resolve(), destination):
+            target.symlink_to(link)
+            return None
+        target.write_bytes(link.encode("utf-8", "surrogateescape"))
+        target.chmod(0o644)
+        return {"path": path, "target": link, "handling": "link-text-file"}
+    if not _within_surface((target.parent / link).resolve(), destination):
+        raise ValueError(
+            f"relative tracked symlink traverses out of the verifier surface: "
+            f"{path} -> {link} (resolves outside the surface destination)"
+        )
+    target.symlink_to(link)
+    return None
+
+
 def _tracked_objects_matching(
     source_repository: Path,
     ref: str,
@@ -474,10 +531,18 @@ def _materialize_ref(
     report_paths: Iterable[str],
     retained_report_paths: Iterable[str] = (),
     same_spec_metrics_paths: Iterable[str] = (),
-) -> list[str]:
-    """Materialize one tracked snapshot without sharing the source object DB."""
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Materialize one tracked snapshot without sharing the source object DB.
+
+    Returns the withheld paths and the per-entry record of every tracked symlink
+    materialized as something other than a symlink (SPEC-285). The two lists are
+    kept apart deliberately: a withheld path must be *unreachable* from the
+    surface, while a transformed entry is still present and committed.
+    """
     _clear_snapshot(destination)
+    surface_root = destination.resolve()
     excluded: list[str] = []
+    transformed: list[dict[str, str]] = []
     retained = set(retained_report_paths)
     same_spec_metrics = set(same_spec_metrics_paths)
     entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
@@ -499,15 +564,16 @@ def _materialize_ref(
         target.parent.mkdir(parents=True, exist_ok=True)
         body = _git_bytes(source_repository, "cat-file", "blob", object_id)
         if mode == "120000":
-            link = body.decode("utf-8", "surrogateescape")
-            resolved = (target.parent / link).resolve()
-            if Path(os.path.commonpath((destination.resolve(), resolved))) != destination.resolve():
-                raise ValueError(f"symlink escapes verifier surface: {path}")
-            target.symlink_to(link)
+            record = _materialize_symlink(
+                body.decode("utf-8", "surrogateescape"),
+                target=target, destination=surface_root, path=path,
+            )
+            if record is not None:
+                transformed.append(record)
         else:
             target.write_bytes(body)
             target.chmod(0o755 if mode == "100755" else 0o644)
-    return sorted(excluded)
+    return sorted(excluded), sorted(transformed, key=lambda record: record["path"])
 
 
 def prepare_verifier_surface(
@@ -549,6 +615,11 @@ def prepare_verifier_surface(
 
     Same-spec resolution runs before the destination repository exists, so a
     failure to compute it leaves no surface behind at all.
+
+    A tracked symlink whose target is absolute and lands outside the surface is
+    materialized as a regular file holding the link text and recorded in
+    ``transformed_symlinks`` (SPEC-285); a *relative* link that traverses out is
+    still refused outright.
     """
     source_repository = source_repository.resolve()
     destination = destination.resolve()
@@ -616,12 +687,13 @@ def prepare_verifier_surface(
     refs = (("baseline", baseline_ref), ("head", head_ref))
     commits: dict[str, str] = {}
     excluded_by_ref: dict[str, list[str]] = {}
+    transformed_by_ref: dict[str, list[dict[str, str]]] = {}
     fixed_env = _git_environment(
         GIT_AUTHOR_DATE="2000-01-01T00:00:00Z",
         GIT_COMMITTER_DATE="2000-01-01T00:00:00Z",
     )
     for label, ref in refs:
-        excluded_by_ref[label] = _materialize_ref(
+        excluded_by_ref[label], transformed_by_ref[label] = _materialize_ref(
             source_repository,
             destination,
             ref,
@@ -674,6 +746,11 @@ def prepare_verifier_surface(
         "surface_commits": commits,
         "surface_repositories": surface_repositories,
         "excluded_paths": excluded_by_ref,
+        # SPEC-285: entries that are present in the surface but not as the type
+        # the source tree carries. Recorded per ref, per entry, with the original
+        # link target, so a verifier can tell a transformed entry from one whose
+        # content simply differs.
+        "transformed_symlinks": transformed_by_ref,
         "explicit_report_paths": list(report_paths),
         "same_spec_id": spec_id,
         "same_spec_excluded_paths": same_spec_exclusions,
@@ -979,6 +1056,18 @@ def verifier_surface_self_test() -> dict[str, Any]:
         same_spec_metrics_fixture.write_text("task_id: SMOKE\nstatus: completed\n", encoding="utf-8")
         unrelated_metrics_fixture = source / "canonical/metrics/2026-01-01_001_OTHER-SPEC.yaml"
         unrelated_metrics_fixture.write_text("task_id: OTHER-SPEC\nstatus: completed\n", encoding="utf-8")
+        # SPEC-285: the tracked-symlink pair a real repository carries — one
+        # absolute link to ordinary content outside the repo, one relative link
+        # that stays inside it. The smoke contract is that the surface builds at
+        # all, that the first becomes a visible link-text file recorded in
+        # containment evidence, and that the second is still a working symlink.
+        outside_target = root / "outside-the-repository" / "CLAUDE.md"
+        outside_target.parent.mkdir(parents=True, exist_ok=True)
+        outside_target.write_text("out-of-repository content\n", encoding="utf-8")
+        os.symlink(str(outside_target), source / "AGENTS.md")
+        in_surface_link = source / "docs/AGENTS.md"
+        in_surface_link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink("../AGENTS.md", in_surface_link)
         _run_git(source, "add", "-A")
         _run_git(source, "commit", "-qm", "baseline")
         baseline = _run_git(source, "rev-parse", "HEAD").strip()
@@ -1066,6 +1155,29 @@ def verifier_surface_self_test() -> dict[str, Any]:
             )
             if probe.returncode == 0:
                 raise RuntimeError("same-spec metrics blob remains reachable from verifier surface")
+        # SPEC-285 containment: the absolute out-of-repo link is a plain file
+        # holding its link text and is declared as transformed; the in-surface
+        # relative link is untouched and still followable in the head arm.
+        transformed = evidence.get("transformed_symlinks")
+        expected_transform = {
+            "path": "AGENTS.md",
+            "target": str(outside_target),
+            "handling": "link-text-file",
+        }
+        if not isinstance(transformed, dict) or set(transformed) != {"baseline", "head"} or any(
+            expected_transform not in transformed[label] for label in ("baseline", "head")
+        ):
+            raise RuntimeError("transformed symlink containment evidence contract failed")
+        materialized_link_text = surface / "AGENTS.md"
+        arm_relative_link = Path(evidence["surface_repositories"]["head"]) / "docs/AGENTS.md"
+        if (
+            materialized_link_text.is_symlink()
+            or not materialized_link_text.is_file()
+            or materialized_link_text.read_text(encoding="utf-8") != str(outside_target)
+            or not arm_relative_link.is_symlink()
+            or os.readlink(arm_relative_link) != "../AGENTS.md"
+        ):
+            raise RuntimeError("tracked symlink materialization contract failed")
         verdict = {
             "spec_id": "SMOKE", "branch": "smoke", "baseline_commit": baseline,
             "head_commit": plan["head_commit"],

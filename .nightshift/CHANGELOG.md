@@ -9,6 +9,47 @@
 
 ## [Unreleased]
 
+## 3.11.1 (2026-08-30)
+
+### An absolute tracked symlink no longer makes the verifier surface unbuildable (SPEC-285)
+
+`_materialize_ref` in `verification_report.py` resolved every tracked symlink's
+link text against the entry's own parent directory inside the surface. For an
+**absolute** link text pathlib discards the left operand, so the resolution was
+the raw target, `commonpath` was `/`, and the containment check raised
+unconditionally. A relative traversal attempt (`../../etc/passwd`) and an
+absolute link to an ordinary file outside the repository were indistinguishable
+to that predicate, though only the first is the threat it guards against.
+
+The failure was total, not partial: `prepare-dispatch` exited nonzero, the
+parent recorded the controlled evidence gap `verifier_surface_unavailable`, and
+no spec in an affected repository could reach a verifier verdict at all. Argo
+Home is affected today through its tracked `AGENTS.md -> ~/.claude/CLAUDE.md`,
+which is its documented Codex entry point and not retargetable.
+
+- The traversal guard is now scoped to the threat it was written for: a
+  **relative** link text that resolves outside the surface destination is still
+  refused, and the diagnostic names the path, the link text, and the reason
+  rather than a bare "escapes".
+- An **absolute** link text landing outside the surface is materialized as a
+  visible regular file containing the link text. The entry stays present and the
+  verifier can see what it pointed at, while a plain file cannot be followed
+  anywhere — so SPEC-228/239 containment holds trivially and the verifier gains
+  no read path out of the surface.
+- An absolute link text landing *inside* the surface, and any in-surface
+  relative symlink, still materialize as ordinary working symlinks. This is not
+  a blanket retreat from symlinks.
+- Containment evidence gains `transformed_symlinks`: per ref, per entry, the
+  path, the original link target, and the handling applied
+  (`link-text-file`), so a transformed entry is distinguishable from one whose
+  content merely differs. `CONTAINMENT_EVIDENCE_SCHEMA_VERSION` 1.3.0 → 1.4.0.
+  The key is additive and outside the identity projection, so verifier identity
+  digests are unchanged.
+- `verifier-self-test` now carries both symlink shapes, making the repair part
+  of the managed release smoke contract.
+
+No config or protocol change; no migration required.
+
 ## 3.11.0 (2026-08-30)
 
 ### Whole-kit release of the resilient-unblock kit with a registered config migration (SPEC-269)
