@@ -43,6 +43,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _normalized_blocked_since(value: object) -> str:
+    """Return the stable text identity used for a blocker timestamp.
+
+    PyYAML resolves unquoted ISO timestamps to ``datetime`` while quoted values
+    remain strings.  The controller must treat those equivalent spellings as the
+    same blocker so packets are JSON-serializable and can round-trip through
+    ``finalize``.
+    """
+    if isinstance(value, datetime):
+        instant = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return str(value)
+
+
 def _relative(root: Path, value: str) -> Path:
     path = (root / value).resolve()
     try:
@@ -97,9 +111,10 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
     if not evidence_path.is_file():
         raise UnblockError("actionable blocker evidence is missing or unverifiable")
     evidence_hash = _hash(evidence_path)
+    blocked_since = _normalized_blocked_since(fm["blocked_since"])
     fingerprint = hashlib.sha256(json.dumps({
         "spec_id": fm["id"], "class": blocker_class, "reason": fm["block_reason"],
-        "since": fm["blocked_since"], "evidence": evidence_ref, "sha256": evidence_hash,
+        "since": blocked_since, "evidence": evidence_ref, "sha256": evidence_hash,
     }, sort_keys=True).encode()).hexdigest()
     prior = _load_attempts(project_root, str(fm["id"]))
     if not retry_override and any(a.get("fingerprint") == fingerprint and a.get("automatic") for a in prior):
@@ -108,7 +123,7 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
     packet = {
         "schema_version": 1, "packet_id": f"{run_id}:{fm['id']}:{fingerprint[:12]}",
         "run_id": run_id, "spec_id": fm["id"], "spec_path": str(spec_file.relative_to(project_root)),
-        "source_blocked_since": fm["blocked_since"], "blocker_class": blocker_class,
+        "source_blocked_since": blocked_since, "blocker_class": blocker_class,
         "metric_blocker_class": LIFECYCLE_TO_METRIC_BLOCKER[blocker_class],
         "blocker_scope": fm["blocker_scope"], "fingerprint": fingerprint,
         "evidence": [{"path": evidence_ref, "sha256": evidence_hash}], "prior_attempts": prior,
@@ -203,13 +218,13 @@ def finalize(packet: Mapping[str, Any], attempt_path: Path, project_root: Path) 
     if not transition_allowed("blocked", "ready"):
         raise UnblockError("lifecycle rejects blocked -> ready")
     def mutate(fm: dict[str, Any]) -> dict[str, Any]:
-        if fm.get("status") not in {"blocked", "ready"} or fm.get("blocked_since") != packet.get("source_blocked_since"):
+        if fm.get("status") not in {"blocked", "ready"} or _normalized_blocked_since(fm.get("blocked_since")) != packet.get("source_blocked_since"):
             raise UnblockError("spec blocker changed; prepare again")
         fm["status"] = "ready"
         fm.setdefault("unblock_history", []).append({"attempt": attempt["attempt_id"], "at": _now()})
         return fm
     current = parse_spec_file(spec_path).frontmatter
-    if current.get("status") != "blocked" or current.get("blocked_since") != packet.get("source_blocked_since"):
+    if current.get("status") != "blocked" or _normalized_blocked_since(current.get("blocked_since")) != packet.get("source_blocked_since"):
         raise UnblockError("spec blocker changed; prepare again")
     try:
         StatusStore.for_specs_dir(spec_path.parent).transition_commit_backed(
