@@ -20,9 +20,33 @@ operation with ref inventory and post-rewrite leak evidence.
 runtime helper, schema, hook, config reference, or synced skill, add
 `release_handoff: {impact: required}` and create the matching portable
 `release-handoffs/<SPEC-ID>.json` artifact. Documentation-only or non-managed
-work must instead record `impact: exempt` with a reason. A release-impact spec
-cannot become `done` until the artifact validates; only `/nightshift release`
-can fulfil its pending handoff after the full managed-kit rollout.
+work must instead record `impact: exempt` with a reason. Author a required
+artifact with `manifest_fingerprint:
+"pending-release-manifest-fingerprint-v1"` and the spec's declared target
+version; never guess a real fingerprint. The release coordinator alone
+mechanically replaces that sentinel and target version with the actual manifest
+immediately before delivery validation. A raw sentinel or any other mismatched
+fingerprint cannot complete. A release-impact spec cannot become `done` until
+the artifact validates; only `/nightshift release` can fulfil its pending
+handoff after the full managed-kit rollout.
+
+**Declaration policy for terminal non-delivering specs (SPEC-271):** A
+`release_handoff:` declaration describes a spec's intent while it was live,
+not a live obligation once the spec stops moving. The terminal
+non-delivering status set is derived structurally from
+`lifecycle.LIFECYCLE_TRANSITIONS` (via `lifecycle.terminal_statuses()`):
+every status with no outgoing transition, minus `done` (which is delivering
+by definition and stays fully gated). That leaves exactly `{superseded}` —
+the only status that is both terminal and non-delivering. Once a spec
+reaches `superseded`, its `impact: required` declaration stops producing an
+unclearable "release-impact spec requires a release handoff artifact"
+finding; this is the default outcome, requiring no action, and the
+declaration is left byte-unchanged. Re-classifying that declaration (e.g.
+`required` → `exempt` with a `reason`) is never a side effect of the status
+transition itself — it requires the dedicated
+`release_handoff.reclassify_terminal_declaration` function, which refuses to
+run on a non-`superseded` spec, refuses an empty reason, and records a
+durable checkpoint distinct from any status-transition commit.
 
 **Historical checkbox dispositions (SPEC-204):** A project that has deliberately
 preserved unchecked Requirements or Acceptance Criteria in historical `done`
@@ -543,6 +567,79 @@ instruction-packet primitives. A new mechanism needs a named measurable gap, a s
 reuse-based alternative considered, and an AC that proves the addition closes that gap
 without duplicating authority or storage. Do not propose a parallel decision command or
 store merely to make a brief easier to describe.
+
+### Typed spec artifacts and transition reasons (SPEC-291)
+
+Every durable status transition performed through canonical tooling
+(`status_store.transition_commit_backed`, the board status PUT, the promotion
+entrypoint in `spec_promotion.py`, and `unblock_spec.finalize`) writes a
+durable, typed artifact under `canonical/reports/<SPEC-ID>/artifacts/`,
+indexed by `canonical/reports/<SPEC-ID>/artifacts/index.json`. Discoverability
+requires only the spec ID — no new frontmatter field is added to the spec
+itself.
+
+The index schema has exactly one code source
+(`lifecycle.ARTIFACT_INDEX_FIELDS`); this list is that schema's prose mirror,
+and a test (`tests/test_artifact_index_schema.py`) fails if the two diverge.
+Every index entry carries:
+
+- `type` — one of the closed, registered vocabulary below
+- `created` — an ISO-8601 UTC timestamp
+- `actor` — the agent, human, or tool identifier that wrote the artifact
+- `summary` — a one-line human-readable summary
+- `path` — the artifact file's path relative to the spec's `artifacts/` directory
+
+The artifact-type vocabulary (`lifecycle.ARTIFACT_TYPES`) is closed and
+registered in one place; adding a type is a registry edit plus this
+documentation, nowhere else:
+
+- `status-transition` — records one durable status change: `from`, `to`,
+  `reason`, `evidence`, `run_id`
+- `decision` — reuses `lifecycle.decision_record`'s immutable shape for a
+  judgment made about the spec (e.g. resolving a `promotion_gap`)
+- `validation-evidence` — the validation an agent performed to justify a
+  transition
+- `context` — findings an agent gathered while deciding
+- `verifier` — a reference to an existing verifier verdict/packet under this
+  spec's `reports/` tree
+- `other` — anything not covered above
+
+**Transition reasons.** A *judgment* transition (`draft`/`planned -> ready`,
+any `-> blocked`, any `-> superseded`, or a manual board move) requires a
+non-empty prose reason; the tooling refuses the transition rather than
+silently recording it. A *mechanical* transition (`ready -> in_progress` via
+kickoff, an evidence-gated `-> done`, or a controller-verified
+`blocked -> ready` via the unblock protocol) synthesizes its reason from the
+run ID / evidence trailers already in hand — no extra prompting.
+`lifecycle.is_judgment_transition(current, target)` is the single source for
+this classification.
+
+**Promotion knowledge (R4).** A promotion that resolves a declared
+`promotion_gap` additionally persists the resolution rationale as a
+`decision` artifact (reusing `lifecycle.decision_record`/
+`resolve_decision_record`), and any agent-gathered findings/evidence as
+`context`/`validation-evidence` artifacts — reuse `spec_promotion.promote_to_ready`
+rather than resolving a gap and writing `status: ready` by hand. The knowledge
+behind a promotion must be recallable from `artifacts/index.json` alone,
+without the promoting session's transcript.
+
+**The commit-backed/private-local kickoff choke points (SKILL.md Step
+2/6)** mutate frontmatter directly (an `Edit` + `git commit`, or
+`transition_private_state`) rather than calling `transition_commit_backed`
+directly, so they call `spec_artifacts.py record-transition <spec-file>
+--from <status> --to <status> --run-id <run-id> [--reason "<why>"]`
+immediately after, to write the same `status-transition` artifact.
+
+**Verifier containment is unchanged.** Artifacts live under
+`reports/<SPEC-ID>/`, so they inherit the existing same-spec withholding rule
+(`verification_report.is_verifier_report_path`) — a spec's own artifacts never
+reach that spec's verifier surface.
+
+**Historical corpus.** Absence of `artifacts/` is never a validation finding
+— the convention applies from this spec's merge commit forward, never
+retroactively (R7). `validate_specs.py` validates an existing
+`artifacts/index.json` (schema, on-registry types, listed-file
+existence/tracking, orphan files) but never requires one to exist.
 
 ### Record R/AC contract friction
 

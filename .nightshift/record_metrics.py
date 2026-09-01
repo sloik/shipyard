@@ -567,6 +567,16 @@ def next_sequence(metrics_dir: Path, date: str) -> str:
 # ---------------------------------------------------------------------------
 
 MARK_COMMIT_RE = re.compile(r"^chore: mark (SPEC-(?:[A-Z0-9]+-)*\d+) (done|blocked)$")
+# SPEC-256: a subject that clearly *intends* to be a mark-done/blocked commit — it
+# begins with the strict prefix and names a terminal outcome word — but carries
+# extra trailing content (e.g. the historical `— <reason>` suffix) must not be
+# confused with an ordinary, unrelated commit. MARK_COMMIT_RE staying silent on
+# those is correct (most commits aren't mark-commits at all); this near-miss
+# pattern exists only to distinguish "not a mark-commit" from "a mark-commit
+# whose subject drifted from the strict grammar" so the latter can fail loudly.
+_MARK_COMMIT_NEAR_MISS_RE = re.compile(
+    r"^chore: mark (SPEC-(?:[A-Z0-9]+-)*\d+) (done|blocked)\b(.+)$"
+)
 _REPORT_TESTS_RE = re.compile(r"[Tt]ests?\s+passed:?\s*(\d+)\s*/\s*(\d+)")
 
 
@@ -614,6 +624,7 @@ def derive_resolution(
     mark_commit: str,
     in_progress_sha: str,
     final_outcome: str,
+    trailer_commit: str | None = None,
 ) -> dict:
     """Derive the parent-authoritative kickoff resolution from git history.
 
@@ -643,6 +654,7 @@ def derive_resolution(
     ) else "kickoff_gate"
 
     default_evidence = "pass" if final_outcome == "done" else "unknown"
+    evidence_commit = trailer_commit or mark_commit
     evidence_keys = {
         "report_exists": "Nightshift-Evidence-Report",
         "tests_passed": "Nightshift-Evidence-Tests",
@@ -651,12 +663,12 @@ def derive_resolution(
     }
     evidence_gate = {}
     for field, trailer_key in evidence_keys.items():
-        value = commit_trailer(repo, mark_commit, trailer_key).lower()
+        value = commit_trailer(repo, evidence_commit, trailer_key).lower()
         evidence_gate[field] = (
             value if value in EVIDENCE_RESULT_ENUM else default_evidence
         )
     verifier_verdict = commit_trailer(
-        repo, mark_commit, "Nightshift-Evidence-Verifier"
+        repo, evidence_commit, "Nightshift-Evidence-Verifier"
     ).lower()
     evidence_gate["verifier"] = (
         verifier_verdict
@@ -665,10 +677,10 @@ def derive_resolution(
     )
 
     blocker_class = commit_trailer(
-        repo, mark_commit, "Nightshift-Blocker-Class"
+        repo, evidence_commit, "Nightshift-Blocker-Class"
     ).lower()
     blocker_scope = commit_trailer(
-        repo, mark_commit, "Nightshift-Blocker-Scope"
+        repo, evidence_commit, "Nightshift-Blocker-Scope"
     ).lower()
     blocker_class = blocker_class if blocker_class in BLOCKER_CLASS_ENUM else (
         "none" if final_outcome == "done" else "unknown"
@@ -677,13 +689,13 @@ def derive_resolution(
         "none" if final_outcome == "done" else "unknown"
     )
     unblock_attempts = _bounded_int(
-        commit_trailer(repo, mark_commit, "Nightshift-Unblock-Attempts")
+        commit_trailer(repo, evidence_commit, "Nightshift-Unblock-Attempts")
     )
     unblock_limit = _bounded_int(
-        commit_trailer(repo, mark_commit, "Nightshift-Unblock-Limit")
+        commit_trailer(repo, evidence_commit, "Nightshift-Unblock-Limit")
     )
     unblock_rung = _bounded_int(
-        commit_trailer(repo, mark_commit, "Nightshift-Unblock-Rung")
+        commit_trailer(repo, evidence_commit, "Nightshift-Unblock-Rung")
     )
 
     started = datetime.fromisoformat(commit_iso(repo, run_id).replace("Z", "+00:00"))
@@ -845,6 +857,21 @@ def existing_metrics_for_commit(metrics_dir: Path, spec_id: str, commit_hash: st
     return False
 
 
+def metrics_paths_for_commit(metrics_dir: Path, spec_id: str, commit_hash: str) -> list[Path]:
+    """Return every metrics row bound to one terminal commit identity."""
+    if not metrics_dir.is_dir():
+        return []
+    paths = []
+    for path in metrics_dir.glob(f"*_{spec_id}.yaml"):
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict) and (data.get("commit") or {}).get("hash") == commit_hash:
+            paths.append(path)
+    return paths
+
+
 def derive_block_reason(spec_file: Path) -> str:
     """Pull a 'Block Reason' line from the spec body for the failure ledger, if present."""
     try:
@@ -858,8 +885,14 @@ def derive_block_reason(spec_file: Path) -> str:
 def main_mark_commit(argv) -> int:
     """Derive + emit a metrics row from a `chore: mark <id> done|blocked` commit.
 
-    No-ops (exit 0) on any commit that is not a mark-done/blocked, or that cannot be
-    routed to an install. Idempotent. Never raises into the caller's hook.
+    No-ops (exit 0) on any commit that is not a mark-done/blocked at all, or that
+    cannot be routed to an install. Idempotent. On a NEAR-MISS subject — one that
+    begins with the strict `chore: mark <spec-id> ` prefix and names a terminal
+    outcome word but carries extra trailing content (SPEC-256/R2) — returns exit
+    code 2 with a diagnostic on stderr instead of silently no-op'ing, so a drifted
+    subject is never mistaken for "nothing to do here." Never raises. The
+    hooks/post-commit caller invokes this with `|| true` and no steps after it, so
+    a non-zero return here never aborts the commit or any later hook logic.
     """
     p = argparse.ArgumentParser(description="Emit metrics from a mark-done/blocked commit.")
     p.add_argument("--mark-commit", required=True, help="commit SHA (e.g. HEAD)")
@@ -875,6 +908,17 @@ def main_mark_commit(argv) -> int:
     subject = _run_git(repo, ["log", "-1", "--format=%s", args.mark_commit])
     m = MARK_COMMIT_RE.match(subject)
     if not m:
+        near_miss = _MARK_COMMIT_NEAR_MISS_RE.match(subject)
+        if near_miss:
+            print(
+                "[mark-commit] ERROR: subject looks like a mark-done/blocked commit "
+                f"but does not match the required grammar: {subject!r}\n"
+                "  Expected exactly: 'chore: mark <spec-id> done' or "
+                "'chore: mark <spec-id> blocked' (no suffix — put any reason in the "
+                "commit body).",
+                file=sys.stderr,
+            )
+            return 2
         return 0  # not a mark-done/blocked commit — silent no-op (the common case)
     spec_id, mark_word = m.group(1), m.group(2)
     outcome = mark_word  # done | blocked
@@ -989,6 +1033,107 @@ def main_mark_commit(argv) -> int:
     return 0
 
 
+def main_correct_commit(argv) -> int:
+    """Re-emit corrected trailers into one existing terminal metrics row.
+
+    This is deliberately separate from mark-commit mode: hooks only invoke the
+    latter, while a correction must be an explicit operator action on a
+    non-terminal correction commit.
+    """
+    p = argparse.ArgumentParser(description="Correct one terminal metrics row without rewriting Git history.")
+    p.add_argument("--correct-commit", required=True, help="SHA of the original terminal mark commit")
+    p.add_argument("--repo", default=".")
+    args = p.parse_args(argv)
+
+    repo = Path(args.repo)
+    bad_subject = _run_git(repo, ["log", "-1", "--format=%s", args.correct_commit])
+    bad_match = MARK_COMMIT_RE.match(bad_subject)
+    if not bad_match:
+        print("Error: --correct-commit must name a terminal chore: mark <spec-id> done|blocked commit.", file=sys.stderr)
+        return 2
+    spec_id, outcome = bad_match.group(1), bad_match.group(2)
+    bad_commit = _run_git(repo, ["rev-parse", args.correct_commit]) or args.correct_commit
+
+    correction_commit = _run_git(repo, ["rev-parse", "HEAD"])
+    correction_subject = _run_git(repo, ["log", "-1", "--format=%s", "HEAD"])
+    if MARK_COMMIT_RE.match(correction_subject):
+        print(
+            "Error: correction commit subject must not match MARK_COMMIT_RE; "
+            "use a distinct correction subject so it cannot create another terminal transition.",
+            file=sys.stderr,
+        )
+        return 2
+
+    spec_rel = next(
+        (path for path in _changed_files(repo, bad_commit)
+         if "/specs/" in path and path.endswith(".md")),
+        "",
+    )
+    if not spec_rel:
+        print("Error: original terminal commit has no changed spec file to route its metrics row.", file=sys.stderr)
+        return 2
+    install_dir = (repo / spec_rel).parent.parent
+    metrics_dir = install_dir / "metrics"
+    rows = metrics_paths_for_commit(metrics_dir, spec_id, bad_commit)
+    if len(rows) != 1:
+        print(
+            f"Error: expected exactly one metrics row for {spec_id} @ {bad_commit[:8]}, found {len(rows)}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    row_path = rows[0]
+    try:
+        metrics = yaml.safe_load(row_path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"Error: cannot read metrics row {row_path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(metrics, dict):
+        print(f"Error: metrics row {row_path} is not a YAML mapping.", file=sys.stderr)
+        return 2
+
+    in_progress_sha = find_in_progress_sha(repo, spec_id, bad_commit)
+    metrics["resolution"] = derive_resolution(
+        repo,
+        spec_id,
+        bad_commit,
+        in_progress_sha,
+        outcome,
+        trailer_commit=correction_commit,
+    )
+    from validate_metrics import validate_metrics_data
+
+    errors = validate_metrics_data(metrics)
+    if errors:
+        print("Error: corrected metrics row would remain invalid: " + "; ".join(errors), file=sys.stderr)
+        return 2
+    row_path.write_text(yaml.safe_dump(metrics, sort_keys=False))
+    print(f"[correct-commit] corrected {row_path} from {correction_commit[:8]}")
+    return 0
+
+
+def main_verify_amend_head(argv) -> int:
+    """Hard-stop an amend if the branch tip changed after the caller's commit."""
+    p = argparse.ArgumentParser(description="Require the captured branch tip before git commit --amend.")
+    p.add_argument("--verify-amend-head", required=True, help="exact 40-character SHA captured after the caller's commit")
+    p.add_argument("--repo", default=".")
+    args = p.parse_args(argv)
+
+    if not re.fullmatch(r"[0-9a-f]{40}", args.verify_amend_head):
+        print("Error: --verify-amend-head must be the exact 40-character captured SHA.", file=sys.stderr)
+        return 2
+    current = _run_git(Path(args.repo), ["rev-parse", "HEAD"])
+    if current != args.verify_amend_head:
+        print(
+            "Refusing git commit --amend: HEAD no longer matches this session's captured commit. "
+            "Do not rewrite shared history; create a separate correction commit and run "
+            "record_metrics.py --correct-commit <bad-terminal-sha>.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Emit one schema-valid Nightshift metrics file.")
     p.add_argument("--spec-id", required=True)
@@ -1037,6 +1182,10 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if "--correct-commit" in argv:
+        return main_correct_commit(argv)
+    if "--verify-amend-head" in argv:
+        return main_verify_amend_head(argv)
     if "--mark-commit" in argv:
         return main_mark_commit(argv)
 

@@ -64,6 +64,35 @@ ID. Workers cannot transition state, and terminal transitions are idempotent.
 Use the source fingerprint guard when fingerprint metadata exists; stale
 source-of-truth writes must be reconciled before overwriting frontmatter.
 
+### Shared-branch correction safety (SPEC-275)
+
+Scope every `git add` to its exact intended path. That protects the index, but
+it does **not** protect `HEAD`: on a shared branch, `git commit --amend` is never
+permitted because another session may have advanced `HEAD` after the caller's
+commit and amend would rewrite that other session's history.
+
+If an exceptional same-session amend is contemplated outside a shared branch,
+capture the exact 40-character `git rev-parse HEAD` value immediately after the
+caller's own prior commit, then require it before the amend:
+
+```bash
+python3 .nightshift/record_metrics.py \
+  --verify-amend-head <captured-40-character-sha> --repo . && \
+git commit --amend
+```
+
+A mismatch is a hard stop, not a warning. Do not use Git author/email identity
+as a substitute: concurrent sessions can share it. For a wrong terminal trailer,
+create a separate correction commit with a subject that does not match
+`MARK_COMMIT_RE`, put the corrected trailers on that correction commit, then run
+`record_metrics.py --correct-commit <bad-terminal-sha> --repo .`. That explicitly
+patches the one existing metrics row; it neither rewrites history nor emits a
+second terminal transition, and the automatic post-commit path cannot reach it.
+
+If a session discovers it has rewritten another session's commit, it stops writing
+and hands the choice to that commit's owner. Do not attempt a compensating rewrite:
+that would repeat the same ownership error one commit later.
+
 ## Commit Format
 
 ### Documentation exemption (SPEC-183)

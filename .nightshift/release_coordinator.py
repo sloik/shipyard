@@ -845,6 +845,7 @@ def coordinate_release(
         "producer_session_evidence": {},
         "old_fingerprints": {},
         "post_commit_rebuild_time_s": None,
+        "release_handoffs_repinned": [],
         "release_handoffs_completed": [],
         "skill_delivery": (
             {
@@ -1153,6 +1154,9 @@ def coordinate_release(
         and result["rollback_attempted"] is False
         and result["push_attempted"] is False
     ):
+        result["release_handoffs_repinned"] = release_handoff.repin_pending_handoffs(
+            canonical, manifest
+        )
         result["release_handoffs_completed"] = (
             release_handoff.complete_pending_handoffs(canonical, manifest, result)
         )

@@ -7,6 +7,7 @@ for parallel spec execution with git worktree-based isolation.
 """
 
 import enum
+import fcntl
 import hashlib
 import json
 import os
@@ -497,6 +498,10 @@ class QueueDecision:
     overlap_kind: str = "none"
     human_status_ping_required: bool = False
     applied_revision: str = ""
+    # SPEC-278: release-surface lease outcome for this decision.
+    # "not_required" | "acquired" | "fail_open" | "contended"
+    lease_outcome: str = "not_required"
+    lease_warning: str = ""
 
 
 @dataclass
@@ -520,6 +525,107 @@ def _queue_result_from_record(record: Dict[str, Any]) -> IntegrationQueueResult:
     )
 
 
+@dataclass
+class ReleaseSurfaceLeaseOutcome:
+    """Result of one acquisition attempt against the release-surface lease.
+
+    ``status`` is one of ``acquired`` (caller holds the lease; must release),
+    ``fail_open`` (the lock mechanism itself was unavailable/erroring; caller
+    proceeds today's-behaviour with ``warning`` recorded), or ``contended``
+    (a live, healthy holder kept the lease past the bound; caller must not
+    proceed into merge).
+    """
+
+    status: str
+    warning: str = ""
+    _handle: Any = field(default=None, repr=False, compare=False)
+
+
+class ReleaseSurfaceLease:
+    """Short-lived, cross-process advisory lease over the release surface.
+
+    SPEC-278: reuses the ``fcntl.flock``-on-a-lockfile pattern already
+    established by ``integration_broker.py``'s ``DurableIntegrationReceiptAdapter``,
+    rather than inventing a new locking mechanism. One fixed lock file covers
+    the release surface as a whole (``canonical/release-manifest.json`` and
+    ``canonical/config.yaml``) -- not one lease per protected file, so there is
+    no acquisition-order question.
+    """
+
+    LOCK_NAME = "release-surface.lock"
+    SURFACE: frozenset = frozenset({
+        "canonical/release-manifest.json",
+        "canonical/config.yaml",
+    })
+
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        poll_interval_s: float = 5.0,
+        timeout_s: float = 300.0,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.project_root = Path(project_root)
+        self.poll_interval_s = poll_interval_s
+        self.timeout_s = timeout_s
+        self._sleep = sleep
+        self._clock = clock
+        self._lock_dir = self.project_root / "reports" / "_wip" / "release-surface-lease"
+        self.lock_path = self._lock_dir / self.LOCK_NAME
+
+    def covers(self, paths: Iterable[str]) -> bool:
+        """True when any of ``paths`` fall within the protected release surface."""
+        return bool(set(paths) & self.SURFACE)
+
+    def acquire(self) -> ReleaseSurfaceLeaseOutcome:
+        """Acquire the lease, polling on contention up to ``timeout_s``.
+
+        Fails open (returns ``fail_open`` with a warning) when the lock
+        mechanism itself is unavailable or errors -- never when it is simply
+        held by a live contender.  A contender still holding the lease past
+        the bound yields ``contended``; the caller must not proceed to merge.
+        """
+        try:
+            self._lock_dir.mkdir(parents=True, exist_ok=True)
+            handle = open(self.lock_path, "a+b")
+        except OSError as exc:
+            return ReleaseSurfaceLeaseOutcome(
+                status="fail_open",
+                warning=f"release-surface lease mechanism unavailable: {exc}",
+            )
+        start = self._clock()
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return ReleaseSurfaceLeaseOutcome(status="acquired", _handle=handle)
+            except BlockingIOError:
+                if self._clock() - start >= self.timeout_s:
+                    handle.close()
+                    return ReleaseSurfaceLeaseOutcome(status="contended")
+                self._sleep(self.poll_interval_s)
+            except OSError as exc:
+                handle.close()
+                return ReleaseSurfaceLeaseOutcome(
+                    status="fail_open",
+                    warning=f"release-surface lease mechanism erroring: {exc}",
+                )
+
+    def release(self, outcome: ReleaseSurfaceLeaseOutcome) -> None:
+        """Release a held lease. Safe to call on any outcome (R4: every terminal path)."""
+        if outcome.status != "acquired" or outcome._handle is None:
+            return
+        handle = outcome._handle
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+            outcome._handle = None
+
+
 class SerializedIntegrationQueue:
     """Coordinator-only queue that integrates one completed worktree at a time.
 
@@ -540,6 +646,7 @@ class SerializedIntegrationQueue:
         evidence_path: Optional[Path] = None,
         protected_surfaces: Optional[Iterable[str]] = None,
         terminal_gate: Optional[Callable[[WorktreeHandle], Dict[str, Any]]] = None,
+        release_surface_lease: Optional[ReleaseSurfaceLease] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.main_branch = main_branch
@@ -554,6 +661,9 @@ class SerializedIntegrationQueue:
         self._last_rebase_conflicts: List[str] = []
         self.terminal_gate = terminal_gate
         self._shared_integrity_failure: Dict[str, str] | None = None
+        # SPEC-278: optional release-surface lease guarding the
+        # merge-and-regenerate window for manifest-touching candidates.
+        self.release_surface_lease = release_surface_lease
 
     @property
     def shared_integrity_failed(self) -> bool:
@@ -878,6 +988,33 @@ class SerializedIntegrationQueue:
         return result
 
     def _merge_validate_or_revert(self, handle: WorktreeHandle, before: str, observed: List[str], result: IntegrationQueueResult, **evidence: Any) -> bool:
+        lease = self.release_surface_lease
+        if lease is not None and lease.covers(observed):
+            outcome = lease.acquire()
+            if outcome.status == "contended":
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(
+                    handle.spec_id, "held", before, before, observed,
+                    reason="release_surface_lease_contention: release surface held by another integration",
+                    lease_outcome="contended",
+                    human_status_ping_required=True,
+                    **evidence,
+                ))
+                return False
+            try:
+                evidence = {
+                    **evidence,
+                    "lease_outcome": outcome.status,
+                    "lease_warning": outcome.warning,
+                }
+                return self._merge_validate_or_revert_locked(handle, before, observed, result, **evidence)
+            finally:
+                lease.release(outcome)
+        return self._merge_validate_or_revert_locked(
+            handle, before, observed, result, lease_outcome="not_required", **evidence,
+        )
+
+    def _merge_validate_or_revert_locked(self, handle: WorktreeHandle, before: str, observed: List[str], result: IntegrationQueueResult, **evidence: Any) -> bool:
         attempts = 0
         while True:
             integration_ref = handle.verified_revision or handle.branch_name

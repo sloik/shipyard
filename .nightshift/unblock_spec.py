@@ -134,15 +134,33 @@ def _validate_causal(outcome: str, causal: Mapping[str, Any], verification: Mapp
         raise UnblockError("successful attempt requires a passing verification gate")
 
 
+def _validate_authorization(authorization: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Require a non-empty human authorization record for an operator-resolved success."""
+    if not isinstance(authorization, Mapping):
+        raise UnblockError("operator-resolved success requires an authorization record")
+    authorized_by = str(authorization.get("authorized_by", "")).strip()
+    statement = str(authorization.get("statement", "")).strip()
+    if not authorized_by or not statement:
+        raise UnblockError("authorization requires non-empty authorized_by and statement")
+    return {"authorized_by": authorized_by, "statement": statement}
+
+
 def record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: str,
                    intervention: str, verification: Mapping[str, Any],
                    causal: Mapping[str, Any], automatic: bool = True,
-                   reason: str = "") -> Path:
+                   reason: str = "", authorization: Mapping[str, Any] | None = None) -> Path:
     """Persist one immutable, validated attempt artifact and return its path."""
     if outcome not in OUTCOMES:
         raise UnblockError("unknown attempt outcome")
+    authorization_record: dict[str, Any] = {}
     if packet.get("eligibility") == "skipped" and outcome != "skipped":
-        raise UnblockError("unsafe/external blocker must be recorded as skipped")
+        # The controller never dispatches or self-certifies an unsafe/external class: an
+        # automatic attempt is refused unconditionally. A human operator recording a
+        # non-automatic, evidence-backed success with an explicit authorization record is
+        # the one narrow exception (SPEC-276) -- it does not widen automatic dispatch.
+        if automatic or outcome != "succeeded":
+            raise UnblockError("unsafe/external blocker must be recorded as skipped")
+        authorization_record = _validate_authorization(authorization)
     if outcome == "skipped" and not reason:
         raise UnblockError("skipped attempt requires a reason")
     _validate_causal(outcome, causal, verification)
@@ -163,7 +181,7 @@ def record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: st
         "blocker_class": packet["blocker_class"], "metric_blocker_class": packet["metric_blocker_class"],
         "outcome": outcome, "automatic": bool(automatic), "intervention": intervention,
         "reason": reason, "evidence": list(evidence), "verification": dict(verification),
-        "causal": dict(causal),
+        "causal": dict(causal), "authorization": authorization_record,
     }
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("---\n" + yaml.safe_dump(data, sort_keys=False, allow_unicode=True) + "---\n\n# Unblock attempt\n", encoding="utf-8")

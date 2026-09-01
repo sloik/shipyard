@@ -21,6 +21,7 @@ from pathlib import Path
 
 from dependency_registry import DependencyRegistryResolver
 from lifecycle import migrate_legacy_planning, validate_blocked
+import spec_artifacts
 
 try:
     import yaml
@@ -28,6 +29,7 @@ except ImportError:
     print("Error: PyYAML is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+import artifact_reachability
 import release_handoff
 
 try:
@@ -465,6 +467,200 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
     return loaded
 
 
+# SPEC-270 R1: findings whose message already carries a named
+# ``release_handoff`` constant are keyed on that constant's exact string —
+# checked first so they never fall through to the shorter ad-hoc markers
+# below.  These constants appear as a substring of the rendered message
+# (e.g. ``f"{relative}: {ORPHANED_HANDOFF_ARTIFACT_ERROR}"``), never the whole
+# message, so matching is substring containment, not equality.
+_NAMED_FINDING_FAMILIES: tuple[str, ...] = (
+    release_handoff.MISSING_RELEASE_HANDOFF_DECLARATION_ERROR,
+    release_handoff.STRANDED_PENDING_HANDOFF_ERROR,
+    release_handoff.ORPHANED_HANDOFF_ARTIFACT_ERROR,
+    release_handoff.AMBIGUOUS_HANDOFF_ARTIFACT_ERROR,
+    release_handoff.UNTRACKED_HANDOFF_ARTIFACT_ERROR,
+    release_handoff.MISSING_STRANDED_DISPOSITION_ERROR,
+    release_handoff.INVALID_STRANDED_DISPOSITION_ERROR,
+)
+
+# SPEC-270 R1: ad-hoc findings have no named constant in code. Each entry
+# pairs a stable, short family key with the fixed marker phrase that
+# identifies it in the rendered message — the "fixed, non-parameterized
+# portion" the spec requires. Never the raw message: most of these messages
+# interpolate a spec ID, file path, line number, or arbitrary prose (e.g. the
+# text of an unchecked checkbox), and keying on the raw message would explode
+# one conceptual finding into many singleton "families". Ordered; first match
+# wins, evaluated only after the named constants above.
+_AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("done-spec-unchecked-checkbox", "but has an unchecked checkbox in"),
+    ("missing-required-field-id", "missing required field: id"),
+    ("missing-required-field-status", "missing required field: status"),
+    ("missing-required-field-nfrs", "missing required field: nfrs"),
+    ("invalid-status-value", "valid values:"),
+    ("legacy-planning-status", "legacy status 'planning'"),
+    # attachments — two distinct fixed shapes; "attachments[" (not bare
+    # "attachments") avoids swallowing unrelated messages that merely mention
+    # the word in passing.
+    ("attachments-list-shape", "attachments must be a list of mappings"),
+    ("attachments-item-shape", "attachments["),
+    ("followup-shape", "followup."),
+    # promotion_gap — kept as four distinct families (not one broad
+    # "promotion_gap" marker) because each is a materially different failure:
+    # wrong shape, invalid kind, missing reason, missing upstream_spec. The
+    # more specific real_use_evidence marker below is checked first so it
+    # cannot be shadowed by the shorter "requires a non-empty reason" marker.
+    ("promotion-gap-not-mapping", "promotion_gap must be a mapping with kind and reason"),
+    ("promotion-gap-kind-invalid", "promotion_gap kind must be one of:"),
+    ("promotion-gap-upstream-required", "promotion_gap awaiting_upstream_spec requires upstream_spec"),
+    ("real-use-evidence-reason-required", "real_use_evidence.not_applicable requires a non-empty reason"),
+    ("promotion-gap-reason-required", "requires a non-empty reason"),
+    ("nfr-waivers-shape", "nfr_waivers"),
+    ("nfr-reconciliation-required", "NFR reconciliation required"),
+    ("scope-tags-shape", "scope_tags"),
+    ("transfer-refusal-shape", "transfer_refusal must be a non-empty string"),
+    ("unquoted-template-token", "unquoted {{ }} token in frontmatter value"),
+    ("unknown-template-token", "unknown template token"),
+    ("path-traversal-token", "traverses past PROJECT_ROOT"),
+    ("absolute-path-leak", "absolute path leak"),
+    ("missing-body-h1", "missing body H1 title"),
+    ("block-reason-as-title", "first body H1 is 'Block Reason'"),
+    ("missing-frontmatter-open-delimiter", "missing opening frontmatter delimiter"),
+    ("missing-frontmatter-close-delimiter", "missing closing frontmatter delimiter"),
+    ("release-handoff-artifact-required", "release-impact spec requires a release handoff artifact"),
+    ("release-handoff-awaiting-repin", "release handoff awaits coordinator re-pin"),
+    ("ac-amendment-undocumented", "ac_amendment_undocumented:"),
+)
+
+# A finding matching neither table above still needs a stable, machine-
+# comparable key rather than silently disappearing from the summary or being
+# merged into an unrelated bucket.
+_UNCLASSIFIED_FINDING_FAMILY = "unclassified-finding"
+
+# SPEC-270: only a non-terminal spec can currently own a finding family — a
+# finished or retired spec's historical claim does not keep future findings
+# owned once the spec itself is closed.
+_TERMINAL_SPEC_STATUSES = frozenset({"done", "superseded", "retired"})
+
+
+def classify_finding_family(message: str) -> str:
+    """Return the stable finding-family key for a rendered validator message.
+
+    Severity is not family identity: a ``WARNING: `` prefix is stripped
+    before classification. See the two pattern tables above for the
+    derivation rule (SPEC-270 R1).
+    """
+    msg = message[len("WARNING: "):] if message.startswith("WARNING: ") else message
+    for constant in _NAMED_FINDING_FAMILIES:
+        if constant in msg:
+            return constant
+    for family_key, marker in _AD_HOC_FINDING_FAMILIES:
+        if marker in msg:
+            return family_key
+    return _UNCLASSIFIED_FINDING_FAMILY
+
+
+def _open_spec_family_owners(frontmatters: list[dict]) -> dict[str, list[str]]:
+    """Map finding-family key -> sorted open spec IDs claiming ownership.
+
+    Matching is exact string equality between a finding's derived family key
+    and a spec's ``owns_findings`` entries — never fuzzy or substring (SPEC-270
+    matching rule). Multiple open specs may declare the same family; both are
+    recorded (R2's "owning spec IDs", plural — a collision is not a conflict).
+    """
+    owners: dict[str, set[str]] = {}
+    for fm in frontmatters:
+        if not isinstance(fm, dict):
+            continue
+        status = str(fm.get("status", "")).lower()
+        if status in _TERMINAL_SPEC_STATUSES:
+            continue
+        spec_id = fm.get("id")
+        if not isinstance(spec_id, str) or not spec_id.strip():
+            continue
+        owns = fm.get("owns_findings")
+        if not isinstance(owns, list):
+            continue
+        for family in owns:
+            if isinstance(family, str) and family.strip():
+                owners.setdefault(family, set()).add(spec_id)
+    return {family: sorted(ids) for family, ids in owners.items()}
+
+
+def finding_family_summary(results: dict, frontmatters: list[dict]) -> dict:
+    """SPEC-270 R2/R4: per-family finding counts with owning open spec IDs.
+
+    ``results`` is the ``{filename: [message, ...]}`` shape ``validate_directory``
+    / ``validate_file`` already produce. Output is sorted by family key with
+    sorted owner lists so two runs are byte-diffable (AC2), and each family
+    carries an explicit ``unowned`` flag — growth in the unowned set is the
+    signal a reviewer needs; growth in the owned set is not (R4).
+    """
+    owners_by_family = _open_spec_family_owners(frontmatters)
+    counts: dict[str, int] = {}
+    for errors in results.values():
+        for msg in errors:
+            key = classify_finding_family(msg)
+            counts[key] = counts.get(key, 0) + 1
+
+    families = []
+    for family in sorted(counts):
+        owners = owners_by_family.get(family, [])
+        families.append({
+            "family": family,
+            "count": counts[family],
+            "owners": owners,
+            "unowned": len(owners) == 0,
+        })
+
+    total = sum(counts.values())
+    unowned_total = sum(f["count"] for f in families if f["unowned"])
+    return {
+        "total_findings": total,
+        "unowned_findings": unowned_total,
+        "owned_findings": total - unowned_total,
+        "families": families,
+    }
+
+
+def diff_finding_family_summaries(baseline: dict, current: dict) -> dict:
+    """SPEC-270 R3: compare two ``finding_family_summary`` outputs.
+
+    A family whose count is unchanged but whose owners changed, or an overall
+    total that stays flat while one family shrinks and a different family
+    grows by the same amount, is still reported as a change — never collapsed
+    into "no-op" by comparing only the grand total.
+    """
+    before = {f["family"]: f for f in baseline.get("families", [])}
+    after = {f["family"]: f for f in current.get("families", [])}
+    changes = []
+    for family in sorted(set(before) | set(after)):
+        b = before.get(family)
+        a = after.get(family)
+        if b is None:
+            changes.append({
+                "family": family, "change": "added",
+                "count": a["count"], "owners": a["owners"],
+            })
+        elif a is None:
+            changes.append({
+                "family": family, "change": "removed",
+                "count": b["count"], "owners": b["owners"],
+            })
+        elif b["count"] != a["count"] or b["owners"] != a["owners"]:
+            changes.append({
+                "family": family,
+                "change": "changed",
+                "before": {"count": b["count"], "owners": b["owners"]},
+                "after": {"count": a["count"], "owners": a["owners"]},
+            })
+    return {
+        "changed": bool(changes),
+        "changes": changes,
+        "total_before": baseline.get("total_findings", 0),
+        "total_after": current.get("total_findings", 0),
+    }
+
+
 def declaring_handoff_spec_ids(frontmatters: list[dict]) -> list[str]:
     """Return the spec IDs whose declaration resolves a handoff artifact.
 
@@ -513,6 +709,46 @@ def handoff_tracked_paths(canonical: Path) -> set[str] | None:
     if listed is None or listed.returncode != 0:
         return None
     return {path for path in listed.stdout.split("\0") if path}
+
+
+def _tracked_paths_for(canonical: Path, dirname: str) -> set[str] | None:
+    """Return canonical-relative tracked paths under ``dirname``, or None.
+
+    Shared generic form of ``handoff_tracked_paths`` (SPEC-252) used by the
+    SPEC-272 reports/runs sweeps. ``None`` is deliberate rather than an empty
+    set — see ``handoff_tracked_paths``'s docstring for why.
+    """
+    if not (canonical / dirname).is_dir():
+        return None
+    inside = _git(canonical, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    ignored = _git(canonical, "check-ignore", "-q", dirname)
+    if ignored is None or ignored.returncode == 0:
+        return None
+    listed = _git(canonical, "ls-files", "-z", "--", dirname)
+    if listed is None or listed.returncode != 0:
+        return None
+    return {path for path in listed.stdout.split("\0") if path}
+
+
+def reports_tracked_paths(canonical: Path) -> set[str] | None:
+    return _tracked_paths_for(canonical, artifact_reachability.REPORTS_DIR)
+
+
+def runs_tracked_paths(canonical: Path) -> set[str] | None:
+    return _tracked_paths_for(canonical, artifact_reachability.RUNS_DIR)
+
+
+def all_corpus_spec_ids(frontmatters: list[dict]) -> list[str]:
+    """Return every spec ID in the corpus regardless of status (SPEC-272).
+
+    Reports and runs reachability is judged against a spec that "exists in
+    the corpus, in any status" -- a ``done`` spec still legitimately owns its
+    historical reports and runs. Unlike ``declaring_handoff_spec_ids`` this
+    does not filter by ``release_handoff`` declaration.
+    """
+    return [str(fm.get("id", "")) for fm in frontmatters if fm.get("id")]
 
 
 def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str]]:
@@ -991,6 +1227,17 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                         f"scope_tags[{_i}] must be a string, got {type(_tag).__name__!r}"
                     )
 
+    # SPEC-290: transfer_refusal, when present, must be a non-empty scalar
+    # string — same shape as block_reason. No closed schema requires this
+    # field at all; this only guards its shape when a writer sets it.
+    transfer_refusal = fm.get("transfer_refusal")
+    if transfer_refusal is not None:
+        if not isinstance(transfer_refusal, str) or not transfer_refusal.strip():
+            errors.append(
+                "transfer_refusal must be a non-empty string when present "
+                "— clear it by removing the field, not by setting it to ''"
+            )
+
     # SPEC-071 (R9 b/c/d/e/f): portable path-variable hygiene over the WHOLE file
     # (frontmatter + prose). Code fences/spans are skipped by the detectors.
     # (d) Unquoted {{ }} frontmatter values.
@@ -1129,6 +1376,62 @@ def validate_directory(specs_dir: Path) -> dict:
     ).items():
         results.setdefault(name, []).extend(findings)
 
+    # SPEC-251 R3: the stranded backlog cannot silently regrow. A stranded
+    # record must carry a recorded disposition (re-pin, fold, or retire);
+    # this never suppresses release_handoff.validate_artifact's own
+    # STRANDED_PENDING_HANDOFF_ERROR (R4) -- it is an additional, independent
+    # finding against the artifact's own path.
+    manifest_path = canonical_root / "release-manifest.json"
+    if manifest_path.is_file():
+        try:
+            live_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live_manifest = None
+        if isinstance(live_manifest, dict):
+            for name, findings in release_handoff.stranded_disposition_findings(
+                canonical_root, live_manifest
+            ).items():
+                results.setdefault(name, []).extend(findings)
+
+    # SPEC-272: extend the same artifact-side sweep to reports/ and runs/,
+    # the two other directories populated by runs and referenced from specs
+    # only by convention. Reachability rules live in artifact_reachability.py.
+    corpus_spec_ids = all_corpus_spec_ids(all_specs)
+    for name, findings in artifact_reachability.sweep_reports_directory(
+        canonical_root,
+        corpus_spec_ids,
+        tracked_paths=reports_tracked_paths(canonical_root),
+    ).items():
+        results.setdefault(name, []).extend(findings)
+    for name, findings in artifact_reachability.sweep_runs_directory(
+        canonical_root,
+        corpus_spec_ids,
+        tracked_paths=runs_tracked_paths(canonical_root),
+    ).items():
+        results.setdefault(name, []).extend(findings)
+
+    # SPEC-291 R6: validate every spec's artifacts/index.json (schema,
+    # on-registry types, listed-file existence/tracking, orphan files). A
+    # spec with no artifacts/ directory produces no findings (R7: absence of
+    # historical artifacts is never retroactively required).
+    reports_root = canonical_root / artifact_reachability.REPORTS_DIR
+    tracked = reports_tracked_paths(canonical_root)
+    for spec_file in sorted(specs_dir.glob("*.md")):
+        if spec_file.name.startswith("_"):
+            continue
+        try:
+            fm = yaml.safe_load(spec_file.read_text(encoding="utf-8").split("\n---", 1)[0][3:]) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        spec_id = str(fm.get("id") or "") if isinstance(fm, dict) else ""
+        if not spec_id:
+            continue
+        artifact_findings = spec_artifacts.validate_artifact_index(
+            reports_root, spec_id, tracked_paths=tracked,
+        )
+        if artifact_findings:
+            results.setdefault(spec_file.name, []).extend(artifact_findings)
+
     # SPEC-071 R9a: validate the sibling projects-registry.json when present
     # (specs_dir is typically `.nightshift/specs`; the registry is its sibling).
     registry = specs_dir.parent / "projects-registry.json"
@@ -1221,21 +1524,44 @@ def _render_text(
     return "\n".join(lines)
 
 
+def _collect_frontmatters_for_paths(positional: list[str]) -> list[dict]:
+    """Shared frontmatter collection for --promotion-gap-summary and
+    --ownership-summary — both need the whole examined corpus, not just one
+    file's own frontmatter."""
+    frontmatters: list[dict] = []
+    for raw_path in positional:
+        path = Path(raw_path)
+        if path.is_dir():
+            frontmatters.extend(_load_directory_frontmatters(path))
+        elif path.is_file() and path.suffix == ".md":
+            try:
+                frontmatters.append(parse_spec_file(path).frontmatter)
+            except FrontmatterError:
+                pass
+    return frontmatters
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if any(arg in {"--help", "-h"} for arg in argv):
-        print("Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] [--promotion-gap-summary]")
+        print(
+            "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
+            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]"
+        )
         print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
         return 0
     if not argv:
         print(
-            "Usage: python3 validate_specs.py <file_or_directory> [--format json|text] [--promotion-gap-summary]",
+            "Usage: python3 validate_specs.py <file_or_directory> [--format json|text] "
+            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]",
             file=sys.stderr,
         )
         return 1
 
     fmt = "text"
     show_promotion_gap_summary = False
+    show_ownership_summary = False
+    baseline_path: str | None = None
     positional = []
     i = 0
     while i < len(argv):
@@ -1245,6 +1571,12 @@ def main(argv: list[str] | None = None) -> int:
         elif argv[i] == "--promotion-gap-summary":
             show_promotion_gap_summary = True
             i += 1
+        elif argv[i] == "--ownership-summary":
+            show_ownership_summary = True
+            i += 1
+        elif argv[i] == "--baseline" and i + 1 < len(argv):
+            baseline_path = argv[i + 1]
+            i += 2
         else:
             positional.append(argv[i])
             i += 1
@@ -1283,6 +1615,24 @@ def main(argv: list[str] | None = None) -> int:
         for errors in results.values()
     )
 
+    # SPEC-270 R3: --baseline implies computing the current family summary
+    # even when --ownership-summary was not separately requested, since a
+    # diff needs the "after" side regardless.
+    fam_summary = None
+    if show_ownership_summary or baseline_path:
+        fam_summary = finding_family_summary(
+            results, _collect_frontmatters_for_paths(positional)
+        )
+    fam_diff = None
+    baseline_error = None
+    if baseline_path:
+        try:
+            baseline_data = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            baseline_error = f"could not read baseline {baseline_path!r}: {exc}"
+        else:
+            fam_diff = diff_finding_family_summaries(baseline_data, fam_summary)
+
     if fmt == "json":
         output = {
             "validated_files": len(results),
@@ -1291,17 +1641,15 @@ def main(argv: list[str] | None = None) -> int:
             "results": results,
         }
         if show_promotion_gap_summary:
-            frontmatters = []
-            for raw_path in positional:
-                path = Path(raw_path)
-                if path.is_dir():
-                    frontmatters.extend(_load_directory_frontmatters(path))
-                elif path.is_file() and path.suffix == ".md":
-                    try:
-                        frontmatters.append(parse_spec_file(path).frontmatter)
-                    except FrontmatterError:
-                        pass
-            output["promotion_gap_summary"] = promotion_gap_summary(frontmatters)
+            output["promotion_gap_summary"] = promotion_gap_summary(
+                _collect_frontmatters_for_paths(positional)
+            )
+        if show_ownership_summary:
+            output["finding_family_summary"] = fam_summary
+        if baseline_path:
+            output["finding_family_diff"] = fam_diff
+            if baseline_error:
+                output["finding_family_diff_error"] = baseline_error
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
         print(
@@ -1313,21 +1661,28 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         if show_promotion_gap_summary:
-            frontmatters = []
-            for raw_path in positional:
-                path = Path(raw_path)
-                if path.is_dir():
-                    frontmatters.extend(_load_directory_frontmatters(path))
-                elif path.is_file() and path.suffix == ".md":
-                    try:
-                        frontmatters.append(parse_spec_file(path).frontmatter)
-                    except FrontmatterError:
-                        pass
-            summary = promotion_gap_summary(frontmatters)
+            summary = promotion_gap_summary(_collect_frontmatters_for_paths(positional))
             print("promotion_gap_summary:")
             for kind, row in summary["by_kind"].items():
                 rate = row["rate"] if row["rate"] == "N/A" else f"{row['rate']:.0%}"
                 print(f"  {kind}: {row['numerator']}/{row['denominator']} ({rate})")
+        if show_ownership_summary:
+            print("finding_family_summary:")
+            print(
+                f"  total={fam_summary['total_findings']} "
+                f"owned={fam_summary['owned_findings']} "
+                f"unowned={fam_summary['unowned_findings']}"
+            )
+            for fam in fam_summary["families"]:
+                owners = ", ".join(fam["owners"]) if fam["owners"] else "UNOWNED"
+                print(f"  - {fam['family']}: count={fam['count']} owners=[{owners}]")
+        if baseline_path:
+            if baseline_error:
+                print(f"finding_family_diff: {baseline_error}")
+            else:
+                print(f"finding_family_diff: changed={fam_diff['changed']}")
+                for change in fam_diff["changes"]:
+                    print(f"  - {change['family']}: {change['change']}")
 
     return 1 if has_errors else 0
 

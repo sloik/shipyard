@@ -31,6 +31,7 @@ This generated entry point is checked by `vocabulary.py audit`; consumer-specifi
 | `blocker_scope` | Blocker scope | Whether the blocker belongs to this contract. | in_scope, out_of_scope, mixed, unknown |
 | `block_reason` | Block reason | Specific evidence-backed explanation of a blocker. | — |
 | `unblock_condition` | Unblock condition | Smallest evidence needed to resume safely. | — |
+| `transfer_refusal` | Transfer refusal | Most recent reason a status-column move was refused. | — |
 | `prior_attempts` | Prior attempts | Durable record of earlier attempts. | — |
 | `overrides` | Overrides | Explicit | — |
 | `roles` | Roles | Run | run, worker, orchestrator, parent |
@@ -136,6 +137,10 @@ Why an exceptional constraint prevents progress.
 ### Unblock condition
 
 Actionable or explicitly unknown condition for recovery.
+
+### Transfer refusal
+
+Persists a status-transfer refusal (client pre-check or server-refused write) to the spec file so it survives past its toast; cleared on the next successful status write or manual dismiss.
 
 ### Prior attempts
 

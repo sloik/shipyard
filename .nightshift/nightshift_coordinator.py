@@ -35,6 +35,7 @@ import yaml
 
 from parallel_executor import (
     BoundedWorktreeDispatcher,
+    ReleaseSurfaceLease,
     SerializedIntegrationQueue,
     WorktreeHandle,
     parallel_worker_limit,
@@ -1174,6 +1175,7 @@ class Coordinator:
             protected_surfaces=protected_surfaces,
             terminal_gate=terminal_gate,
             evidence_path=self.project_root / "reports" / "_wip" / f"integration-queue-{self.metrics.run_id}.json",
+            release_surface_lease=ReleaseSurfaceLease(self.project_root),
         )
 
     def build_integration_broker(self, *, request_repair=None, dependency_graph=None) -> IntegrationBroker:

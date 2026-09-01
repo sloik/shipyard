@@ -30,6 +30,10 @@ class LifecyclePersistenceError(StatusStoreError):
     """A coordinator transition could not durably establish its checkpoint."""
 
 
+class TransitionReasonRequired(StatusStoreError, ValueError):
+    """A judgment transition (SPEC-291 R3) was attempted with no reason."""
+
+
 @dataclass(frozen=True)
 class StatusCheckpoint:
     checkpoint_id: int
@@ -195,28 +199,68 @@ class StatusStore:
         return _checkpoint_from_row(row).to_dict()
 
     def transition_commit_backed(self, spec_path: Path, status: str, *, run_id: str,
-                                source: str = "coordinator", note: str | None = None) -> dict[str, Any]:
+                                source: str = "coordinator", note: str | None = None,
+                                reason: str | None = None, evidence: Any = (),
+                                actor: str | None = None) -> dict[str, Any]:
         """Write the coordinator checkpoint before tracked frontmatter.
 
         This ordering prevents a store outage from producing a false terminal
         frontmatter result. A subsequent file-write failure retains a precise,
         append-only recovery checkpoint instead of silently claiming success.
+
+        SPEC-291 R3: every durable transition also writes a ``status-transition``
+        artifact under ``reports/<SPEC-ID>/artifacts/``. A judgment transition
+        (``lifecycle.is_judgment_transition``) with no ``reason``/``note`` is
+        refused before any checkpoint is written -- a store outage can never
+        make an unreasoned judgment transition look durable. A mechanical
+        transition synthesizes its reason from ``run_id`` when none is given.
+        ``note`` remains accepted as a reason source for backward-compatible
+        callers (e.g. ``unblock_spec.finalize``); ``reason`` takes precedence
+        when both are supplied.
         """
+        import lifecycle
+        import spec_artifacts
         from spec_frontmatter import parse_spec_file, write_spec_frontmatter
 
         path = Path(spec_path).resolve()
-        spec_id = str(parse_spec_file(path).frontmatter.get("id") or "")
+        parsed = parse_spec_file(path)
+        spec_id = str(parsed.frontmatter.get("id") or "")
         if not spec_id:
             raise LifecyclePersistenceError(f"spec id missing from {path.name}")
+        current_status = str(parsed.frontmatter.get("status") or "")
+
+        reason_text = (reason if reason is not None else note)
+        reason_text = reason_text.strip() if isinstance(reason_text, str) else ""
+        if lifecycle.is_judgment_transition(current_status, status) and not reason_text:
+            raise TransitionReasonRequired(
+                f"transition {current_status!r} -> {status!r} for {spec_id} is a judgment "
+                "transition and requires a non-empty reason"
+            )
+        if not reason_text:
+            reason_text = f"mechanical transition to {status!r} via run {run_id}"
+
         try:
             checkpoint = self.update_state(
-                spec_id, status, run_id=run_id, source=source, note=note,
+                spec_id, status, run_id=run_id, source=source, note=note or reason_text,
                 payload={"spec_path": str(path), "canonical_spec_path": str(path)},
             )
         except Exception as exc:
             raise LifecyclePersistenceError(
                 f"durable lifecycle checkpoint failed; frontmatter unchanged; "
                 f"recovery: rerun coordinator transition for {spec_id}"
+            ) from exc
+        try:
+            spec_artifacts.write_status_transition_artifact(
+                spec_artifacts.reports_root_for_spec_path(path), spec_id,
+                from_status=current_status, to_status=status,
+                actor=actor or source, reason=reason_text,
+                evidence=evidence, run_id=run_id,
+            )
+        except Exception as exc:
+            raise LifecyclePersistenceError(
+                f"checkpoint {checkpoint['checkpoint_id']} persisted but status-transition "
+                f"artifact write failed; refusal: {exc}; "
+                f"recovery: reconcile {path.name} artifacts and retry"
             ) from exc
         try:
             write_spec_frontmatter(path, lambda fm: {**fm, "status": status})

@@ -39,6 +39,11 @@ try:
 except Exception:  # pragma: no cover - deployed install may be incomplete
     managed_payload_provenance = None  # type: ignore[assignment]
 
+try:
+    import spec_artifacts
+except Exception:  # pragma: no cover - deployed install may be incomplete
+    spec_artifacts = None  # type: ignore[assignment]
+
 
 class InstructionAdmissionError(RuntimeError):
     """Raised when instruction generation is not admitted by the install gate."""
@@ -302,6 +307,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
             "blockingReasons": [_blocker("spec", "selected spec cannot be executed", f"{spec_id} not found in {specs_dir}", "Create the spec file or pass the correct --specs-dir/--spec value.")],
             "recommendedNextAction": "fix_blockers",
             "resultAcceptance": acceptance_binding,
+            "artifactIndex": [],
         }
 
     fm = located.frontmatter
@@ -340,6 +346,13 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
 
     tasks = _count_checkboxes(located.body)
     acceptance = _count_acceptance_criteria(located.body)
+
+    # SPEC-291 R5: surface prior transition/promotion knowledge, when any
+    # exists, so the agent starts from why rather than re-deriving it.
+    artifact_index: list[dict[str, Any]] = []
+    if spec_artifacts is not None:
+        reports_root = spec_artifacts.reports_root_for_spec_path(located.path)
+        artifact_index = spec_artifacts.read_index(reports_root, spec_id)
 
     if status == "done":
         state = "all_done"
@@ -387,6 +400,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         "blockingReasons": blockers,
         "recommendedNextAction": next_action,
         "resultAcceptance": acceptance_binding,
+        "artifactIndex": artifact_index,
     }
 
 
@@ -414,6 +428,15 @@ def render_text(packet: dict[str, Any]) -> str:
     lines.append(f"  <receipt>{acceptance.get('receipt_ref', '')}</receipt>")
     lines.append(f"  <sha256>{acceptance.get('receipt_sha256', '')}</sha256>")
     lines.append("</result_acceptance>")
+    artifact_index = packet.get("artifactIndex") or []
+    if artifact_index:
+        lines += ["", "<artifact_history>"]
+        for item in artifact_index:
+            lines.append(
+                f"  - {item.get('type', '')} ({str(item.get('created', ''))[:10]}): "
+                f"{item.get('summary', '')}"
+            )
+        lines.append("</artifact_history>")
     lines += ["", "<next_action>", packet.get("recommendedNextAction", "read_context"), "</next_action>", "", "</artifact>"]
     return "\n".join(lines)
 

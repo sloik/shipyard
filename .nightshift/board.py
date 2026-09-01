@@ -47,6 +47,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
 from spec_frontmatter import promotion_transition_error
+import lifecycle
+import spec_artifacts
 
 try:
     from status_store import StatusStore
@@ -70,6 +72,7 @@ def _registry_field_help() -> dict[str, str]:
     wanted = {
         "status", "layer", "priority", "readiness", "run_state",
         "blocker_class", "blocker_scope", "block_reason", "unblock_condition",
+        "transfer_refusal",
     }
     return {
         str(concept["key"]): str(concept.get("short_help") or concept.get("definition") or "")
@@ -222,6 +225,58 @@ def _should_reconcile_frontmatter_status(
     if checkpoint_mtime is None:
         return True
     return file_mtime >= checkpoint_mtime
+
+
+# SPEC-290: the frontmatter field that persists a status-transfer refusal so
+# it survives past the toast that first reported it, and is discoverable by
+# any tool reading the spec file directly (not only the board).
+TRANSFER_REFUSAL_FIELD = "transfer_refusal"
+_TRANSFER_REFUSAL_MAX_LEN = 300
+
+
+def _sanitize_transfer_refusal_text(text: str) -> str:
+    """Collapse to one line and cap length so the value is a safe YAML scalar.
+
+    A raw refusal detail can be multi-line or arbitrarily long; a folded YAML
+    scalar with text at line-start could otherwise corrupt a later regex-based
+    field rewrite (e.g. the status line).
+    """
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) > _TRANSFER_REFUSAL_MAX_LEN:
+        collapsed = collapsed[: _TRANSFER_REFUSAL_MAX_LEN - 1].rstrip() + "…"
+    return collapsed
+
+
+def _render_scalar_field_line(key: str, value: str) -> str:
+    """Render ``key: value`` as one safely-quoted YAML mapping line."""
+    dumped = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True)
+    return dumped.rstrip("\n")
+
+
+def _upsert_or_remove_field_line(fm_block: str, key: str, rendered_line: str | None) -> str:
+    """Upsert or delete a single top-level ``key: ...`` line, else no-op.
+
+    Every other line — order, list style, date quoting — is preserved
+    byte-for-byte, matching ``_update_status_file``'s regex approach rather
+    than a full YAML re-serialization.
+    """
+    lines = fm_block.split("\n")
+    prefix = f"{key}:"
+    out: list[str] = []
+    found = False
+    for line in lines:
+        if line.startswith(prefix):
+            found = True
+            if rendered_line is not None:
+                out.append(rendered_line)
+            continue
+        out.append(line)
+    if not found and rendered_line is not None:
+        if out and out[-1] == "":
+            out.insert(len(out) - 1, rendered_line)
+        else:
+            out.append(rendered_line)
+    return "\n".join(out)
 
 
 @dataclass
@@ -409,8 +464,16 @@ class SpecCache:
             })
         return results
 
-    def update_status(self, spec_id: str, status: str) -> None:
-        """Write new status to spec frontmatter and the durable checkpoint store."""
+    def update_status(self, spec_id: str, status: str, *, reason: str | None = None) -> None:
+        """Write new status to spec frontmatter and the durable checkpoint store.
+
+        SPEC-291 R3: this is a board-manual move, so a judgment transition
+        (``lifecycle.is_judgment_transition``) requires a non-empty ``reason``;
+        the refusal happens before any write, mirroring every other refusal
+        gate in this method. A ``status-transition`` artifact is written for
+        every successful transition, whether or not a durable store is
+        configured, so no deployment mode is left without R3's durable trace.
+        """
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
@@ -418,9 +481,12 @@ class SpecCache:
             raise ValueError(f"invalid status: {status}")
         allowed_statuses = _allowed_statuses_for_spec(entry.frontmatter)
         if status not in allowed_statuses:
-            raise ValueError(_status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}")
+            refusal_msg = _status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}"
+            self._record_transfer_refusal(entry, refusal_msg)
+            raise ValueError(refusal_msg)
         refusal = promotion_transition_error(entry.frontmatter, status, specs_dir=self._specs_dir)
         if refusal:
+            self._record_transfer_refusal(entry, refusal)
             raise ValueError(refusal)
         if status == "done":
             import release_handoff
@@ -428,21 +494,51 @@ class SpecCache:
             try:
                 manifest = json.loads((canonical / "release-manifest.json").read_text())
             except (OSError, json.JSONDecodeError) as exc:
+                self._record_transfer_refusal(entry, str(exc))
                 raise ValueError(f"release handoff validation unavailable: {exc}") from exc
             errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
             if errors:
-                raise ValueError("; ".join(errors))
+                joined = "; ".join(errors)
+                self._record_transfer_refusal(entry, joined)
+                raise ValueError(joined)
 
-        self._update_status_file(entry, status)
+        current_status = str(entry.frontmatter.get("status") or "")
+        reason_text = reason.strip() if isinstance(reason, str) else ""
+        if lifecycle.is_judgment_transition(current_status, status) and not reason_text:
+            refusal_msg = (
+                f"status transition {current_status} -> {status} requires a non-empty reason"
+            )
+            self._record_transfer_refusal(entry, refusal_msg)
+            raise ValueError(refusal_msg)
+        if not reason_text:
+            reason_text = f"mechanical board transition to {status}"
 
         if self._status_store is not None:
-            self._status_store.update_state(
-                spec_id,
-                status,
-                source="board",
-                payload={"spec_path": str(entry.path)},
+            self._status_store.transition_commit_backed(
+                entry.path, status, run_id=f"board-{spec_id}-{uuid4().hex[:8]}",
+                source="board", reason=reason_text,
             )
+            entry.mtime = os.stat(entry.path).st_mtime
+            entry.frontmatter["status"] = status
+            self._clear_transfer_refusal(entry)
             return
+
+        spec_artifacts.write_status_transition_artifact(
+            spec_artifacts.reports_root_for_spec_path(entry.path), spec_id,
+            from_status=current_status, to_status=status,
+            actor="board", reason=reason_text, run_id=None,
+        )
+        self._update_status_file(entry, status)
+        self._clear_transfer_refusal(entry)
+
+    def get_artifacts(self, spec_id: str) -> list[dict]:
+        """Return the SPEC-291 artifact index entries for one spec (R5)."""
+        entry = self._entries.get(spec_id)
+        if entry is None:
+            raise KeyError(f"spec not found: {spec_id}")
+        return spec_artifacts.read_index(
+            spec_artifacts.reports_root_for_spec_path(entry.path), spec_id
+        )
 
     def _update_status_file(self, entry: CacheEntry, status: str) -> None:
         """Legacy file-backed status write used when no durable store is configured."""
@@ -476,6 +572,71 @@ class SpecCache:
         # Actually body is unchanged; we just keep it to avoid unnecessary disk I/O.
         # But our mtime comparison would re-read on next call — preserve body.
         # We already updated mtime above, so body is still valid.
+
+    def _write_scalar_field(self, entry: CacheEntry, key: str, value: str | None) -> None:
+        """Upsert (``value`` given) or remove (``value`` is ``None``) one
+        top-level scalar frontmatter field, leaving every other line
+        byte-for-byte unchanged. No-ops if the requested state already holds.
+        """
+        text = entry.path.read_text(encoding="utf-8")
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            raise ValueError(f"malformed frontmatter in {entry.path}")
+        fm_block, body_block = parts[1], parts[2]
+
+        rendered = None if value is None else _render_scalar_field_line(key, value)
+        new_fm = _upsert_or_remove_field_line(fm_block, key, rendered)
+        if new_fm == fm_block:
+            return
+
+        new_content = "---" + new_fm + "---" + body_block
+        tmp = entry.path.with_suffix(".md.tmp")
+        tmp.write_text(new_content, encoding="utf-8")
+        os.replace(tmp, entry.path)
+
+        entry.mtime = os.stat(entry.path).st_mtime
+        if value is None:
+            entry.frontmatter.pop(key, None)
+        else:
+            entry.frontmatter[key] = value
+
+    def _record_transfer_refusal(self, entry: CacheEntry, reason: str) -> None:
+        """Persist a status-transfer refusal reason (SPEC-290 R1/R6).
+
+        Best-effort: a failure to persist this advisory record must never
+        turn a legitimate refusal response into a 500.
+        """
+        text = _sanitize_transfer_refusal_text(reason)
+        if not text:
+            return
+        try:
+            self._write_scalar_field(entry, TRANSFER_REFUSAL_FIELD, text)
+        except (OSError, ValueError):
+            pass
+
+    def _clear_transfer_refusal(self, entry: CacheEntry) -> None:
+        """Clear a persisted refusal after a successful status write (R2)."""
+        if not entry.frontmatter.get(TRANSFER_REFUSAL_FIELD):
+            return
+        try:
+            self._write_scalar_field(entry, TRANSFER_REFUSAL_FIELD, None)
+        except (OSError, ValueError):
+            pass
+
+    def set_transfer_refusal(self, spec_id: str, reason: str) -> None:
+        """Public entry point for client-pre-check / network-failure refusals
+        that never reach ``update_status`` (R1 client-side path, R6)."""
+        entry = self._entries.get(spec_id)
+        if entry is None:
+            raise KeyError(f"spec not found: {spec_id}")
+        self._record_transfer_refusal(entry, reason)
+
+    def clear_transfer_refusal(self, spec_id: str) -> None:
+        """Public entry point for the panel's manual dismiss control (R3)."""
+        entry = self._entries.get(spec_id)
+        if entry is None:
+            raise KeyError(f"spec not found: {spec_id}")
+        self._clear_transfer_refusal(entry)
 
     def force_refresh(self) -> None:
         """Wipe cache and re-warm all frontmatter from disk."""
@@ -1245,6 +1406,7 @@ async def get_spec(spec_id: str) -> JSONResponse:
         "frontmatter": fm,
         "body_md": body,
         "title": fm.get("_title", spec_id),
+        "artifacts": cache.get_artifacts(spec_id),
     }
     return performance_registry.measure(
         "server.selected_response_serialization", lambda: JSONResponse(jsonable_encoder(payload))
@@ -1256,14 +1418,42 @@ async def update_status(spec_id: str, payload: dict) -> dict:
     status = payload.get("status")
     if not status:
         raise HTTPException(status_code=400, detail="status required")
+    reason = payload.get("reason")
     try:
-        cache.update_status(spec_id, status)
+        cache.update_status(spec_id, status, reason=reason)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True}
+
+
+@app.post("/api/spec/{spec_id}/transfer-refusal")
+async def record_transfer_refusal(spec_id: str, payload: dict) -> dict:
+    """Persist a status-transfer refusal that never reached ``update_status``:
+    a client-side pre-check (SPEC-290 R1) or a thrown network failure with no
+    ``Response`` to read a server detail from (R6). The generic toast fallback
+    text is an acceptable ``reason`` here."""
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise HTTPException(status_code=400, detail="reason required")
+    try:
+        cache.set_transfer_refusal(spec_id, reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    return {"ok": True}
+
+
+@app.delete("/api/spec/{spec_id}/transfer-refusal")
+async def dismiss_transfer_refusal(spec_id: str) -> dict:
+    """Manual dismiss (SPEC-290 R3): clear a persisted refusal without
+    requiring a subsequent successful status write."""
+    try:
+        cache.clear_transfer_refusal(spec_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     return {"ok": True}
 
 
@@ -2251,6 +2441,28 @@ body {
   color: var(--text-muted);
   width: 80px;
 }
+/* SPEC-290: subtle, theme-adaptive background hints — a hint, not an alert
+   banner — that distinguish a "stuck" spec (block_reason, reddish) from a
+   "just-refused-a-move" spec (transfer_refusal, amber). Both --c-blocked and
+   --c-active already carry separate light/dark values, so no new theme
+   tokens are needed. */
+.meta-table tr.meta-row-blocked td {
+  background: color-mix(in srgb, var(--c-blocked) 12%, var(--surface));
+}
+.meta-table tr.meta-row-refusal td {
+  background: color-mix(in srgb, var(--c-active) 12%, var(--surface));
+}
+.meta-dismiss-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 0 0 6px;
+  float: right;
+}
+.meta-dismiss-btn:hover { color: var(--text); }
 /* Status dropdown in the detail panel */
 #panel-status-select {
   background: var(--surface-hi);
@@ -2813,6 +3025,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <div id="panel-title"></div>
       <table class="meta-table" id="panel-meta"></table>
       <div id="panel-chips"></div>
+      <div id="panel-artifacts"></div>
       <div id="panel-reports-btn-wrap">
         <button class="btn" id="panel-reports-btn" onclick="openReportsView()">📋 REPORTS</button>
         <button class="btn" id="panel-run-prompt-btn" onclick="copyRunPrompt()" title="Copy a parent-agent prompt for kicking off and monitoring this Nightshift spec">▶ COPY RUN PROMPT</button>
@@ -2868,24 +3081,11 @@ function allowedStatusIdsForSpec(spec) {
   return isNfrFamilySpec(spec) ? NFR_STATUS_IDS : STATUS_IDS;
 }
 
-// Status progression order — used to pick the "most progressive" status when
-// main and a worktree disagree. A terminal main status is an explicit lifecycle
-// decision and must remain authoritative over stale retained-worktree progress.
-const PROGRESS_RANK = Object.fromEntries(STATUS_IDS.map((s, i) => [s, i]));
-const TERMINAL_MAIN_STATUSES = new Set(['blocked', 'done', 'superseded', 'retired']);
-
 function effectiveStatusFor(spec, wtStatus) {
-  const mainStatus = spec.status || 'draft';
-  if (TERMINAL_MAIN_STATUSES.has(mainStatus)) return mainStatus;
-  const wts = (wtStatus || {})[spec.id] || [];
-  if (!wts.length) return mainStatus;
-  let best = mainStatus;
-  let bestRank = PROGRESS_RANK[mainStatus] ?? 0;
-  for (const wt of wts) {
-    const r = PROGRESS_RANK[wt.status] ?? -1;
-    if (r > bestRank) { best = wt.status; bestRank = r; }
-  }
-  return best;
+  // `/api/specs` is the lifecycle-rendering authority. Worktree status is
+  // diagnostic context only: promoting it here can place a card in a column
+  // different from the status that the detail payload displays.
+  return spec.status || 'draft';
 }
 
 function effectiveStatus(spec) {
@@ -3692,6 +3892,55 @@ function statusWriteFailureToastText(specId, detail) {
   return detail ? `⚠ ${specId}: ${detail}` : `⚠ ${specId}: status write failed`;
 }
 
+// SPEC-291 R3: mirrors lifecycle.MECHANICAL_TRANSITIONS exactly — kept in
+// sync by tests/test_board_api.py's Python/JS parity assertion. A pair not
+// in this set is a judgment transition and must carry a reason; a pair in
+// it is mechanical and the server synthesizes its own reason, so the board
+// must not block a mechanical move on a prompt.
+const MECHANICAL_TRANSITION_PAIRS = new Set(['ready->in_progress', 'in_progress->done', 'blocked->ready']);
+function isJudgmentTransition(oldStatus, newStatus) {
+  return !MECHANICAL_TRANSITION_PAIRS.has(`${oldStatus}->${newStatus}`);
+}
+
+// SPEC-291 R3/R5: a judgment transition must carry a reason (the server
+// refuses one otherwise); a mechanical one must NOT block on a prompt — the
+// server already synthesizes its reason. Ask once, up front, so the PUT
+// body always carries whatever the operator supplied — an empty/cancelled
+// prompt still sends through, and the server's own refusal (with its
+// specific message) is what the existing toast path already surfaces.
+function promptTransitionReason(specId, oldStatus, newStatus) {
+  if (!isJudgmentTransition(oldStatus, newStatus)) return '';
+  return window.prompt(`${specId}: ${oldStatus} → ${newStatus} — reason for this move:`, '') || '';
+}
+
+// SPEC-290: persist a refusal reason that never reaches (or never returns
+// from) the /status PUT — a client-side pre-check, or a thrown network
+// failure with no Response to read a server-recorded detail from. A refusal
+// that *does* reach the server is already persisted server-side inside
+// update_status, so callers must not call this for that path (would double-write).
+async function persistTransferRefusal(specId, reason) {
+  try {
+    await fetch(`/api/spec/${specId}/transfer-refusal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+  } catch (e) {
+    // Best-effort — the toast already told the user; a failure to persist
+    // the advisory record must never surface as a second error.
+  }
+  if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
+}
+
+async function dismissTransferRefusal(specId) {
+  try {
+    await fetch(`/api/spec/${specId}/transfer-refusal`, { method: 'DELETE' });
+  } catch (e) {
+    // Best-effort — leave the row as-is if the clear couldn't be persisted.
+  }
+  if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
+}
+
 function onCardDrop(evt) {
   isDragging = false;
   const wasPending = renderBoardQueued;
@@ -3721,7 +3970,9 @@ function onCardDrop(evt) {
       evt.from.appendChild(evt.item);
       updateColumnCounts();
     }
-    showToast(`⚠ ${specId}: NFR specs only use active or retired`);
+    const nfrRefusalText = `${specId}: NFR specs only use active or retired`;
+    showToast(`⚠ ${nfrRefusalText}`);
+    persistTransferRefusal(specId, nfrRefusalText);
     return;
   }
   if (spec) spec.status = newStatus;
@@ -3738,10 +3989,11 @@ function onCardDrop(evt) {
   // the reverted error path uses renderBoard() too when wasPending, not appendChild.
   if (wasPending) { renderBoard(); }
 
+  const dragReason = promptTransitionReason(specId, oldStatus, newStatus);
   fetch(`/api/spec/${specId}/status`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: newStatus }),
+    body: JSON.stringify({ status: newStatus, reason: dragReason }),
   }).then(async r => {
     if (!r.ok) {
       // Revert
@@ -3756,6 +4008,8 @@ function onCardDrop(evt) {
         evt.from.appendChild(evt.item);
         updateColumnCounts();
       }
+      // The server already persisted this refusal inside update_status (R1);
+      // it becomes visible next time the panel opens/refreshes.
       showToast(statusWriteFailureToastText(specId, detail));
       return;
     }
@@ -3781,8 +4035,10 @@ function onCardDrop(evt) {
       updateColumnCounts();
     }
     // Network error / thrown before a response existed — no body to read, so
-    // fall back to the generic message (R2).
+    // fall back to the generic message (R2), and still persist a refusal
+    // record using that same generic text (SPEC-290 R6).
     showToast(statusWriteFailureToastText(specId, null));
+    persistTransferRefusal(specId, statusWriteFailureToastText(specId, null));
   });
 }
 
@@ -3862,6 +4118,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     ['blocker_class', fm.blocker_class],
     ['blocker_scope', fm.blocker_scope],
     ['block_reason', fm.block_reason],
+    ['transfer_refusal', fm.transfer_refusal],
     ['unblock_condition', fm.unblock_condition],
     ['created', fm.created],
   ];
@@ -3869,9 +4126,20 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
 
   const metaEl = document.getElementById('panel-meta');
   const statusRow = `<tr><td title="${_escHtml(registryHelp(fm, 'status'))}">status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  // SPEC-290: block_reason and transfer_refusal get subtle, distinct
+  // background hints (reddish / amber) so a stuck-vs-refused spec is
+  // distinguishable at a glance; transfer_refusal also carries a manual
+  // dismiss control that clears it without requiring a successful move.
   const otherRows = fields
     .filter(([k, v]) => v !== undefined && v !== null && v !== '')
-    .map(([k, v]) => `<tr><td title="${_escHtml(registryHelp(fm, k))}">${k}</td><td>${_escHtml(String(v))}</td></tr>`)
+    .map(([k, v]) => {
+      const rowClass = k === 'block_reason' ? ' class="meta-row-blocked"'
+        : k === 'transfer_refusal' ? ' class="meta-row-refusal"' : '';
+      const dismissBtn = k === 'transfer_refusal'
+        ? ` <button type="button" class="meta-dismiss-btn" title="Dismiss" onclick="dismissTransferRefusal('${specId}')">×</button>`
+        : '';
+      return `<tr${rowClass}><td title="${_escHtml(registryHelp(fm, k))}">${k}</td><td>${_escHtml(String(v))}${dismissBtn}</td></tr>`;
+    })
     .join('');
   metaEl.innerHTML = statusRow + otherRows;
 
@@ -3897,6 +4165,21 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   }
   document.getElementById('panel-chips').innerHTML = chipsHtml;
   attachSpecRefPreview(document.getElementById('panel-chips'));
+
+  // SPEC-291: list the spec's typed artifact index (status-transition,
+  // decision, validation-evidence, ... entries) — type, date, summary.
+  const artifacts = data.artifacts || [];
+  const artifactsEl = document.getElementById('panel-artifacts');
+  if (artifacts.length) {
+    const rows = artifacts.map(a =>
+      `<div class="artifact-row"><span class="artifact-type">${_escHtml(a.type || '')}</span>` +
+      `<span class="artifact-date">${_escHtml((a.created || '').slice(0, 10))}</span>` +
+      `<span class="artifact-summary">${_escHtml(a.summary || '')}</span></div>`
+    ).join('');
+    artifactsEl.innerHTML = `<div class="artifacts-label">artifacts:</div>${rows}`;
+  } else {
+    artifactsEl.innerHTML = '';
+  }
   // SPEC-064: fill in external dep statuses from peer boards (async, best-effort)
   fillExternalChipStatuses(document.getElementById('panel-chips'));
 
@@ -3990,17 +4273,22 @@ async function changeSpecStatus(specId, newStatus) {
   const spec = specs.find(s => s.id === specId);
   if (spec && !allowedStatusIdsForSpec(spec).includes(newStatus)) {
     if (sel) { sel.value = oldStatus; sel.dataset.status = oldStatus; }
-    showToast(`⚠ ${specId}: NFR specs only use active or retired`);
+    const nfrRefusalText = `${specId}: NFR specs only use active or retired`;
+    showToast(`⚠ ${nfrRefusalText}`);
+    persistTransferRefusal(specId, nfrRefusalText);
     return;
   }
 
+  const dropdownReason = promptTransitionReason(specId, oldStatus, newStatus);
   try {
     const r = await fetch(`/api/spec/${specId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
+      body: JSON.stringify({ status: newStatus, reason: dropdownReason }),
     });
     if (!r.ok) {
+      // The server already persisted this refusal inside update_status (R1);
+      // it becomes visible next time the panel opens/refreshes.
       const detail = await statusWriteErrorDetail(r);
       if (sel) { sel.value = oldStatus; sel.dataset.status = oldStatus; }
       showToast(statusWriteFailureToastText(specId, detail));
@@ -4013,9 +4301,11 @@ async function changeSpecStatus(specId, newStatus) {
     showToast(`✓ ${specId} → ${newStatus}`);
   } catch {
     // Network error / thrown before a response existed — no body to read, so
-    // fall back to the generic message (R2).
+    // fall back to the generic message (R2), and still persist a refusal
+    // record using that same generic text (SPEC-290 R6).
     if (sel) { sel.value = oldStatus; sel.dataset.status = oldStatus; }
     showToast(statusWriteFailureToastText(specId, null));
+    persistTransferRefusal(specId, statusWriteFailureToastText(specId, null));
   }
 }
 

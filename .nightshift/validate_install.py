@@ -61,6 +61,15 @@ ADMISSION_ALLOW = "allow"
 ADMISSION_DENY = "deny"
 ADMISSION_INDETERMINATE = "indeterminate"
 
+# SPEC-245: the documented invocation_kind vocabulary. Enforced in run_validation
+# itself (not only in the CLI argparse choices=) so non-CLI callers — which is
+# every production caller today — cannot pass an undocumented value. See the
+# Signal Contract in SPEC-229's spec body for the seven-value rationale.
+INVOCATION_KINDS = (
+    "normal", "kickoff", "bootstrap", "orchestrator", "preflight",
+    "instructions", "coordinator",
+)
+
 STATUS_SEVERITY_RANK = {
     "pass": 0,
     "not_applicable": 0,
@@ -1105,6 +1114,10 @@ def check_int_entrypoints(ctx: ValidationContext) -> None:
 # ---------------------------------------------------------------------------
 
 def run_validation(root: Path, profile: str, kind: str, spec_id: str | None) -> tuple[ValidationContext, list[ConfigFinding], dict[str, Any] | None, str | None]:
+    if kind not in INVOCATION_KINDS:
+        raise ValueError(
+            f"invocation_kind {kind!r} is not in the documented vocabulary {INVOCATION_KINDS!r}"
+        )
     root = root.absolute()
     install = root / ".nightshift" if profile == "installed" and (root / ".nightshift").is_dir() else root
     config_path = install / "config.yaml"
@@ -1271,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--profile", choices=("installed", "canonical"), required=True)
-    parser.add_argument("--kind", choices=("normal", "kickoff", "bootstrap", "orchestrator", "preflight"), default="normal")
+    parser.add_argument("--kind", choices=INVOCATION_KINDS, default="normal")
     parser.add_argument("--spec-id", default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true", help="print the full artifact JSON to stdout")

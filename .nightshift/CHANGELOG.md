@@ -7,7 +7,161 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
-## [Unreleased]
+## 3.14.0 (2026-09-01)
+
+### Typed spec artifacts: persist the reason and evidence behind every status transition (SPEC-291)
+
+A spec's lifecycle decisions were made on evidence that evaporated the moment the decision was
+committed — a promotion left only a commit subject, never the reasoning or validation behind it.
+
+- New per-spec artifact convention: `reports/<SPEC-ID>/artifacts/index.json` records every durable
+  status transition (`status-transition`, `decision`, `validation-evidence`, `context`, `verifier`,
+  `other` — a closed, registered vocabulary) with `type`, `created`, `actor`, `summary`, and path.
+- `StatusStore.transition_commit_backed` now requires and durably records a `reason` for every
+  judgment transition (promotions, blocks, supersessions, manual board moves); mechanical
+  transitions (`ready -> in_progress`, evidence-gated `-> done`, controller-verified
+  `blocked -> ready`) synthesize their reason from the run ID automatically.
+- New canonical entrypoints: `spec_artifacts.py` (index read/write/validate + `record-transition`
+  CLI) and `spec_promotion.py` (the `draft`/`planned -> ready` promotion entrypoint, persisting the
+  resolved `promotion_gap` rationale and gathered findings as artifacts).
+- `validate_specs.py` validates every artifact index (schema, registry membership, tracked paths, no
+  orphan files) from this release's cutover forward — historical transitions are not retroactively
+  required to have artifacts.
+- The board spec-detail panel lists each spec's artifact history; the kickoff/run brief scaffold
+  includes the artifact-index summary when one exists.
+
+### Dispose of the stranded pending release handoffs SPEC-244 made legible (SPEC-251)
+
+Gave every stranded pending release-handoff record (43 live at implementation time) exactly one
+recorded disposition — `re-pin` (still needs shipping), `fold` (ships in the next release), or
+`retire` (never will, with a written reason) — grounded in fleet-presence evidence, never inferred
+from age. A new mechanical check (`release_handoff.stranded_disposition_findings`) fails validation
+if the stranded set regrows without a disposition on every member.
+
+### Let a spec author a release handoff without stranding it on its own implementation (SPEC-253)
+
+A handoff authored while its own spec is still in flight has no real manifest fingerprint to pin yet.
+The coordinator now mechanically re-pins a pending record's `manifest_fingerprint`/`target_version`
+to the manifest actually being released, at release time, before any completion check — a
+formalization of manual practice that previously happened by hand on every release. A record whose
+`changed_managed_paths` content genuinely differs from what's being released is reported, never
+silently re-targeted.
+
+### Re-target or deliver pending release handoffs when `kit_version` bumps (SPEC-277)
+
+A `kit_version` bump previously stranded every pending handoff still targeting the outgoing version
+in one shot (nine at once, in the SPEC-239 bump). Adopts SPEC-253's mechanical re-pin for the bump
+case rather than a second bump-specific mechanism, and teaches `validate_specs` to distinguish "
+stranded by an in-flight bump, resolved automatically at next release" from "stranded and abandoned,
+needs operator attention."
+
+### Constrain `invocation_kind` to the documented vocabulary at every admission caller (SPEC-245)
+
+Every `validate_install.run_validation` call site now passes one of the documented
+`INVOCATION_KINDS` values instead of an ad hoc string, closing the gap where an undocumented
+invocation kind could silently bypass admission classification.
+
+### Promote the evidence-arithmetic gate to a shared canonical helper (SPEC-246)
+
+The evidence-gate arithmetic used by SPEC-229-006's live end-to-end tests is now a shared
+`evidence_arithmetic.py` helper (renamed from a test-local module) with its own dedicated coverage,
+removing duplicated gate logic between the live and fixture-driven test suites.
+
+### Document the sanctioned procedure for discharging a canonical-copy drift alarm (SPEC-254)
+
+`canonical_copies.py`'s drift alarm previously had no documented, sanctioned discharge procedure —
+an agent hitting it had to reason out a fix from scratch. Documents the exact procedure and adds a
+disk-resolved guard so the alarm can't be silently bypassed.
+
+### Make the commit-time canonical-copy guard fire for out-of-repo copies (SPEC-255)
+
+The canonical-copy drift guard previously only checked copies inside the same repository; a copy
+living outside the repo entirely could drift without ever tripping the alarm. The guard now resolves
+copy paths from disk rather than assuming repo-relative placement.
+
+### Reconcile the blocked-commit subject template with `MARK_COMMIT_RE` (SPEC-256)
+
+The documented blocked-commit subject template in `SKILL.md` didn't match the regex
+`record_metrics.py`'s commit-msg hook actually enforces, producing commits that looked correct but
+were silently rejected. Corrected the template and added a regression test pinning the two together.
+
+### Classify the live validation error floor into spec-owned and unowned findings (SPEC-270)
+
+`validate_specs.py specs` produces hundreds of findings with no way to tell "known, owned by an open
+spec, deliberately not fixed yet" from "nobody's watching this." New `owns_findings:` frontmatter
+field plus a family-key classifier attribute each finding to its owning open spec(s) or mark it
+unowned; a committed baseline artifact lets a later run diff what changed, including a family change
+that leaves the total count flat.
+
+### Decide the release_handoff declaration for a spec in a terminal non-delivering status (SPEC-271)
+
+A spec that reaches `superseded` keeps whatever `release_handoff: impact: required` declaration it
+had while live, producing a permanent, unclearable "requires a release handoff artifact" finding for
+work that will never ship. `superseded` (the one terminal, non-delivering lifecycle status) now
+defaults to suppressing that finding without touching the declaration; a dedicated, separately
+evidenced function lets an authorized re-classification (`required -> exempt`) happen deliberately,
+never as a side effect of the status transition itself.
+
+### Extend the artifact-side reachability sweep to the reports and runs directories (SPEC-272)
+
+Extends SPEC-252's artifact-reachability sweep (previously scoped to `release-handoffs/`) to
+`canonical/reports/` (reachable via a `SPEC-<id>`/`BUG-<id>` name-token, or one of two closed named
+exception shapes) and `canonical/runs/` (reachable via an `events.jsonl` `spec_id`, never by
+directory naming) — closing the gap where an artifact-side entry referencing no live spec, or
+referenced by nothing, was invisible to validation.
+
+### Give a terminal commit a safe correction path on a shared branch (SPEC-275)
+
+Correcting a wrong evidence trailer on an already-landed terminal commit previously had no safe path
+on a shared branch — `git commit --amend` risks rewriting a concurrent writer's commit if `HEAD` has
+advanced. Adds a documented, non-amend correction-commit path plus `record_metrics.py
+--correct-commit`/`--verify-amend-head` guards.
+
+### An externally resolved blocker has no controller-sanctioned path back to ready (SPEC-276)
+
+A spec blocked by the controller, then fixed by something outside the controller's own unblock
+ladder (a manual fix, an upstream dependency landing), had no sanctioned way back to `ready` without
+either re-running the full ladder from scratch or a raw frontmatter edit. `unblock_spec.py`'s
+`record_attempt` now accepts an externally-resolved recovery path with its own evidence requirement,
+relaxing the gate without weakening the evidence bar.
+
+### Serialize manifest-touching integration with a release-surface lease (SPEC-278)
+
+Concurrent Nightshift runs integrating manifest-touching changes at the same time could race each
+other's manifest reseals. `parallel_executor.py` gains a `ReleaseSurfaceLease`
+(`fcntl.flock(LOCK_EX | LOCK_NB)`, 5s acquire / 300s hold bound) that the coordinator holds for the
+duration of a manifest-touching integration, serializing what used to be an unguarded race.
+
+### BUG-016 — A spec renders in one board column while its details show a different status
+
+Fixed a board rendering path where a spec's column placement and its detail-panel status could
+disagree after a status write, with new regression coverage in `test_board_api.py`.
+
+### Persist a status-transfer refusal on the spec instead of only in a vanishing toast (SPEC-290)
+
+A board drag or status-dropdown move refused by a client-side pre-check (the NFR
+active/retired-only rule) or a server-refused `/api/spec/<id>/status` write reported the
+reason only in a toast that auto-hides after 3 seconds. There was no durable record of what
+was refused or why once the toast faded, and — unlike the board's existing `block_reason`
+convention — nothing survived in the spec file for another tool or agent to discover.
+
+- New frontmatter field `transfer_refusal`, written server-side to the spec file (matching
+  `block_reason`'s mechanism) whenever a status-transfer request is refused, from either
+  refusal source (client pre-check via new `POST /api/spec/<id>/transfer-refusal`, or a
+  server-refused write inside `SpecCache.update_status`) — both converge on the same
+  persisted shape.
+- A network-level failure (thrown before any `Response` exists) still persists a refusal
+  record using the same generic fallback toast text, via the same POST endpoint.
+- Cleared automatically the next time that spec's status write succeeds, and via a new
+  manual dismiss control in the panel (`DELETE /api/spec/<id>/transfer-refusal`) that clears
+  it without requiring a successful move first.
+- The panel's `block_reason` row gets a subtle reddish background hint and the new
+  `transfer_refusal` row a subtle, distinct amber hint, both theme-adaptive (reusing the
+  existing `--c-blocked` / `--c-active` tokens via `color-mix()`).
+- `transfer_refusal` registered in `vocabulary-registry.yaml` (tooltip help text) and given a
+  shape check in `validate_specs.py` (non-empty string when present).
+- The toast, its 3-second auto-hide, and all existing successful status-write behavior are
+  unchanged.
 
 ## 3.13.0 (2026-08-30)
 

@@ -61,6 +61,41 @@ LIFECYCLE_TRANSITIONS = {
     "blocked": frozenset({"draft", "planned", "ready", "superseded"}),
 }
 
+# SPEC-291 R2: the closed, registered artifact-type vocabulary. Adding a type
+# is a registry edit plus its documentation (SPEC-GUIDE.md), nowhere else.
+ARTIFACT_TYPES = frozenset({
+    "status-transition", "decision", "validation-evidence", "context",
+    "verifier", "other",
+})
+
+# SPEC-291 R1: the single source for the artifact index schema. Prose in
+# SPEC-GUIDE.md documents exactly this field list; a test proves they cannot
+# drift (see tests/test_artifact_index_schema.py).
+ARTIFACT_INDEX_FIELDS = ("type", "created", "actor", "summary", "path")
+
+# SPEC-291 R3: the literal, closed set of (from, to) pairs whose reason may be
+# synthesized from evidence already in hand (run ID / evidence trailers)
+# rather than demanded as prose. Every other transition between two
+# LIFECYCLE_STATUSES is a judgment transition and requires a non-empty
+# prose reason.
+MECHANICAL_TRANSITIONS = frozenset({
+    ("ready", "in_progress"),
+    ("in_progress", "done"),
+    ("blocked", "ready"),
+})
+
+
+def terminal_statuses() -> frozenset[str]:
+    """Return lifecycle statuses with no outgoing transition.
+
+    ``LIFECYCLE_TRANSITIONS`` has no key for ``done`` or ``superseded``:
+    ``transition_allowed`` falls back to ``LIFECYCLE_TRANSITIONS.get(current,
+    ())``, which is empty for both, so both are structural dead ends. This
+    derives that set from the registry itself rather than hardcoding it, so a
+    future added/removed status stays in sync automatically.
+    """
+    return LIFECYCLE_STATUSES - frozenset(LIFECYCLE_TRANSITIONS.keys())
+
 
 def attempt_requires_delivery_assessment(role: str, outcome: str) -> bool:
     """Keep an implementer terminal attempt distinct from parent delivery closure."""
@@ -273,6 +308,20 @@ def migrate_legacy_planning(frontmatter: Mapping[str, Any]) -> tuple[str | None,
 
 def transition_allowed(current: str, target: str) -> bool:
     return target in LIFECYCLE_TRANSITIONS.get(current, ())
+
+
+def is_judgment_transition(current: str, target: str) -> bool:
+    """Return whether a transition requires a prose reason (SPEC-291 R3).
+
+    Scoped to the seven ``LIFECYCLE_STATUSES``: a transition touching a
+    status outside that set (NFR-family ``active``/``retired``, for example)
+    is outside this spec's enumerated vocabulary and is never required to
+    carry a reason here. Within that set, every pair except the closed
+    ``MECHANICAL_TRANSITIONS`` list is a judgment transition.
+    """
+    if current not in LIFECYCLE_STATUSES or target not in LIFECYCLE_STATUSES:
+        return False
+    return (current, target) not in MECHANICAL_TRANSITIONS
 
 
 def validate_scope_extraction(

@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.13.0
+version: 3.14.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -477,6 +477,28 @@ Interactive spec authoring with validation.
      reviewed counts, R/AC IDs, item kinds, and reasons — never spec prose.
 
 5. **Write spec** to `specs/SPEC-{ID}-{slug}.md`. Confirm with user before writing. When creating an NFR, reconcile every matched non-done spec; when promoting any spec, reconcile it against every active NFR. Use `audit_nfr.py --check-all` where installed.
+
+5a. **Promoting `draft`/`planned` -> `ready` (SPEC-291)** — never hand-edit
+    `status:` for this transition. Use the canonical entrypoint, which writes
+    the durable checkpoint, the `status-transition` artifact, and — when a
+    `promotion_gap` is being resolved — `decision`/`context`/
+    `validation-evidence` artifacts recording the resolution rationale and
+    whatever was gathered to justify it, all under
+    `reports/<SPEC-ID>/artifacts/`:
+    ```bash
+    python3 .nightshift/spec_promotion.py <spec-file> \
+      --run-id <run-or-session-id> \
+      --reason "<why this is ready now>" \
+      [--gap-resolved | --gap-waived-reason "<why the gap no longer blocks>"] \
+      [--resolution-rationale "<what resolved the promotion_gap>"] \
+      [--finding "<one finding you gathered>" ...] \
+      [--evidence "<path or ID you checked>" ...]
+    ```
+    `--reason` is always required — a promotion with no reason is refused, not
+    silently recorded. `--resolution-rationale` is required whenever
+    `--gap-resolved`/`--gap-waived-reason` resolves a declared `promotion_gap`.
+    A later agent should be able to answer "why is this spec ready?" by
+    reading `reports/<SPEC-ID>/artifacts/index.json` alone.
 
 6. **Post-save for `type: nfr`** — after saving a new NFR spec, run the impact audit:
    ```bash
@@ -1046,13 +1068,31 @@ Edit({
 })
 ```
 
-(If the spec is already `in_progress` from a prior aborted run, skip 2a and go directly to 2b. Do not regress the status.)
+(If the spec is already `in_progress` from a prior aborted run, skip 2a and go directly to 2a2. Do not regress the status.)
 
-**2b. Commit on main with only this file staged:**
+**2a2. Record the SPEC-291 transition artifact — before the commit.** This
+edit is a mechanical `ready -> in_progress` transition, so its reason
+synthesizes from the run ID with no prose required. Run this *before* 2b so
+the artifact file exists on disk to be staged in the same commit — writing it
+after would leave it untracked, which corpus validation would then flag as an
+orphan/untracked finding on the very next run:
+```bash
+python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
+  --from ready --to in_progress --run-id <run-id>
+```
+A non-zero exit means the transition was classified as a judgment transition
+(unexpected for `ready -> in_progress`) — pass `--reason "<why>"` and retry
+rather than skipping this step; it is what R3 makes durable and what Step 6
+below, and the board panel, both read back.
+
+**2b. Commit on main with the spec file and its artifact directory staged.**
+The artifact directory is a sibling of the specs directory's `reports/`, not
+bare `reports/` from the project root — `.nightshift/reports/<spec-id>/artifacts/`
+in a deployed project, `canonical/reports/<spec-id>/artifacts/` in this kit repo:
 
 ```
 Bash({
-  command: "cd <project-root> && git add <relative spec path> && git commit -m 'chore: mark <spec-id> in_progress'",
+  command: "cd <project-root> && git add <relative spec path> <specs-dir-sibling>/reports/<spec-id>/artifacts/ && git commit -m 'chore: mark <spec-id> in_progress'",
 })
 ```
 
@@ -1083,6 +1123,13 @@ Verify all of the following before Step 3:
 - `private_state.py privacy-check` passes for every configured private path.
 
 Never stage or force-add private Nightshift state. A worker cannot own this call.
+
+Run 2a2 here too, exactly as above — the artifact is a spec-side record, not
+private state. Unlike commit-backed, private-local makes no lifecycle commit
+at all (`HEAD`/`git write-tree` stay byte-for-byte unchanged), so the artifact
+file lands on disk untracked until a later ordinary commit (e.g. the run's own
+implementation commit) picks it up; do not force a commit here solely to
+track it, since that would break the byte-for-byte invariant above.
 
 ### Step 3: Read config
 
@@ -1144,6 +1191,13 @@ Auto-generate the brief the agent will receive.
 - Requirements section → brief Requirements (verbatim)
 - Acceptance Criteria → brief AC (verbatim)
 - Context section → target files, test files, framework
+
+**b1. Include the artifact-index summary when one exists (SPEC-291).** Read
+`reports/<SPEC-ID>/artifacts/index.json`, if present, and add one line per
+entry (`type` / `created` date / `summary`) to the brief under an "Artifact
+history" heading — so the agent starts from why prior transitions happened
+instead of re-deriving it. Absent or empty is silently skipped, never an
+error (R7: most specs have no artifact history yet).
 
 **c. Auto-map DevKB files** from spec `technologies` field using the DevKB Mapping Table in Implementation Notes. If the spec has no `technologies` field, detect from target file extensions (`.py` → python.md, `.swift` → swift.md + xcode.md, `.ts/.js` → shell.md, etc.).
 
@@ -2492,7 +2546,21 @@ git worktree remove <path>
 git branch -d <branch>
 ```
 
-Resolve terminal status on main. In `commit-backed`, flip to `done` and commit:
+In `commit-backed`, first record the SPEC-291 transition artifact for the
+evidence-gated `in_progress -> done` transition about to be made — its reason
+synthesizes from the run ID, no prose required — *before* flipping status and
+committing, so the artifact file exists on disk to be staged in the same
+commit (writing it after would leave it untracked):
+```bash
+python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
+  --from in_progress --to done --run-id <started-run-id>
+```
+
+Resolve terminal status on main. In `commit-backed`, flip to `done` and
+commit, staging both the spec file and its `reports/<spec-id>/artifacts/`
+directory (the sibling of the specs directory's `reports/` —
+`.nightshift/reports/...` deployed, `canonical/reports/...` in this kit
+repo — not bare `reports/` from the project root):
 ```
 chore: mark <spec-id> done
 
@@ -2525,6 +2593,20 @@ so a blocked transition and a later recovery remain one analyzable run.
 Set `Nightshift-Unblock-Rung` to `0` when no drive-to-done rung was entered, or
 to the final entered rung (`1` through `5`) when the ladder ran.
 
+**Terminal-trailer correction on a shared branch (SPEC-275).** Never use `git
+commit --amend` to repair a terminal trailer on a shared branch: a concurrent
+writer may have advanced `HEAD`, and amend would rewrite that writer's commit.
+Instead create a separate correction commit with the corrected trailers and a
+subject that does **not** match `MARK_COMMIT_RE`, then explicitly run
+`record_metrics.py --correct-commit <bad-terminal-sha> --repo <project-root>`.
+The post-commit hook cannot invoke this path and the existing metrics row is
+patched in place; no second `chore: mark ...` transition is created. If an amend
+is otherwise permitted, first run `record_metrics.py --verify-amend-head
+<captured-40-character-sha> --repo <project-root>` using the exact SHA captured
+immediately after this session's own prior commit. A mismatch is a hard stop. If
+you discover that another session's commit was already rewritten, stop writing
+and hand the choice to that commit's owner; do not attempt a compensating rewrite.
+
 In `private-local`, do not make a lifecycle commit. After the same evidence gate
 and serialized application merge, call `transition_private_state(..., "done",
 run_id=<started-run-id>, owner="coordinator", assigned_spec=<spec-id>)`. Derive
@@ -2533,7 +2615,9 @@ the same durable run without searching Git history. `Nightshift-Parent-Tool-Call
 `Nightshift-Resolution-Kind` are commit trailers and R2 requires the artifact to be
 git-tracked, so this instrumentation does not apply under `private-local` today —
 recording the tally there needs its own private-state field, out of scope for
-SPEC-ARGO-059.
+SPEC-ARGO-059. Run the SPEC-291 `record-transition` command above regardless of
+mode — the artifact lives under `reports/<spec-id>/artifacts/`, a spec-side,
+git-tracked record independent of which lifecycle-checkpoint proof was used.
 
 Tell the user: spec ID, what landed, test count, report path. One paragraph.
 
@@ -2587,11 +2671,27 @@ speculative explanation of why it worked.
    For `private-local`, call `transition_private_state(..., "blocked",
    run_id=<started-run-id>, owner="coordinator", assigned_spec=<spec-id>,
    note=<specific reason>)` instead. It must leave one terminal checkpoint and no
-   staged/committed private path.
+   staged/committed private path. Run the SPEC-291 `record-transition` command
+   below (with `--reason`) regardless of mode.
 
-2. In `commit-backed`, commit on main:
+   `-> blocked` is a judgment transition (SPEC-291 R3): record the transition
+   artifact *before* committing (below), so the artifact file exists on disk
+   to be staged in the same commit — an empty reason is refused, not silently
+   skipped:
+   ```bash
+   python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
+     --from in_progress --to blocked --run-id <started-run-id> \
+     --reason "<specific reason: which check(s) failed and why>"
    ```
-   chore: mark <spec-id> blocked — <one-line reason>
+
+2. In `commit-backed`, commit on main: stage both the spec file and its
+   `reports/<spec-id>/artifacts/` directory (the sibling of the specs
+   directory's `reports/`, not bare `reports/` from the project root — see
+   Step 2b).
+   ```
+   chore: mark <spec-id> blocked
+
+   <one-line reason>
 
    Nightshift-Evidence-Report: <pass|fail|unknown>
    Nightshift-Evidence-Tests: <pass|fail|unknown>
@@ -2607,6 +2707,12 @@ speculative explanation of why it worked.
    Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
    Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
    ```
+
+   The subject line is exactly `chore: mark <spec-id> blocked` with no trailing suffix —
+   this is what `record_metrics.MARK_COMMIT_RE` and `hooks/commit-msg` both enforce. The
+   one-line reason goes as the first line of the commit body, above the trailer block; it
+   is for human/git-log readability only — `derive_block_reason` reads the reason from the
+   spec file's own `block_reason`, not from the commit.
 
    The tool-call tally and resolution-kind trailers are mandatory here too (R2's "terminal
    resolution" includes `blocked`, not only `done`) — same definitions as the done-path
