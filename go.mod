@@ -1,11 +1,11 @@
 module github.com/sloik/shipyard
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
-	github.com/ncruces/go-sqlite3 v0.34.0
+	github.com/ncruces/go-sqlite3 v0.35.4
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.117
 )
 
@@ -17,6 +17,7 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v2 v2.1.35300 // indirect
+	github.com/ncruces/go-sqlite3-wasm/v5 v5.0.35304 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )
