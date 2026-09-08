@@ -1,6 +1,6 @@
 # Autonomous Execution Loop
 
-**Kit Version:** 2.62.0 | **Date:** 2026-08-01
+**Kit Version:** 3.17.0 | **Date:** 2026-09-08
 **Purpose:** The heart of the Nightshift Kit. This document describes the full 16-step autonomous cycle that an agent follows to complete a single spec and move to the next one.
 
 ---
@@ -541,6 +541,13 @@ or require a human status ping to advance. The parent resolves to `done` after a
 passing gate, or follows the controller-backed one bounded unblock pass and
 then resolves to `done` or `blocked`, recording the terminal state and elapsed
 time in parent progress before it is idle.
+
+Before that lifecycle projection, the parent persists one immutable terminal
+choice keyed by selected spec and coordinator-issued logical run ID. An
+identical restart reuses the row; an opposite choice is refused. Recovery must
+load and finish projecting the recorded choice before selecting any fallback
+terminal status, so a post-decision interruption cannot turn `done` into
+`blocked` or create a second logical run identity.
 
 #### Heartbeat contract when a watcher is enabled (SPEC-225)
 
@@ -1819,6 +1826,33 @@ the historical traceability is identical to a circuit-breaker abort.
    Only after this command exits zero may the parent lifecycle commit be accepted:
    `chore: mark <spec-id> done`.
 
+   For the live parallel queue, the immutable `done`/`blocked` decision and
+   matching durable status checkpoint must exist before this tracked
+   frontmatter projection. The parent validates the handle's canonical spec
+   path and ID, commits only that path with the complete lifecycle trailer set,
+   and replays the same decision after a crash. A matching but dirty spec path
+   is not converged; recovery commits it before another serialized integration
+   proceeds. Unrelated staged or unstaged paths are never included.
+
+   A post-merge validation failure uses the queue's checked-revert protocol.
+   Persist `started` with exact pre-merge/merge revisions before invoking Git,
+   then persist command output and the verified HEAD/tree/clean postcondition
+   before choosing `blocked`. Failed, interrupted, postcondition-mismatched, or
+   ambiguous attempts retain their worktree and reason-coded evidence. Replay
+   must inspect revisions first; it may not blindly issue a second revert when
+   the first command could already have committed.
+   On every fresh or continuing integration call, reload unresolved typed
+   attempt history before candidate Git mutation. If the recorded candidate
+   still affects current main, hold all non-owner candidates with
+   `shared_main_revert_recovery_required`; only the exact spec/run owner may
+   replay. Bind through exact repository lineage and persisted observed-file
+   differences, not ancestry alone. A mechanically valid durable successful
+   revert restores main safety even if terminal projection is still pending.
+   A clean, already-projected terminal decision may replay before the barrier
+   only to restore its durable accepted-surface memory. It may not choose or
+   write state, commit projection, or clear another run's barrier; incomplete
+   terminal projection waits behind the mutation gate.
+
    **This step is MANDATORY.** Without it, the spec remains `in_progress` and will
    not be filtered out by Task Selection (step 2), causing re-selection in the next
    loop iteration. In orchestrator mode, the orchestrator also cannot detect completion
@@ -2052,6 +2086,22 @@ reasoning are unavailable to the standard verification gate by construction.
    See specs/{PROJECT}-QUESTIONS-NNN.md for the consolidated tracker.
    If no QUESTIONS spec exists yet, these will be picked up by the next
    `/nightshift address-issues` run.
+   <!-- Write the literal word `None` when there is nothing to report — never
+        omit this section. -->
+
+   ## Report Action Log
+   <!-- SPEC-299 R2: one row per report-consumer recording what action was
+        taken in response to THIS report's own Open Questions / Blocked Specs
+        content. At this report's own first writing there is usually exactly
+        one self-referential row, since nothing has consumed it yet. A later
+        `board.py` COPY PROMPT / address-issues scan appends its own row when
+        it reads this report. Action is closed vocabulary: `none_found` |
+        `consolidated_into <QUESTIONS-spec-id>` | `resolved_in_report` |
+        `deferred: <reason>`. Never silently omit a row for a scanned report,
+        even when its Open Questions/Blocked Specs are both `None`. -->
+   | Report | `## Open Questions` / `## Blocked Specs` present? | Action taken |
+   | --- | --- | --- |
+   | (this report) | No | none_found |
 
    ## Discovered TODOs
    - See TODOs-discovered.md for items found during implementation
@@ -2104,6 +2154,15 @@ reasoning are unavailable to the standard verification gate by construction.
    still completes.
 3. Write to `reports/YYYY-MM-DD-nightshift-report.md`
 4. **Verify the file exists** — confirm `reports/YYYY-MM-DD-nightshift-report.md` is present and non-empty before continuing. If it is missing or empty, write it again.
+   For a bounded parallel run, the parent coordinator (not the worker) must
+   create the completion receipt after independent review. Bind it to the exact
+   candidate commit and dispatcher run, record the independently observed diff,
+   and hash-reference the Step 9 test result, Step 9.5 AC checklist, this Step 14
+   report, and the structurally validated Step 10 verifier verdict. Worker
+   all-pass strings and the managed-payload receipt are not completion evidence.
+   The coordinator validates the receipt before the distinct payload-integrity
+   gate at serialized integration; a missing/stale/malformed receipt is an
+   indeterminate denial, never implicit success.
 5. **Seal the official follow-up decisions (SPEC-236).** After every terminal
    resolution — `done`, `partial`, `noop`, `blocked`, unblock, verifier warning,
    material scope split, integration failure, and post-release review — process
@@ -2124,6 +2183,34 @@ reasoning are unavailable to the standard verification gate by construction.
 6. Commit: `[SPEC-XXX] docs: generate nightshift report`
 
 **Why:** A human can scan the report in 2 minutes and know if anything needs attention. This is the primary deliverable of a Nightshift run — not just the code, but the audit trail.
+
+---
+
+### 14a. Coordinator-Authored Reports (SPEC-317)
+
+**Applies whenever a coordinator/parent session writes a
+`reports/YYYY-MM-DD-nightshift-report*.md` file directly** — investigating,
+verifying, or live-proving a spec or bug without dispatching a
+`nightshift-worker` agent through Step 4e. This is the same report file Step
+14 defines, produced by a different hand; it carries the identical contract,
+not a paraphrase of it.
+
+**What to do:** Before writing the report, confirm it will include, verbatim
+as headings, matching LOOP.md Step 14's canonical template exactly (not a
+paraphrase): summary stats, per-spec changes, test results, AC checklist, a
+`## Blocked Specs` section, an `## Open Questions` section, and a
+`## Report Action Log` section — each states its content, or the literal
+word `None`/a `none_found` row when empty, never omitted. The
+`## Report Action Log` table's Action column is closed vocabulary:
+`none_found` | `consolidated_into <QUESTIONS-spec-id>` | `resolved_in_report`
+| `deferred: <reason>`.
+
+**Why:** SPEC-299 fixed this contract for the kickoff-mode dispatch path
+(Step 4e's worker boilerplate) only. `SPEC-QUESTIONS-006`'s report sweep
+found 10 of 13 recent reports missing both `## Blocked Specs` and
+`## Open Questions` — every one of the 10 written directly by a coordinator,
+not a dispatched worker. Nothing previously told a coordinator writing its
+own report by hand to carry the same three sections; this closes that gap.
 
 ---
 

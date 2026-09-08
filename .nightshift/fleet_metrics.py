@@ -41,6 +41,7 @@ SAFE_BLOCKER_CLASSES = {
     "baseline_regression",
     "external_input",
     "evidence_gap",
+    "scope_violation",
     "unknown",
 }
 EXPERIMENT_STATES = {"registered", "collecting", "review_due", "resolved", "retired"}

@@ -24,6 +24,55 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def enrich_rows_for_token_report(metrics: List[Dict[str, Any]], specs_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """SPEC-298 R5: join each metrics row to its spec's declared type/layer.
+
+    Read-only: never writes a spec file. A missing/unreadable spec yields
+    "unknown" strata rather than raising, so one bad spec file cannot break
+    the whole report.
+    """
+    rows: List[Dict[str, Any]] = []
+    cache: Dict[str, Tuple[str, str]] = {}
+    for m in metrics:
+        spec_id = m.get("task_id")
+        spec_type = "unknown"
+        complexity_band = "unknown"
+        if specs_dir is not None and spec_id:
+            if spec_id in cache:
+                spec_type, complexity_band = cache[spec_id]
+            else:
+                try:
+                    from spec_frontmatter import parse_spec_file
+                    candidates = list(Path(specs_dir).glob(f"{spec_id}-*.md")) + list(
+                        Path(specs_dir).glob(f"{spec_id}.md")
+                    )
+                    if candidates:
+                        parsed = parse_spec_file(candidates[0])
+                        fm = parsed.frontmatter or {}
+                        spec_type = str(fm.get("type") or "unknown")
+                        layer = fm.get("layer")
+                        complexity_band = f"layer-{layer}" if layer is not None else "unknown"
+                except Exception:
+                    spec_type, complexity_band = "unknown", "unknown"
+                cache[spec_id] = (spec_type, complexity_band)
+        rows.append({
+            **m,
+            "spec_type": spec_type,
+            "complexity_band": complexity_band,
+            "outcome": m.get("outcome") or m.get("status"),
+            "metrics_row_id": m.get("task_id"),
+        })
+    return rows
+
+
+def compute_token_report(metrics: List[Dict[str, Any]], specs_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """SPEC-298 R5: read-only, per-stratum token/duration/completion report."""
+    from token_usage import build_token_report
+
+    rows = enrich_rows_for_token_report(metrics, specs_dir)
+    return build_token_report(rows)
+
+
 def analyze_fleet_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Expose allowlisted fleet evidence through the existing analyzer surface.
 
@@ -1680,6 +1729,13 @@ def main():
         action="store_true",
         help="Generate model comparison report",
     )
+    parser.add_argument(
+        "--token-report",
+        action="store_true",
+        help="SPEC-298: also write a read-only per-stratum token-usage report "
+             "(reports/token-usage-report.json). Off by default; never affects "
+             "the exit code or the existing trend/analysis outputs.",
+    )
 
     args = parser.parse_args()
 
@@ -1758,6 +1814,13 @@ def main():
     print(f"Analysis JSON: {metrics_dir / 'analysis.json'}")
     print(f"Regression status snapshot: {status_snapshot}")
     print(f"Gap analytics status snapshot: {gap_status_snapshot}")
+
+    if args.token_report:
+        specs_dir = project_root / "specs"
+        token_report = compute_token_report(metrics, specs_dir if specs_dir.is_dir() else None)
+        token_report_path = reports_dir / "token-usage-report.json"
+        token_report_path.write_text(json.dumps(token_report, indent=2, default=str))
+        print(f"Token usage report: {token_report_path}")
 
     if alerts:
         print(f"Regression alerts: {reports_dir / 'REGRESSION-ALERT.md'}")

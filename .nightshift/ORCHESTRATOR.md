@@ -422,11 +422,142 @@ one unique branch, worktree, and run id. Worker artifacts live below
 `.nightshift/runs/<run-id>/<spec-id>/`; workers report only their own outcome.
 
 After any outcome the coordinator releases capacity, recomputes the live
-frontier, and refills it immediately. A crash becomes recoverable `pending`
-state and does not leak a slot. Concurrent workers never merge branches
-directly; the coordinator retains integration ownership (SPEC-139-003).
+frontier, and refills it immediately. The dispatcher first records a crash as
+recoverable `pending`; the live parent then owns its single terminal transition
+to `blocked` before the selected run returns. Concurrent workers never merge
+branches directly; the coordinator retains integration ownership
+(SPEC-139-003).
+
+The authoritative live caller is `Coordinator.run()` in
+`nightshift_coordinator.py`, the `/nightshift run` CLI implementation. Only an
+explicit integer `parallel_admission.worker_limit >= 2` selects its parallel
+branch. That branch constructs one `BoundedWorktreeDispatcher` for the exact
+spec IDs selected by the invocation and one `SerializedIntegrationQueue`.
+The coordinator starts workers in one bounded `ThreadPoolExecutor`; each start
+returns an in-flight future and polling only observes completion. Workers return
+isolated results to the dispatcher; the coordinator drains successful handles
+into that sole queue. Queue acceptance writes durable `done`; worker failure,
+queue hold, or integration failure converges once to durable `blocked` under the
+parent, with a final sweep forbidding selected `pending`/`in_progress` residue.
+Missing, boolean, string, zero, or one limits keep `Coordinator.run()` on its
+existing sequential path.
+
+### Full completion-evidence decision (SPEC-296-002)
+
+Worker completion is not integration admission. Before any completed handle is
+given to `SerializedIntegrationQueue`, the live `Coordinator.run()` path makes
+one full completion-evidence decision from the LOOP result envelope. The
+coordinator invokes its parent-owned `completion_evidence_provider`; worker
+result fields are never an authority for this decision. The provider returns a
+receipt bound to spec ID, dispatcher run ID, current main, exact clean candidate
+commit, independently observed changed files, and SHA-256 artifact descriptors
+for the Step 9 test result, Step 9.5 AC checklist, Step 14 report, and Step 10
+independent-verifier verdict. The coordinator reloads candidate artifacts from
+the immutable Git object, reloads the verifier only from the parent-private
+`.nightshift/completion-evidence/` root, and applies the existing verifier
+schema, candidate identity, independence, contamination, footprint, and complete
+per-AC validators. Only those checks plus passing tests, ACs, and verdict are
+`accepted`; explicit valid failures are `rejected`; a missing provider/receipt,
+stale identity, hash mismatch, malformed artifact, or incomplete evidence is
+`indeterminate` and fails closed.
+
+This decision is separate from managed-payload integrity. An admission receipt
+or terminal payload-integrity acceptance cannot populate or satisfy completion
+evidence. Forged all-pass strings in a worker outcome are ignored. Only
+completion-accepted handles proceed to the queue, where the
+existing managed-payload gate still runs independently before merge. Rejected
+or indeterminate handles retain their branch, worktree, worker outcome, and
+integrity receipt coordinates in the durable parent-owned `blocked` checkpoint;
+they are never marked `done` and are not cleaned up.
+
+### Immutable terminal choice before lifecycle projection (SPEC-296-003)
+
+For each selected spec and coordinator-issued logical run ID, the coordinator
+records exactly one `done` or `blocked` row in the status store's append-only
+`terminal_decisions` history before it projects that choice into lifecycle
+status. The `(spec_id, run_id)` key is immutable: replaying the same choice
+returns the original row and projects at most one matching checkpoint; asking
+for the opposite choice raises `TerminalDecisionConflict` and stops closed.
+Decision history and lifecycle history are deliberately separate tables.
+
+The serialized queue owns accepted/reverted integration choices. The live
+coordinator owns dispatch, worker, completion-evidence, integration-exception,
+held, and final-sweep blocked choices. If interruption occurs after the durable
+choice but before projection, recovery first reloads the existing choice using
+the handle's coordinator-issued `terminal_run_id`, then projects that choice;
+it never substitutes a new run ID or converts a recorded `done` to `blocked`.
+Integration exceptions are isolated to the current deterministic handle; after
+recovering or blocking that handle, the same queue continues independent peers
+while retaining cross-handle overlap memory. Only an evidenced shared integrity
+failure stops subsequent candidates.
+The immutable queue decision carries the pre-merge observed-file set and
+declared surfaces. Recovery restores overlap memory from those exact durable
+values; it must not recompute the candidate diff after the candidate is already
+in main, where that comparison can be empty.
+On a fresh coordinator restart, startup recovery considers only selected specs
+whose current non-terminal checkpoint names the original decision run. Each
+newly projected `done` choice is passed through the queue's validated,
+idempotent restore API before dispatch advances. Malformed surfaces stop closed;
+arbitrary historical `done` rows never seed the current queue.
+Dependency-descendant propagation remains a separate derived lifecycle effect,
+not a second terminal choice for the selected logical run.
+
+### Durable terminal choice to tracked frontmatter (SPEC-296-005)
+
+Every live queue handle carries the resolved, tracked canonical spec path and
+the parent validates that path's frontmatter ID before integration mutation.
+After the immutable terminal choice and its matching durable status checkpoint
+exist, the same coordinator-owned queue projects that exact `done` or `blocked`
+value to the tracked spec.  The two writes are deliberately ordered rather than
+made falsely atomic: interruption may leave durable state ahead of frontmatter,
+and startup recovery replays the existing choice under its original run ID.
+Recovery never chooses a replacement terminal value.
+
+The projector commits only the owned spec path with the canonical
+`chore: mark <spec-id> done|blocked` subject and the complete evidence, verifier,
+blocker, unblock, resolution, parent-call, and model trailer contract.  A `done`
+commit's pass trailers derive from the coordinator-accepted completion receipt
+stored with the immutable decision; blocked or unavailable facts remain
+`unknown`. Before writing, the projector appends a receipt to
+`terminal_projection_events` binding decision/run/path, pre-write SHA-256, and
+the exact expected post-write SHA-256. StatusStore admits a `started` receipt
+only while the path is clean at the exact base HEAD and independently derives
+both hashes from that immutable blob. Recovery independently repeats that
+derivation; caller-supplied hashes never establish ownership. The store persists
+one normalized Git common-directory owner intrinsically from its canonical
+location or through explicit construction. Projector creation requires that
+owner and never establishes it by first use. Every receipt binds that owner plus
+the exact checkout root. Linked worktrees share the owner but
+independent clones do not; both admission and replay revalidate these identities.
+A dirty matching
+path is recoverable only when its bytes equal that canonical target. Dirty opposite or mixed
+user edits are refused untouched; a clean tracked opposite terminal value is
+corrected outward from immutable durable truth. Crash after write, failed
+commit, and crash after commit are replayed idempotently. Path-only commit
+semantics preserve unrelated staged and unstaged paths and keep main clean for
+the next serialized handle.
+
+### Board read reconciliation direction (SPEC-296-008)
+
+Board cache/API reads are not a terminal lifecycle owner. File mtime may repair
+only nonterminal-to-nonterminal durable cache drift. A file value of `done` or
+`blocked` never appends inward to StatusStore, even when newer than a transient
+durable checkpoint; the board displays the durable value. When a matching
+immutable terminal decision and lifecycle checkpoint exist, that pair wins
+regardless of file status or mtime, and only the coordinator-owned projector
+above may converge tracked frontmatter and create the canonical terminal commit.
 
 ### Serialized integration queue and fresh-main validation (SPEC-139-003)
+
+Every queue construction requires a real, current, writable `StatusStore`.
+Construction verifies the SQLite file exists, schema v5 is current, an
+immediate write transaction can be acquired, and terminal-decision,
+terminal-projection, merge-attempt, and cleanup storage are queryable. `integrate()` repeats
+this durability check before inspecting or
+mutating Git, because storage can disappear after construction. Missing,
+non-store, stale, deleted, unreadable, or unwritable storage fails closed before
+merge, lifecycle projection, or cleanup. Tests use real stores in their
+temporary repositories; in-memory stand-ins are not an allowed queue path.
 
 Completed workers enter one coordinator-owned queue; dispatch completion does
 not mean `done`. The queue sorts candidates deterministically, compares both
@@ -442,12 +573,108 @@ surfaces are parent-owned: workers provide relative-path intents, never direct
 edits. A rebase conflict receives one bounded packet containing only conflict
 paths and refs; its terminal result is durable and never left in progress.
 
+The queue records every main-merge command in the append-only
+`merge_attempt_events` ledger before Git mutation and again with its checked
+outcome. Exit zero is accepted only when HEAD is a clean exact two-parent merge
+whose first parent is recorded main, second parent is the immutable candidate,
+and tree equals Git's deterministic merge-tree result,
+or when the candidate was already an ancestor of the unchanged clean main.
+No-op, wrong-parent, unrelated-HEAD, or candidate-unreachable success claims are
+never validated or projected `done`. Malformed runner attributes and inspection
+errors are normalized into durable evidence rather than escaping after `started`.
+A cleanly aborted first content conflict, postcondition mismatch, or interrupted command is held
+as `NS-INTEGRATION-MERGE-CONFLICT` or `NS-INTEGRATION-MERGE-INTERRUPTED` with one
+restart-safe retry. The retry is allowed only while the candidate revision is
+unchanged and main is exactly the recorded clean pre-merge revision; a second
+failure chooses one immutable `blocked` decision as
+`NS-INTEGRATION-MERGE-RETRY-EXHAUSTED`. A non-conflict command failure on safely
+restored main blocks immediately as `NS-INTEGRATION-MERGE-COMMAND-FAILED`.
+Dirty, divergent, or otherwise ambiguous main is held as
+`NS-INTEGRATION-MERGE-RECOVERY-REQUIRED`; it cannot retry until exact restoration.
+Candidate identity drift is separately held and never substitutes a new object
+into an old attempt. These merge classifications retain branch/worktree inputs,
+never run cleanup, and remain distinct from post-merge validation and checked
+revert evidence. On restart, an exact durable `succeeded` row resumes at
+validation/revert without another merge; an invalid success shape appends a
+durable recovery-required hold.
+Keyed prepared recovery uses this same proof and reconciles its matching merge
+ledger before validation. The ledger identity must match the prepared intent's
+canonical observed and declared surface sets, and the declared set must also
+match the handle; candidate, main, spec, run, and bounded attempt identity must
+match as well. Every observed/conflict path is a strict repository-relative
+path; declared/reserved touch surfaces use the same rule while retaining the
+existing single trailing `/` directory marker. Absolute, traversal/dot,
+internal-empty, backslash, URI, and platform-drive aliases are refused without
+normalization. The StatusStore enforces the same rule at merge-ledger admission.
+Noncanonical, malformed, missing, or mismatched identity evidence is held as
+`NS-INTEGRATION-MERGE-RECOVERY-IDENTITY-MISMATCH`. Parent shape alone is
+insufficient. A wrong tree, candidate mismatch, surface mismatch, or divergent
+checkout becomes the terminal keyed queue record as a retained recovery-required
+hold; an exact applied merge first gains its matching durable `succeeded` row
+and then resumes validation without remerge.
+Only the queue's exact untracked evidence file is excluded from the clean-main
+proof; all other tracked, staged, and untracked changes fail closed.
+
+**Deployment-environment authorization hold (SPEC-294).** Immediately before
+each merge attempt -- inside the same loop that retries after a bounded repair,
+so a repair commit is re-checked on its own next iteration -- an optional,
+coordinator-injected `authorization_gate` callable may hold the candidate for a
+third reason beside conflict and overlap: its resolved deployment environment
+(`config.yaml`'s `deployment:` block plus the spec's `deploy_environment:`
+frontmatter) requires `on_completion: authorize` and no durable, non-agent-actor
+SPEC-291 `decision` artifact yet binds that exact candidate SHA. The hold is
+`QueueDecision.outcome = "held"` with `overlap_kind = "authorization_required"`
+-- the same durable, already-derived shape every other hold uses, not a new
+mechanism. Rebase and fresh-main validation already ran (they are unconditional
+ahead of this check); only the final `git merge` call is gated. Absent the
+optional callable (the default), this paragraph never applies and every
+candidate merges exactly as it always has (R2). A human records authorization
+through the board UI (`POST /api/spec/{id}/deployment-authorization`); the
+coordinator is still the sole `spec_artifacts.write_artifact` caller. A
+subsequent commit on the candidate branch changes its SHA, so a stale
+authorization is never honored -- the same drift-based invalidation this queue
+already applies everywhere else, not new machinery.
+
 For each accepted merge it runs the configured build/test gate from main and
 records separate evidence. A conflict or overlap holds only that candidate and
 keeps its worktree. A validation failure returns raw output to the originating
-worker for the configured bounded repair attempt; exhaustion reverts the merge,
-blocks only its dependency descendants, and retains the branch. No queue cleanup
-occurs before main is green and durable `done` status has been recorded.
+worker for the configured bounded repair attempt. Before every normal or
+prepared-recovery revert, the queue appends a durable `started` checkpoint with
+the pre-merge and merge revisions. It then appends the exact command outcome,
+return code, stdout, stderr, observed files, and post-attempt revision before any
+`blocked` choice. Exit zero is not sufficient: successful recovery additionally
+requires a clean new HEAD whose parent is the exact merge revision and whose
+tree equals the pre-merge tree.
+
+Exhaustion after that checked success blocks only dependency descendants and
+retains the branch. A failed, interrupted, or postcondition-mismatched revert is
+reason-coded and held with branch/worktree and red-main evidence intact; it is
+never reported as a successful revert. A replay retries only when HEAD is still
+the exact clean merge revision. If a crash occurred after Git created the revert
+commit but before outcome persistence, recovery proves the parent/tree/clean
+postcondition and records a reconciled success without issuing another revert.
+Ambiguous revision or dirty-index state stays held. No queue cleanup occurs
+before main is green and durable `done` status has been recorded.
+
+Every integration call, including keyed prepared recovery, reloads the latest
+typed revert attempt for each logical run before candidate Git mutation. An
+unresolved attempt whose merge still affects current main is a queue-global
+barrier: independent handles are held as
+`shared_main_revert_recovery_required` until the exact owner
+restores main. Binding requires repository-local Git lineage plus either the
+exact merge HEAD, its direct recovery child, or a persisted observed-file delta
+from the recorded pre-merge tree; ancestry alone is insufficient. Thus an old
+attempt whose candidate surfaces are demonstrably restored cannot poison later
+work. A durable `succeeded` attempt clears the main-safety barrier as soon as
+its recorded parent/tree postconditions validate, independently of later
+terminal projection. Dirty or divergent owner replay remains held, and a fresh
+queue never treats process-local memory as recovery authority.
+An already-terminal handle whose durable status and tracked frontmatter are
+clean may be replayed read-only before this barrier. That replay restores its
+persisted accepted observed/declared surfaces so later overlap checks remain
+sound; it does not write status, choose another terminal decision, project a
+commit, or clear another run's revert barrier. An incomplete terminal
+projection remains behind the barrier because completing it can mutate Git.
 
 ### Safe bounded parallel operation (SPEC-139-004)
 
@@ -1263,7 +1490,11 @@ projection transport may be `awaiting_sync` without changing this decision.
 ```python
 if sub_agent_status == "completed":
     merge_worktree()
-    cleanup_merged_worktree()  # shared primitive; see GIT.md merge-path cleanup
+    # Only the coordinator-owned checked cleanup protocol may remove resources.
+    # It runs after immutable terminal decision + durable/frontmatter projection,
+    # records exact ownership before mutation, checks subprocess/postconditions,
+    # and durably enumerates every retained resource on partial failure.
+    cleanup_merged_worktree(status_store=durable_store, spec_path=canonical_spec)
     continue_next_spec()
 
 elif sub_agent_status in ["failed", "blocked", "discarded"]:

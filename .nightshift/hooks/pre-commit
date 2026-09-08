@@ -100,6 +100,16 @@ if [ -f "$VALIDATE_SPECS" ]; then
     fi
 fi
 
+# Write-scope guard — rejects a commit that stages a path outside the active
+# spec's declared scope.write (SPEC-300-003). Runs before lint/type-check so a
+# scope rejection is reported before slower gates run.
+WRITE_SCOPE_GUARD=".nightshift/hooks/protect-write-scope.sh"
+if [ -x "$WRITE_SCOPE_GUARD" ]; then
+    if ! "$WRITE_SCOPE_GUARD"; then
+        FAILED=1
+    fi
+fi
+
 if [ -n "$LINT_CMD" ]; then
     echo "[nightshift pre-commit] Running lint: $LINT_CMD"
     if ! eval "$LINT_CMD"; then

@@ -26,7 +26,7 @@ This generated entry point is checked by `vocabulary.py audit`; consumer-specifi
 | `confidence` | Confidence | Diagnostic estimate; never a hidden status transition. | — |
 | `outcome` | Outcome | Result of one run | done, partial, blocked, noop |
 | `readiness` | Readiness | Deterministic intrinsic contract check. | PASS, REVIEW, FAIL |
-| `run_state` | Run state | Current derived admission or execution condition. | runnable, specification_incomplete, intentionally_future, validation_failed, review_required, waiting_dependencies, waiting_external_input, time_gated, overlap_conflict, dependency_cycle, resource_gated, waiting_gap_spec |
+| `run_state` | Run state | Current derived admission or execution condition. | runnable, specification_incomplete, intentionally_future, validation_failed, review_required, waiting_dependencies, waiting_external_input, time_gated, overlap_conflict, dependency_cycle, resource_gated, waiting_gap_spec, awaiting_authorization |
 | `blocker_class` | Blocker class | Category of an evidenced exceptional constraint. | technical_infeasibility, safety_constraint, evidence_unavailable, critical_external_constraint, unknown_critical_failure |
 | `blocker_scope` | Blocker scope | Whether the blocker belongs to this contract. | in_scope, out_of_scope, mixed, unknown |
 | `block_reason` | Block reason | Specific evidence-backed explanation of a blocker. | — |

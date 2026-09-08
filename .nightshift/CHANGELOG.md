@@ -7,6 +7,465 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.17.0 (2026-09-08)
+
+**First whole-kit rollout since 3.14.0 (2026-09-02).** 3.15.0 and 3.16.0 were cut
+in canonical on 2026-09-04 but never delivered, so an install moving to 3.17.0
+receives all three releases' payload at once and completes 38 release handoffs
+that had been waiting on a qualifying release. The release's own scope, evidence
+and rollout record are SPEC-319 (`specs/SPEC-319-cut-and-roll-out-nightshift-3-17-0.md`,
+report under `reports/SPEC-319/`).
+
+### Board request-latency work budget, and a non-blocking event loop (SPEC-303)
+
+Clicking a spec on the board took ~1 s at p50 and 10 s+ at p95. Board telemetry
+located the cost in the request, not the rendering (`browser.panel_markdown_parse`
+p50 2.7 ms against `browser.panel_fetch` p50 1409 ms / p95 11130 ms).
+
+- Blocking filesystem, SQLite and subprocess work no longer runs on the event
+  loop: every board route whose handler does such work is declared `def` (served
+  on Starlette's threadpool), not `async def`, and a test enumerates the app's
+  routes so a new blocking `async def` handler fails the suite.
+- `SpecCache` entry mutation and status writes are serialized by a lock.
+- New `tests/test_board_latency_baseline.py` asserts per-request **work-count**
+  budgets (deterministic counters, not wall-clock thresholds) against a fixture
+  corpus. The single-spec budget is asymptotically flat: one
+  `GET /api/spec/{id}` does identical work at 40 and at 400 specs. One coarse
+  wall-clock smoke test per hot route remains as a documented backstop.
+- A failed drag re-renders when the card was orphaned mid-request.
+
+### Spec detail panel: declared execution models, styled artifacts, collapsible metadata (SPEC-307)
+
+- **New optional `execution:` frontmatter field** with `worker_model` and
+  `verifier_model` (free-form model identifiers; absent means "parent default").
+  Documented in `SPEC-GUIDE.md` Phase 5 and `_TEMPLATE.md`. `validate_specs.py`
+  accepts it and rejects non-string values or unknown keys under `execution:` —
+  WARN for `draft`, ERROR for `ready`. Until now the model a spec should run on
+  lived only in the parent's memory as an Agent-call parameter; a cheaper-model
+  policy is now declarable on the spec itself.
+- `/api/spec/<id>` returns `execution` verbatim; the panel shows both values as
+  metadata rows next to status, and the copied run prompt carries one
+  `Launch the run worker with model: <…>` line per declared key. Prompts for
+  specs without the field are byte-identical to before.
+- The SPEC-291 artifact list is styled (`.artifacts-label`, `.artifact-row`,
+  `.artifact-type`, `.artifact-date`, `.artifact-summary` had no CSS at all), and
+  the metadata table — grown to 12+ rows — is collapsible.
+
+### Verification protocol for evidence that requires real git mutation (SPEC-309)
+
+A probe run on 2026-09-06 established that the sandbox refusal hit by
+`isolation: "worktree"` subagents does not track the boundary its message
+asserts: it fires identically for the agent's own worktree and for a disposable
+external scratch repo, and it tracks invocation *shape*, not mutation
+(`git add .` succeeded unrefused where `git status`/`git log`/`git commit` were
+refused against the same repo). The consequence is structural, so `SKILL.md` now
+states it rather than leaving each session to rediscover it:
+
+- Worker- and verifier-dispatch sections document that a spec whose Live
+  Execution Checklist or Acceptance Criteria require a real `git commit`-class
+  operation cannot be fully executed or independently verified by a
+  worktree-isolated subagent.
+- The sanctioned fallback is named: the coordinator executes the live proof
+  directly and the completion report says so explicitly, rather than reading like
+  ordinary worker output.
+- The verifier-brief template tells the verifier to mark such an AC
+  `unverifiable` with the specific reason — never `fail`, which would
+  misrepresent a sandbox limitation as a defect in the work.
+
+### Report section contract extended to coordinator-authored reports (SPEC-317)
+
+SPEC-299 restored the `## Blocked Specs` / `## Open Questions` /
+`## Report Action Log` headings to the *worker* boilerplate; reports written by a
+coordinator session by hand still had no mechanical check. `validate_specs.py`
+gains `--check-report-headings`, date-gated so no historical report is
+retroactively flagged, and `LOOP.md` Step 14's contract now covers
+coordinator-authored reports too.
+
+### Lifecycle-commit trailers are visible to git's own trailer parser (BUG-017)
+
+Git recognizes only the **last** contiguous, blank-line-delimited paragraph of a
+commit message as trailers. This project's own convention wrote the
+`Nightshift-*` block, a blank line, then `Co-Authored-By:`/`Claude-Session:` — so
+`git log --format=%(trailers:key=…)`, which `record_metrics.py` uses, silently
+read back empty values for **every** `Nightshift-*` field on every lifecycle
+commit.
+
+- `SKILL.md`'s documented commit shape now places every trailer — `Nightshift-*`
+  and attribution alike — in one contiguous paragraph.
+- A regression test asserts `git interpret-trailers --parse` recovers every
+  `Nightshift-*` key from that documented shape.
+- `record_metrics.py` detects and reports the "trailer-shaped line present in the
+  body but invisible to the parser" case instead of absorbing it into defaults.
+
+### `--mark-commit` recognizes `BUG-NNN` lifecycle commits (BUG-018)
+
+`MARK_COMMIT_RE` required a literal `SPEC-` prefix, so every
+`chore: mark BUG-NNN done|blocked` commit — this project's own documented naming
+for bugfix specs — no-opped through `record_metrics.py --mark-commit` with no
+error and no warning, and no `BUG-*` spec ever recorded terminal metrics. The
+regex now matches both forms; `SPEC-*` behavior is unchanged.
+
+### `INT.HOOKS` admission no longer denies every linked worktree (BUG-019)
+
+`validate_install.py`'s `check_int_hooks` always failed with
+`observed: foreign-or-escaped` / `NS-REM-HOOK-SHADOWED` when run from a linked
+git worktree — even with `core.hooksPath` unset and the pre-commit hook present,
+executable and demonstrably running. Since worktree isolation is the kit's own
+kickoff convention, this blocked LOOP Step 1 admission in every installed
+project, with no manual fallback. The check now passes for a linked worktree
+whose effective hooks directory is its repository's shared, un-shadowed one, and
+still fails when `core.hooksPath` genuinely points outside the repository — in
+both a main checkout and a linked worktree. Reported from a live kickoff in
+`agent-chat-mcp`.
+
+### `scope_guard.py`'s spec-home rule no longer falls open on import failure (BUG-020)
+
+`_discover_specs_dirs`'s hardcoded `.nightshift/specs` / `canonical/specs`
+fallback sat *after* its `try`/`except`, so any exception from the dynamic
+`doctor.py` import returned an empty result and the universal "spec files have
+one home" rule fell open. This was live, not hypothetical: the hooks invoke bare
+`python3`, and loading `doctor.py` under Python 3.14 raises inside dataclass
+processing. The fallback is now reachable on that path; the rule falls open only
+when neither fleet discovery nor the fallback finds a usable specs directory,
+matching its documented contract. No change to the discovery mechanism itself.
+
+### Live-execution checkboxes require backing evidence — spec template v11 (BUG-023)
+
+`validate_specs.py` treated a checked `- [x] **LEn:**` box as proof the live
+execution happened, checking nothing behind it. That is exactly how SPEC-300-003
+and SPEC-300-004 reached `done` with entire Live Execution Checklists never
+executed (BUG-021, BUG-022).
+
+- Under `real_use_evidence.policy: required_before_done`, each checked LE item
+  must carry an inline `(evidence: <path>)` reference that resolves to a real
+  file relative to the spec's directory or its parent. Existence only — no hash,
+  deliberately asymmetric with `delegated_experiment`.
+- A missing, empty or non-existent reference is an ERROR at `status: done`,
+  naming the LE id and the reference.
+- **`specs/_TEMPLATE.md` → v11.** Specs below v11 are grandfathered; do not bump
+  an already-`done` spec to v11 without backfilling real evidence references.
+
+### `flake_resolved` verdict classification bucket (BUG-024)
+
+`SKILL.md`'s verdict table defined `fixed` as `baseline_all − head_any`, which
+requires a 100% baseline failure rate — a test failing 13% of the time clears a
+30-sample all-fail bar with probability ≈1×10⁻²⁷. The bucket that exists to name
+"this spec fixed a flake" was mathematically unreachable for an actual flake. New
+disjoint bucket `flake_resolved` = `(baseline_any − baseline_all) − head_any`
+partitions `fixed`'s precondition, so `fixed ∪ flake_resolved = baseline_any −
+head_any` exactly, with no overlap by construction and no new threshold to pick.
+
+### The board learns terminal status from commit-only finalization (BUG-313)
+
+`_should_reconcile_frontmatter_status` refused to let a fresh `done`/`blocked`
+frontmatter value repair a stale non-terminal durable row, on the premise that
+only `nightshift_coordinator.py`'s immutable-decision projector writes terminal
+truth. But the kit's own documented interactive workflow (`SKILL.md` Steps 1–7)
+finalizes a spec by editing frontmatter and committing — so every hand-driven
+coordinator session left the board showing a non-terminal column for a `done`
+spec. A one-time forward reconcile from non-terminal durable to terminal
+frontmatter is now allowed, using the same file-mtime-vs-checkpoint-mtime
+comparison the existing non-terminal repair path already used, and it is durable
+(`status_store.update_state`).
+
+### Write-scope hook installer (SPEC-318 follow-through)
+
+SPEC-318 confirmed by live probe that Claude Code fires a mid-session-installed,
+marker-keyed `PreToolUse` hook, and left `hooks/install-write-scope-hook.sh` in
+the managed payload. `release-manifest.json` was resealed for it.
+
+### Close the widen-while-still-`ready` bypass and same-field reconciliation gap (SPEC-302-001)
+
+Two real, reproduced gaps in the SPEC-302 scope-widening reconciliation mechanism
+are closed, both disclosed by SPEC-302's own independent verifier:
+
+- `_scope_at_last_ready` now finds the commit where the spec's `status:`
+  *transitioned into* `ready` (its immediately preceding commit for that spec
+  file had a different `status:`, or none exists), not merely the most recent
+  commit whose `status:` happens to read `ready`. A widening committed while
+  `status:` remains `ready` (never touching `in_progress`) can no longer become
+  its own reconciliation baseline and bypass the amendment gate.
+- `_reconcile_scope_widening` no longer treats each field as a single
+  baseline-or-current binary choice. A commit that both narrows (drops an
+  existing item) and widens (adds an uncovered item) the *same* field now only
+  reverts the specific uncovered addition — the narrowed-out item stays dropped,
+  never silently restored as a side effect of blocking the widening. Applied
+  consistently to `write`, `deny`, and `read`.
+
+Neither gap was an AC failure of SPEC-302 (both AC1/AC3 passed on their tested
+paths), but both were real weaknesses in a mechanism whose purpose is closing
+exactly this class of enforcement gap. No change to SPEC-302's own tested paths.
+
+### Mechanical scope-amendment gate (SPEC-302)
+
+`scope_guard.scope_from_main` now reconciles a widened `scope.write`/`deny`/`read`
+on main against the value that was in effect the last time the spec was `ready`,
+before returning it. A widening with no covering `## Scope Amendments` row
+(`Approved by: human`/`human:<name>`, dated on or after that ready commit) is not
+honored for enforcement — the narrower prior value is used instead, per field, so
+an unrelated narrowing in the same commit still takes effect immediately. A pure
+narrowing never requires an amendment row. Both the evidence-gate check 6 script
+and the git pre-commit guard (`scope_guard.py check`) read scope exclusively
+through this one function, so the precondition applies identically at both
+layers, with no duplicated matching logic. A spec that has never been `ready`, or
+whose scope has never widened, validates and enforces unchanged.
+
+- `scope_guard.py` gains `_scope_at_last_ready`, `_valid_amendment_rows`,
+  `_covered_by_amendment`, and `_reconcile_scope_widening`, wired into
+  `scope_from_main`.
+- `Skills/nightshift/SKILL.md` documents the precondition alongside the existing
+  "scope changes are human-approved, mechanically" paragraph, and its embedded
+  check-6 gate script's `scope_self_edit` comparison now uses main's raw
+  (unreconciled) scope so a worker-branch edit that leaves `scope:` untouched is
+  never misclassified as a self-widening because of an unrelated, already-rolled-
+  back widening on main.
+- Kit-version bump for this change is deferred to the parent — `config.yaml`
+  (`kit_version`) is outside this spec's declared `scope.write`.
+
+### The canonical-suite preflight bound tracks the suite again (BUG-320)
+
+`release_coordinator.py`'s `CANONICAL_SUITE_TIMEOUT_S` was 600s, set when the
+canonical suite measured 305.25s. By 3.17.0 a **green** suite measured 996.10s
+(3448 passed, 11 skipped) through the manifest's own declared `uv` environment,
+so the guard that exists to catch a *hang* was converting every healthy release
+into `failure_class: canonical_preflight` and touching no install. Raised to
+2100s, and the pinning test now carries the new measurement and asserts the
+headroom *relation* (cap − measured ≥ measured) plus the timeout message built
+from the constant, so the next module that lengthens the suite fails that
+arithmetic instead of silently blocking releases. The guard is unchanged in
+every other respect: still finite, still enforced on both the probe and the
+suite step, still `returncode 124` → preflight failure with zero fleet mutation.
+
+### The kit's own guard no longer blocks the kit's own release (BUG-321)
+
+`scope_guard.py`'s universal "spec files have one home" rule matches on basename
+(`^(SPEC-.+|NFR-.+|.+-QUESTIONS-.+)\.md$`), and `SPEC-GUIDE.md` matches it.
+`SPEC-GUIDE.md` is not a spec — it is the kit's authoring guide, a
+`CANONICAL_PROTOCOL_FILES` member that correctly lives at the kit root — so every
+write to it was denied `spec_wrong_home`. It is the only manifest member the
+pattern catches (checked across all 115 managed files).
+
+Because `hooks/protect-write-scope.sh` runs that classification in `pre-commit`,
+and `release_coordinator.py` delivers payload and then commits it, **a kit
+release could not be committed in any repository with the write-scope hook
+installed** — enforcement blocking delivery, through the one universal rule that
+applies with no active spec and has no environment-variable bypass. It halted the
+3.17.0 rollout live, after three repositories had already committed.
+
+The rule now exempts paths that are members of the kit's own release manifest,
+read from `release-marker.json` (embedded in every install) or
+`release-manifest.json` (canonical). Keyed on membership, not on a filename, so a
+future managed file with a spec-shaped name needs no further patch. Enforcement
+is unchanged everywhere else: a spec-shaped path under the kit that is *not*
+payload is still denied, the same basename outside the kit is still denied, and
+missing or malformed kit metadata means "not payload" — the rule fails closed.
+
+Latent until now because the rule only began genuinely enforcing when BUG-020
+made `_discover_specs_dirs`' hardcoded fallback reachable; before that it fell
+open whenever `doctor.py`'s import raised, which it does under Python 3.14.
+
+### Shipped kit shell satisfies a receiving project's shellcheck gate (BUG-322)
+
+`hooks/install-write-scope-guard.sh` assigns the snippet its installer writes
+into a target `pre-commit`. The single quotes are load-bearing — the snippet must
+reach that hook as literal text so `$(git rev-parse …)` expands when the
+*installed* hook runs, not when the installer does — but `shellcheck` reports
+`SC2016 (info)` for it, and a project is entitled to treat any shellcheck finding
+as a failure. `Fartownik`'s pre-commit does, so the coordinator's payload commit
+was blocked there and the rollout halted after 15 installs across 10
+repositories.
+
+Declared with a targeted `# shellcheck disable=SC2016` plus a comment explaining
+why the expansion is deliberate. The `SNIPPET=` value is byte-identical — the
+diff is five added comment lines and nothing else. A sweep of every `.sh` file in
+the manifest (six) finds no other finding.
+
+Same family as BUG-321 — canonical payload failing a gate its own installs run —
+but a different cause: a third-party linter with a legitimate observation about
+deliberate code. Canonical still has no pre-release gate that runs the payload
+through the checks installs apply to it; that gap is recorded as follow-up work
+rather than patched a third time.
+
+### Not in this payload
+
+Work merged in the same window that changed no managed payload file, and so
+carries no entry above: the TLA+ formal lane (SPEC-304 registry re-baseline and
+drift lane, SPEC-305 executable trace conformance, SPEC-306 coverage ledger,
+SPEC-308 scheduled lane and drift digest, SPEC-315 and SPEC-316 property
+divergences) lives under `formal/`; BUG-021, BUG-022, BUG-310, BUG-311 and
+BUG-312 corrected live-execution-checklist claims on already-`done` specs; and
+BUG-314 re-pinned the `tla2tools.jar` v1.8.0 hash to the real rolling-prerelease
+asset.
+
+### Migration
+
+None. `schema_version` stays `3.1.0`; no config or metrics schema change. An
+install at 3.14.0 moves to 3.17.0 in one coordinator-applied step.
+
+
+## 3.16.0 (2026-09-04)
+
+### Scope enforcement at the evidence gate and the verifier (SPEC-300-002)
+
+The evidence gate (Step 6) gains check 6 — **Scope**: every path in the candidate
+branch's diff against main is classified by `scope_guard.py` against the spec's
+declared write scope (SPEC-300-001), read from the spec file on main. A denied
+path with no covering `## Scope Amendments` row fails the gate; the spec lands
+`blocked` with `blocker_class: scope_violation`, `blocker_scope: out_of_scope`,
+and a `block_reason` naming each offending path and its reason code. This class
+is never auto-entered into the controller-backed unblock ladder — a human adds
+the amendment row on main, after which `unblock_spec.py prepare` reports
+`eligibility: eligible` for that spec.
+
+- `scope_violation` added to `BLOCKER_CLASS_ENUM` (`record_metrics.py`,
+  `validate_metrics.py`, `fleet_metrics.py`) and to `lifecycle.BLOCKER_CLASSES`.
+- New `Nightshift-Scope-Check: clean|amended|violated|not_run` terminal-commit
+  trailer, read by `record_metrics.py --mark-commit` into `resolution.scope_check`
+  (`metrics/_SCHEMA.md`); a legacy commit with no trailer reads `absent`, not an
+  error.
+- The verifier brief (both the suite and no-suite templates) gains a fifth
+  input, `Declared write scope`, rendered from main's `scope:` (or
+  `project root (default)`) plus a fixed implicit-rule summary.
+- The verdict schema gains `scope: {"checked": [...], "out_of_scope": [...],
+  "amended": [...]}`; `validate_verdict` requires it and, given the standalone
+  verifier surface, recomputes it from the `verifier-baseline..verifier-head`
+  diff and rejects a disagreeing verdict.
+- `unblock_spec.py prepare` treats a `scope_violation` packet as
+  `eligibility: skipped` unless a `## Scope Amendments` row now covers every
+  offending path named in `block_reason`.
+
+## 3.15.0 (2026-09-04)
+
+### Write-scope declaration, template v10, resolver library, validator (SPEC-300-001)
+
+Specs can now declare `scope:` (`write`, `deny`, `read`) in frontmatter — a machine-readable
+write boundary that later SPEC-300 children enforce (evidence-gate check 6, the git pre-commit
+guard, and the harness `PreToolUse` hook). This child delivers the declaration, the shared
+resolver, and the authoring step only; nothing yet blocks a misplaced write.
+
+- **`specs/_TEMPLATE.md` → v10.** Adds a documented `scope:` frontmatter block and a
+  `## Scope Amendments` body section (`Date | Path or glob | Change (old → new) | Reason |
+  Approved by`). Migration: add nothing; absent `scope:` means project root.
+- **New `scope_guard.py`.** `resolve_scope`, `classify_write`, `classify_read`, `active_spec`,
+  `scope_from_main`, and a `check` CLI. Implements every default/implicit rule from SPEC-300
+  § Defaults (project-root default, implicit kit evidence paths, heartbeat exception, spec-home
+  rule, malformed-target rule, deny-wins) behind ten controlled reason codes.
+- **`validate_specs.py`** validates `scope:` (lists of strings, no absolute paths, no `..`, no
+  `{{...}}` anchors) and `## Scope Amendments` (`Approved by` must be `human` or `human:<name>`);
+  warns (never errors) when a `ready` feature/bugfix/refactor spec has neither `scope:` nor
+  `touches:`.
+- **`SPEC-GUIDE.md`** gains a "Write scope" section documenting the field, defaults, implicit
+  rules, amendment rule, and all ten reason codes.
+- **`Skills/nightshift/SKILL.md`** — the `/nightshift spec` interview proposes `scope.write` from
+  Context paths and `touches:`; the kickoff brief boilerplate states the resolved scope and the
+  deny-then-retry rule.
+- Existing specs validate unchanged — `scope:` is entirely optional, and no historical spec is
+  retroactively required to declare one.
+
+Out of scope for this child: enforcement (SPEC-300-002/003/004), deriving `touches:` from
+`scope.write`, migrating historical specs to v10.
+
+### Git pre-commit write-scope guard (SPEC-300-003)
+
+A misplaced write that survives every harness-side check still has to pass through `git commit`
+in the worker's worktree. Git hooks live in the shared common directory, so this is the earliest
+portable point to reject an out-of-scope path, before it reaches a branch the parent has to diff.
+
+- **New `hooks/protect-write-scope.sh`.** Resolves the active spec via `scope_guard.py
+  active_spec` (env var, then the `nightshift/<SPEC-ID>-<run-id>` branch); with no active spec it
+  enforces only the two universal rules (spec-home, malformed-target). With an active spec, it
+  reads `scope.write` from the spec on the configured main branch (never the worktree or worker
+  branch) and classifies every staged path (`git diff --cached --name-status --diff-filter=ACDMR
+  -M -z`, both sides of a rename) with the shared `scope_guard.py` resolver. Rejects the commit
+  with a dedicated exit code (96 — `protect-live-data.sh` already owns 97) on any `DENY`, printing
+  the offending paths, their reason codes, the spec ID, and the declared `write` globs. Fails
+  **open** on internal error (missing resolver, git failure) with a `[nightshift write-scope]`
+  warning; no environment-variable bypass exists — only a `## Scope Amendments` row on main or
+  removing the path from the index can commit an out-of-scope write.
+- **New `hooks/install-write-scope-guard.sh`.** Idempotent chaining installer (marker
+  `# SPEC-300-003 protect-write-scope`, inserted before a trailing `exit 0`), resolving the guard
+  from either the Argo Home or `.nightshift/hooks/` layout. Refuses to touch an unrecognised
+  pre-commit hook rather than silently altering it.
+- **`hooks/guard-registry.yaml`** gains the write-scope guard entry so the generic guard-liveness
+  checker (`preflight.check_guard_liveness`) reports it for opted-in protected checkouts.
+- **Managed `hooks/pre-commit`** now runs the guard (when present) before lint/type-check, so a
+  scope rejection surfaces before slower gates run.
+- **`doctor.py`** gains finding `D7` (`WARNING`): the kit ships `protect-write-scope.sh` but the
+  repository's common-dir pre-commit hook lacks the marker. `doctor --fix` runs the installer for
+  that repository; doctor never edits an unrecognised hook, and the installer's refusal becomes
+  the finding's remedy text.
+- **Release manifest** — both new scripts join the managed payload set (executable mode).
+
+### Harness `PreToolUse` write-scope hook (SPEC-300-004)
+
+The guard and the gate catch a misplaced write after it happened, and the file may already be
+untracked and invisible to `git diff`. This child adds the earliest enforcement point: a Claude
+Code `PreToolUse` hook that stops an out-of-scope write before the tool call executes.
+
+- **New `hooks/write-scope-hook.sh`.** Resolves the active spec the same way the git guard does
+  (env var, then branch); with no active spec it enforces only the two universal rules. For
+  `Edit|Write|MultiEdit|NotebookEdit`, classifies `tool_input.file_path`/`notebook_path` with
+  `scope_guard.py` against `scope.write` as committed on main and denies with the spec ID, path,
+  reason code, declared globs, and a "record it under `## Scope Blockers`" instruction. For
+  `Bash`, best-effort extracts write targets from a bounded pattern list (redirects,
+  `cp`/`mv`/`install`/`rsync`, `mkdir`/`touch`, `tee`, `sed -i`) and classifies each; an
+  unparseable command is allowed (the git guard and evidence gate remain the backstops). The
+  heartbeat `cp` to `reports/_wip/orchestrator-progress-<spec-id>.md` is explicitly allowed even
+  when its destination sits in a sibling main checkout, outside the worker's own worktree. For
+  `Read|Grep|Glob`, enforces `scope.read` only when it is a list; `unrestricted` (the default)
+  exits without ever calling the resolver. Fails **open** on any internal error (missing
+  `jq`/`python3`, missing resolver, unparsable input) with a `[nightshift write-scope]` stderr
+  warning; no environment-variable bypass exists. A per-event debug line is appended to
+  `reports/_wip/write-scope-hook-debug.log`, never to the tool's own output.
+- **New `hooks/install-write-scope-hook.sh`.** Idempotently wires three `PreToolUse` entries
+  (marker key `nightshift-write-scope`) into the project's `.claude/settings.json` without
+  disturbing any other configured hook; `--uninstall` removes only the marked entries. Init and
+  retrofit offer the install alongside the pre-commit hook offer.
+- **`Skills/nightshift/SKILL.md`** documents that the hook fires for `isolation: "worktree"`
+  workers launched from a project where it's installed (project-level setting, not per-worker),
+  that a worker whose own settings omit it still meets the write-scope contract through the git
+  guard and the evidence gate, and that Codex/Hermes have no equivalent hook today — both rely on
+  the git guard and the gate, with the terminal commit's `Nightshift-Scope-Check:` trailer
+  recording the outcome either way.
+- **`EXTENSIONS.md`** gains a harness write-scope hook coverage matrix.
+- **`doctor.py`** gains finding `D8` (`WARNING`): the kit ships `write-scope-hook.sh` but the
+  repository's `.claude/settings.json` lacks the `nightshift-write-scope` entry. `doctor --fix`
+  runs the installer; a project with no `.claude/` directory still gets the finding, with a manual
+  step as the remedy — `--fix` never creates `.claude/` on its own.
+- **Release manifest** — both new scripts join the managed payload set (executable mode).
+
+### Conditional canonical-payload write-scope exception (SPEC-300-001-001)
+
+SPEC-301 and SPEC-300-004-001 both hit the same friction: their `scope.write` named only the
+source file they directly edited (e.g. `SKILL.md`), but the kickoff protocol's own mandatory
+release-manifest regeneration step then required touching `release-manifest.json` (and often
+`CHANGELOG.md`), which `scope_guard.py` correctly denied against the narrower declared scope
+every time — a recurring, structural friction rather than a one-off authoring gap.
+
+- **`scope_guard.py`** `classify_write` gains one new conditional implicit-allow rule, reusing the
+  existing `implicit_kit_path` reason code (no new reason introduced): `<kit_dir>/CHANGELOG.md`
+  and `<kit_dir>/release-manifest.json` are writable **only when** the spec's own declared
+  `scope.write` already names at least one file that is itself a member of `nightshift-sync.py`'s
+  `CANONICAL_PROTOCOL_FILES` — i.e. the spec is already legitimately editing managed canonical
+  payload. A spec with no such relationship gets no exception; `release-manifest.json` still
+  denies with its pre-existing reason code. The membership check loads `nightshift-sync.py`
+  without importing it as a package module and fails **closed** (exception never fires) if the
+  module cannot be located or loaded.
+- **`specs/_TEMPLATE.md`** `scope:` authoring guidance documents the exception so an author does
+  not need to add `release-manifest.json`/`CHANGELOG.md` to `write` by hand for a
+  canonical-payload-editing spec.
+- **`SPEC-GUIDE.md`** "Write scope" section documents the exception alongside the other
+  implicit-allow rules, and the `implicit_kit_path` reason-code row now mentions it.
+- Demonstrated live against SPEC-301's and SPEC-300-004-001's real, unchanged, already-`done`
+  `scope.write` declarations: `scope_guard.py check` now returns `ALLOW implicit_kit_path` for
+  the `release-manifest.json`/`CHANGELOG.md` edits both specs' workers made and originally
+  recorded as `## Scope Blockers`.
+
+Out of scope: which files are members of the release manifest's managed set (untouched here);
+widening the implicit-allow rule to any file other than these two; the git pre-commit guard's and
+harness hook's own copies of this logic (both call the same shared resolver, so this fix applies
+to all three enforcement points).
+
 ## 3.14.0 (2026-09-01)
 
 ### Typed spec artifacts: persist the reason and evidence behind every status transition (SPEC-291)
@@ -1340,7 +1799,14 @@ validation, lint, type check, the canonical copy-drift guard and the `[SPEC-ID]`
 ⚠️ **Non-synced hand-copy:** `Cortex/core/nightshift_scanner.py` was refreshed in the same
 commit, as every `scanner.py` change must be.
 
-## Unreleased
+## Unversioned — recorded 2026-08-08, shipped in a later release
+
+> **Version-attribution note (SPEC-319, 2026-09-08):** this entry was written under
+> an `Unreleased` heading while 2.64.3 was current and was never folded into a version
+> heading; every later entry was inserted above it. SPEC-199 is `done` and its telemetry
+> is present in `board.py` today (SPEC-303 measured against it), so it shipped — but the
+> pre-relocation history that would pin the exact release is not in this repository, so
+> no version claims it.
 
 ### Local board performance telemetry (SPEC-199)
 

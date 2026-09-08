@@ -59,6 +59,7 @@ except ImportError:  # pragma: no cover - environment guard
     sys.exit(2)
 
 from loop_events import PHASE_IDS, PHASE_MEASUREMENT_STATES, load_events
+from token_usage import apply_token_measurements, derive_token_measurements
 
 # status enum accepted by analyze_metrics.py / validate_metrics.py
 STATUS_ENUM = {"completed", "failed", "blocked", "discarded", "partial"}
@@ -99,9 +100,18 @@ BLOCKER_CLASS_ENUM = {
     "baseline_regression",
     "external_input",
     "evidence_gap",
+    "scope_violation",
     "unknown",
 }
 BLOCKER_SCOPE_ENUM = {"none", "in_scope", "out_of_scope", "mixed", "unknown"}
+# SPEC-300-002 R4: durable per-terminal-commit record of whether check 6
+# (evidence-gate scope enforcement) ran and what it found. `absent` is the
+# legacy case -- no `Nightshift-Scope-Check` trailer at all, never an error
+# (AC6). `not_run` is recorded, never silently omitted, when `scope_guard.py`
+# was unavailable at the install (R9) -- distinct from `absent` because it
+# still reflects a real terminal commit's trailer, just one that could not run
+# the check rather than one written before the check existed.
+SCOPE_CHECK_ENUM = {"clean", "amended", "violated", "not_run", "absent"}
 ORDINARY_WAIT_CATEGORY_ENUM = {"test_runtime", "api_runtime"}
 MISSING_CAPABILITY_ENUM = {"browser_runtime", "api_runtime", "test_runtime"}
 
@@ -566,7 +576,20 @@ def next_sequence(metrics_dir: Path, date: str) -> str:
 # is not in the loop. Everything is derived from git + the spec's report.
 # ---------------------------------------------------------------------------
 
-MARK_COMMIT_RE = re.compile(r"^chore: mark (SPEC-(?:[A-Z0-9]+-)*\d+) (done|blocked)$")
+# BUG-018: the spec-ID family prefix is an explicit enumerated set, not a
+# generic `[A-Z]+-` wildcard — a wildcard would risk matching an ordinary,
+# non-lifecycle commit subject that happens to start with a capitalized
+# word and a hyphen followed by digits, which the Gap Protocol's
+# stop-immediately clause forbids. The three families below are this
+# project's own documented spec-ID conventions (see `specs/_TEMPLATE.md`,
+# `specs/_TEMPLATE-BUGFIX.md`, `specs/_TEMPLATE-NFR.md`); no other prefix
+# (e.g. the one-off `FART-TEST-*` fixture ID) is a real spec-completion
+# family, and none has ever appeared in a `chore: mark ... done|blocked`
+# commit subject in this repo's history.
+_MARK_COMMIT_ID_FAMILY = r"(?:SPEC|BUG|NFR)"
+MARK_COMMIT_RE = re.compile(
+    r"^chore: mark (" + _MARK_COMMIT_ID_FAMILY + r"-(?:[A-Z0-9]+-)*\d+) (done|blocked)$"
+)
 # SPEC-256: a subject that clearly *intends* to be a mark-done/blocked commit — it
 # begins with the strict prefix and names a terminal outcome word — but carries
 # extra trailing content (e.g. the historical `— <reason>` suffix) must not be
@@ -575,7 +598,7 @@ MARK_COMMIT_RE = re.compile(r"^chore: mark (SPEC-(?:[A-Z0-9]+-)*\d+) (done|block
 # pattern exists only to distinguish "not a mark-commit" from "a mark-commit
 # whose subject drifted from the strict grammar" so the latter can fail loudly.
 _MARK_COMMIT_NEAR_MISS_RE = re.compile(
-    r"^chore: mark (SPEC-(?:[A-Z0-9]+-)*\d+) (done|blocked)\b(.+)$"
+    r"^chore: mark (" + _MARK_COMMIT_ID_FAMILY + r"-(?:[A-Z0-9]+-)*\d+) (done|blocked)\b(.+)$"
 )
 _REPORT_TESTS_RE = re.compile(r"[Tt]ests?\s+passed:?\s*(\d+)\s*/\s*(\d+)")
 
@@ -608,6 +631,34 @@ def commit_trailer(repo: Path, ref: str, key: str) -> str:
         repo,
         ["log", "-1", f"--format=%(trailers:key={key},valueonly,separator=)", ref],
     ).strip()
+
+
+_NIGHTSHIFT_TRAILER_LINE_RE = re.compile(r"(?m)^(Nightshift-[A-Za-z0-9-]+):\s*\S")
+_RECOGNIZED_TRAILER_KEY_RE = re.compile(r"(?m)^(Nightshift-[A-Za-z0-9-]+):")
+
+
+def detect_dropped_nightshift_trailers(repo: Path, ref: str) -> list[str]:
+    """Return `Nightshift-*` keys that appear, trailer-shaped, in the raw commit
+    body of ``ref`` but that git's own trailer parser did NOT recognize (BUG-017).
+
+    Git's trailer machinery only treats the last blank-line-delimited paragraph
+    of a commit message as trailers, and only when every line in that paragraph
+    is trailer-shaped. A second trailer-shaped paragraph appended after the
+    `Nightshift-*` block (e.g. a separate `Co-Authored-By`/`Claude-Session`
+    block), or free-form prose glued directly onto the `Nightshift-*` block with
+    no blank line, both silently defeat that recognition. This is a read-only
+    diagnostic: it never fixes or rewrites the commit, it only lets a caller
+    report the mismatch instead of silently treating it as "trailer absent."
+    """
+    body = _run_git(repo, ["log", "-1", "--format=%B", ref])
+    raw_keys = set(_NIGHTSHIFT_TRAILER_LINE_RE.findall(body))
+    if not raw_keys:
+        return []
+    recognized_text = _run_git(
+        repo, ["log", "-1", "--format=%(trailers:only,unfold)", ref]
+    )
+    recognized_keys = set(_RECOGNIZED_TRAILER_KEY_RE.findall(recognized_text))
+    return sorted(raw_keys - recognized_keys)
 
 
 def _bounded_int(value: str, default: int = 0) -> int:
@@ -697,6 +748,10 @@ def derive_resolution(
     unblock_rung = _bounded_int(
         commit_trailer(repo, evidence_commit, "Nightshift-Unblock-Rung")
     )
+    scope_check = commit_trailer(
+        repo, evidence_commit, "Nightshift-Scope-Check"
+    ).lower()
+    scope_check = scope_check if scope_check in SCOPE_CHECK_ENUM else "absent"
 
     started = datetime.fromisoformat(commit_iso(repo, run_id).replace("Z", "+00:00"))
     completed = datetime.fromisoformat(
@@ -711,6 +766,7 @@ def derive_resolution(
         "evidence_gate": evidence_gate,
         "blocker_class": blocker_class,
         "blocker_scope": blocker_scope,
+        "scope_check": scope_check,
         "unblock_attempts": unblock_attempts,
         "unblock_limit": unblock_limit,
         "automatic_unblock_succeeded": (
@@ -980,6 +1036,23 @@ def main_mark_commit(argv) -> int:
         outcome,
     )
     blocker_class = str(resolution.get("blocker_class") or "unknown")
+
+    # BUG-017 R3: never silently absorb a Nightshift-* trailer that's present in
+    # the commit body but that git's own trailer parser failed to recognize
+    # (e.g. a second trailer-shaped paragraph, or prose glued onto the block
+    # with no blank line) into a default/absent value without surfacing it.
+    dropped_trailers = detect_dropped_nightshift_trailers(repo, args.mark_commit)
+    if dropped_trailers:
+        print(
+            "[mark-commit] WARNING (BUG-017): commit body contains Nightshift-* "
+            "trailer-shaped line(s) that git's trailer parser did not recognize: "
+            f"{', '.join(dropped_trailers)}. This usually means a second "
+            "trailer-shaped paragraph follows the Nightshift-* block (git only "
+            "reads the LAST paragraph), or free-form prose is glued directly onto "
+            "it with no blank line. The metrics row below will reflect these as "
+            "absent/default, not their true declared values.",
+            file=sys.stderr,
+        )
     ns = SimpleNamespace(
         spec_id=spec_id,
         spec_file=spec_rel,
@@ -1227,8 +1300,16 @@ def main(argv=None) -> int:
         if not (args.events_file and args.run_id):
             print("Error: --events-file and --run-id must be supplied together", file=sys.stderr)
             return 2
+        run_events = load_events(Path(args.events_file))
         apply_phase_measurements(
-            metrics, derive_phase_measurements(load_events(Path(args.events_file)), args.run_id, args.spec_id), args.run_id
+            metrics, derive_phase_measurements(run_events, args.run_id, args.spec_id), args.run_id
+        )
+        # SPEC-298: token telemetry is optional-additive; a run with no
+        # token_usage events yields an explicit unavailable aggregate, not
+        # zero counts (R4). Legacy rows that never reach this branch have
+        # no `token_usage` key at all and remain valid.
+        apply_token_measurements(
+            metrics, derive_token_measurements(run_events, args.run_id, args.spec_id)
         )
 
     metrics_dir = Path(args.metrics_dir)

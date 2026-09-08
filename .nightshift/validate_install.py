@@ -302,6 +302,17 @@ def _git_path(repo: Path, name: str) -> Path | None:
     return path if path.is_absolute() else (repo / path)
 
 
+def _git_dir_output(repo: Path, flag: str) -> Path | None:
+    """Resolve a bare ``git rev-parse <flag>`` (e.g. --git-dir,
+    --git-common-dir) relative to ``repo`` the same way ``_git_path`` does
+    for --git-path, without requiring a git-path name argument."""
+    code, out = _git_run(repo, "rev-parse", flag)
+    if code != 0 or not out:
+        return None
+    path = Path(out)
+    return path if path.is_absolute() else (repo / path)
+
+
 @dataclass
 class ValidationContext:
     root: Path
@@ -1008,7 +1019,34 @@ def check_int_hooks(ctx: ValidationContext) -> None:
     try:
         hooks_resolved = hooks_dir.resolve(strict=False)
         toplevel_resolved = Path(toplevel).resolve(strict=True)
-        hooks_resolved.relative_to(toplevel_resolved)
+        # A linked worktree's own toplevel is never an ancestor of the
+        # shared hooks directory, because git hooks live in the *common*
+        # git dir, not the per-worktree one (--git-path always resolves
+        # against --git-common-dir for hooks). Comparing solely against
+        # this worktree's own toplevel is therefore a false negative for
+        # every linked worktree, even with an unset core.hooksPath and a
+        # hooks dir that is genuinely shared/un-shadowed. When this repo is
+        # actually a linked worktree (--git-dir != --git-common-dir), also
+        # accept a hooks dir resolved *under the common git dir itself*
+        # (deliberately narrow — not the main checkout's whole working
+        # tree, which would accept a genuinely foreign/shadowed path that
+        # merely happens to live inside the main repo's tree). A foreign
+        # path resolves under neither the worktree's own toplevel nor the
+        # common git dir, so this does not weaken the invariant's purpose.
+        boundary_root = toplevel_resolved
+        common_dir = _git_dir_output(ctx.install, "--git-common-dir")
+        git_dir = _git_dir_output(ctx.install, "--git-dir")
+        if common_dir is not None and git_dir is not None:
+            common_dir_resolved = common_dir.resolve(strict=False)
+            git_dir_resolved = git_dir.resolve(strict=False)
+            is_linked_worktree = common_dir_resolved != git_dir_resolved
+            if is_linked_worktree:
+                try:
+                    hooks_resolved.relative_to(common_dir_resolved)
+                    boundary_root = common_dir_resolved
+                except ValueError:
+                    pass
+        hooks_resolved.relative_to(boundary_root)
     except (OSError, ValueError):
         inv.set(
             "fail", observed="foreign-or-escaped", expected="hooks-under-git-worktree",
@@ -1019,7 +1057,7 @@ def check_int_hooks(ctx: ValidationContext) -> None:
         return
     ancestor = hooks_resolved
     nested_boundary = False
-    while ancestor != toplevel_resolved:
+    while ancestor != boundary_root:
         if os.path.lexists(ancestor / ".git"):
             nested_boundary = True
             break

@@ -2,7 +2,7 @@
 
 **Version:** 1.1
 **Status:** Active
-**Last Updated:** 2026-07-25
+**Last Updated:** 2026-09-03
 
 This document defines the complete schema for per-spec YAML metrics files produced by the Nightshift loop (Step 13 of LOOP.md).
 
@@ -729,6 +729,7 @@ resolution:
     acs_covered: fail
   blocker_class: fixture_drift
   blocker_scope: out_of_scope
+  scope_check: absent
   unblock_attempts: 1
   unblock_limit: 1
   automatic_unblock_succeeded: false
@@ -748,8 +749,21 @@ Constraints:
 - Every `evidence_gate` value is `pass | fail | unknown`.
 - `blocker_class`:
   `none | implementation | test_infrastructure | fixture_drift |
-  baseline_regression | external_input | evidence_gap | unknown`.
+  baseline_regression | external_input | evidence_gap | scope_violation |
+  unknown`. `scope_violation` (SPEC-300-002 R3) is evidence-gate check 6
+  (write-scope enforcement) denying a path in the candidate diff; it always
+  pairs with `blocker_scope: out_of_scope` and is never auto-entered into the
+  controller-backed unblock ladder (see `SPEC-GUIDE.md`'s recovery-route note).
 - `blocker_scope`: `none | in_scope | out_of_scope | mixed | unknown`.
+- `scope_check` (SPEC-300-002 R4, optional): `clean | amended | violated |
+  not_run | absent`. Read from the terminal commit's `Nightshift-Scope-Check`
+  trailer by `record_metrics.py --mark-commit`. `clean` and `amended` are
+  passing outcomes of evidence-gate check 6 (`amended` means every
+  out-of-scope path matched a `## Scope Amendments` row on main); `violated`
+  is the failing outcome; `not_run` records that `scope_guard.py` was missing
+  from the install, never silently folded into `clean`; `absent` is the
+  legacy case — a terminal commit with no `Nightshift-Scope-Check` trailer at
+  all, not an error.
 - `unblock_attempts` and `unblock_limit` are non-negative integers, with
   attempts <= limit.
 - `automatic_unblock_succeeded` and `later_session_required` are booleans.
@@ -981,8 +995,136 @@ failure:
 
 ---
 
+## Token usage telemetry (SPEC-298)
+
+Token telemetry is **opt-in and optional-additive**. A metrics row that never
+calls `token_usage.apply_token_measurements` has no `token_usage` key at all —
+the true legacy shape, and it remains fully valid. When `--events-file` and
+`--run-id` are supplied to `record_metrics.py`, a `token_usage` block is
+always written, even when no `token_usage` events exist for that run/spec: in
+that case every count is `null` (not `0`) and `measurement_state` is
+`unavailable`. Treat `token_usage: null`/absent and `token_usage.measurement_state:
+unavailable` identically to "no data collected" — never as "0 tokens spent".
+
+### `token_usage` (object, optional-additive)
+
+```yaml
+token_usage:
+  event_count: <int>
+  measurement_state: measured | partial | unavailable
+  measurement_state_counts: {measured: <int>, partial: <int>, unavailable: <int>}
+  input_tokens: <int | null>
+  output_tokens: <int | null>
+  reasoning_tokens: <int | null>
+  cached_tokens: <int | null>
+  request_count: <int | null>
+  cost: <float | null>
+  currency: <string | "mixed" | null>
+  duration_s: <float | null>
+  by_phase: {<phase>: {input_tokens, output_tokens, reasoning_tokens, cached_tokens, event_count, measurement_state_counts}}
+```
+
+Token classes are never summed into one another — `input_tokens`,
+`output_tokens`, `reasoning_tokens`, and `cached_tokens` remain separate
+totals because their provider semantics overlap (e.g. `cached_tokens` may
+already be a subset of `input_tokens` for some providers). Do not compute a
+single "total spend" field by adding all four; a report or forecast that
+needs one total defines it explicitly (currently `input_tokens +
+output_tokens`, see `token_usage.py::_run_total_tokens`) and documents the
+components it used.
+
+### Privacy boundary and the event schema
+
+The durable event this block is aggregated from (`event: "token_usage"` in
+the run's `events.jsonl`, emitted only via `loop_events.emit_token_usage_event`
+→ `token_usage.normalize_provider_usage`) is a closed, versioned schema. It
+carries only: `schema_version`, `run_id`, `spec_id`, `ts`, `provider`,
+`harness`, `model`, `role`, `phase`, `attempt_ordinal`, `input_tokens`,
+`output_tokens`, `reasoning_tokens`, `cached_tokens`, `request_count`,
+`cost`, `currency`, `duration_s`, `measurement_state`. It never carries a
+prompt, response, tool argument/result, filesystem path, credential, raw
+provider payload, or account/quota identifier — see `token_usage.py`'s
+`REJECTION_REASONS` (`transcript_like_payload`, `absolute_path_field`,
+`credential_shaped_key`, `negative_token_count`, `non_numeric_token_count`,
+`inconsistent_total`, `unsupported_usage_field`, `empty_or_invalid_input`).
+A rejected input is **never persisted** — it produces only the named
+in-process diagnostic.
+
+### Measurement states (never derive from duration/length/price)
+
+- `measured` — the provider returned every requested token dimension.
+- `partial` — the provider returned some but not all requested dimensions.
+- `unavailable` — no usage data was available (unsupported harness, or a
+  supported harness that returned none this call). This is a distinct,
+  legitimate outcome — not a rejection and not zero.
+- `rejected` — the input violated the privacy/consistency contract above and
+  was never persisted as an event.
+
+A token count is **never** derived from `duration_s`, prompt/response
+character counts, context-window size, provider pricing, or an LLM's own
+estimate. If the provider did not report a count, the field is `null`.
+
+### Provider-semantics caveats
+
+- `cached_tokens` aliases both `cache_read_input_tokens` and
+  `cache_creation_input_tokens` from Anthropic-style APIs into one field;
+  they are not distinguished further at this layer.
+- A `total_tokens` field on raw provider usage is checked only against
+  `input_tokens + output_tokens`, and only when both are present. It is
+  never summed with `reasoning_tokens` or `cached_tokens`: those classes are
+  commonly a subset of `output_tokens`/`input_tokens` respectively (an
+  additive check would falsely reject real, internally-consistent OpenAI-
+  and Anthropic-shaped payloads). A mismatch against `input_tokens +
+  output_tokens` is rejected as `inconsistent_total`.
+- `SUPPORTED_HARNESSES` in `token_usage.py` is intentionally small
+  (`openai_compatible`, `anthropic_api` — the two structured-usage sources
+  already parsed by `llm_client.py`). Any other harness always yields
+  `unavailable`; extending support means adding a new alias mapping to
+  `_FIELD_ALIASES`, never scraping a transcript.
+
+### Reports, forecasts, and quota (read-only, evidence-gated)
+
+- **Cohort report** (R5) — `analyze_metrics.py --token-report` (opt-in flag;
+  the default `analyze_metrics.py` invocation is unaffected) writes
+  `reports/token-usage-report.json` via `token_usage.build_token_report`.
+  Every group (model × harness × spec type × declared complexity band ×
+  outcome × phase) is reported separately with its own sample size, median
+  and 10th/90th percentile token totals, completion rate, duration, and
+  measurement-state counts. There is no cross-stratum average.
+- **Forecast** (R6/R7) — `python3 token_usage.py forecast <metrics_dir>
+  --model M --harness H --spec-type T --complexity-band B [--quota-remaining N
+  --quota-reset R]` derives a cohort and returns either `insufficient_evidence`
+  (naming every failed gate) or a `forecast` with a deterministic median +
+  empirical 10th/90th-percentile interval, exact source metrics row IDs, and
+  the excluded-observation count. Gates: ≥10 completed measured/partial
+  cohort runs, ≥3 per compared model/tier, ≤30% unavailable/rejected in the
+  cohort. This is a **descriptive baseline, not a Bayesian or LLM-generated
+  precision claim**.
+- **Model-efficiency comparison** (R8) — `token_usage.compare_model_efficiency`
+  is advisory only (`no_recommendation` / `candidate_more_efficient` /
+  `candidate_less_efficient`) and never writes to `model_selection.py` or any
+  routing/config file.
+- **Quota projection** (R9) — `token_usage.project_quota` returns only
+  `likely_fits` / `uncertain` / `likely_exceeds` / `quota_unknown`. The
+  remaining-amount/reset-boundary values a caller supplies are **never**
+  written to a canonical artifact, report, or log — only the categorical
+  result crosses that boundary. Absent an authorized numeric quota source,
+  the result is always `quota_unknown`, never a guessed percentage.
+
+### Public vs. private forecasting methodology
+
+The deterministic median-plus-empirical-interval baseline in
+`token_usage.forecast_spec` is self-contained and was **not** built by
+reading the public `Developer/Repos/superforecasting` skill or any other
+external method reference. It does not read, cite, or publish the private
+`ManagedProjects/Forecasts` ledger, which remains a separate, unrelated
+instance.
+
+---
+
 ## See Also
 
 - **LOOP.md Step 13**: Metrics logging procedure
 - **validate_metrics.py**: Automated schema validator
 - **ORCHESTRATOR.md Step 3d**: How metrics are validated in the orchestration loop
+- **token_usage.py**: SPEC-298 adapter, aggregation, report, forecast, and quota-projection module

@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 
+import scope_guard
 from lifecycle import BLOCKER_CLASSES, transition_allowed, validate_blocked
 from loop_events import open_run_log
 from spec_frontmatter import is_nfr_family, parse_spec_file, write_spec_frontmatter
@@ -28,11 +30,77 @@ LIFECYCLE_TO_METRIC_BLOCKER = {
     "evidence_unavailable": "evidence_gap",
     "critical_external_constraint": "external_input",
     "unknown_critical_failure": "unknown",
+    # SPEC-300-002 R3/R8: mirrors record_metrics.BLOCKER_CLASS_ENUM's
+    # `scope_violation` so a scope-blocked spec's packet carries the same
+    # metric class as its terminal commit trailer.
+    "scope_violation": "scope_violation",
 }
 SAFE_CLASSES = {"technical_infeasibility", "evidence_unavailable"}
 SKIP_CLASSES = {"safety_constraint", "critical_external_constraint"}
+# SPEC-300-002 R2/R8: never auto-eligible via SAFE_CLASSES -- a scope
+# violation only becomes eligible once every offending path named in
+# `block_reason` is covered by a `## Scope Amendments` row on main
+# (see `_scope_amendments_cover_block_reason`), never by class membership
+# alone. This is deliberately its own set, not folded into SKIP_CLASSES,
+# because SKIP_CLASSES has no path-by-path re-check: it is permanently
+# skipped, while scope_violation is conditionally skipped.
+SCOPE_VIOLATION_CLASS = "scope_violation"
 OUTCOMES = {"succeeded", "failed", "skipped"}
 CONFIDENCE = {"demonstrated", "supported", "hypothesis", "not_established"}
+# SPEC-300-002: the block_reason shape check 6 writes for a scope violation
+# (SKILL.md "Step 6 evidence gate — check 6"), one entry per offending path:
+# "<repo-relative-path> (<scope_guard reason code>)", comma-separated.
+_SCOPE_BLOCK_REASON_ENTRY_RE = re.compile(r"([^\s,()][^,()]*?)\s*\(([a-z_]+)\)")
+_SCOPE_AMENDMENTS_HEADING_RE = re.compile(
+    r"^## Scope Amendments\s*$([\s\S]*?)(?=^## |\Z)", re.MULTILINE
+)
+
+
+def _scope_amendment_globs(spec_text: str) -> list[str]:
+    """Return every non-empty `Path or glob` cell from `## Scope Amendments`.
+
+    Mirrors `validate_specs.py`'s row-shape parsing (SPEC-300-001 R7) -- same
+    heading regex, same "skip header/separator/short rows" rules -- but
+    extracts the path column instead of validating `Approved by`. A row
+    lacking a human-approved `Approved by` cell was already rejected by
+    `validate_specs.py` at commit time, so any row reachable here on main is
+    trusted.
+    """
+    match = _SCOPE_AMENDMENTS_HEADING_RE.search(spec_text)
+    if not match:
+        return []
+    globs: list[str] = []
+    for line in match.group(1).split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if re.match(r"^\|[\s:|-]*\|?$", stripped):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if not any(cells):
+            continue
+        if cells[0] == "Date":
+            continue
+        if len(cells) < 5 or not cells[1]:
+            continue
+        globs.append(cells[1])
+    return globs
+
+
+def _scope_amendments_cover_block_reason(block_reason: str, spec_text: str) -> bool:
+    """True only if every offending path in `block_reason` has an amendment.
+
+    Fails closed: an unparsable `block_reason` (no `path (reason_code)`
+    entries found at all) never reports coverage, since there is nothing to
+    confirm was actually approved.
+    """
+    offenders = [m.group(1).strip() for m in _SCOPE_BLOCK_REASON_ENTRY_RE.finditer(block_reason)]
+    if not offenders:
+        return False
+    globs = _scope_amendment_globs(spec_text)
+    if not globs:
+        return False
+    return all(any(scope_guard._glob_match(g, path) for g in globs) for path in offenders)
 
 
 class UnblockError(ValueError):
@@ -119,7 +187,17 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
     prior = _load_attempts(project_root, str(fm["id"]))
     if not retry_override and any(a.get("fingerprint") == fingerprint and a.get("automatic") for a in prior):
         raise UnblockError("automatic attempt already recorded for unchanged blocker fingerprint")
-    eligibility = "eligible" if blocker_class in SAFE_CLASSES else "skipped"
+    if blocker_class == SCOPE_VIOLATION_CLASS:
+        # R8: never eligible on class membership alone -- only once every
+        # offending path named in `block_reason` is covered by a `## Scope
+        # Amendments` row on main (a human decision), can rung 1 run.
+        eligibility = (
+            "eligible"
+            if _scope_amendments_cover_block_reason(str(fm["block_reason"]), parsed.body)
+            else "skipped"
+        )
+    else:
+        eligibility = "eligible" if blocker_class in SAFE_CLASSES else "skipped"
     packet = {
         "schema_version": 1, "packet_id": f"{run_id}:{fm['id']}:{fingerprint[:12]}",
         "run_id": run_id, "spec_id": fm["id"], "spec_path": str(spec_file.relative_to(project_root)),

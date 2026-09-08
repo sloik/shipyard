@@ -38,6 +38,25 @@ def emit_phase_event(log: "RunEventLog", event: str, spec_id: str, phase: str, *
     log.emit(event, spec_id=spec_id, phase=phase, **payload)
 
 
+def emit_token_usage_event(log: "RunEventLog", *, spec_id: str, **kwargs) -> "TokenUsageResult":
+    """SPEC-298: normalize and, if accepted, persist one token-usage event.
+
+    Delegates the privacy/consistency adapter boundary to
+    ``token_usage.normalize_provider_usage``. A rejected input is never
+    written to the run event stream (R2); this function still returns the
+    ``TokenUsageResult`` so the caller can surface the deterministic
+    rejection reason.
+    """
+    from token_usage import normalize_provider_usage
+
+    result = normalize_provider_usage(run_id=log.run_id, spec_id=spec_id, **kwargs)
+    if result.accepted:
+        event = dict(result.event)
+        event.pop("spec_id", None)
+        log.emit("token_usage", spec_id=spec_id, **event)
+    return result
+
+
 STEP_NAMES: Dict[int, str] = {
     1: "preflight",
     2: "task_selection",

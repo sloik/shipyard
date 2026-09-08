@@ -40,10 +40,20 @@ RUN_STATES = frozenset({
     "validation_failed", "review_required", "waiting_dependencies",
     "waiting_external_input", "time_gated", "overlap_conflict",
     "dependency_cycle", "resource_gated", "waiting_gap_spec",
+    # SPEC-294 R3/Q4: a completed, verified candidate held pre-merge in an
+    # `authorize` deployment environment awaiting a durable human
+    # authorization record. Not `blocked` -- the wait is expected and
+    # resolves the moment authorization is recorded.
+    "awaiting_authorization",
 })
 BLOCKER_CLASSES = frozenset({
     "technical_infeasibility", "safety_constraint", "evidence_unavailable",
     "critical_external_constraint", "unknown_critical_failure",
+    # SPEC-300-002 R2/R8: a failed evidence-gate check 6 (scope enforcement).
+    # Not auto-eligible for the controller-backed unblock ladder -- a human
+    # decides via a `## Scope Amendments` row on main, never an automatic
+    # mechanism (unblock_spec.py special-cases this class; see SAFE_CLASSES).
+    "scope_violation",
 })
 ATTEMPT_OUTCOMES_REQUIRING_ASSESSMENT = frozenset({
     "blocked", "failed", "refused", "stalled", "unavailable",

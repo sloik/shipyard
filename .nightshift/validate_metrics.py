@@ -555,9 +555,14 @@ def validate_resolution(data):
             "baseline_regression",
             "external_input",
             "evidence_gap",
+            "scope_violation",
             "unknown",
         },
         "blocker_scope": {"none", "in_scope", "out_of_scope", "mixed", "unknown"},
+        # SPEC-300-002 R4/AC6: optional -- historical rows have no
+        # `Nightshift-Scope-Check` trailer at all and are not rejected for
+        # lacking this field; only validated when present.
+        "scope_check": {"clean", "amended", "violated", "not_run", "absent"},
     }
     for field, allowed in enums.items():
         value = resolution.get(field)

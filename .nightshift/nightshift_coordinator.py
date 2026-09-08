@@ -26,9 +26,11 @@ import json
 import re
 import sys
 import hashlib
+import time
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import subprocess
 import yaml
@@ -37,6 +39,7 @@ from parallel_executor import (
     BoundedWorktreeDispatcher,
     ReleaseSurfaceLease,
     SerializedIntegrationQueue,
+    TrackedTerminalFrontmatterProjector,
     WorktreeHandle,
     parallel_worker_limit,
 )
@@ -45,11 +48,20 @@ from integration_broker import (
     IntegrationBroker,
     IntegrationBrokerFeedbackAdapter,
 )
+import deployment_tiers
+from spec_artifacts import reports_root_for_spec_path
+from spec_frontmatter import parse_spec_file
 from status_store import StatusStore
 from worktree_janitor import run_startup_janitor
-from verifier_feedback import FeedbackRuntimeAdapter, FeedbackState, reconcile_feedback
+from verifier_feedback import (
+    FeedbackRuntimeAdapter,
+    FeedbackState,
+    FeedbackValidationError,
+    reconcile_feedback,
+    validate_verifier_verdict,
+)
 import managed_payload_provenance
-from verification_report import validate_dispatch_identity
+from verification_report import candidate_revision_digest, validate_dispatch_identity
 
 try:
     from preflight import run_install_admission
@@ -993,6 +1005,7 @@ class Coordinator:
         spec_files: List[Path],
         argo_home: Path,
         config: Optional[Dict[str, Any]] = None,
+        completion_evidence_provider: Optional[Callable[[WorktreeHandle], Dict[str, Any]]] = None,
     ):
         self.project_root = project_root
         self.spec_files = spec_files
@@ -1005,6 +1018,9 @@ class Coordinator:
         self._integrity_receipts: Dict[str, Dict[str, Any]] = {}
         self._shared_admission: Dict[str, Any] | None = None
         self._shared_integrity_failed = False
+        # Parent-only seam. Worker results are never consulted for completion
+        # acceptance; an unwired provider is an explicit fail-closed state.
+        self._completion_evidence_provider = completion_evidence_provider
 
     def _install_root(self) -> Path:
         installed = self.project_root / ".nightshift"
@@ -1076,6 +1092,10 @@ class Coordinator:
         )
         main_branch = str((self.config.get("git") or {}).get("main_branch", "main"))
         store = StatusStore.for_specs_dir(specs_dir)
+        selected_spec_ids = {
+            str(read_spec_frontmatter(spec_file)[0].get("id"))
+            for spec_file in self.spec_files
+        }
 
         def admit_worker(spec_id, handle, _worker_run_id):
             if self._shared_integrity_failed:
@@ -1101,7 +1121,592 @@ class Coordinator:
             ),
             admit_worker=admit_worker,
             dispatch_guard=lambda: not self._shared_integrity_failed,
+            selected_spec_ids=selected_spec_ids,
         )
+
+    def _execute_parallel_worker(
+        self, spec_id: str, handle: WorktreeHandle, _worker_run_id: str,
+    ) -> Dict[str, Any]:
+        """Execute one isolated worker without granting integration authority."""
+        source = next(
+            (
+                path for path in self.spec_files
+                if read_spec_frontmatter(path)[0].get("id") == spec_id
+            ),
+            None,
+        )
+        if source is None:
+            raise CoordinatorError(f"parallel worker was not selected by this coordinator: {spec_id}")
+        try:
+            relative = source.resolve().relative_to(self.project_root.resolve())
+            worker_spec = handle.worktree_path / relative
+        except ValueError:
+            worker_spec = source
+        frontmatter, _ = read_spec_frontmatter(worker_spec)
+        verify_required_inputs(handle.worktree_path, frontmatter)
+        context = ContextPointerAssembler(
+            handle.worktree_path, self.config, frontmatter, self.argo_home,
+        ).assemble()
+        result = self._delegate_spec(
+            spec_id, worker_spec,
+            self._generate_agent_brief(spec_id, worker_spec, context),
+        )
+        self._enforce_run_token_ceiling(spec_id, worker_spec, result)
+        return result
+
+    def _start_parallel_worker(
+        self, spec_id: str, handle: WorktreeHandle, worker_run_id: str,
+    ) -> Future:
+        """Return an in-flight future owned by this coordinator's bounded pool."""
+        pool = getattr(self, '_parallel_worker_pool', None)
+        if pool is None:
+            raise CoordinatorError("parallel worker pool is unavailable")
+        return pool.submit(self._execute_parallel_worker, spec_id, handle, worker_run_id)
+
+    @staticmethod
+    def _poll_parallel_worker(worker: object) -> Optional[Dict[str, Any]]:
+        """Return a completed worker result without granting it parent-side effects."""
+        if not isinstance(worker, Future):
+            return {"status": "failed", "reason": "invalid parallel worker handle"}
+        if not worker.done():
+            return None
+        try:
+            result = worker.result()
+        except Exception as exc:  # worker failures become coordinator-owned terminal evidence
+            return {
+                "status": "failed",
+                "reason": f"parallel worker raised {type(exc).__name__}: {exc}",
+            }
+        if not isinstance(result, dict):
+            return {"status": "failed", "reason": "parallel worker returned a non-mapping result"}
+        return result
+
+    def _terminalize_parallel_blocked(
+        self,
+        status_store: StatusStore, *, spec_id: str, run_id: str | None,
+        reason: str, payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Persist one immutable blocked choice, then project it to lifecycle."""
+        if not run_id:
+            raise ValueError("terminal run_id is required")
+        current = status_store.get_state(spec_id)
+        if (
+            current is not None
+            and current.get('status') in {'done', 'blocked'}
+            and current.get('run_id') != run_id
+        ):
+            return False
+        decision = status_store.record_terminal_decision(
+            spec_id, run_id, 'blocked', source='coordinator', reason=reason,
+            payload=payload or {},
+        )
+        current = status_store.get_state(spec_id)
+        already_projected = (
+            current is not None
+            and current.get('status') == 'blocked'
+            and current.get('run_id') == run_id
+            and (current.get('payload') or {}).get('terminal_decision_id')
+                == decision['decision_id']
+        )
+        if not already_projected:
+            status_store.update_state(
+                spec_id, 'blocked', run_id=run_id, source='coordinator',
+                note=reason, payload={
+                    **(payload or {}),
+                    'terminal_decision_id': decision['decision_id'],
+                },
+            )
+        spec_path = next((
+            path for path in self.spec_files
+            if read_spec_frontmatter(path)[0].get('id') == spec_id
+        ), None)
+        if spec_path is None:
+            raise ValueError(f"canonical spec path missing for {spec_id}")
+        handle = WorktreeHandle(
+            spec_id, self.project_root, "", self.project_root, self.project_root,
+            terminal_run_id=run_id, canonical_spec_path=spec_path,
+        )
+        TrackedTerminalFrontmatterProjector(
+            self.project_root, status_store,
+        ).project(handle, decision)
+        return not already_projected
+
+    @staticmethod
+    def _recover_persisted_terminal_decisions(
+        status_store: StatusStore, spec_ids: set[str], *,
+        terminal_projector: Any = None,
+        spec_paths: Optional[Dict[str, Path]] = None,
+    ) -> Dict[str, str]:
+        """Project interrupted choices under their original logical run IDs."""
+        recovered: Dict[str, str] = {}
+        for spec_id in sorted(spec_ids):
+            current = status_store.get_state(spec_id)
+            if current is None:
+                continue
+            run_id = current.get('run_id')
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            decision = status_store.get_terminal_decision(spec_id, run_id)
+            if decision is None:
+                continue
+            current_terminal = current.get('status') in {'done', 'blocked'}
+            if current_terminal:
+                if (
+                    current.get('status') != decision.get('decision')
+                    or (current.get('payload') or {}).get('terminal_decision_id')
+                        != decision.get('decision_id')
+                ):
+                    raise StatusStoreError(
+                        f"durable terminal status conflicts with immutable decision for {spec_id}"
+                    )
+            else:
+                status_store.update_state(
+                    spec_id, decision['decision'], run_id=run_id,
+                    source='coordinator_recovery',
+                    note=decision.get('reason') or 'recovered immutable terminal decision',
+                    payload={
+                        **(decision.get('payload') or {}),
+                        'terminal_decision_id': decision['decision_id'],
+                        'recovered_projection': True,
+                    },
+                )
+            if terminal_projector is not None:
+                spec_path = (spec_paths or {}).get(spec_id)
+                if spec_path is None:
+                    raise ValueError(f"canonical spec path missing for {spec_id}")
+                handle = WorktreeHandle(
+                    spec_id, Path(spec_path).parent, "", Path(spec_path).parent,
+                    Path(spec_path).parent, terminal_run_id=run_id,
+                    canonical_spec_path=spec_path,
+                )
+                terminal_projector.project(handle, decision)
+            recovered[spec_id] = str(decision['decision'])
+        return recovered
+
+    @staticmethod
+    def _completion_artifact_bytes(
+        handle: WorktreeHandle, revision: str, descriptor: Any,
+    ) -> tuple[bytes, str]:
+        """Read one hash-bound candidate artifact from the immutable revision."""
+        if not isinstance(descriptor, dict):
+            raise ValueError("artifact descriptor is missing")
+        path = descriptor.get('path')
+        expected_sha = descriptor.get('sha256')
+        pure = PurePosixPath(path) if isinstance(path, str) else PurePosixPath('..')
+        if not path or pure.is_absolute() or '..' in pure.parts:
+            raise ValueError("artifact path is not a safe candidate-relative path")
+        result = subprocess.run(
+            ['git', 'show', f'{revision}:{pure.as_posix()}'],
+            cwd=handle.worktree_path, capture_output=True,
+        )
+        if result.returncode != 0 or not result.stdout:
+            raise ValueError(f"candidate artifact is missing or empty: {path}")
+        observed_sha = hashlib.sha256(result.stdout).hexdigest()
+        if expected_sha != observed_sha:
+            raise ValueError(f"candidate artifact hash mismatch: {path}")
+        return result.stdout, pure.as_posix()
+
+    def _decide_parallel_completion_evidence(self, handle: WorktreeHandle) -> Dict[str, Any]:
+        """Validate a parent-owned receipt; worker evidence claims are ignored."""
+        provider = self._completion_evidence_provider
+        if provider is None:
+            return {
+                'ok': False, 'outcome': 'indeterminate',
+                'reason_code': 'NS-COMP-EVIDENCE-PROVIDER-MISSING',
+            }
+        try:
+            receipt = provider(handle)
+        except Exception as exc:
+            return {
+                'ok': False, 'outcome': 'indeterminate',
+                'reason_code': 'NS-COMP-EVIDENCE-PROVIDER-FAILED',
+                'detail': f'{type(exc).__name__}: {exc}',
+            }
+        try:
+            if not isinstance(receipt, dict) or receipt.get('schema_version') != '1.0.0':
+                raise ValueError('completion receipt schema is invalid')
+            if receipt.get('spec_id') != handle.spec_id:
+                raise ValueError('completion receipt spec_id mismatch')
+            if not handle.integrity_run_id or receipt.get('run_id') != handle.integrity_run_id:
+                raise ValueError('completion receipt run_id mismatch')
+
+            head = subprocess.run(
+                ['git', 'rev-parse', 'HEAD^{commit}'], cwd=handle.worktree_path,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            branch = subprocess.run(
+                ['git', 'rev-parse', f'{handle.branch_name}^{{commit}}'],
+                cwd=handle.worktree_path, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            revision = receipt.get('candidate_revision')
+            if revision != head or revision != branch:
+                raise ValueError('completion receipt candidate revision is stale or mismatched')
+            main_branch = str((self.config.get('git') or {}).get('main_branch', 'main'))
+            main_revision = subprocess.run(
+                ['git', 'rev-parse', f'{main_branch}^{{commit}}'],
+                cwd=handle.worktree_path, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if receipt.get('main_revision') != main_revision:
+                raise ValueError('completion receipt main revision is stale or mismatched')
+            dirty = subprocess.run(
+                ['git', 'status', '--porcelain'], cwd=handle.worktree_path,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if dirty:
+                raise ValueError('candidate worktree changed after its immutable revision')
+            observed_files = sorted(filter(None, subprocess.run(
+                ['git', 'diff', '--name-only', f'{main_revision}...{revision}'],
+                cwd=handle.worktree_path, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()))
+            if not observed_files or receipt.get('changed_files') != observed_files:
+                raise ValueError('completion receipt changed-file observation mismatch')
+
+            artifacts = receipt.get('artifacts')
+            if not isinstance(artifacts, dict):
+                raise ValueError('completion receipt artifacts are missing')
+            report_bytes, report_path = self._completion_artifact_bytes(
+                handle, revision, artifacts.get('report'),
+            )
+            tests_bytes, tests_path = self._completion_artifact_bytes(
+                handle, revision, artifacts.get('tests'),
+            )
+            checklist_bytes, checklist_path = self._completion_artifact_bytes(
+                handle, revision, artifacts.get('ac_checklist'),
+            )
+            tests = json.loads(tests_bytes)
+            checklist = json.loads(checklist_bytes)
+            if not isinstance(tests, dict) or tests.get('status') not in {'pass', 'fail'}:
+                raise ValueError('test evidence is structurally invalid')
+            total = tests.get('tests_total')
+            passed = tests.get('tests_passed')
+            commands = tests.get('commands')
+            if (
+                isinstance(total, bool) or not isinstance(total, int) or total < 0
+                or isinstance(passed, bool) or not isinstance(passed, int) or passed < 0
+                or passed > total
+                or not isinstance(commands, list) or not commands
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get('command'), str)
+                    or not item['command'].strip()
+                    or isinstance(item.get('exit_code'), bool)
+                    or not isinstance(item.get('exit_code'), int)
+                    for item in commands
+                )
+            ):
+                raise ValueError('test counts or command evidence are invalid')
+            if not isinstance(checklist, dict) or not isinstance(checklist.get('items'), list):
+                raise ValueError('AC checklist is structurally invalid')
+            ac_items = checklist['items']
+            source = next((
+                path for path in self.spec_files
+                if read_spec_frontmatter(path)[0].get('id') == handle.spec_id
+            ), None)
+            if source is None:
+                raise ValueError('selected spec is unavailable for AC coverage')
+            source_text = source.read_text(encoding='utf-8')
+            ac_section = source_text.partition('## Acceptance Criteria')[2].partition('\n## ')[0]
+            expected_ac_ids = sorted({
+                f'AC{number}' for number in re.findall(
+                    r'\bAC(\d+)\s*(?:\([^\n)]*\))?\s*:', ac_section,
+                )
+            })
+            reported_ac_ids = [
+                item.get('ac_id') for item in ac_items if isinstance(item, dict)
+            ]
+            if (
+                not expected_ac_ids
+                or len(reported_ac_ids) != len(ac_items)
+                or len(reported_ac_ids) != len(set(reported_ac_ids))
+                or set(reported_ac_ids) != set(expected_ac_ids)
+                or any(
+                    not isinstance(item.get('passes'), bool)
+                    or not isinstance(item.get('evidence'), str)
+                    or not item['evidence'].strip()
+                    for item in ac_items if isinstance(item, dict)
+                )
+            ):
+                raise ValueError('AC checklist does not exactly cover the selected spec')
+
+            verifier_descriptor = artifacts.get('verifier')
+            if not isinstance(verifier_descriptor, dict):
+                raise ValueError('verifier artifact descriptor is missing')
+            verifier_path = verifier_descriptor.get('path')
+            if not isinstance(verifier_path, str):
+                raise ValueError('verifier artifact path is invalid')
+            verifier_file = (self.project_root / verifier_path).resolve()
+            evidence_root = (self.project_root / '.nightshift' / 'completion-evidence').resolve()
+            if verifier_file.parent != evidence_root or not verifier_file.is_file():
+                raise ValueError('verifier artifact is outside the parent-owned evidence root')
+            verifier_bytes = verifier_file.read_bytes()
+            if hashlib.sha256(verifier_bytes).hexdigest() != verifier_descriptor.get('sha256'):
+                raise ValueError('verifier artifact hash mismatch')
+            verdict = json.loads(verifier_bytes)
+            candidate_digest = candidate_revision_digest(revision)
+            if (
+                receipt.get('candidate_revision_digest') != candidate_digest
+                or verdict.get('candidate_revision_digest') != candidate_digest
+            ):
+                raise ValueError('verifier identity is not bound to the candidate revision')
+            validate_verifier_verdict(
+                verdict,
+                spec_id=handle.spec_id,
+                implementation_head_digest=str(receipt.get('implementation_head_digest', '')),
+                verifier_head_commit=str(receipt.get('verifier_head_commit', '')),
+                expected_ac_ids=expected_ac_ids,
+                verifier_id=str(receipt.get('verifier_id', '')),
+                implementer_ids=receipt.get('implementer_ids') or (),
+            )
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError,
+                subprocess.CalledProcessError, FeedbackValidationError) as exc:
+            return {
+                'ok': False, 'outcome': 'indeterminate',
+                'reason_code': 'NS-COMP-EVIDENCE-RECEIPT-INVALID',
+                'detail': str(exc),
+            }
+
+        failed = []
+        if tests.get('status') != 'pass' or total <= 0 or passed != total \
+                or any(item['exit_code'] != 0 for item in commands):
+            failed.append('tests_passed')
+        if not checklist.get('all_pass') or any(not item.get('passes') for item in ac_items):
+            failed.append('acs_covered')
+        if verdict.get('verdict') != 'pass' or any(
+            item.get('status') != 'pass' for item in verdict.get('acs') or ()
+        ):
+            failed.append('verifier')
+        if failed:
+            return {
+                'ok': False, 'outcome': 'rejected',
+                'reason_code': 'NS-COMP-EVIDENCE-REJECTED',
+                'failed': sorted(failed),
+                'candidate_revision': revision,
+            }
+        return {
+            'ok': True, 'outcome': 'accepted',
+            'reason_code': 'NS-COMP-EVIDENCE-ACCEPTED',
+            'candidate_revision': revision,
+            'changed_files': observed_files,
+            'artifacts': {
+                'report': report_path, 'tests': tests_path,
+                'ac_checklist': checklist_path, 'verifier': verifier_path,
+            },
+        }
+
+    @staticmethod
+    def _completion_evidence_recovery_payload(
+        handle: WorktreeHandle, decision: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Retain the branch and exact recovery inputs for a denied decision."""
+        return {
+            'completion_evidence_decision': decision,
+            'worker_outcome': handle.outcome or {},
+            'branch_name': handle.branch_name,
+            'worktree_path': str(handle.worktree_path),
+            'integrity_receipt_path': handle.integrity_receipt_path,
+            'integrity_receipt_sha256': handle.integrity_receipt_sha256,
+            'integrity_run_id': handle.integrity_run_id,
+        }
+
+    def _run_parallel_specs(self, start_time: datetime) -> int:
+        """Run the selected specs through one dispatcher and one integration queue."""
+        dispatcher = self.build_parallel_dispatcher(
+            start_worker=self._start_parallel_worker,
+            poll_worker=self._poll_parallel_worker,
+        )
+        integration_queue = self.build_integration_queue()
+        selected_ids = {
+            str(read_spec_frontmatter(spec_file)[0].get('id'))
+            for spec_file in self.spec_files
+        }
+        accepted_ids: set[str] = set()
+        failed_ids: set[str] = set()
+        integration_failed = False
+        selected_spec_paths = {
+            str(read_spec_frontmatter(path)[0].get('id')): path
+            for path in self.spec_files
+            if str(read_spec_frontmatter(path)[0].get('id')) in selected_ids
+        }
+        recovered = self._recover_persisted_terminal_decisions(
+            dispatcher.status_store, selected_ids,
+            terminal_projector=getattr(
+                integration_queue, 'terminal_frontmatter_projector', None,
+            ),
+            spec_paths=selected_spec_paths,
+        )
+        self.metrics.data.setdefault('parallel_integrations', []).extend(
+            {
+                'spec_id': spec_id,
+                'decision': 'accepted' if terminal_value == 'done' else 'reverted',
+                'reason': 'immutable_terminal_projection_recovered_at_startup',
+                'validation_output': '',
+            }
+            for spec_id, terminal_value in sorted(recovered.items())
+        )
+        for spec_id, terminal_value in recovered.items():
+            if terminal_value != 'done':
+                continue
+            state = dispatcher.status_store.get_state(spec_id)
+            run_id = state.get('run_id') if state is not None else None
+            decision = (
+                dispatcher.status_store.get_terminal_decision(spec_id, run_id)
+                if isinstance(run_id, str) and run_id else None
+            )
+            if decision is None:
+                raise ValueError(
+                    f"recovered done decision missing for {spec_id}/{run_id}"
+                )
+            integration_queue.restore_accepted_terminal_decision(spec_id, decision)
+        accepted_ids.update(
+            spec_id for spec_id, decision in recovered.items() if decision == 'done'
+        )
+        failed_ids.update(
+            spec_id for spec_id, decision in recovered.items() if decision == 'blocked'
+        )
+        integration_failed = any(decision == 'blocked' for decision in recovered.values())
+        worker_limit = parallel_worker_limit(self.config)
+        assert worker_limit is not None
+
+        self._parallel_worker_pool = ThreadPoolExecutor(
+            max_workers=worker_limit, thread_name_prefix='nightshift-worker',
+        )
+        try:
+            while True:
+                try:
+                    launched = dispatcher.advance()
+                except Exception as exc:
+                    integration_failed = True
+                    for spec_id in selected_ids:
+                        if self._terminalize_parallel_blocked(
+                            dispatcher.status_store, spec_id=spec_id, run_id=self.metrics.run_id,
+                            reason=f"parallel dispatch failed: {type(exc).__name__}: {exc}",
+                        ):
+                            failed_ids.add(spec_id)
+                    break
+                self.metrics.data['specs_queued'] += len(launched)
+
+                for failure in dispatcher.drain_failed():
+                    spec_id = str(failure['spec_id'])
+                    reason = str(failure.get('reason') or 'parallel worker failed')
+                    if self._terminalize_parallel_blocked(
+                        dispatcher.status_store, spec_id=spec_id,
+                        run_id=failure.get('run_id'), reason=reason,
+                        payload=failure.get('outcome'),
+                    ):
+                        failed_ids.add(spec_id)
+
+                completed = dispatcher.drain_completed()
+                if completed:
+                    evidence_accepted: List[WorktreeHandle] = []
+                    for handle in completed:
+                        decision = self._decide_parallel_completion_evidence(handle)
+                        handle.completion_evidence_acceptance = decision
+                        self.metrics.data.setdefault('completion_evidence_decisions', []).append({
+                            'spec_id': handle.spec_id,
+                            **decision,
+                        })
+                        if decision['ok']:
+                            handle.verified_revision = decision['candidate_revision']
+                            evidence_accepted.append(handle)
+                            continue
+                        integration_failed = True
+                        if self._terminalize_parallel_blocked(
+                            dispatcher.status_store, spec_id=handle.spec_id,
+                            run_id=handle.terminal_run_id or handle.integrity_run_id,
+                            reason=(
+                                f"completion evidence {decision['outcome']}: "
+                                f"{decision['reason_code']}"
+                            ),
+                            payload=self._completion_evidence_recovery_payload(handle, decision),
+                        ):
+                            failed_ids.add(handle.spec_id)
+                    for handle in sorted(evidence_accepted, key=lambda item: item.spec_id):
+                        try:
+                            result = integration_queue.integrate([handle])
+                        except Exception as exc:
+                            recovered = integration_queue.recover_terminal_projection(handle)
+                            if recovered == 'done':
+                                accepted_ids.add(handle.spec_id)
+                                self.metrics.data.setdefault('parallel_integrations', []).append({
+                                    'spec_id': handle.spec_id,
+                                    'decision': 'accepted',
+                                    'reason': 'immutable_terminal_projection_recovered',
+                                    'validation_output': '',
+                                })
+                                continue
+                            if recovered == 'blocked':
+                                integration_failed = True
+                                failed_ids.add(handle.spec_id)
+                                self.metrics.data.setdefault('parallel_integrations', []).append({
+                                    'spec_id': handle.spec_id,
+                                    'decision': 'reverted',
+                                    'reason': 'immutable_terminal_projection_recovered',
+                                    'validation_output': '',
+                                })
+                                continue
+                            integration_failed = True
+                            if self._terminalize_parallel_blocked(
+                                dispatcher.status_store, spec_id=handle.spec_id,
+                                run_id=handle.terminal_run_id or handle.integrity_run_id,
+                                reason=f"serialized integration failed: {type(exc).__name__}: {exc}",
+                                payload=handle.outcome,
+                            ):
+                                failed_ids.add(handle.spec_id)
+                            continue
+                        accepted_ids.update(result.accepted)
+                        failed_ids.update(result.held)
+                        failed_ids.update(result.reverted)
+                        integration_failed = integration_failed or bool(result.held or result.reverted)
+                        decisions = {decision.spec_id: decision for decision in result.decisions}
+                        for spec_id in result.held:
+                            decision = decisions.get(spec_id)
+                            reason = decision.reason if decision else 'serialized integration held'
+                            self._terminalize_parallel_blocked(
+                                dispatcher.status_store, spec_id=spec_id,
+                                run_id=handle.terminal_run_id or handle.integrity_run_id,
+                                reason=f"serialized integration held: {reason}",
+                                payload={
+                                    'integration_decision': vars(decision)
+                                    if decision is not None else None,
+                                },
+                            )
+                        self.metrics.data.setdefault('parallel_integrations', []).extend(
+                            {
+                                'spec_id': decision.spec_id,
+                                'decision': decision.outcome,
+                                'reason': decision.reason,
+                                'validation_output': decision.validation_output,
+                            }
+                            for decision in result.decisions
+                        )
+                if not dispatcher.active and not launched and not completed:
+                    break
+                if dispatcher.active and not launched and not completed:
+                    delay = float(
+                        (self.config.get('parallel_admission') or {}).get('poll_interval_s', 1.0)
+                    )
+                    time.sleep(max(0.01, min(delay, 5.0)))
+        finally:
+            self._parallel_worker_pool.shutdown(wait=True)
+            self._parallel_worker_pool = None
+
+        for spec_id in selected_ids:
+            current = dispatcher.status_store.get_state(spec_id)
+            if current is None or current.get('status') not in {'done', 'blocked'}:
+                if self._terminalize_parallel_blocked(
+                    dispatcher.status_store, spec_id=spec_id, run_id=self.metrics.run_id,
+                    reason='parallel run ended without a terminal integration outcome',
+                ):
+                    failed_ids.add(spec_id)
+
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        self.metrics.data['specs_completed'] += len(accepted_ids)
+        self.metrics.data['specs_failed'] += len(failed_ids)
+        self.metrics.record_completion(elapsed, 30)
+        self.metrics.save()
+        if integration_failed:
+            return 3
+        return 2 if failed_ids else 0
 
     def build_integration_queue(self, *, request_repair=None, dependency_graph=None) -> SerializedIntegrationQueue:
         """Create the sole main-branch integration owner for parallel workers.
@@ -1164,18 +1769,46 @@ class Coordinator:
             ).to_dict()
             return {**worker_result, "scope": "worker"}
 
+        status_store = StatusStore.for_specs_dir(specs_dir)
+
+        def authorization_gate(handle, candidate_sha, head_drift):
+            # SPEC-294 R3/R6: the only place config/frontmatter is read for
+            # this gate -- the queue itself stays policy-agnostic (mirrors
+            # request_repair's injected-callable shape). Reads happen fresh
+            # per call rather than being cached on the handle, so an edited
+            # deploy_environment: or config.yaml is honored on the very next
+            # merge attempt without a coordinator restart.
+            deploy_environment = None
+            spec_path = specs_dir / f"{handle.spec_id}.md"
+            if spec_path.is_file():
+                try:
+                    deploy_environment = parse_spec_file(spec_path).frontmatter.get(
+                        "deploy_environment"
+                    )
+                except Exception:
+                    deploy_environment = None
+            return deployment_tiers.check_candidate_authorization(
+                reports_root_for_spec_path(spec_path), handle.spec_id,
+                cfg=self.config, deploy_environment=deploy_environment,
+                candidate_sha=candidate_sha, head_drift=head_drift,
+            )
+
         return SerializedIntegrationQueue(
             repo_root=repo_root,
             main_branch=main_branch,
             validate_main=validate,
             request_repair=request_repair,
-            status_store=StatusStore.for_specs_dir(specs_dir),
+            status_store=status_store,
             dependency_graph=dependency_graph,
             max_repair_attempts=attempts,
             protected_surfaces=protected_surfaces,
             terminal_gate=terminal_gate,
             evidence_path=self.project_root / "reports" / "_wip" / f"integration-queue-{self.metrics.run_id}.json",
             release_surface_lease=ReleaseSurfaceLease(self.project_root),
+            terminal_frontmatter_projector=TrackedTerminalFrontmatterProjector(
+                repo_root, status_store,
+            ),
+            authorization_gate=authorization_gate,
         )
 
     def build_integration_broker(self, *, request_repair=None, dependency_graph=None) -> IntegrationBroker:
@@ -1330,6 +1963,9 @@ class Coordinator:
 
         start_time = datetime.now(timezone.utc)
 
+        if self.parallel_dispatch_enabled():
+            return self._run_parallel_specs(start_time)
+
         # Process each spec
         for spec_file in self.spec_files:
             frontmatter, _ = read_spec_frontmatter(spec_file)
@@ -1366,7 +2002,11 @@ class Coordinator:
         spec_file: Path,
         brief: str,
     ) -> Dict[str, Any]:
-        """Placeholder implementation-agent delegation hook."""
+        """Placeholder implementation-agent delegation hook.
+
+        Completion acceptance never comes from this worker-facing result. The
+        distinct parent evidence provider remains unwired by default.
+        """
         print(f"\n=== SPEC {spec_id} ===")
         print(f"Spec file: {spec_file}")
         print(f"Brief preview (first 500 chars):\n{brief[:500]}...\n")

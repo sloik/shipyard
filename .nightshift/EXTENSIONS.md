@@ -95,3 +95,50 @@ calls. The canonical `Skills/nightshift/SKILL.md` source is manifest-hashed with
 the kit, and the serialized release coordinator alone verifies and delivers its
 exact bytes to the external active path. A repository worker or parent never
 patches that delivery outside the whole-kit handoff.
+
+## Harness write-scope hook matrix (SPEC-300-004)
+
+Separately from the extension checkpoints above: SPEC-300's write-scope lock
+has a harness-specific earliest layer, `hooks/write-scope-hook.sh`, a Claude
+Code `PreToolUse` hook that classifies a write's destination against the
+active spec's declared `scope.write` (via `scope_guard.py`, SPEC-300-001)
+before the tool call runs, and denies it with the correct location named.
+
+| Harness | Pre-write interception | Fallback enforcement |
+| --- | --- | --- |
+| Claude Code | `hooks/write-scope-hook.sh` (`PreToolUse`), installed per-project via `hooks/install-write-scope-hook.sh` — but see the note below: its spec-scoped rules are presently unreachable for a harness-launched worker | git pre-commit guard (SPEC-300-003), evidence gate (SPEC-300-002) |
+| Codex | none today | git pre-commit guard (SPEC-300-003), evidence gate (SPEC-300-002) |
+| Hermes | none today | git pre-commit guard (SPEC-300-003), evidence gate (SPEC-300-002) |
+
+The hook is strictly an earliest-detection optimization, never the only
+enforcement layer: a Codex or Hermes run still has its scope enforced by the
+git guard at commit time and the evidence gate at verification time, and the
+terminal lifecycle commit's `Nightshift-Scope-Check:` trailer (SPEC-300 R11)
+records which layer actually resolved a violation, independent of which
+harness ran the worker.
+
+**Claude Code's own hook is not fully reachable for a harness-launched
+worker either (SPEC-300-004-001).** The row above is more precise than "no
+hook at all" (Codex/Hermes) but less capable than it looks: the hook's
+*spec-scoped* `write`/`deny`/`read` rules depend on `scope_guard.py`'s
+`active_spec()` resolving the active spec from either
+`NIGHTSHIFT_ACTIVE_SPEC` or the branch name, and for a harness-launched
+(`isolation: "worktree"`) kickoff worker, **neither input is available at
+the `PreToolUse` layer**: the parent's Agent-launch tool has no parameter to
+set an environment variable for the launched subagent's session (checked
+directly against the launch tool's own schema — `description`, `isolation`,
+`mode`, `model`, `name`, `prompt`, `subagent_type`, `team_name`; no `env`
+field), a worker's own Bash-tool `export` does not persist across separate
+Bash calls (confirmed empirically by SPEC-301), and the harness assigns its
+own `worktree-agent-<hex>` branch name that carries no spec ID for
+`scope_guard.py` to parse. So `active_spec()` falls back to
+`no_active_spec` (allow) at this layer for every real harness-launched
+kickoff, and only the hook's two **universal** rules (spec-home guard,
+malformed-target guard — neither depends on `active_spec()`) actually fire.
+The git pre-commit guard (via the inline `NIGHTSHIFT_ACTIVE_SPEC={spec-id}`
+commit-prefix convention, which the guard reads from the `git commit`
+subprocess's own environment) and the evidence gate remain the two working
+backstops for spec-scoped enforcement in this case — the same fallback
+Codex/Hermes rely on for everything. This is a known, accepted gap (no fix
+available at the harness-launch layer today), not a silent one; see
+`canonical/Skills/nightshift/SKILL.md` Step 5 for the full evidence trail.

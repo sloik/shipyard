@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from dependency_registry import DependencyRegistryResolver
+from deployment_tiers import deployment_block_findings, resolve_deployment_policy
 from lifecycle import migrate_legacy_planning, validate_blocked
 import spec_artifacts
 
@@ -141,6 +142,97 @@ _ALLOWED_HISTORICAL_CHECKBOX_DISPOSITIONS = frozenset({
     "intentional_historical_record",
     "unresolved_evidence_gap",
 })
+
+
+_SCOPE_ANCHOR_RE = re.compile(r"\{\{[^}]*\}\}")
+
+
+def _validate_scope_glob_list(key: str, value: object) -> list[str]:
+    """Shared glob-list checks for scope.write/deny/read (SPEC-300-001 R6)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return [f"scope.{key} must be a list of strings"]
+    errors: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            errors.append(f"scope.{key}[{index}] must be a string")
+            continue
+        if item.startswith("/") or item.startswith("~"):
+            errors.append(f"scope.{key}[{index}] must not be an absolute path: {item!r}")
+        if ".." in Path(item).parts:
+            errors.append(f"scope.{key}[{index}] must not contain '..': {item!r}")
+        if _SCOPE_ANCHOR_RE.search(item):
+            errors.append(f"scope.{key}[{index}] must not use a {{{{...}}}} anchor: {item!r}")
+    return errors
+
+
+def validate_scope(fm: dict) -> list[str]:
+    """Validate the optional ``scope:`` block (SPEC-300-001 R6).
+
+    ``scope:`` is entirely optional — absent means the project-root default
+    (SPEC-300 § Defaults). When present, ``write``/``deny`` must be lists of
+    project-root-relative strings with no absolute paths, no ``..``
+    components, and no ``{{...}}`` anchors (scope must never reach outside
+    the project via a path_vars anchor). ``read`` is either the literal
+    string ``unrestricted`` or the same kind of list.
+    """
+    scope = fm.get("scope")
+    if scope is None:
+        return []
+    if not isinstance(scope, dict):
+        return ["scope must be a mapping"]
+    errors: list[str] = []
+    allowed_keys = {"write", "deny", "read"}
+    unknown = sorted(set(scope) - allowed_keys)
+    if unknown:
+        errors.append("scope has unknown fields: " + ", ".join(unknown))
+    errors.extend(_validate_scope_glob_list("write", scope.get("write")))
+    errors.extend(_validate_scope_glob_list("deny", scope.get("deny")))
+    read = scope.get("read", "unrestricted")
+    if read != "unrestricted":
+        errors.extend(_validate_scope_glob_list("read", read))
+        if not isinstance(read, list):
+            errors.append("scope.read must be 'unrestricted' or a list of strings")
+    return errors
+
+
+_SCOPE_AMENDMENTS_HEADING = re.compile(r"^## Scope Amendments\s*$([\s\S]*?)(?=^## |\Z)", re.MULTILINE)
+_SCOPE_AMENDMENTS_SEPARATOR = re.compile(r"^\|[\s:|-]*\|?$")
+
+
+def validate_scope_amendments(content: str) -> list[str]:
+    """Validate ``## Scope Amendments`` rows (SPEC-300-001 R7).
+
+    Columns: ``Date | Path or glob | Change (old -> new) | Reason |
+    Approved by``. Every non-empty row's ``Approved by`` cell must be
+    exactly ``human`` or ``human:<name>``; the table may be empty.
+    """
+    match = _SCOPE_AMENDMENTS_HEADING.search(content)
+    if not match:
+        return []
+    errors: list[str] = []
+    for line in match.group(1).split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if _SCOPE_AMENDMENTS_SEPARATOR.match(stripped):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if not any(cells):
+            continue
+        if cells[0] == "Date":  # header row
+            continue
+        if len(cells) < 5:
+            continue  # malformed row shape is not this validator's concern
+        approved_by = cells[4]
+        if not approved_by:
+            continue
+        if approved_by != "human" and not re.fullmatch(r"human:.+", approved_by):
+            errors.append(
+                f"## Scope Amendments row 'Approved by' must be 'human' or 'human:<name>', got {approved_by!r}"
+            )
+    return errors
 
 
 def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
@@ -266,6 +358,102 @@ def validate_decision_briefs(content: str, project_root: Path) -> list[str]:
                     continue
                 if not candidate.is_file():
                     findings.append(f"{prefix}: unresolvable evidence reference: {reference}")
+    return findings
+
+
+# SPEC-299 R2/R3: a `## Report Action Log` table records, per scanned report,
+# what happened to its own `## Open Questions` / `## Blocked Specs` content.
+# Mirrors the decision-brief validator's shape (mechanical contract only): a
+# closed-vocabulary Action column, checked against a fixed prefix set rather
+# than free text. Heading match is deliberately exact-case (`Report Action
+# Log`, capitalized) -- that is the canonical form this spec introduces.
+# `SPEC-QUESTIONS-005.md`'s pre-existing `## Report action log` (lowercase
+# "action log") predates this spec, is its named reference for the *table
+# shape* only (not the validated heading spelling), and is explicitly out of
+# scope for rewriting (see SPEC-299's Out of Scope). A case-insensitive match
+# would retroactively fail every free-prose "Action taken" cell in that file;
+# `test_spec_299_report_questions_flow.py::test_spec_questions_005_is_exempt_from_the_new_closed_vocabulary`
+# pins this boundary so it cannot regress silently.
+_REPORT_ACTION_LOG_HEADING = re.compile(r"^##\s+Report Action Log\s*$", re.MULTILINE)
+_REPORT_ACTION_LOG_ALLOWED_PREFIXES = (
+    "none_found",
+    "consolidated_into ",
+    "resolved_in_report",
+    "deferred: ",
+)
+_TABLE_SEPARATOR_ROW = re.compile(r"^\|[\s:|-]+\|$")
+
+# SPEC-317: gates `validate_report_headings` by report filename date so it
+# never retroactively flags a report predating the coordinator-authored-
+# report contract (LOOP.md Step 14a). Set to SPEC-317's own `created` date;
+# a report dated on or before this is silently exempt, which covers every
+# report SPEC-QUESTIONS-006 swept (2026-09-04 through 2026-09-07 inclusive),
+# including its two 2026-09-07 entries.
+_REPORT_HEADINGS_MIN_DATE = "2026-09-07"
+_REPORT_FILENAME_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})-nightshift-report")
+_REQUIRED_REPORT_HEADINGS = ("## Blocked Specs", "## Open Questions")
+
+
+def validate_report_headings(report_path: Path, min_date: str = _REPORT_HEADINGS_MIN_DATE) -> list[str]:
+    """Flag a coordinator-authored report (SPEC-317) missing the
+    `## Blocked Specs` / `## Open Questions` headings LOOP.md Step 14 (and
+    Step 14a, for coordinator-authored reports) require.
+
+    Gated by the report's filename date, not by who wrote it — mechanical
+    enforcement has no way to tell a dispatched-worker report from a
+    coordinator-authored one, and doesn't need to: both paths owe the same
+    three sections as of `min_date`. A report dated on or before `min_date`
+    (SPEC-317's own `created` date) predates this mechanical check and is
+    never flagged, so it cannot retroactively fail any of
+    `SPEC-QUESTIONS-006`'s 10 historical gap reports (or the 3 that already
+    carry the headings).
+    """
+    match = _REPORT_FILENAME_DATE.match(report_path.name)
+    if not match or match.group(1) <= min_date:
+        return []
+    content = report_path.read_text(encoding="utf-8")
+    findings = []
+    for heading in _REQUIRED_REPORT_HEADINGS:
+        if not re.search(rf"^{re.escape(heading)}\s*$", content, re.MULTILINE):
+            findings.append(f"missing required heading: {heading!r}")
+    return findings
+
+
+def validate_report_action_log(content: str) -> list[str]:
+    """Return mechanical findings for every `## Report Action Log` table
+    (SPEC-299). Enumerates every occurrence of the heading, mirroring
+    ``validate_decision_briefs``'s multi-block handling.
+
+    Each table's last column is the Action; every data row's Action must be
+    exactly ``none_found``/``resolved_in_report`` or start with
+    ``consolidated_into ``/``deferred: ``. A missing section is valid — not
+    every report or spec carries one.
+    """
+    findings: list[str] = []
+    starts = list(_REPORT_ACTION_LOG_HEADING.finditer(content))
+    for block_number, start in enumerate(starts, start=1):
+        next_heading = re.search(r"^##\s+", content[start.end():], re.MULTILINE)
+        end = start.end() + next_heading.start() if next_heading else len(content)
+        block = content[start.end():end]
+        table_rows = [
+            line.strip() for line in block.splitlines()
+            if line.strip().startswith("|") and line.strip().endswith("|")
+        ]
+        # A well-formed table is header, then a `|---|---|` separator, then
+        # data rows. Drop the separator row(s) first, then the header (the
+        # first remaining row) — this only discards a real data row if the
+        # table omits its header, which is not a shape this spec's format
+        # produces.
+        non_separator_rows = [row for row in table_rows if not _TABLE_SEPARATOR_ROW.fullmatch(row)]
+        data_rows = non_separator_rows[1:] if non_separator_rows else []
+        prefix = f"report action log {block_number}" if len(starts) > 1 else "report action log"
+        for row_number, row in enumerate(data_rows, start=1):
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            action = cells[-1] if cells else ""
+            if not action.startswith(_REPORT_ACTION_LOG_ALLOWED_PREFIXES):
+                findings.append(
+                    f"{prefix} row {row_number}: unrecognized action value: {action!r}"
+                )
     return findings
 
 
@@ -751,21 +939,86 @@ def all_corpus_spec_ids(frontmatters: list[dict]) -> list[str]:
     return [str(fm.get("id", "")) for fm in frontmatters if fm.get("id")]
 
 
-def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str]]:
-    """Return checked and unchecked stable LE IDs from the exact section."""
+# BUG-023: matches a clean `(evidence: <path>)` or `(evidence: `<path>`)`
+# annotation -- the parens may contain ONLY the (optionally backtick-quoted)
+# path token, nothing else, so the reference is unambiguous and
+# machine-parseable (R1). A path with surrounding prose (e.g. an explanatory
+# aside before the closing paren) deliberately does not match.
+_EVIDENCE_REF_RE = re.compile(r"\(evidence:\s*`?([^\s`()]+)`?\s*\)")
+
+# BUG-023: template_version at/above this threshold must back every checked LE
+# item with an `(evidence: <path>)` reference that resolves to a real file.
+# Chosen as one past the current template ceiling (v10, SPEC-300-001) so that
+# no spec authored under an existing template version is retroactively broken
+# -- see R4/AC3 and the corpus-wide count reported in the completion report.
+EVIDENCE_REFERENCE_TEMPLATE_VERSION = 11
+
+
+def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str], dict[str, str | None]]:
+    """Return checked/unchecked stable LE IDs and each checked ID's evidence ref.
+
+    The evidence reference is the content of an inline ``(evidence: <path>)``
+    annotation -- possibly wrapped onto a continuation line, since long LE
+    entries commonly wrap (BUG-023). The format is inspired by the informal
+    ``(evidence: `<path>`)`` idiom already seen in some of SPEC-300-003's LE
+    items; it is a formal subset of that prose, not a full parse of it --
+    the parens must contain only the (optionally backtick-quoted) path, no
+    other prose, so an LE line with additional explanatory text inside the
+    parens, or a differently worded reference (e.g. "See `<path>`."), is
+    correctly treated as having no machine-parseable reference. Text
+    describing the whole LE item, across all its wrapped lines, is joined
+    before searching for the annotation, so it need not sit on the same
+    physical line as the checkbox. ``None`` means no clean annotation was
+    found anywhere in the item's text.
+    """
     checked: set[str] = set()
     unchecked: set[str] = set()
+    evidence: dict[str, str | None] = {}
     in_section = False
+    current_id: str | None = None
+    buffer: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_id, buffer
+        if current_id is not None:
+            text = " ".join(buffer)
+            ref_match = _EVIDENCE_REF_RE.search(text)
+            evidence[current_id] = ref_match.group(1) if ref_match else None
+        current_id = None
+        buffer = []
+
     for line in body_lines:
         if line.startswith("## "):
+            flush()
             in_section = line.strip() == "## Live Execution Checklist"
             continue
         if not in_section:
             continue
-        match = re.match(r"^\s*- \[([ xX])\]\s+\*\*(LE[1-9][0-9]*):\*\*", line)
+        match = re.match(r"^\s*- \[([ xX])\]\s+\*\*(LE[1-9][0-9]*):\*\*(.*)$", line)
         if match:
-            (checked if match.group(1).lower() == "x" else unchecked).add(match.group(2))
-    return checked, unchecked
+            flush()
+            le_id = match.group(2)
+            if match.group(1).lower() == "x":
+                checked.add(le_id)
+                current_id = le_id
+                buffer = [match.group(3)]
+            else:
+                unchecked.add(le_id)
+        elif current_id is not None and line.strip() and line[:1].isspace():
+            # Continuation line of the current (checked) LE item's own text.
+            buffer.append(line.strip())
+        else:
+            flush()
+    flush()
+    return checked, unchecked, evidence
+
+
+def _evidence_reference_exists(reference: str, spec_file: Path) -> bool:
+    """Resolve an evidence reference relative to the spec file or kit dir."""
+    if not reference or reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
+        return False
+    roots = [spec_file.parent, spec_file.parent.parent]
+    return any((root / reference).is_file() for root in roots)
 
 
 def validate_real_use_evidence(
@@ -795,7 +1048,7 @@ def validate_real_use_evidence(
     if policy not in policies:
         errors.append("real_use_evidence.policy must be required_before_done, delegated_experiment, or not_applicable")
         return errors
-    checked, unchecked = _live_execution_items(body_lines)
+    checked, unchecked, evidence_refs = _live_execution_items(body_lines)
     status = str(fm.get("status", ""))
     deferred = declaration.get("deferred", [])
     if policy == "not_applicable":
@@ -819,6 +1072,22 @@ def validate_real_use_evidence(
             errors.append("required_before_done may not contain deferred mappings")
         if status == "done" and unchecked:
             errors.append("status is 'done' but real_use_evidence requires completed live execution: " + ", ".join(sorted(unchecked)))
+        # BUG-023: a checked LE item is proof of nothing on its own -- require an
+        # evidence-artifact reference that actually exists on disk. Grandfathered
+        # by template_version so no pre-existing spec is retroactively broken
+        # (see EVIDENCE_REFERENCE_TEMPLATE_VERSION and the completion report's
+        # corpus count for AC3/R4).
+        template_version = fm.get("template_version")
+        evidence_required = isinstance(template_version, int) and template_version >= EVIDENCE_REFERENCE_TEMPLATE_VERSION
+        if status == "done" and evidence_required:
+            for le_id in sorted(checked):
+                reference = evidence_refs.get(le_id)
+                if not reference or not _evidence_reference_exists(reference, spec_file):
+                    errors.append(
+                        f"real_use_evidence: checked live item {le_id} is missing a valid "
+                        f"evidence reference (expected inline `(evidence: <path>)` pointing "
+                        f"to an existing file); found: {reference!r}"
+                    )
         return errors
     if not isinstance(deferred, list) or not deferred:
         return errors + ["delegated_experiment requires a non-empty deferred list"]
@@ -1024,8 +1293,23 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     if str(fm.get("type", "")).lower() == "questions" or _DECISION_BRIEF_HEADING.search(body):
         project_root = spec_file.parent.parent if spec_file.parent.name == "specs" else spec_file.parent
         errors.extend(validate_decision_briefs(body, project_root))
+    errors.extend(validate_report_action_log(body))
     errors.extend(validate_reuse_gate(body))
     errors.extend(validate_ac_amendments(content, spec_file))
+    errors.extend(validate_scope(fm))
+    errors.extend(validate_scope_amendments(body))
+    # R8: a ready code spec with neither scope: nor touches: silently gets
+    # the project-root default — surface that as a warning, never an error,
+    # so historical specs are not retroactively required to declare either.
+    if (
+        fm.get("status") == "ready"
+        and str(fm.get("type", "")).lower() in {"feature", "bugfix", "refactor"}
+        and fm.get("scope") is None
+        and not fm.get("touches")
+    ):
+        errors.append(
+            "WARNING: no scope: or touches: declared; the project-root default write scope will apply"
+        )
 
     # Required fields
     if "id" not in fm:
@@ -1202,6 +1486,25 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                 if not isinstance(waiver.get("reason"), str) or not waiver["reason"].strip():
                     errors.append(f"{prefix}.reason is required and must be a non-empty string")
 
+    # SPEC-307 R1: optional `execution:` model-override declaration. Absent
+    # means "parent default" — no error. When present, only `worker_model`/
+    # `verifier_model` are recognized, each a non-empty string; anything else
+    # (unknown key or non-string value) is a WARN at draft and an ERROR at
+    # ready+, matching the nfrs/promotion_gap severity-by-status pattern above.
+    execution = fm.get("execution")
+    if execution is not None:
+        if not isinstance(execution, dict):
+            message = "execution must be a mapping with worker_model and/or verifier_model"
+            errors.append(f"WARNING: {message}" if _spec_status == "draft" else message)
+        else:
+            for key, value in execution.items():
+                if key not in {"worker_model", "verifier_model"}:
+                    message = f"execution has unknown key: {key!r} (only worker_model, verifier_model are recognized)"
+                    errors.append(f"WARNING: {message}" if _spec_status == "draft" else message)
+                elif not isinstance(value, str) or not value.strip():
+                    message = f"execution.{key} must be a non-empty string"
+                    errors.append(f"WARNING: {message}" if _spec_status == "draft" else message)
+
     # SPEC-065: nfrs: field required for feature/bugfix/refactor specs
     if _spec_type in _NFRS_REQUIRED_TYPES and "nfrs" not in fm:
         if _spec_status == "ready":
@@ -1274,6 +1577,26 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
         )
         errors.append(msg if _prose_is_error else f"WARNING: {msg}")
 
+    # SPEC-294 AC1: a deploy_environment: naming an undeclared environment
+    # is a named validation finding. Only meaningful when the project has
+    # opted into a deployment: block at all (R2 zero-behavior-change).
+    deploy_environment = fm.get("deploy_environment")
+    if deploy_environment is not None:
+        try:
+            _deploy_cfg_raw = config_path.read_text(encoding="utf-8")
+            _deploy_cfg = {}
+            for _document in yaml.safe_load_all(_deploy_cfg_raw):
+                if isinstance(_document, dict):
+                    _deploy_cfg.update(_document)
+        except (OSError, yaml.YAMLError):
+            _deploy_cfg = {}
+        if "deployment" in _deploy_cfg:
+            _on_completion, _deploy_findings = resolve_deployment_policy(
+                _deploy_cfg, str(deploy_environment)
+            )
+            for finding in _deploy_findings:
+                errors.append(f"deploy_environment: {finding}")
+
     return errors
 
 
@@ -1334,12 +1657,15 @@ def validate_config_file(config_path: Path) -> list:
         return findings  # not a mapping — other validators handle this
 
     override = cfg.get("board_column_defaults")
-    if override is None:
-        return findings  # absent section — nothing to check
+    if override is not None:
+        problems = _check_column_override(override)
+        for problem in problems:
+            findings.append(f"WARNING: board_column_defaults: {problem}")
 
-    problems = _check_column_override(override)
-    for problem in problems:
-        findings.append(f"WARNING: board_column_defaults: {problem}")
+    # SPEC-294 R1/R5: deployment: is a merge-safety gate, not a UI
+    # preference, so unlike board_column_defaults its findings are errors
+    # (no WARNING: prefix) -- they must not be silently non-fatal.
+    findings.extend(deployment_block_findings(cfg))
 
     return findings
 
@@ -1546,17 +1872,53 @@ def main(argv: list[str] | None = None) -> int:
     if any(arg in {"--help", "-h"} for arg in argv):
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
-            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]"
+            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]\n"
+            "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]"
         )
         print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
         return 0
     if not argv:
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [--format json|text] "
-            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]",
+            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]\n"
+            "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]",
             file=sys.stderr,
         )
         return 1
+
+    # SPEC-317 R3: a report file is not a spec file — validate_file() expects
+    # spec frontmatter, which reports don't carry. This flag routes to
+    # validate_report_headings() instead of the positional spec dispatch
+    # below, on request, never implicitly.
+    if "--check-report-headings" in argv:
+        idx = argv.index("--check-report-headings")
+        if idx + 1 >= len(argv):
+            print("Error: --check-report-headings requires a path", file=sys.stderr)
+            return 1
+        fmt_idx = argv.index("--format") if "--format" in argv else -1
+        report_fmt = "json" if fmt_idx != -1 and fmt_idx + 1 < len(argv) and argv[fmt_idx + 1] == "json" else "text"
+        target = Path(argv[idx + 1])
+        if target.is_dir():
+            # Top-level only, matching the canonical `YYYY-MM-DD-nightshift-
+            # report*.md` filename shape. Does not recurse into subdirectory
+            # reports (e.g. `reports/SPEC-248/2026-08-28-nightshift-report.md`).
+            report_paths = sorted(target.glob("*-nightshift-report*.md"))
+        elif target.is_file():
+            report_paths = [target]
+        else:
+            print(f"Error: {target} does not exist", file=sys.stderr)
+            return 1
+        report_results = {str(p): validate_report_headings(p) for p in report_paths}
+        has_report_errors = any(errors for errors in report_results.values())
+        if report_fmt == "json":
+            print(json.dumps({"results": report_results}, indent=2, ensure_ascii=False))
+        else:
+            for path_str, errors in report_results.items():
+                status = "OK" if not errors else "FAIL"
+                print(f"[{status}] {path_str}")
+                for error in errors:
+                    print(f"  - {error}")
+        return 1 if has_report_errors else 0
 
     fmt = "text"
     show_promotion_gap_summary = False

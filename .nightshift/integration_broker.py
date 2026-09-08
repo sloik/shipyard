@@ -268,6 +268,32 @@ class IntegrationBrokerFeedbackAdapter:
         )
         accepted = spec_id in result.accepted
         applied_revision = decision.applied_revision if decision and accepted else None
+
+        # SPEC-294 R3/Q5: a hold for pending deployment authorization is not
+        # a terminal adapter failure -- it is an expected, resumable wait.
+        # Leaving the receipt at "prepared" (rather than CAS-ing it to
+        # "terminal") is what lets a later execute_effect call -- after a
+        # human authorization artifact lands -- re-enter integrate_completed
+        # and actually merge, keyed by the same run_id/idempotency_key
+        # (DurableIntegrationReceiptAdapter). CAS-ing this to terminal here
+        # would permanently lock the candidate out of ever merging.
+        if (
+            decision is not None
+            and decision.outcome == "held"
+            and decision.overlap_kind == "authorization_required"
+        ):
+            return NormalizedFeedbackEvent(
+                key="integration-result:"
+                + hashlib.sha256(idempotency_key.encode()).hexdigest()[:24],
+                kind="integration_result",
+                role="parent",
+                outcome="stalled",
+                head=str(payload.get("head") or ""),
+                applied_revision=None,
+                reason="external_authority",
+                next_action="provide_external_input",
+            )
+
         outcome = "completed" if accepted and applied_revision == revision else "failed"
         event = NormalizedFeedbackEvent(
             key="integration-result:"

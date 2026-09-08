@@ -72,7 +72,13 @@ class RepositoryPlan:
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
 SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
-CANONICAL_SUITE_TIMEOUT_S = 600
+# Bounds one canonical-suite step so a hung release cannot wait forever. The
+# value tracks a real measurement: it must clear the suite's measured healthy
+# runtime with roughly as much room again to spare, which is the relation
+# test_canonical_suite_timeout_is_a_preflight_failure asserts. 600 was set
+# against a 305.25s suite; by 3.17.0 a green suite measured 996.10s, so the
+# guard meant to catch a hang was refusing every healthy release (BUG-320).
+CANONICAL_SUITE_TIMEOUT_S = 2100
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
 
 
@@ -269,9 +275,15 @@ def _suite_argv(metadata: dict, phase: str) -> list[str]:
 
 
 def _project_owned_managed_path(path: str) -> bool:
-    """Keep generated project evidence private while admitting the schema."""
+    """Keep generated project evidence private while admitting the schema.
+
+    ``specs/_TEMPLATE.md`` (SPEC-300-001) is the one managed-kit exception
+    under ``specs/`` — a template, not project-generated spec content, so it
+    joins ``metrics/_SCHEMA.md`` as the other named exemption from the
+    project-owned ``specs``/``metrics``/``knowledge`` boundary.
+    """
     parts = Path(path).parts
-    if path == "metrics/_SCHEMA.md":
+    if path in {"metrics/_SCHEMA.md", "specs/_TEMPLATE.md"}:
         return False
     return bool({"specs", "metrics", "knowledge"}.intersection(parts))
 

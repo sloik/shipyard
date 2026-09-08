@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
 from spec_frontmatter import promotion_transition_error
+import deployment_tiers
 import lifecycle
 import spec_artifacts
 
@@ -84,6 +86,11 @@ def _registry_field_help() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Cache layer
 # ---------------------------------------------------------------------------
+
+# SPEC-303: resolved once at import. `Path(__file__).resolve()` walks and stats
+# every path component, which is not free on a synced filesystem, and this was
+# being recomputed per corpus-signature call and per spec with a release handoff.
+_RELEASE_HANDOFFS_DIR = Path(__file__).resolve().parent / "release-handoffs"
 
 _FRONTMATTER_RECONCILE_STATUSES = frozenset({
     "planned", "draft", "ready", "in_progress", "blocked",
@@ -210,9 +217,29 @@ def _should_reconcile_frontmatter_status(
     file_mtime: float,
     spec_path: Path | None = None,
 ) -> bool:
-    """Whether a newer spec-file status should repair a stale durable row."""
+    """Whether a newer file status may repair a durable row.
+
+    A durable row already at a terminal status (`done`/`blocked`) is
+    authoritative and immutable via frontmatter — that is SPEC-296-008's
+    original protection, and BUG-313 R2 requires it survive intact: a
+    terminal durable row must never be silently overwritten by a later,
+    different frontmatter status.
+
+    A durable row that is still *non-terminal*, however, may be
+    forward-reconciled by a newer, terminal (`done`/`blocked`) frontmatter
+    status. Nightshift's documented interactive/manual coordinator workflow
+    (SKILL.md's finalization steps: edit frontmatter, `chore: mark <id>
+    done` commit) never itself calls `nightshift_coordinator.py`'s
+    automated terminal-decision projector — without this forward reconcile
+    the durable store would freeze at its last non-terminal value forever
+    (BUG-313). Once this repair fires it writes the terminal status back to
+    the durable store (see `_effective_status`), so the row itself becomes
+    terminal and the guard above then protects it from any further changes.
+    """
     durable_status = str(durable_state.get("status", ""))
     if durable_status == frontmatter_status:
+        return False
+    if durable_status in {"done", "blocked"}:
         return False
     if frontmatter_status not in _FRONTMATTER_RECONCILE_STATUSES:
         return False
@@ -301,6 +328,15 @@ class SpecCache:
         self._entries: dict[str, CacheEntry] = {}  # keyed by spec id
         self._dependency_resolver = DependencyRegistryResolver(specs_dir)
         self._dependency_resolution = DependencyResolution()
+        # SPEC-303 R5: handlers run in Starlette's threadpool, so entry
+        # mutation and status writes are genuinely concurrent. Reentrant
+        # because the public methods call each other.
+        self._lock = threading.RLock()
+        # SPEC-303 R6: the last corpus projection, and the signature of every
+        # input it was derived from. A single-spec fetch reads this instead of
+        # recomputing the corpus; a changed input invalidates it.
+        self._projection: dict[str, dict] = {}
+        self._projection_signature: tuple | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -309,16 +345,97 @@ class SpecCache:
     def warm(self) -> None:
         """Load all Tier 1 frontmatter at startup."""
         def _warm() -> None:
-            self._dir_mtime = os.stat(self._specs_dir).st_mtime
-            with os.scandir(self._specs_dir) as entries:
-                for entry in entries:
-                    if entry.name.endswith(".md"):
-                        self._load_entry(Path(entry.path), entry.stat().st_mtime)
+            with self._lock:
+                self._dir_mtime = os.stat(self._specs_dir).st_mtime
+                self._invalidate_projection()
+                with os.scandir(self._specs_dir) as entries:
+                    for entry in entries:
+                        if entry.name.endswith(".md"):
+                            self._load_entry(Path(entry.path), entry.stat().st_mtime)
         performance_registry.measure("startup.cache_warm", _warm)
+
+    def get_projected(self, spec_id: str) -> Optional[dict]:
+        """Return one spec's public frontmatter without a corpus pass (SPEC-303).
+
+        The board polls `/api/specs` every 10 seconds, so a click almost always
+        lands on an unchanged corpus whose projection is already derived. Only a
+        genuinely changed input — a spec file, the durable status store, the
+        release-handoff or authorization artifacts — falls through to the full
+        pass. That keeps the cheap path from ever serving a stale value: it is a
+        memo keyed on its own inputs, not a time-based cache.
+        """
+        with self._lock:
+            if self._projection_signature is not None:
+                if self._corpus_signature() == self._projection_signature:
+                    projected = self._projection.get(spec_id)
+                    return dict(projected) if projected is not None else None
+            for item in self.get_all_frontmatter():
+                if item.get("id") == spec_id:
+                    return dict(item)
+            return None
+
+    def _invalidate_projection(self) -> None:
+        self._projection = {}
+        self._projection_signature = None
+
+    def _corpus_signature(self) -> tuple:
+        """Every input the corpus projection is derived from, cheaply.
+
+        Spec files are the obvious input; the durable status store is the one
+        that is easy to miss, because a kickoff writes a status there without
+        touching any file. Artifact directories read during projection
+        (`release-handoffs/`, `reports/_wip/`) are included for the same reason.
+        """
+        try:
+            with os.scandir(self._specs_dir) as iterator:
+                files = tuple(sorted(
+                    (entry.name, entry.stat().st_mtime)
+                    for entry in iterator
+                    if entry.name.endswith(".md")
+                ))
+        except OSError:
+            return ()
+        parent = Path(self._specs_dir).parent
+        # Directory mtime is NOT enough for these two: rewriting an existing
+        # file inside a directory does not change the directory's mtime, and
+        # both an authorization artifact and a release-handoff record can be
+        # updated in place. Stamp their members instead.
+        artifact_dirs = [
+            _RELEASE_HANDOFFS_DIR,
+            parent / "reports" / "_wip",
+        ]
+        artifacts = []
+        for directory in artifact_dirs:
+            try:
+                with os.scandir(directory) as iterator:
+                    artifacts.append(tuple(sorted(
+                        (entry.name, entry.stat().st_mtime) for entry in iterator
+                    )))
+            except OSError:
+                artifacts.append(())
+        # The durable status store is the input with no file of its own in the
+        # corpus: a kickoff writes a status here without touching any spec file.
+        # In WAL mode the write lands in `-wal`, so both are stamped, with size
+        # alongside mtime because a same-tick append must still invalidate.
+        stamps = []
+        db_path = getattr(self._status_store, "db_path", None)
+        if db_path is not None:
+            for path in (Path(db_path), Path(str(db_path) + "-wal")):
+                try:
+                    stat = os.stat(path)
+                    stamps.append((stat.st_mtime, stat.st_size))
+                except OSError:
+                    stamps.append(None)
+        return (files, tuple(artifacts), tuple(stamps))
 
     def get_all_frontmatter(self) -> list[dict]:
         """Return all frontmatter dicts, checking mtime for staleness."""
+        with self._lock:
+            return self._get_all_frontmatter_locked()
+
+    def _get_all_frontmatter_locked(self) -> list[dict]:
         start = time.monotonic()
+        signature = self._corpus_signature()
         dir_m = performance_registry.measure(
             "cache.directory_stat", lambda: os.stat(self._specs_dir).st_mtime
         )
@@ -346,9 +463,17 @@ class SpecCache:
 
         # Return copies with internal keys stripped, plus observable readiness
         # and admission evidence. Stored lifecycle status remains untouched.
+        # SPEC-303 R7: read every spec's durable status in one query rather than
+        # one connection per spec, which was 88% of this method's cost.
+        states = self._durable_states(
+            [str(e.frontmatter.get("id")) for e in self._entries.values() if e.frontmatter.get("id")]
+        )
         public = performance_registry.measure(
             "cache.frontmatter_public_assembly",
-            lambda: [self._public_fm(e.frontmatter, e.mtime) for e in self._entries.values()],
+            lambda: [
+                self._public_fm(e.frontmatter, e.mtime, states=states)
+                for e in self._entries.values()
+            ],
         )
         by_id = {str(item.get("id")): item for item in public if item.get("id")}
         dependency_ids = {
@@ -371,6 +496,10 @@ class SpecCache:
         except ImportError:
             derive_admission = None
         if derive_admission is not None:
+            _reports_wip_dir = spec_artifacts.reports_root_for_spec_path(
+                Path(self._specs_dir) / "placeholder.md"
+            ) / "_wip"
+
             def _derive_admission() -> None:
                 for item in public:
                     if item.get("status") in {"done", "superseded", "active", "retired"}:
@@ -394,14 +523,52 @@ class SpecCache:
                     ]
                     item["run_state"] = admission.state
                     item["run_state_reason"] = admission.reason
+                    if item.get("status") == "in_progress":
+                        # SPEC-294 R3: a completed, verified candidate held
+                        # pre-merge for deployment authorization is a
+                        # distinct derived run state -- never blocked, never
+                        # done. Read-only projection of the integration
+                        # queue's own durable evidence; never the merge gate
+                        # itself (that is check_candidate_authorization at
+                        # merge time).
+                        held, reason, candidate_sha = deployment_tiers.pending_authorization_hold(
+                            _reports_wip_dir, str(item.get("id"))
+                        )
+                        if held:
+                            item["run_state"] = "awaiting_authorization"
+                            item["run_state_reason"] = reason
+                            # SPEC-294-001-001 R2: read-only surface of the
+                            # persisted candidate SHA (R1) for the approve
+                            # control's prefill (R3). Never authoritative --
+                            # the merge gate re-checks the live ref itself.
+                            item["run_state_candidate_sha"] = candidate_sha
                     item["_help"] = dict(help_text)
 
             performance_registry.measure("cache.admission_derivation", _derive_admission)
+        # SPEC-303 R6: memoize the finished projection against the signature of
+        # the inputs it came from, so a single-spec fetch can reuse it.
+        self._projection = {
+            str(item.get("id")): item for item in public if item.get("id")
+        }
+        self._projection_signature = signature
         performance_registry.record("cache.frontmatter", time.monotonic() - start)
-        return public
+        return [dict(item) for item in public]
+
+    def _durable_states(self, spec_ids: list[str]) -> Optional[dict]:
+        """Batch-read durable status, or None when there is no store."""
+        if self._status_store is None or not spec_ids:
+            return None
+        batch = getattr(self._status_store, "get_states", None)
+        if batch is None:  # a store predating SPEC-303 still works, just slower
+            return None
+        return batch(spec_ids)
 
     def get_body(self, spec_id: str, *, purpose: str = "selected") -> Optional[str]:
         """Return body markdown for a spec, loading lazily."""
+        with self._lock:
+            return self._get_body_locked(spec_id, purpose=purpose)
+
+    def _get_body_locked(self, spec_id: str, *, purpose: str = "selected") -> Optional[str]:
         entry = self._entries.get(spec_id)
         if entry is None:
             return None
@@ -420,12 +587,17 @@ class SpecCache:
 
     def get_path(self, spec_id: str) -> Optional[Path]:
         """Return the source file path for a spec."""
-        self.get_all_frontmatter()
-        entry = self._entries.get(spec_id)
-        return entry.path if entry else None
+        with self._lock:
+            self.get_all_frontmatter()
+            entry = self._entries.get(spec_id)
+            return entry.path if entry else None
 
     def search(self, q: str) -> list[dict]:
         """In-memory case-insensitive search over frontmatter fields + body."""
+        with self._lock:
+            return self._search_locked(q)
+
+    def _search_locked(self, q: str) -> list[dict]:
         self.get_all_frontmatter()  # ensure Tier 1 is fresh
 
         # Warm all bodies for changed/new files
@@ -474,6 +646,12 @@ class SpecCache:
         every successful transition, whether or not a durable store is
         configured, so no deployment mode is left without R3's durable trace.
         """
+        with self._lock:
+            self._update_status_locked(spec_id, status, reason=reason)
+
+    def _update_status_locked(
+        self, spec_id: str, status: str, *, reason: str | None = None
+    ) -> None:
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
@@ -533,11 +711,35 @@ class SpecCache:
 
     def get_artifacts(self, spec_id: str) -> list[dict]:
         """Return the SPEC-291 artifact index entries for one spec (R5)."""
+        with self._lock:
+            entry = self._entries.get(spec_id)
+            if entry is None:
+                raise KeyError(f"spec not found: {spec_id}")
+            path = entry.path
+        return spec_artifacts.read_index(
+            spec_artifacts.reports_root_for_spec_path(path), spec_id
+        )
+
+    def record_deployment_authorization(
+        self, spec_id: str, *, actor: str, sha: str, environment: str,
+    ) -> dict:
+        """SPEC-294 R1/R4 (Q1/Q2): the board UI approve entrypoint.
+
+        The board process is the same single durable-writer boundary already
+        used by ``update_status``/``get_artifacts`` above -- this adds no new
+        writer, dispatch path, or lifecycle owner (R6, NFR-001 I2). It calls
+        the exact same ``spec_artifacts.write_artifact`` path every other
+        SPEC-291 artifact uses (via ``deployment_tiers.record_authorization``),
+        with ``actor`` carried as data identifying the human who approved --
+        never a git identity. An agent-identified actor or a malformed SHA is
+        refused before anything is written (``AuthorizationRefused``).
+        """
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
-        return spec_artifacts.read_index(
-            spec_artifacts.reports_root_for_spec_path(entry.path), spec_id
+        return deployment_tiers.record_authorization(
+            spec_artifacts.reports_root_for_spec_path(entry.path), spec_id,
+            actor=actor, sha=sha, environment=environment,
         )
 
     def _update_status_file(self, entry: CacheEntry, status: str) -> None:
@@ -626,24 +828,28 @@ class SpecCache:
     def set_transfer_refusal(self, spec_id: str, reason: str) -> None:
         """Public entry point for client-pre-check / network-failure refusals
         that never reach ``update_status`` (R1 client-side path, R6)."""
-        entry = self._entries.get(spec_id)
-        if entry is None:
-            raise KeyError(f"spec not found: {spec_id}")
-        self._record_transfer_refusal(entry, reason)
+        with self._lock:
+            entry = self._entries.get(spec_id)
+            if entry is None:
+                raise KeyError(f"spec not found: {spec_id}")
+            self._record_transfer_refusal(entry, reason)
 
     def clear_transfer_refusal(self, spec_id: str) -> None:
         """Public entry point for the panel's manual dismiss control (R3)."""
-        entry = self._entries.get(spec_id)
-        if entry is None:
-            raise KeyError(f"spec not found: {spec_id}")
-        self._clear_transfer_refusal(entry)
+        with self._lock:
+            entry = self._entries.get(spec_id)
+            if entry is None:
+                raise KeyError(f"spec not found: {spec_id}")
+            self._clear_transfer_refusal(entry)
 
     def force_refresh(self) -> None:
         """Wipe cache and re-warm all frontmatter from disk."""
-        self._entries.clear()
-        self._dir_mtime = 0.0
-        self._dependency_resolver.invalidate()
-        self.warm()
+        with self._lock:
+            self._entries.clear()
+            self._dir_mtime = 0.0
+            self._invalidate_projection()
+            self._dependency_resolver.invalidate()
+            self.warm()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -680,6 +886,7 @@ class SpecCache:
         entry = CacheEntry(path=path, mtime=mtime, frontmatter=fm, body_md=None)
         # We don't store body in Tier 1 — only load it on demand
         self._entries[spec_id] = entry
+        self._invalidate_projection()
 
     def _reload_entry(self, entry: CacheEntry, mtime: float) -> None:
         """Re-parse a changed file in-place."""
@@ -689,6 +896,7 @@ class SpecCache:
         entry.mtime = mtime
         entry.frontmatter = fm
         entry.body_md = None  # Invalidate Tier 2 on file change
+        self._invalidate_projection()
         if new_id and new_id != old_id:
             # ID changed — re-key
             if old_id in self._entries:
@@ -703,13 +911,13 @@ class SpecCache:
             return ""
         return parts[2].lstrip("\n")
 
-    def _public_fm(self, fm: dict, mtime: float = 0.0) -> dict:
+    def _public_fm(self, fm: dict, mtime: float = 0.0, *, states: Optional[dict] = None) -> dict:
         """Return frontmatter dict without internal _body key, plus _mtime."""
         out = {k: v for k, v in fm.items() if k != "_body"}
-        out["status"] = self._effective_status(fm, mtime)
+        out["status"] = self._effective_status(fm, mtime, states=states)
         declaration = fm.get("release_handoff")
         if isinstance(declaration, dict) and declaration.get("impact") == "required":
-            artifact = Path(__file__).resolve().parent / "release-handoffs" / f"{fm.get('id', '')}.json"
+            artifact = _RELEASE_HANDOFFS_DIR / f"{fm.get('id', '')}.json"
             try:
                 out["release_handoff_state"] = json.loads(artifact.read_text()).get("status", "missing")
             except (OSError, json.JSONDecodeError):
@@ -718,18 +926,25 @@ class SpecCache:
             out["_mtime"] = mtime
         return out
 
-    def _effective_status(self, fm: dict, file_mtime: float = 0.0) -> str:
+    def _effective_status(
+        self, fm: dict, file_mtime: float = 0.0, *, states: Optional[dict] = None
+    ) -> str:
         spec_id = fm.get("id")
         file_status = str(fm.get("status", "draft"))
         if self._status_store is not None and spec_id:
-            state = self._status_store.get_state(spec_id)
+            # SPEC-303 R7: `states` is one batch read for the whole corpus;
+            # without it this falls back to the per-spec query.
+            state = (
+                states.get(spec_id) if states is not None
+                else self._status_store.get_state(spec_id)
+            )
             if state and state.get("status"):
                 if _should_reconcile_frontmatter_status(file_status, state, file_mtime, self._entries[spec_id].path):
                     self._status_store.update_state(
                         spec_id,
                         file_status,
                         source="frontmatter-reconcile",
-                        note="terminal spec frontmatter was newer than durable transient status",
+                        note="newer frontmatter status repaired stale durable status",
                         payload={"file_mtime": file_mtime},
                     )
                     return file_status
@@ -1207,7 +1422,7 @@ def _save_read_set(read_set: set[str]) -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
+def index() -> HTMLResponse:
     html = HTML_TEMPLATE
     html = html.replace("__PROJECT__", project_name)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
@@ -1246,7 +1461,7 @@ def _db_reachable(db_path: Optional[Path]) -> bool:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+def health() -> dict:
     """Operational health — never returns 5xx itself; verdict is in the body.
 
     Surfaces the FD-exhaustion bug-class (SPEC-121) BEFORE it causes a 500:
@@ -1308,7 +1523,7 @@ def _health_payload() -> dict:
 
 
 @app.get("/api/performance")
-async def get_performance() -> dict:
+def get_performance() -> dict:
     """On-demand, aggregate-only performance diagnosis for this process."""
     return performance_registry.summary()
 
@@ -1322,7 +1537,7 @@ _CLIENT_PERFORMANCE_OPERATIONS = frozenset({
 
 
 @app.post("/api/performance/client")
-async def record_client_performance(payload: dict) -> dict:
+def record_client_performance(payload: dict) -> dict:
     """Accept a best-effort browser duration without making UI paths depend on it."""
     operation = payload.get("operation")
     duration_ms = payload.get("duration_ms")
@@ -1343,18 +1558,18 @@ async def record_client_performance(payload: dict) -> dict:
 
 
 @app.get("/api/specs")
-async def get_specs() -> list[dict]:
+def get_specs() -> list[dict]:
     return cache.get_all_frontmatter()
 
 
 @app.get("/api/statuses")
-async def get_statuses() -> list[dict]:
+def get_statuses() -> list[dict]:
     """Canonical board status columns sourced from Nightshift definitions."""
     return STATUS_COLUMNS
 
 
 @app.get("/api/vocabulary")
-async def get_vocabulary() -> dict:
+def get_vocabulary() -> dict:
     """Versioned registry export for board/CLI/documentation consumers."""
     try:
         from vocabulary import load_registry
@@ -1365,7 +1580,7 @@ async def get_vocabulary() -> dict:
 
 
 @app.get("/api/loop-observability")
-async def get_loop_observability() -> dict:
+def get_loop_observability() -> dict:
     """Operational loop-health metrics from recorded run history."""
     if compute_loop_observability is None:
         raise HTTPException(status_code=503, detail="loop observability unavailable")
@@ -1373,7 +1588,7 @@ async def get_loop_observability() -> dict:
 
 
 @app.get("/api/experiments")
-async def get_experiments() -> dict:
+def get_experiments() -> dict:
     """Return only the sanitized, rebuildable experiment projection."""
     if reports_dir is None:
         return {"schema_version": 1, "experiments": []}
@@ -1396,9 +1611,11 @@ async def get_experiments() -> dict:
 
 
 @app.get("/api/spec/{spec_id}")
-async def get_spec(spec_id: str) -> JSONResponse:
-    all_fm = cache.get_all_frontmatter()
-    fm = next((f for f in all_fm if f.get("id") == spec_id), None)
+def get_spec(spec_id: str) -> JSONResponse:
+    # SPEC-303 R6: one spec, not a corpus pass. `get_projected` reuses the
+    # projection the last /api/specs poll already derived when no input has
+    # changed, and falls through to the full pass when one has.
+    fm = cache.get_projected(spec_id)
     if not fm:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     body = cache.get_body(spec_id)
@@ -1414,7 +1631,7 @@ async def get_spec(spec_id: str) -> JSONResponse:
 
 
 @app.put("/api/spec/{spec_id}/status")
-async def update_status(spec_id: str, payload: dict) -> dict:
+def update_status(spec_id: str, payload: dict) -> dict:
     status = payload.get("status")
     if not status:
         raise HTTPException(status_code=400, detail="status required")
@@ -1431,7 +1648,7 @@ async def update_status(spec_id: str, payload: dict) -> dict:
 
 
 @app.post("/api/spec/{spec_id}/transfer-refusal")
-async def record_transfer_refusal(spec_id: str, payload: dict) -> dict:
+def record_transfer_refusal(spec_id: str, payload: dict) -> dict:
     """Persist a status-transfer refusal that never reached ``update_status``:
     a client-side pre-check (SPEC-290 R1) or a thrown network failure with no
     ``Response`` to read a server detail from (R6). The generic toast fallback
@@ -1447,7 +1664,7 @@ async def record_transfer_refusal(spec_id: str, payload: dict) -> dict:
 
 
 @app.delete("/api/spec/{spec_id}/transfer-refusal")
-async def dismiss_transfer_refusal(spec_id: str) -> dict:
+def dismiss_transfer_refusal(spec_id: str) -> dict:
     """Manual dismiss (SPEC-290 R3): clear a persisted refusal without
     requiring a subsequent successful status write."""
     try:
@@ -1457,8 +1674,44 @@ async def dismiss_transfer_refusal(spec_id: str) -> dict:
     return {"ok": True}
 
 
+@app.post("/api/spec/{spec_id}/deployment-authorization")
+def record_deployment_authorization(spec_id: str, payload: dict) -> dict:
+    """SPEC-294 R1 (Q1): the board UI approve/reject entrypoint for a
+    candidate held ``awaiting_authorization`` in an ``authorize`` deployment
+    environment. ``action: "approve"`` durably records a SPEC-291 ``decision``
+    artifact binding ``actor`` to the exact ``sha``; the integration queue's
+    authorization gate picks it up on its next check. ``action: "reject"``
+    is acknowledged but writes nothing -- the hold simply stands, exactly as
+    it did before the reject action, since there is nothing durable to
+    invalidate (R5: absence is never treated as authorized).
+    """
+    action = payload.get("action")
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'")
+    if action == "reject":
+        return {"ok": True, "action": "reject"}
+    actor = payload.get("actor")
+    sha = payload.get("sha")
+    environment = payload.get("environment")
+    if not isinstance(actor, str) or not actor.strip():
+        raise HTTPException(status_code=400, detail="actor required")
+    if not isinstance(sha, str) or not sha.strip():
+        raise HTTPException(status_code=400, detail="sha required")
+    if not isinstance(environment, str) or not environment.strip():
+        raise HTTPException(status_code=400, detail="environment required")
+    try:
+        entry = cache.record_deployment_authorization(
+            spec_id, actor=actor, sha=sha, environment=environment,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    except deployment_tiers.AuthorizationRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "action": "approve", "artifact": entry}
+
+
 @app.get("/api/spec/{spec_id}/status/history")
-async def get_status_history(spec_id: str) -> dict:
+def get_status_history(spec_id: str) -> dict:
     if not any(f.get("id") == spec_id for f in cache.get_all_frontmatter()):
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     store = getattr(cache, "_status_store", None)
@@ -1468,21 +1721,22 @@ async def get_status_history(spec_id: str) -> dict:
 
 
 @app.get("/api/search")
-async def search(q: str = "") -> list[dict]:
+def search(q: str = "") -> list[dict]:
     if not q:
         return []
     return cache.search(q)
 
 
 @app.get("/api/graph")
-async def graph() -> dict:
+def graph() -> dict:
     specs = cache.get_all_frontmatter()
     return _build_graph_data(specs, cache._dependency_resolution)
 
 
 @app.post("/api/refresh")
-async def refresh() -> dict:
+def refresh() -> dict:
     cache.force_refresh()
+    reset_worktree_status_cache()
     return {"count": len(cache.get_all_frontmatter())}
 
 
@@ -1616,7 +1870,7 @@ def _open_in_vscode(path: Path) -> dict:
 
 
 @app.get("/api/reports")
-async def get_reports() -> list[dict]:
+def get_reports() -> list[dict]:
     """List every Markdown file inside any `reports/` directory in the project,
     not just `.nightshift/reports/`. Agents tend to drop reports next to the
     artifact they reviewed (e.g. `App/<Package>/reports/...`)."""
@@ -1647,14 +1901,14 @@ async def get_reports() -> list[dict]:
 
 
 @app.get("/api/report/{filename:path}")
-async def get_report(filename: str) -> dict:
+def get_report(filename: str) -> dict:
     """Read a single report by its project-relative path (slashes allowed)."""
     _, candidate = _resolve_report_path(filename)
     return {"filename": filename, "content": candidate.read_text(encoding="utf-8")}
 
 
 @app.post("/api/open/spec/{spec_id}")
-async def open_spec_in_vscode(spec_id: str) -> dict:
+def open_spec_in_vscode(spec_id: str) -> dict:
     path = cache.get_path(spec_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
@@ -1662,13 +1916,51 @@ async def open_spec_in_vscode(spec_id: str) -> dict:
 
 
 @app.post("/api/open/report/{filename:path}")
-async def open_report_in_vscode(filename: str) -> dict:
+def open_report_in_vscode(filename: str) -> dict:
     _, candidate = _resolve_report_path(filename)
     return _open_in_vscode(candidate)
 
 
+# SPEC-303 R8: `/api/worktree-status` is polled every 10 seconds and ran up to
+# three `git` subprocesses per registered worktree — 3.7-8.1 s measured against
+# 70 registered worktrees. The answer only changes when the worktree listing,
+# one of their spec files, or main's own statuses change, so it is memoized
+# against exactly those inputs. A repeat poll on an unchanged repository costs
+# one subprocess (the listing) regardless of how many worktrees exist.
+_worktree_status_cache: dict = {"signature": None, "value": None}
+_worktree_status_lock = threading.Lock()
+
+
+def reset_worktree_status_cache() -> None:
+    """Drop the memo. Exposed for tests and for `/api/refresh`."""
+    with _worktree_status_lock:
+        _worktree_status_cache["signature"] = None
+        _worktree_status_cache["value"] = None
+
+
+def _worktree_specs_signature(worktrees: list[dict], rel_specs: Path) -> tuple:
+    """Spec-file mtimes across every worktree — no subprocess, no file read."""
+    stamps = []
+    for wt in worktrees:
+        wt_path = wt.get("worktree", "")
+        if not wt_path:
+            continue
+        specs_dir = Path(wt_path) / rel_specs
+        try:
+            with os.scandir(specs_dir) as iterator:
+                files = tuple(sorted(
+                    (entry.name, entry.stat().st_mtime)
+                    for entry in iterator
+                    if entry.name.endswith(".md")
+                ))
+        except OSError:
+            files = ()
+        stamps.append((wt_path, files))
+    return tuple(stamps)
+
+
 @app.get("/api/worktree-status")
-async def get_worktree_status() -> dict:
+def get_worktree_status() -> dict:
     """For each spec, report any worktree (other than the board's working tree)
     where the spec has a different `status:` than what the board sees on main.
 
@@ -1711,6 +2003,17 @@ async def get_worktree_status() -> dict:
     out: dict[str, list[dict]] = {}
     rel_specs = cur_specs_dir.relative_to(project_root)  # e.g. ".nightshift/specs"
     rel_specs_str = str(rel_specs) + "/"
+
+    # SPEC-303 R8: everything the answer depends on, gathered without spawning
+    # a single further subprocess. Unchanged inputs return the memo.
+    signature = (
+        result.stdout,
+        _worktree_specs_signature(worktrees, rel_specs),
+        tuple(sorted(main_statuses.items())),
+    )
+    with _worktree_status_lock:
+        if _worktree_status_cache["signature"] == signature:
+            return dict(_worktree_status_cache["value"] or {})
     for wt in worktrees:
         wt_path = wt.get("worktree", "")
         if not wt_path or os.path.realpath(wt_path) == os.path.realpath(main_path):
@@ -1776,11 +2079,14 @@ async def get_worktree_status() -> dict:
                     "status": wt_status,
                     "path": wt_path,
                 })
-    return out
+    with _worktree_status_lock:
+        _worktree_status_cache["signature"] = signature
+        _worktree_status_cache["value"] = out
+    return dict(out)
 
 
 @app.post("/api/reports/read")
-async def mark_report_read(payload: dict) -> dict:
+def mark_report_read(payload: dict) -> dict:
     filename = payload.get("filename", "")
     if not filename:
         raise HTTPException(status_code=400, detail="filename required")
@@ -1791,7 +2097,7 @@ async def mark_report_read(payload: dict) -> dict:
 
 
 @app.post("/api/reports/read-all")
-async def mark_all_reports_read() -> dict:
+def mark_all_reports_read() -> dict:
     root = _project_root_for_reports()
     if root is None:
         raise HTTPException(status_code=503, detail="reports not configured")
@@ -2487,6 +2793,58 @@ body {
 #panel-status-select[data-status="superseded"]  { border-left-color: var(--c-superseded); }
 #panel-status-select[data-status="retired"]     { border-left-color: var(--c-retired); }
 
+/* SPEC-294-001: board UI approve/reject control for the derived
+   awaiting_authorization run_state (presentation-only; wires the existing
+   SPEC-294 POST /api/spec/{id}/deployment-authorization endpoint). */
+.panel-deploy-auth {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-blocked);
+  border-left: 3px solid var(--c-blocked);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--c-blocked) 8%, var(--surface));
+  font-size: 11px;
+}
+.panel-deploy-auth-title {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+.panel-deploy-auth-reason {
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.panel-deploy-auth-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.panel-deploy-auth-row label {
+  width: 70px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.panel-deploy-auth-row input {
+  flex: 1;
+  background: var(--surface-hi);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: monospace;
+  padding: 2px 6px;
+}
+.panel-deploy-auth-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.panel-deploy-auth-diagnostic {
+  margin-top: 6px;
+  color: var(--c-blocked);
+  white-space: pre-wrap;
+}
+
 .chips-row {
   margin-bottom: 8px;
   font-size: 11px;
@@ -2540,6 +2898,63 @@ body {
 .chip[data-external="1"][data-unreachable="1"] {
   opacity: 0.6;
 }
+
+/* SPEC-307 R4: SPEC-291 artifact list, styled to match the panel's existing
+   visual language (chips-label / meta-table) instead of rendering as bare
+   inline text. */
+.artifacts-label {
+  color: var(--text-muted);
+  display: inline-block;
+  width: 60px;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.artifact-type {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  color: var(--c-ready);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.artifact-date {
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.artifact-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* SPEC-307 R5/R7: collapsible metadata-group toggle in the table header row */
+.meta-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  padding: 4px 0;
+  width: 100%;
+  text-align: left;
+}
+.meta-toggle-btn:hover { color: var(--text); }
+.meta-toggle-btn:focus-visible { outline: 1px solid var(--c-theme); outline-offset: 2px; }
 .spec-link {
   display: inline-flex;
   align-items: center;
@@ -3024,6 +3439,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <div id="panel-view-spec">
       <div id="panel-title"></div>
       <table class="meta-table" id="panel-meta"></table>
+      <div id="panel-deploy-auth" class="panel-deploy-auth" style="display:none"></div>
       <div id="panel-chips"></div>
       <div id="panel-artifacts"></div>
       <div id="panel-reports-btn-wrap">
@@ -3136,6 +3552,8 @@ let cardOrder = {};            // { colId: [specId, ...] } — intra-column card
 let panelWidth = null;         // px — null means use CSS default (40%)
 let graphPositions = {};       // { specId: {x, y} } — user-dragged graph node positions
 let worktreeStatus = {};       // { specId: [{branch, status, path}, ...] } — sibling worktrees with differing status
+let metaCollapsed = true;      // SPEC-307 R5/R6: #panel-meta collapsible-group state, global not per-spec
+let currentPanelFm = null;     // frontmatter of the currently open panel spec (re-render on toggle, no refetch)
 let graphSnap = true;          // snap node positions to a grid on drag-end
 const GRAPH_SNAP_PX = 35;      // grid size in graph-coordinate space
 let graphHiddenStatuses = new Set(); // statuses hidden in graph view ONLY (independent of board's hiddenColumns)
@@ -3207,6 +3625,7 @@ function saveSettings() {
       panelWidth,
       graphPositions,
       graphSnap,
+      metaCollapsed,
       graphHiddenStatuses: [...graphHiddenStatuses],
       showGroupingEdges,
       activeTypeFilters: [...activeTypeFilters],
@@ -3238,6 +3657,7 @@ function loadSettings() {
     if (s.panelWidth) panelWidth = s.panelWidth;
     if (s.graphPositions) graphPositions = s.graphPositions;
     if (s.graphSnap !== undefined) graphSnap = s.graphSnap;
+    if (s.metaCollapsed !== undefined) metaCollapsed = s.metaCollapsed;
     if (s.graphHiddenStatuses) graphHiddenStatuses = new Set(s.graphHiddenStatuses);
     if (s.showGroupingEdges !== undefined) showGroupingEdges = s.showGroupingEdges;
     if (s.activeTypeFilters) {
@@ -3620,9 +4040,36 @@ async function loadSpecs() {
 
 let performanceClock = () => performance.now();
 
+// SPEC-303 R9: most client samples are reported from inside
+// requestAnimationFrame, which is exactly right for "when did this paint" and
+// exactly wrong in a background tab -- rAF does not fire there, so the callback
+// runs on return to the foreground and the sample absorbs the entire hidden
+// period. That produced a `poll_full` maximum of 174,331,586 ms (48 days) and an
+// `initial_board_ready` maximum of 8.9 hours in the live registry, which is why
+// a real latency regression stayed invisible on the very dashboard measuring it.
+// `documentHiddenSince` records when the document last became hidden so the
+// guard can reject a sample whose whole measurement WINDOW overlapped a hidden
+// period, not merely one reported while hidden.
+let documentHiddenSince = (typeof document !== 'undefined' && document.hidden)
+  ? performanceClock() : null;
+let documentLastHiddenEnd = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    documentHiddenSince = performanceClock();
+  } else {
+    documentLastHiddenEnd = performanceClock();
+    documentHiddenSince = null;
+  }
+});
+
 function reportPerformance(operation, start, { failed = false } = {}) {
   // Diagnostic-only: capability absence or a rejected post never affects UI.
   if (!window.performance || typeof start !== 'number') return;
+  // Discard rather than distort: a duration that spans a hidden period is not a
+  // measurement of this operation, and one bad sample poisons min/mean/max for
+  // the whole bounded window.
+  if (document.visibilityState === 'hidden' || documentHiddenSince !== null) return;
+  if (documentLastHiddenEnd !== null && documentLastHiddenEnd >= start) return;
   const duration_ms = performanceClock() - start;
   fetch('/api/performance/client', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3999,8 +4446,13 @@ function onCardDrop(evt) {
       // Revert
       const detail = await statusWriteErrorDetail(r);
       if (spec) spec.status = oldStatus;
-      if (wasPending) {
-        // evt.item and evt.from are orphaned (renderBoard removed them); re-render.
+      // SPEC-303: `wasPending` is not the only way these nodes get orphaned. A
+      // poll that re-renders the board between the optimistic update above and
+      // this response replaces the card too, and writing dataset.status to the
+      // detached node would leave the board showing the optimistic status until
+      // the next poll. Check the DOM rather than inferring it from wasPending.
+      if (wasPending || !evt.item.isConnected || !evt.from.isConnected) {
+        // evt.item and evt.from are orphaned (a render removed them); re-render.
         updateColumnCounts();
         renderBoard();
       } else {
@@ -4026,7 +4478,8 @@ function onCardDrop(evt) {
     }
   }).catch(() => {
     if (spec) spec.status = oldStatus;
-    if (wasPending) {
+    // SPEC-303: same orphaned-node hazard as the not-ok branch above.
+    if (wasPending || !evt.item.isConnected || !evt.from.isConnected) {
       updateColumnCounts();
       renderBoard();
     } else {
@@ -4051,6 +4504,185 @@ function updateColumnCounts() {
     }).length;
     const el = document.getElementById(`count-${col.id}`);
     if (el) el.textContent = count;
+  }
+}
+
+// SPEC-294-001 R1-R3: board UI approve/reject control for a spec held in
+// the derived `awaiting_authorization` run_state (SPEC-294 R3). Renders (or
+// hides) the control in-place in the detail panel -- the same panel the
+// run_state row already renders -- and, on approve, POSTs to the existing
+// SPEC-294 endpoint with no new backend route or authorization code path
+// (R2/R4). Refusal diagnostics (agent actor, stale SHA, missing fields) are
+// the endpoint's own `detail` text, surfaced inline rather than a generic
+// error (R3).
+function renderDeploymentAuthControl(specId, fm) {
+  const el = document.getElementById('panel-deploy-auth');
+  if (!el) return;
+  if (!fm || fm.run_state !== 'awaiting_authorization') {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  const reason = fm.run_state_reason || 'awaiting deployment authorization';
+  // SPEC-294-001-001 R3: prefill from the board's read-only projection of
+  // the queue's own persisted candidate_sha (R1/R2) -- the operator
+  // confirms or overrides rather than transcribing it from elsewhere.
+  const prefillSha = fm.run_state_candidate_sha || '';
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="panel-deploy-auth-title">⚑ Awaiting deployment authorization</div>
+    <div class="panel-deploy-auth-reason">${_escHtml(reason)}</div>
+    <div class="panel-deploy-auth-row">
+      <label for="deploy-auth-actor">actor</label>
+      <input type="text" id="deploy-auth-actor" placeholder="your name (human, not an agent)" autocomplete="off">
+    </div>
+    <div class="panel-deploy-auth-row">
+      <label for="deploy-auth-sha">sha</label>
+      <input type="text" id="deploy-auth-sha" placeholder="candidate commit SHA (40 hex chars)" autocomplete="off" value="${_escHtml(prefillSha)}">
+    </div>
+    <div class="panel-deploy-auth-row">
+      <label for="deploy-auth-env">environment</label>
+      <input type="text" id="deploy-auth-env" placeholder="e.g. prod" autocomplete="off">
+    </div>
+    <div class="panel-deploy-auth-actions">
+      <button class="btn" id="deploy-auth-approve-btn" onclick="submitDeploymentAuthorization('${specId}', 'approve')">✓ APPROVE</button>
+      <button class="btn" id="deploy-auth-reject-btn" onclick="submitDeploymentAuthorization('${specId}', 'reject')">✕ REJECT</button>
+    </div>
+    <div class="panel-deploy-auth-diagnostic" id="deploy-auth-diagnostic" style="display:none"></div>
+  `;
+}
+
+async function submitDeploymentAuthorization(specId, action) {
+  const diagEl = document.getElementById('deploy-auth-diagnostic');
+  if (diagEl) { diagEl.style.display = 'none'; diagEl.textContent = ''; }
+
+  const payload = { action };
+  if (action === 'approve') {
+    const actorEl = document.getElementById('deploy-auth-actor');
+    const shaEl = document.getElementById('deploy-auth-sha');
+    const envEl = document.getElementById('deploy-auth-env');
+    payload.actor = (actorEl ? actorEl.value : '').trim();
+    payload.sha = (shaEl ? shaEl.value : '').trim();
+    payload.environment = (envEl ? envEl.value : '').trim();
+  }
+
+  try {
+    const r = await fetch(`/api/spec/${specId}/deployment-authorization`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      // R3: surface the endpoint's own refusal diagnostic (agent-identified
+      // actor, malformed/stale SHA, missing field) inline, not a generic
+      // failure -- same detail-extraction helper the status dropdown uses.
+      const detail = await statusWriteErrorDetail(r);
+      if (diagEl) {
+        diagEl.textContent = detail || `${specId}: deployment authorization request failed`;
+        diagEl.style.display = '';
+      }
+      showToast(statusWriteFailureToastText(specId, detail));
+      return;
+    }
+    showToast(action === 'approve'
+      ? `✓ ${specId}: deployment authorization recorded`
+      : `${specId}: rejection acknowledged (hold stands)`);
+    await loadSpecs();
+    if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
+  } catch {
+    if (diagEl) {
+      diagEl.textContent = `${specId}: deployment authorization request failed`;
+      diagEl.style.display = '';
+    }
+    showToast(statusWriteFailureToastText(specId, null));
+  }
+}
+
+// Metadata table — status gets an interactive dropdown, rest is plain text.
+// SPEC-307: split into an always-visible group (status, worker/verifier
+// model, hint rows) and a collapsible group (everything else), so this is
+// also the function toggleMetaCollapsed() re-runs on click/reload without a
+// refetch.
+function renderPanelMeta(specId, fm) {
+  currentPanelFm = fm;
+  const currentStatus = fm.status || 'draft';
+  const allowedStatuses = allowedStatusIdsForSpec(fm);
+  const invalidCurrentStatus = !allowedStatuses.includes(currentStatus);
+  const displayedStatuses = invalidCurrentStatus
+    ? [currentStatus, ...allowedStatuses]
+    : allowedStatuses;
+  const statusOptions = displayedStatuses.map(s =>
+    `<option value="${s}"${s === currentStatus ? ' selected' : ''}${invalidCurrentStatus && s === currentStatus ? ' disabled' : ''}>${s}${invalidCurrentStatus && s === currentStatus ? ` (invalid for ${isNfrFamilySpec(fm) ? 'nfr' : 'spec'})` : ''}</option>`
+  ).join('');
+
+  const fields = [
+    ['type', fm.type],
+    ['layer', fm.layer !== undefined ? fm.layer : ''],
+    ['priority', fm.priority],
+    ['readiness', fm.readiness],
+    ['run_state', fm.run_state],
+    ['blocker_class', fm.blocker_class],
+    ['blocker_scope', fm.blocker_scope],
+    ['block_reason', fm.block_reason],
+    ['transfer_refusal', fm.transfer_refusal],
+    ['unblock_condition', fm.unblock_condition],
+    ['created', fm.created],
+  ];
+  if (fm.stack) fields.push(['stack', fm.stack]);
+
+  const metaEl = document.getElementById('panel-meta');
+  const statusRow = `<tr><td title="${_escHtml(registryHelp(fm, 'status'))}">status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  // SPEC-307 R2: an optional execution: {worker_model, verifier_model}
+  // override is surfaced as two always-visible rows next to status, matching
+  // buildRunPrompt (R3), which appends the same values to the copied prompt.
+  const execution = (fm.execution && typeof fm.execution === 'object') ? fm.execution : {};
+  let modelRows = '';
+  if (execution.worker_model) {
+    modelRows += `<tr><td>worker model</td><td>${_escHtml(String(execution.worker_model))}</td></tr>`;
+  }
+  if (execution.verifier_model) {
+    modelRows += `<tr><td>verifier model</td><td>${_escHtml(String(execution.verifier_model))}</td></tr>`;
+  }
+  // SPEC-290: block_reason and transfer_refusal get subtle, distinct
+  // background hints (reddish / amber) so a stuck-vs-refused spec is
+  // distinguishable at a glance; transfer_refusal also carries a manual
+  // dismiss control that clears it without requiring a successful move.
+  const HINT_ROW_KEYS = new Set(['block_reason', 'transfer_refusal']);
+  const rowHtml = ([k, v]) => {
+    const rowClass = k === 'block_reason' ? ' class="meta-row-blocked"'
+      : k === 'transfer_refusal' ? ' class="meta-row-refusal"' : '';
+    const dismissBtn = k === 'transfer_refusal'
+      ? ` <button type="button" class="meta-dismiss-btn" title="Dismiss" onclick="dismissTransferRefusal('${specId}')">×</button>`
+      : '';
+    return `<tr${rowClass}><td title="${_escHtml(registryHelp(fm, k))}">${k}</td><td>${_escHtml(String(v))}${dismissBtn}</td></tr>`;
+  };
+  const populatedFields = fields.filter(([k, v]) => v !== undefined && v !== null && v !== '');
+  // SPEC-307 R5: hint rows (block_reason/transfer_refusal) stay always-visible
+  // above the fold even while the rest of the metadata table is collapsed;
+  // every other row moves into the collapsible group.
+  const alwaysFields = populatedFields.filter(([k]) => HINT_ROW_KEYS.has(k));
+  const collapsibleFields = populatedFields.filter(([k]) => !HINT_ROW_KEYS.has(k));
+  const alwaysRows = alwaysFields.map(rowHtml).join('');
+  const collapsibleRows = collapsibleFields.map(rowHtml).join('');
+  const hiddenCount = collapsibleFields.length;
+  const toggleLabel = metaCollapsed ? `▸ details (${hiddenCount})` : `▾ details`;
+  const toggleRow = `<tr><td colspan="2"><button type="button" id="panel-meta-toggle" class="meta-toggle-btn" aria-expanded="${!metaCollapsed}" onclick="toggleMetaCollapsed()">${_escHtml(toggleLabel)}</button></td></tr>`;
+  metaEl.innerHTML = statusRow + modelRows + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
+
+  // SPEC-294-001: render (or hide) the deployment-authorization approve/
+  // reject control in the same panel the run_state row already renders.
+  renderDeploymentAuthControl(specId, fm);
+}
+
+// SPEC-307 R5/R6/R7: toggles the #panel-meta collapsible group. The state is
+// global (not per-spec, R6) and re-renders the already-fetched frontmatter
+// in place rather than refetching — the toggle must work offline from the
+// last successful panel load.
+function toggleMetaCollapsed() {
+  metaCollapsed = !metaCollapsed;
+  saveSettings();
+  if (currentPanelFm && openPanelId) {
+    renderPanelMeta(openPanelId, currentPanelFm);
   }
 }
 
@@ -4098,50 +4730,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   document.getElementById('panel-id').textContent = specId;
   document.getElementById('panel-title').textContent = title;
 
-  // Metadata table — status gets an interactive dropdown, rest is plain text
-  const currentStatus = fm.status || 'draft';
-  const allowedStatuses = allowedStatusIdsForSpec(fm);
-  const invalidCurrentStatus = !allowedStatuses.includes(currentStatus);
-  const displayedStatuses = invalidCurrentStatus
-    ? [currentStatus, ...allowedStatuses]
-    : allowedStatuses;
-  const statusOptions = displayedStatuses.map(s =>
-    `<option value="${s}"${s === currentStatus ? ' selected' : ''}${invalidCurrentStatus && s === currentStatus ? ' disabled' : ''}>${s}${invalidCurrentStatus && s === currentStatus ? ` (invalid for ${isNfrFamilySpec(fm) ? 'nfr' : 'spec'})` : ''}</option>`
-  ).join('');
-
-  const fields = [
-    ['type', fm.type],
-    ['layer', fm.layer !== undefined ? fm.layer : ''],
-    ['priority', fm.priority],
-    ['readiness', fm.readiness],
-    ['run_state', fm.run_state],
-    ['blocker_class', fm.blocker_class],
-    ['blocker_scope', fm.blocker_scope],
-    ['block_reason', fm.block_reason],
-    ['transfer_refusal', fm.transfer_refusal],
-    ['unblock_condition', fm.unblock_condition],
-    ['created', fm.created],
-  ];
-  if (fm.stack) fields.push(['stack', fm.stack]);
-
-  const metaEl = document.getElementById('panel-meta');
-  const statusRow = `<tr><td title="${_escHtml(registryHelp(fm, 'status'))}">status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
-  // SPEC-290: block_reason and transfer_refusal get subtle, distinct
-  // background hints (reddish / amber) so a stuck-vs-refused spec is
-  // distinguishable at a glance; transfer_refusal also carries a manual
-  // dismiss control that clears it without requiring a successful move.
-  const otherRows = fields
-    .filter(([k, v]) => v !== undefined && v !== null && v !== '')
-    .map(([k, v]) => {
-      const rowClass = k === 'block_reason' ? ' class="meta-row-blocked"'
-        : k === 'transfer_refusal' ? ' class="meta-row-refusal"' : '';
-      const dismissBtn = k === 'transfer_refusal'
-        ? ` <button type="button" class="meta-dismiss-btn" title="Dismiss" onclick="dismissTransferRefusal('${specId}')">×</button>`
-        : '';
-      return `<tr${rowClass}><td title="${_escHtml(registryHelp(fm, k))}">${k}</td><td>${_escHtml(String(v))}${dismissBtn}</td></tr>`;
-    })
-    .join('');
-  metaEl.innerHTML = statusRow + otherRows;
+  renderPanelMeta(specId, fm);
 
   // Chips
   const blocksMap = buildBlocksMap();
@@ -4174,7 +4763,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     const rows = artifacts.map(a =>
       `<div class="artifact-row"><span class="artifact-type">${_escHtml(a.type || '')}</span>` +
       `<span class="artifact-date">${_escHtml((a.created || '').slice(0, 10))}</span>` +
-      `<span class="artifact-summary">${_escHtml(a.summary || '')}</span></div>`
+      `<span class="artifact-summary" title="${_escHtml(a.summary || '')}">${_escHtml(a.summary || '')}</span></div>`
     ).join('');
     artifactsEl.innerHTML = `<div class="artifacts-label">artifacts:</div>${rows}`;
   } else {
@@ -4185,7 +4774,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
 
   // SPEC-268: the drive-to-done prompt replaces the run-kickoff prompt while a
   // spec is blocked — the recovery it names only makes sense in that state.
-  const isBlocked = currentStatus === 'blocked';
+  const isBlocked = (fm.status || 'draft') === 'blocked';
   document.getElementById('panel-run-prompt-btn').style.display = isBlocked ? 'none' : '';
   document.getElementById('panel-drive-to-done-btn').style.display = isBlocked ? '' : 'none';
   openPanelBlockerClass = fm.blocker_class || fm.block_reason || '';
@@ -5348,27 +5937,54 @@ function specPromptTitle(specId) {
   return spec ? (spec._title || spec.title || '') : '';
 }
 
-function buildRunPrompt(specId, specTitle = '') {
+// SPEC-307 R3: an `execution:` override, when the spec declares one, gets
+// one instruction line per declared key inserted before the closing
+// instruction paragraph. A spec without `execution:` produces byte-identical
+// output to before this spec.
+function specExecution(specId) {
+  if (openPanelId === specId && currentPanelFm) {
+    return (currentPanelFm.execution && typeof currentPanelFm.execution === 'object') ? currentPanelFm.execution : null;
+  }
+  const spec = specs.find(s => s.id === specId);
+  return (spec && spec.execution && typeof spec.execution === 'object') ? spec.execution : null;
+}
+
+function buildRunPrompt(specId, specTitle = '', execution = null) {
   const title = (specTitle || '').trim();
   const regexChars = '.+*?^$()[]{}|\\\\';
   const escapedSpecId = [...specId].map(ch => regexChars.includes(ch) ? `\\\\${ch}` : ch).join('');
   const titleStartsWithSpecId = new RegExp(`^${escapedSpecId}(?:$|\\\\s|[—–-])`).test(title);
   const specLabel = title && !titleStartsWithSpecId ? `${specId} ${title}` : (title || specId);
-  return [
+  const lines = [
     'Use the Nightshift kickoff command to run this spec:',
     '',
     `$nightshift kickoff ${specLabel}`,
     `(Codex syntax. In Claude Code / Hermes and other CLIs type: /nightshift kickoff ${specLabel})`,
     '',
+  ];
+  if (execution && typeof execution === 'object') {
+    const executionLines = [];
+    if (execution.worker_model) {
+      executionLines.push(`Launch the run worker with model: ${execution.worker_model}.`);
+    }
+    if (execution.verifier_model) {
+      executionLines.push(`Launch the independent verifier with model: ${execution.verifier_model}.`);
+    }
+    if (executionLines.length) {
+      lines.push(...executionLines, '');
+    }
+  }
+  lines.push(
     'This is the parent kickoff flow. Use the Nightshift skill exactly.',
     'Do not implement, research, validate, or code the spec yourself. Launch and coordinate the orchestrator subagent through the skill flow, monitor progress, then autonomously resolve the run as the skill specifies: verify the evidence gate and merge if sufficient; if the orchestrator reports blocked/stuck, use the controller-backed unblock protocol. The observable packet/result must show eligibility, attempt result, causal confidence, evidence references, and whether human action is needed—never raw logs, secrets, or private-local paths. After the run report is written, process any "## Suggested Follow-up Specs" section per the skill (check_followup_spec.py conflict check).',
-  ].join('\\n');
+  );
+  return lines.join('\\n');
 }
 
 async function copyRunPrompt() {
   if (!openPanelId) { showToast('no spec selected'); return; }
   const specId = openPanelId;
-  const copied = await copyText(buildRunPrompt(specId, specPromptTitle(specId)));
+  const copied = await copyText(buildRunPrompt(specId, specPromptTitle(specId), specExecution(specId)));
   if (copied) {
     showToast(`▶ run prompt copied for ${specId}`);
   } else {
@@ -5616,6 +6232,14 @@ async function copyQuestionsPrompt() {
     'For each report, extract every item under ## Open Questions.',
     'Also read the ## Blocked Specs section and flag any specs blocked on a decision.',
     '',
+    'For EVERY scanned report, record one row in a ## Report Action Log table',
+    'in the generated QUESTIONS spec — never silently skip a report, even one',
+    'with nothing to report. Action is closed vocabulary: none_found |',
+    'consolidated_into <this-QUESTIONS-spec-id> | resolved_in_report |',
+    'deferred: <reason>. Example row for a report with no Open Questions/',
+    'Blocked Specs content:',
+    '| reports/2026-01-01-nightshift-report-SPEC-000.md | No | none_found |',
+    '',
     'Consolidate all questions into a new QUESTIONS spec file at',
     '.nightshift/specs/{PROJECT}-QUESTIONS-NNN.md using this exact format:',
     '',
@@ -5655,6 +6279,13 @@ async function copyQuestionsPrompt() {
     '---',
     '',
     '(repeat for Q2, Q3, ... — blockers first, then advisory)',
+    '',
+    '## Report Action Log',
+    '',
+    '| Report | `## Open Questions` / `## Blocked Specs` present? | Action taken |',
+    '| --- | --- | --- |',
+    '| reports/2026-01-01-nightshift-report-SPEC-000.md | No | none_found |',
+    '(one row per report listed below — every report, even a none_found one)',
     '',
     'Reports to scan:',
     fileList,

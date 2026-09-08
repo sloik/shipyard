@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.14.0
+version: 3.17.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -335,6 +335,15 @@ mkdir -p .nightshift/metrics/_wip .nightshift/reports/_wip
 
 Offer to install the pre-commit hook (`cp .nightshift/hooks/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit`).
 
+Alongside it, offer to install the Claude Code `PreToolUse` write-scope hook
+(SPEC-300-004): `sh .nightshift/hooks/install-write-scope-hook.sh` from the
+project root, which wires `write-scope-hook.sh` into `.claude/settings.json`.
+This is the earliest enforcement point — it stops an out-of-scope write
+before the tool call executes, rather than at commit time — but it only
+takes effect for harnesses that support `PreToolUse` (Claude Code today; see
+"Harness coverage" below). Declining leaves `doctor`'s `D8` finding to catch
+it later.
+
 ### Step 4: Static analysis audit
 
 Compare detected static tools against what's expected for the language (see table in `references/templates.md`). Report gaps. If tools are missing, offer to generate `SPEC-000-tooling` as the first spec.
@@ -437,6 +446,34 @@ Summarize: what was found, what was generated, what gaps were identified, recomm
 
 Interactive spec authoring with validation.
 
+### Intent capture (optional short path)
+
+Use this path when the user has a half-formed idea and wants a durable
+reflection without committing to a spec interview. Do not apply the Phase 1-8
+guardrail pushback during capture. Ask at most these four questions:
+
+1. **Problem:** What feels painful, missing, or worth changing?
+2. **Trigger:** What made this idea worth capturing now?
+3. **Affected:** Who notices the problem or would benefit?
+4. **Rough outcome:** What would better look like, without requiring a solution?
+
+Write the answers with `intents/_TEMPLATE-INTENT.md` to
+`intents/<lowercase-kebab-slug>.md` (`canonical/intents/` in the kit
+repository; `.nightshift/intents/` in an installed project), set
+`status: captured`, leave `promoted_to:` empty, and git-track the file. Tell
+the user: **this intent is non-committing and cannot enter the Nightshift
+loop. An intent cannot be dispatched, kicked off, or counted as a spec.** It
+lives outside `specs/`, so do not add it to validator, scanner, or board
+exclusion lists.
+
+To reject it, change only `status` to `rejected`, or delete the intent. To
+turn it into work, start the complete spec flow below. Pre-fill Phase 1 from
+`problem`, `trigger`, and `affected`, and use `rough_outcome` as initial
+context, but confirm each answer with the user and apply every interview
+guardrail. After the new spec exists, add `Origin intent: intents/<slug>.md`
+to its `## Context`, then set the intent to `status: promoted` and
+`promoted_to: <SPEC-ID>`. Never promote it automatically.
+
 ### Creating a new spec
 
 1. **Context check** — read `config.yaml`, existing specs (for next ID, current layers), and `knowledge/` files.
@@ -458,6 +495,20 @@ Interactive spec authoring with validation.
    c. **Acceptance criteria** — Generate from requirements, present for review. Each must be: specific, testable, independent. Flag overlaps or contradictions.
 
    d. **Context** — Auto-fill target files from project structure. Auto-fill test files from test conventions. Auto-fill framework from config. Ask about related specs and existing code.
+
+   d1. **Write scope (SPEC-300-001)** — Propose `scope.write` as project-root-relative
+       globs derived from the file paths mentioned in `## Context` and from `touches:`
+       (e.g. `src/repositories/DocumentRepository.ts` and `touches:
+       [src/search/**]` propose `scope.write: [src/repositories/**, src/search/**]`).
+       Present the proposal and ask the author to confirm or narrow it. If the author
+       cannot settle on a scope, that is a drafting blocker — resolve it before
+       `status: ready`, per SPEC-300 § Defaults ("a scope the author could not settle
+       is a drafting blocker, not a reason to leave it open"). Leaving `scope:` out
+       entirely is always a valid, deliberate answer — it means the whole project
+       root, exactly like an existing v9 spec with no `scope:` block. Record the
+       confirmed answer as `scope.write` in frontmatter; see SPEC-GUIDE.md
+       § Write scope for the full field, defaults, implicit-allow rules, and the ten
+       controlled reason codes.
 
    e. **Layer + dependencies** — Suggest layer based on what the spec touches. Check existing specs for `after:` dependencies. Warn if dependencies are missing.
 
@@ -598,6 +649,44 @@ Quick dashboard of Nightshift state:
 Run `"$HOME/Dropbox/Developer/ManagedProjects/Nightshift/canonical/.board-venv/bin/python" "$HOME/Dropbox/Developer/ManagedProjects/Nightshift/doctor.py" <project>` for one install, or add `--fleet` to inspect every configured discovery root plus their shared parent (so sibling projects can be found). Add `--fix` only for mechanical repairs: missing discovery-list entries, absent kit files, and a bootstrap `_eval-project/`. It never overwrites a different existing managed file and never changes spec content, status, project config values, or the Git index. Exit codes are 0 clean, 1 warnings, and 2 CRITICAL findings.
 
 Doctor extends validate: use validate for the install's own protocol/config/command integrity; use doctor for external reachability, kit freshness, bootstrap residue, board reachability, cross-directory spec hygiene, and the read-only managed-payload provenance audit. The audit reports `exact-current`, `retained-prior-release`, or `unresolved-divergence` using per-file hashes only. Preserve unresolved paths and route reusable work through a canonical Nightshift spec and whole-kit release; never infer ownership from timestamps, similarity, status text, or an aggregate fingerprint.
+
+Finding `D7` (WARNING, SPEC-300-003) fires when the kit ships
+`hooks/protect-write-scope.sh` but the target repository's common-dir
+pre-commit hook does not carry the `# SPEC-300-003 protect-write-scope`
+marker — the git write-scope guard is uninstalled there. `doctor --fix` runs
+`hooks/install-write-scope-guard.sh` for that repository and records the
+action; like every other `--fix` repair, it never edits a pre-commit hook it
+does not recognise — the installer's own refusal message becomes the
+finding's remedy text, and a human merges the guard into that hook by hand.
+
+Finding `D8` (WARNING, SPEC-300-004) fires when the kit ships
+`hooks/write-scope-hook.sh` but the target repository's
+`.claude/settings.json` has no `nightshift-write-scope`-marked `PreToolUse`
+entry — the Claude Code harness hook is uninstalled there. `doctor --fix`
+runs `hooks/install-write-scope-hook.sh` for that repository. If the
+repository has no `.claude/` directory at all, the finding still reports —
+its remedy is a manual step, and `--fix` does not create `.claude/`
+automatically.
+
+**Harness coverage (SPEC-300-004 R8):** `hooks/write-scope-hook.sh` is a
+Claude Code `PreToolUse` hook — Claude Code is the only harness in the
+current matrix that exposes a pre-write tool hook. Codex and Hermes runs have
+no equivalent interception point today; they rely entirely on the git
+pre-commit write-scope guard (SPEC-300-003) and the evidence gate
+(SPEC-300-002) to catch an out-of-scope write, always after the write has
+already landed on disk rather than before. The terminal lifecycle commit's
+`Nightshift-Scope-Check:` trailer (SPEC-300 R11 / SPEC-300-002) records the
+outcome either way, so a reviewer can tell which layer actually caught (or
+missed) a violation regardless of which harness ran the worker.
+
+Even on Claude Code, where the hook does exist and is installed, its
+spec-scoped rules are presently unreachable for a harness-launched
+(`isolation: "worktree"`) worker — see "Known, accepted gap —
+`NIGHTSHIFT_ACTIVE_SPEC` does not reach the `PreToolUse` hook for a
+harness-launched worker (SPEC-300-004-001)" under Step 5 above for the
+definitive answer and its evidence. Only the hook's two universal rules
+fire in that case; the git guard and evidence gate remain the working
+backstops.
 
 ## `/nightshift validate` — Check Kit Integrity
 
@@ -1208,7 +1297,55 @@ error (R7: most specs have no artifact history yet).
 - Read `.nightshift/BOOTSTRAP.md` first — it defines how to start a run
 - Follow `.nightshift/LOOP.md` for the spec→implement→test→review→commit cycle
 - Work only on spec {spec-id}. Do not touch other specs or unrelated files.
+- Declared write scope: {scope.write, or "project root (no scope: declared)"}. An
+  enforcement point that denies a write names the offending path and this scope;
+  retry inside the declared scope first. If the write is genuinely needed outside
+  it, do not perform it — record the path/reason under `## Scope Blockers` in the
+  run report and return `worker-blocked` (SPEC-300 § Enforcement); scope only
+  widens through a human-approved `## Scope Amendments` row on main. **This is a
+  mechanical gate precondition, not just an audit trail (SPEC-302 R1):** if
+  `scope.write` (or `deny`/`read`) on main is edited directly — widened with no
+  covering `## Scope Amendments` row dated on or after that widening and carrying
+  `Approved by: human` (or `human:<name>`) — `scope_guard.scope_from_main` does
+  not honor the widened value for enforcement; it falls back to the narrower
+  value that was in effect the last time the spec was `ready`. A pure narrowing
+  (removing a `write` glob, adding a `deny` glob) never needs a row and always
+  takes effect immediately (R2). Both the evidence-gate check 6 script below and
+  the git pre-commit guard (SPEC-300-003) read scope exclusively through this one
+  reconciling function (R3), so this precondition applies identically at both
+  layers. A spec that has never had its scope widened, or whose `## Scope
+  Amendments` table has always been empty, is unaffected (R5). SPEC-302-001
+  closed two residual gaps in this same mechanism: a widening committed while
+  `status:` stays `ready` (never passing through `in_progress`) can no longer
+  become its own reconciliation baseline, and a commit that both narrows and
+  widens the *same* field no longer un-drops the narrowed-out item as a side
+  effect of blocking the uncovered widening.
 - Commit your changes — the parent will review and merge the worktree branch.
+- **Every `git commit` in this run MUST be prefixed with `NIGHTSHIFT_ACTIVE_SPEC={spec-id}`
+  in the exact same shell invocation**, e.g.
+  `NIGHTSHIFT_ACTIVE_SPEC={spec-id} git commit -m "..."` (SPEC-301). Your branch
+  name is harness-assigned (`worktree-agent-<hex>` when launched with
+  `isolation: "worktree"`) and does not encode the spec ID, so the git
+  pre-commit write-scope guard (SPEC-300-003) cannot resolve the active spec
+  from the branch name alone — without the inline env var it silently falls
+  back to `no_active_spec` (allow, not a false deny, but also not enforcing
+  your declared `scope.write`). A bare shell `export NIGHTSHIFT_ACTIVE_SPEC=...`
+  does NOT help if your tool issues each command in a fresh shell — verify
+  this for your own harness before relying on it, and prefix every commit
+  inline regardless. This only reaches the git-guard layer; it does not
+  retroactively affect any other enforcement point that resolves the active
+  spec independently (e.g. a `PreToolUse` hook spawned by the harness itself
+  reads its own environment, not this shell's).
+- If you touch a file that is itself a member of `nightshift-sync.py`'s
+  `CANONICAL_PROTOCOL_FILES` (i.e. your `scope.write` already legitimately
+  includes a managed canonical-payload file), you do **not** need to add
+  `release-manifest.json`/`CHANGELOG.md` to `scope.write` by hand —
+  `scope_guard.py` implicit-allows both for you in that case
+  (SPEC-300-001-001). Regenerate the manifest via
+  `release.write_manifest(canonical_path, CANONICAL_PROTOCOL_FILES)` before
+  your final commit regardless, and verify hashes with `shasum -a 256`
+  against every file you edited — a stale manifest checksum breaks
+  `release.apply_install()`'s verification everywhere it's exercised (SPEC-301).
 - Circuit breaker limits: {max_same_errors} same errors, {max_review_cycles} review cycles, {timeout_minutes} min total
 - Do NOT use Write tool for existing files — use Edit with precise replacements
 - Do NOT guess API names — grep existing code first
@@ -1216,8 +1353,12 @@ error (R7: most specs have no artifact history yet).
 - MANDATORY: After completing the spec, write a human review report to
   `reports/YYYY-MM-DD-nightshift-report.md` (Step 14 of LOOP.md).
   This is NOT optional. A run without a report is an incomplete run.
-  The report must include: summary stats, per-spec changes, test results,
-  AC checklist, and any blockers or discoveries.
+  The report must include, verbatim as headings, matching LOOP.md Step 14's
+  canonical template exactly (not a paraphrase): summary stats, per-spec
+  changes, test results, AC checklist, a `## Blocked Specs` section, an
+  `## Open Questions` section, and a `## Report Action Log` section — each
+  states its content, or the literal word `None`/a `none_found` row when
+  empty, never omitted. Also include any other blockers or discoveries.
 ```
 
 **f. If `kickoff_parent: true`, add this section to the launched agent brief:**
@@ -1300,6 +1441,49 @@ that to invoke the controller-backed unblock protocol before a terminal blocked
 status is committed.
 ```
 
+**g. Git-mutation-evidence preflight (SPEC-309, R1/R2/R4) — check before Step 5, not after
+a failed dispatch.** Read this spec's Live Execution Checklist and Acceptance Criteria: do any
+of them require a real git commit-class operation — `git add`, `git commit`, `git worktree add`,
+or any mechanism that only fires at commit time (a pre-commit hook, a branch-naming convention
+check)? If so, **a worktree-isolated worker cannot reliably execute it.** The sandbox's `rtk`
+wrapper refuses bare `git status`/`git log`/`git commit` invocations, with byte-identical refusal
+wording whether the target is the agent's own assigned worktree or a wholly disposable scratch
+repository the agent built itself with no connection to the real project's git state (confirmed by
+direct probe, 2026-09-06) — **this is a static command-shape parse check, not a target- or
+mutation-aware boundary**: bare `git add .` (a real mutation) succeeds unrefused against an
+external scratch repo in the same probe. A sanctioned `dangerouslyDisableSandbox: true` escalation
+on the same command is refused identically; this is a platform boundary, not a bug to route around.
+Three specific things must never be done in response to this refusal:
+1. Do not suggest, and a worker should not attempt, an absolute-path invocation like `/usr/bin/git`
+   in place of bare `git` as a workaround — that is a different, narrower fix for a *different*
+   problem (BUG-019's compound/aliased commands), see the BUG-021 worked example under Step 5c.
+2. Do not pipe (`| cat`, `| head`) or redirect (`>`) a git invocation to get around this refusal.
+   That shape change bypasses the refusal outright — including for real `git commit` against a
+   repository wholly external to the agent's own worktree — which means it evades an isolation
+   guarantee, not merely an inconvenient control. See BUG-310 for the full finding; treat any
+   dispatched agent that does this as having violated the sandbox boundary, not worked around an
+   inconvenience.
+3. Do not wrap the invocation in a subprocess call from another language (e.g. Python's
+   `subprocess.run(["git", ...])`) to get around this refusal, even for a read-only command. This
+   is a third observed bypass form (BUG-310, discovered during BUG-313), consistent with the same
+   static command-shape parse mechanism rather than a new boundary — the wrapper's check keys off
+   the literal `git ...` command-line shape it is asked to run directly, not any semantic property
+   of the invocation, so any indirection that changes that literal shape bypasses it. Treat this
+   identically to item 2: a dispatched agent that does this has violated the sandbox boundary, not
+   found a sanctioned workaround, regardless of whether the wrapped command was itself read-only.
+
+- **Sanctioned fallback (R2):** the coordinator (the top-level, non-isolated session) executes the
+  live proof directly instead of a worktree-isolated worker. The completion report must name this
+  explicitly — e.g. "executed by the coordinator, not a worktree-isolated worker, because
+  `<spec-id>`'s evidence requires a real `git commit`" — rather than silently reading like ordinary
+  worker output.
+- This does not lift or route around the sandbox restriction itself (Out of Scope, SPEC-309 R5) —
+  it only means the coordinator anticipates the constraint before dispatch instead of discovering
+  it mid-run after burning a worker turn.
+- See Step 5c's verifier-brief guidance (R3) below for the matching independent-verification-side
+  handling — the same limitation applies to a dispatched `nightshift-verifier` trying to
+  independently re-execute the same evidence.
+
 **Runner mode variation:**
 - `inline` — agent processes this spec only, returns when done
 - `orchestrator` — after completing this spec, agent picks the next `ready` spec by layer+priority and continues until the queue is empty or circuit breaker trips
@@ -1331,6 +1515,59 @@ The verify command is a hard gate before launch, merge, or cleanup: it proves th
 worktree shares the intended project's Git common directory. A path/ownership failure
 stops the run; do not fall back to a Dropbox sibling. After a successful merge, remove
 the worktree and branch immediately as required by Step 6.
+
+**Branch-name active-spec resolution (SPEC-301):** the `nightshift/{spec-id}-<run-id>`
+branch shape above is only produced by the manual `git worktree add -b ...` path
+just shown. A harness-managed `isolation: "worktree"` launch assigns its own
+branch name independently of this convention (observed in this repository:
+`worktree-agent-<hex>`) — `scope_guard.py`'s `active_spec()` cannot and does not
+try to parse a spec ID out of that shape (no derivable relationship exists between
+a harness-assigned hex ID and any spec ID). Every worker brief's Step 4e
+boilerplate compensates by requiring `NIGHTSHIFT_ACTIVE_SPEC={spec-id}` inline on
+every `git commit`; do not assume branch-name parsing alone enforces `scope.write`
+for a harness-launched worker.
+
+**Subagent coverage (SPEC-300-004 R7):** the write-scope `PreToolUse` hook is a
+project-level Claude Code setting, not a per-worker one — when it is installed
+in `<project>/.claude/settings.json`, it fires for every tool call a worker
+launched with `isolation: "worktree"` makes from that project, including a
+worker whose own worktree carries no `.claude/settings.json` of its own. A
+worker whose settings happen to omit the hook (a harness that doesn't read
+project settings, or a project that never ran the installer) still meets the
+write-scope contract through the git pre-commit guard (SPEC-300-003) and the
+evidence gate (SPEC-300-002) — the hook is the earliest layer, not the only
+one.
+
+**Known, accepted gap — `NIGHTSHIFT_ACTIVE_SPEC` does not reach the
+`PreToolUse` hook for a harness-launched worker (SPEC-300-004-001):** the
+parent's own Agent-launch tool (the `Agent({...})` call shown in Step 5) has
+no parameter for setting an environment variable, or any other durable
+per-session value, for the launched subagent's whole session — its schema
+exposes only `description`, `isolation`, `mode`, `model`, `name`, `prompt`,
+`subagent_type`, and `team_name`. This was checked directly against the
+launch tool's own schema (not inferred), so it is a confirmed answer, not an
+open question. A worker's own Bash tool calls cannot substitute for this
+either: SPEC-301 confirmed empirically that a shell `export` in one Bash tool
+call does not persist into the next — the harness issues each Bash call in a
+fresh shell. Combined with the branch-name finding directly above (a
+harness-assigned `worktree-agent-<hex>` branch carries no spec ID for
+`scope_guard.py` to parse), this means **`scope_guard.py`'s `active_spec()`
+has no working input for the `PreToolUse` hook on a harness-launched kickoff
+today** — neither `NIGHTSHIFT_ACTIVE_SPEC` nor branch-name parsing resolves
+the active spec at that layer, so it falls back to `no_active_spec` (allow)
+for every real kickoff, which in turn means the hook's *spec-scoped* `write`/
+`deny`/`read` rules never actually deny an out-of-scope write today. This is
+not a false-deny risk (R4: a resolution failure always falls open, never a
+false deny) — it is a coverage gap. The hook's two **universal** rules (the
+spec-home guard and the malformed-target guard, which do not depend on
+`active_spec()` resolving anything) still fire normally and are unaffected.
+The two layers that remain fully working for spec-scoped enforcement on a
+harness-launched kickoff are the git pre-commit guard (SPEC-300-003, via the
+inline `NIGHTSHIFT_ACTIVE_SPEC={spec-id}` commit-prefix convention above,
+which the guard reads directly from the `git commit` subprocess's own
+environment) and the parent's evidence gate (SPEC-300-002). No fix is
+available at the harness layer today (SPEC-300-004-001 R1/R3); this is
+recorded as a known, accepted limitation, not a silent one.
 
 In `private-local`, after this verification and before launch, invoke
 `project_private_state` with an explicit allowlist containing only the selected
@@ -1607,9 +1844,32 @@ path defined in Step 6's `Nightshift-Resolution-Kind` documentation, reserved fo
 > verifier's conclusions disagree with its own evidence. Auditing costs one command;
 > re-deriving costs a full run.
 
-**a. Compose the verifier brief.** It carries exactly four inputs — the branch, the
-baseline commit, the declared suites, and the spec's ACs verbatim — and **no worker
-conclusions**, so the verifier cannot inherit them. Use this template verbatim:
+**a. Compose the verifier brief.** It carries exactly five inputs — the branch, the
+baseline commit, the declared suites, the declared write scope (SPEC-300-002 R5),
+and the spec's ACs verbatim — and **no worker
+conclusions**, so the verifier cannot inherit them.
+
+**Git-mutation-evidence caveat (SPEC-309 R3, AC2).** A worktree-isolated verifier is under the
+exact same sandbox boundary as a worktree-isolated worker (Step 4g above): it cannot perform
+commit-class git mutation, and cannot reliably re-execute even read-only `git status`/`git log`
+outside its own assigned surface. Never write or imply, in a brief for a spec whose ACs require
+independently re-executing a real `git commit`, that the dispatched verifier can fully re-run that
+evidence itself — BUG-021's first verifier brief made exactly this mistake. Instead, identify which
+AC(s) require it before dispatch and pre-declare, in the brief, that those specific AC(s) are
+expected to come back `unverifiable` with reason "cannot independently re-execute commit-class git
+mutation under worktree isolation" (see the matching Rule in both brief templates below, and the
+BUG-021 worked example after them).
+
+**`{scope_summary}` (R5).** Read the spec's `scope:` from the spec file **on the
+configured main branch** (`scope_guard.scope_from_main`), never from the worker
+branch. When `scope.write` is empty or `scope:` is absent, render the literal text
+`project root (default)`. Otherwise render the `write` glob list verbatim, e.g.
+`src/search/** (deny: none)`. Immediately follow with one fixed sentence — the
+"implicit-rule summary" — verbatim regardless of the spec's own scope: "Kit-owned
+evidence paths (`reports/**`, `metrics/**`, and this spec's own file) are always
+writable; a new `SPEC-*.md`/`NFR-*.md` file is writable only in the project's specs
+directory; targets with malformed names are never writable." Use this template
+verbatim:
 
 **Canonical verifier-gate boundary (SPEC-228, SPEC-239, SPEC-282; applies to both
 briefs below).** Before composing either brief, materialize one standalone
@@ -1873,10 +2133,13 @@ claims, comments, or worker-derived prose to a suite header or label.
 You are the independent verifier for Nightshift spec {spec-id}. You did not write
 this code and you are not told what its author concluded.
 
-Inputs (the only four you get):
+Inputs (the only five you get):
 - Branch content under test: {branch}, materialized as `verifier-head` in the assigned standalone verifier surface
 - Baseline content: {baseline_commit}, materialized as `verifier-baseline` in that surface
 - Declared suites: {suite_commands}
+- Declared write scope: {scope_summary}. A path in the branch/baseline diff outside
+  this scope, and not covered by a `## Scope Amendments` row on main, is out of scope
+  regardless of whether it looks related to this spec.
 - Acceptance criteria, verbatim from the spec:
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-BEGIN -->
 {acceptance_criteria_verbatim}
@@ -1884,6 +2147,33 @@ Inputs (the only four you get):
 
 Your job: decide, from evidence you gather yourself inside the assigned verifier
 surface, whether each AC holds at `verifier-head` relative to `verifier-baseline`.
+
+Verdict JSON contract: include `spec_id`, `branch`, `baseline_commit`,
+`head_commit`, `identity_schema_version` (`"1.0.0"`),
+`implementation_head_digest` (a lowercase SHA-256), `verdict` (`pass`, `fail`,
+or `disputes_premise`), a non-empty `acs` array, `suites`, `git_footprint`,
+`scope`, and `contamination`. `scope` (SPEC-300-002 R6) is
+`{"checked": [...], "out_of_scope": [...], "amended": [...]}`, each a list of
+repo-relative paths from the `verifier-baseline..verifier-head` diff:
+`checked` is every changed path, `out_of_scope` the ones denied against the
+brief's declared write scope with no covering `## Scope Amendments` row on
+main, `amended` the denied ones a row does cover. Every `acs` entry uses
+`status: pass | fail | unverifiable`
+and `evidence` as a non-empty JSON string containing the command plus observed
+result; arrays, objects, numbers, and null are rejected. `git_footprint` must
+contain `baseline` and `head` arms, each with `tree_before`, `tree_after`,
+`porcelain_before`, and `porcelain_after`; supplementary top-level footprint
+keys are allowed. Suite entries use the declared command and carry named
+baseline/head samples plus the five classification lists (`regressed`,
+`newly_flaky`, `flaky_observed`, `fixed`, `flake_resolved` — BUG-024).
+Set `contamination` to null when none was observed. A `disputes_premise`
+verdict additionally includes `premise_dispute.claim`, `.evidence`, and
+boolean `.spec_defect`. Whenever this contract or the JSON example below it
+needs quoting into a sub-verification brief, copy the canonical block
+verbatim — do not paraphrase field names, the status/verdict enums, or key
+ordering from memory (BUG-024 R6): reconstructing it from memory has
+independently drifted on `acs` vs `acceptance_criteria`, the `unverifiable`
+status enum, per-sample count shape, and `git_footprint` key ordering.
 
 Rules:
 1. READ-ONLY. Run tests and read files. Never edit, create, delete, stage, commit,
@@ -1911,7 +2201,12 @@ Rules:
    wrong or unmeetable, even when it does not (your dispute is against
    something else entirely). That is a first-class outcome, not a failure, and
    it is preferred over forcing a pass/fail.
-6. Write your verdict JSON to {verdict_path} and print nothing else of substance.
+6. If an AC requires you to independently re-execute a real git commit-class operation (`git add`,
+   `git commit`, `git worktree add`) to confirm it, and your own worktree isolation refuses that
+   operation, do not force a `pass` or `fail` for it: mark that AC `unverifiable` with the specific
+   reason (e.g. "cannot independently re-execute commit-class git mutation under worktree
+   isolation") — `fail` would misrepresent a sandbox limitation as a defect in the work.
+7. Write your verdict JSON to {verdict_path} and print nothing else of substance.
 <!-- NIGHTSHIFT-VERIFIER-BRIEF-END -->
 ```
 
@@ -1931,12 +2226,15 @@ of (a) whenever `{suite_commands}` would otherwise be empty/`null`:
 You are the independent verifier for Nightshift spec {spec-id}. You did not write
 this code and you are not told what its author concluded.
 
-Inputs (the only four you get):
+Inputs (the only five you get):
 - Branch content under test: {branch}, materialized as `verifier-head` in the assigned standalone verifier surface
 - Baseline content: {baseline_commit}, materialized as `verifier-baseline` in that surface
 - Declared suites: none — no suite command applies to this spec's changes;
   verify each AC by direct inspection of the diff and the changed files'
   committed content.
+- Declared write scope: {scope_summary}. A path in the branch/baseline diff outside
+  this scope, and not covered by a `## Scope Amendments` row on main, is out of scope
+  regardless of whether it looks related to this spec.
 - Acceptance criteria, verbatim from the spec:
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-BEGIN -->
 {acceptance_criteria_verbatim}
@@ -1946,6 +2244,28 @@ Your job: decide, from evidence you gather yourself inside the assigned verifier
 surface, whether each AC holds at `verifier-head` relative to `verifier-baseline`. There is nothing to run — the evidence is
 whether the committed text, doc content, or config is actually correct, not
 whether a test passes.
+
+Verdict JSON contract: include `spec_id`, `branch`, `baseline_commit`,
+`head_commit`, `identity_schema_version` (`"1.0.0"`),
+`implementation_head_digest` (a lowercase SHA-256), `verdict` (`pass`, `fail`,
+or `disputes_premise`), a non-empty `acs` array, `suites`, `git_footprint`,
+`scope`, and `contamination`. `scope` (SPEC-300-002 R6) is
+`{"checked": [...], "out_of_scope": [...], "amended": [...]}`, each a list of
+repo-relative paths from the `verifier-baseline..verifier-head` diff:
+`checked` is every changed path, `out_of_scope` the ones denied against the
+brief's declared write scope with no covering `## Scope Amendments` row on
+main, `amended` the denied ones a row does cover. Every `acs` entry uses
+`status: pass | fail | unverifiable`
+and `evidence` as a non-empty JSON string containing the command plus observed
+result; arrays, objects, numbers, and null are rejected. `git_footprint` must
+contain `baseline` and `head` arms, each with `tree_before`, `tree_after`,
+`porcelain_before`, and `porcelain_after`; supplementary top-level footprint
+keys are allowed. Report `suites: []` for this no-suite path and set
+`contamination` to null when none was observed. A `disputes_premise` verdict
+additionally includes `premise_dispute.claim`, `.evidence`, and boolean
+`.spec_defect`. Whenever this contract needs quoting into a sub-verification
+brief, copy the canonical block verbatim — do not paraphrase it from memory
+(BUG-024 R6).
 
 Rules:
 1. READ-ONLY. Read files and run `git diff`/`git show`; never edit, create,
@@ -1979,7 +2299,12 @@ Rules:
    disagree with something else about this run, return `verdict:
    disputes_premise` with the claim, the evidence, and an explicit
    `spec_defect: true | false`, exactly as in the suite-based brief.
-7. Write your verdict JSON to {verdict_path} and print nothing else of substance.
+7. If an AC requires you to independently re-execute a real git commit-class operation (`git add`,
+   `git commit`, `git worktree add`) to confirm it, and your own worktree isolation refuses that
+   operation, do not force a `pass` or `fail` for it: mark that AC `unverifiable` with the specific
+   reason (e.g. "cannot independently re-execute commit-class git mutation under worktree
+   isolation") — `fail` would misrepresent a sandbox limitation as a defect in the work.
+8. Write your verdict JSON to {verdict_path} and print nothing else of substance.
 <!-- NIGHTSHIFT-VERIFIER-BRIEF-NOSUITE-END -->
 ```
 
@@ -1995,6 +2320,38 @@ The verifier's per-AC entry:
 — a command, and what was actually observed running it. `suites` in that
 verdict is `[]`; nothing else about the verdict schema, the footprint check, or
 the validator changes.
+
+**Worked example — git-mutation-heavy spec (BUG-021, SPEC-309 AC3, real and
+already-resolved).** BUG-021 (completing SPEC-300-003's own missing
+live-execution evidence) needed a real `git commit` against a genuine
+pre-commit hook — a mechanism that only fires at commit time. The dispatched
+`nightshift-worker`, worktree-isolated, refused the task outright: every `git`
+invocation it attempted — including bare `git status`/`git log --oneline -1`
+with no arguments, run from its own worktree — was refused by the sandbox's
+`rtk` wrapper citing worktree isolation, and its one sanctioned
+`dangerouslyDisableSandbox: true` escalation on the simplest possible case was
+refused identically. It correctly declined to proceed rather than fabricate
+evidence, and correctly refused the coordinator's own mistaken follow-up
+suggestion to retry via `/usr/bin/git` in place of bare `git` — a workaround
+that applies to a different, narrower problem (BUG-019's compound/aliased
+commands that the sandbox's static verifier could not parse) and was not
+authorization to route around this boundary (Step 4g above). Per R2, the
+coordinator then executed the live proof directly — the fallback pattern this
+spec requires the completion report to name explicitly, in this shape:
+"executed by the coordinator, not a worktree-isolated worker, because
+SPEC-300-003's pre-commit hook can only be exercised at real commit time." The
+independently-dispatched `nightshift-verifier` hit the same wall trying to
+re-run the proof itself: it reproduced the read-only step (running the
+installer script) but could not independently reproduce the real `git commit`
+steps. Per R3/Rule 6-7 above, the correct classification for those AC(s) is
+`unverifiable` with reason "cannot independently re-execute commit-class git
+mutation under worktree isolation" — not `fail`, which would misrepresent a
+sandbox limitation as a defect in SPEC-300-003's own work. (A later probe
+found the refusal here is a static command-shape parse check rather than a
+true target-aware boundary — see Step 4g's correction and BUG-310 — but the
+`unverifiable` classification and the coordinator-executes-directly fallback
+are unaffected: they hold regardless of *why* the refusal fires, only never
+via a piped/redirected invocation, which bypasses it.)
 
 **Forbidden-content check on the composed brief (R2/AC2), scoped to the
 parent-authored text (R1/R2/AC1/AC5).** Run this against the brief you actually
@@ -2188,7 +2545,10 @@ cleanup.
 **c. Verdict schema.** The verifier writes one JSON object. Under the (a-alt)
 no-test-suite brief, `suites` is legitimately `[]` — the validator (below) never
 requires a non-empty `suites` array, only that `acs` is non-empty and every AC
-carries evidence; an empty array is not a schema gap to work around:
+carries evidence. `acs[*].evidence` is specifically a non-empty JSON string,
+not a structured value. `git_footprint` must contain the required `baseline`
+and `head` arms and may carry supplementary top-level evidence keys. An empty
+suite array is not a schema gap to work around:
 
 ```json
 {
@@ -2212,7 +2572,8 @@ carries evidence; an empty array is not a schema gap to work around:
         "head":     [{"executed": true, "failing": [], "failed": 0, "passed": 618}]
       },
       "classification": {
-        "regressed": [], "newly_flaky": [], "flaky_observed": ["pkg/mod.py::test_a"], "fixed": []
+        "regressed": [], "newly_flaky": [], "flaky_observed": ["pkg/mod.py::test_a"], "fixed": [],
+        "flake_resolved": []
       }
     }
   ],
@@ -2220,10 +2581,42 @@ carries evidence; an empty array is not a schema gap to work around:
     "baseline": {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain_before": "", "porcelain_after": ""},
     "head":     {"tree_before": "<sha>", "tree_after": "<sha>", "porcelain_before": "", "porcelain_after": ""}
   },
+  "scope": {
+    "checked": ["src/search/index.py", "reports/2026-09-04-nightshift-report.md"],
+    "out_of_scope": [],
+    "amended": []
+  },
   "premise_dispute": null,
   "contamination": null
 }
 ```
+
+This is the canonical verdict-JSON template block. When briefing a
+sub-verification or any nested verdict-composition step, copy it verbatim —
+never reconstruct field names, enums, or key shape from memory (BUG-024 R6).
+A session that paraphrased this block from memory has independently drifted
+on `acs` vs `acceptance_criteria`, the `unverifiable` status enum, per-sample
+count shape, and `git_footprint` key ordering, costing correction round-trips
+each time.
+
+Schema/brief representation sweep (SPEC-292 R5/R6):
+
+- **Change — `acs[*].evidence`:** keep the non-empty-string contract, publish
+  it in both briefs, and reject every other JSON type through `die()`.
+- **Change — `git_footprint` top-level keys:** require `baseline` and `head` as
+  a subset and allow supplementary evidence keys; exact equality discarded
+  useful evidence without strengthening the two-arm check.
+- **Keep — `acs[*].status`:** retain `pass | fail | unverifiable` and publish
+  the enumeration in both briefs.
+- **Keep — identity and verdict fields:** retain the required identity version,
+  lowercase digest, verdict enumeration, contamination field, and conditional
+  premise-dispute fields; both briefs now publish them.
+- **Keep — footprint arm shape:** retain tree-before/tree-after and both
+  porcelain snapshots; both briefs now publish the required arm fields.
+- **Keep — suite sample/classification shape:** the suite brief already states
+  named failures, real execution, two arms, sampling, and recomputation rules;
+  its compact contract now names the sample and four-list representation. The
+  no-suite brief explicitly requires `suites: []`.
 
 A sample is evidence of an actual run, never a placeholder (R3, SPEC-282). The
 validator (below) rejects a sample that declares `"executed": false`, an arm
@@ -2249,26 +2642,49 @@ an arm's samples, `all` the intersection:
 |---|---|---|
 | `regressed` | `head_all − baseline_any` | fails in **every** head sample, in **no** baseline sample |
 | `newly_flaky` | `(head_any − head_all) − baseline_any` | new intermittent failure — not a pass, not a deterministic regression |
-| `flaky_observed` | varies within either arm | pre-existing flake; never a regression |
-| `fixed` | `baseline_all − head_any` | |
+| `flaky_observed` | `(head_any − head_all) ∪ ((baseline_any − baseline_all) ∩ head_any)` | pre-existing flake, still reproducing in some head sample; never a regression |
+| `fixed` | `baseline_all − head_any` | fails in **every** baseline sample, in **no** head sample — a deterministic failure that is now deterministically gone |
+| `flake_resolved` | `(baseline_any − baseline_all) − head_any` | an **intermittent** (not all-fail) baseline failure that reproduces in **zero** head samples — a flake that stopped reproducing, distinct from `fixed`'s all-fail precondition (BUG-024) |
 
 `newly_flaky` exists so the multi-sample rule is not a one-way ratchet. Requiring
 "fails in all head samples" alone would silently absolve an introduced race — a
 60%-failure race clears a 5-sample all-fail bar 92% of the time. Report it; do not
 merge on it without a decision.
 
+`flake_resolved` exists because `fixed`'s `baseline_all − head_any` definition
+requires a 100%-baseline-failure precondition that a genuinely intermittent flake
+almost never satisfies at any practical sample count (BUG-024: a 13%-flake-rate
+test clears a 30-sample all-fail bar with probability ~1e-27). `fixed` and
+`flake_resolved` partition the same underlying signal — "failed at least once in
+baseline, never in head" (`baseline_any − head_any`) — by whether the baseline
+failure was total (`fixed`) or partial (`flake_resolved`); a name can never be in
+both. `flaky_observed`'s second term is correspondingly narrowed to
+`(baseline_any − baseline_all) ∩ head_any` — a partial baseline flake only stays
+`flaky_observed` if it is still reproducing in at least one head sample; once
+head_any goes to zero, it moves to `flake_resolved` instead of being silently
+absorbed with no distinguishing signal. `flake_resolved` does not weaken
+`regressed` or the 3x-minimum sampling rule (Gap Protocol stop-immediately
+clause): it still requires the standard per-arm sample count to fire, per the
+`need` check below, and it only ever removes failures from view, never adds one.
+
 **d. Validate the verdict — this is the audit (R3/R4/R5).** One command; it recomputes
 every classification from the submitted names and never trusts the verifier's arithmetic:
 
 ```python
 # NIGHTSHIFT-VERDICT-VALIDATOR-BEGIN
-# usage: python3 validate_verdict.py <verdict.json> [spec-file]  -> prints report, exit 0 = auditable
-import json, re, sys
+# usage: python3 validate_verdict.py <verdict.json> [spec-file] [surface-repo]
+#   -> prints report, exit 0 = auditable
+# [spec-file] also gates the AC-ID coverage check (below); [surface-repo] --
+# the standalone verifier surface containing `verifier-baseline`/`verifier-head`
+# -- additionally gates full scope.out_of_scope/.amended recomputation
+# (SPEC-300-002 R6) and requires [spec-file] to be supplied too.
+import json, re, subprocess, sys
+from pathlib import Path
 
 def die(msg): print("SCHEMA:     reject: " + msg); print("GATE:       reject"); sys.exit(1)
 
 v = json.load(open(sys.argv[1]))
-for k in ("spec_id","branch","baseline_commit","head_commit","identity_schema_version","implementation_head_digest","verdict","acs","suites","git_footprint","contamination"):
+for k in ("spec_id","branch","baseline_commit","head_commit","identity_schema_version","implementation_head_digest","verdict","acs","suites","git_footprint","scope","contamination"):
     if k not in v: die("missing top-level key '%s'" % k)
 if v["identity_schema_version"] != "1.0.0": die("unsupported verifier identity schema")
 if not re.fullmatch(r"[0-9a-f]{64}", v["implementation_head_digest"]): die("invalid implementation_head_digest")
@@ -2295,7 +2711,7 @@ if v["verdict"] == "disputes_premise":
 # against, and is rejected rather than read as two empty sets, which would
 # accept real dirt.
 gf = v["git_footprint"]
-if not isinstance(gf, dict) or set(gf) != {"baseline","head"}: die("git_footprint must report both baseline and head arms")
+if not isinstance(gf, dict) or not {"baseline","head"}.issubset(gf): die("git_footprint must report both baseline and head arms")
 for arm_label in ("baseline","head"):
     g = gf.get(arm_label) or {}
     if g.get("tree_before") != g.get("tree_after"): die("%s: verifier mutated the repo (tree %s -> %s)" % (arm_label, g.get("tree_before"), g.get("tree_after")))
@@ -2306,11 +2722,61 @@ for arm_label in ("baseline","head"):
     if _added: die("%s: verifier added to the working tree: %s" % (arm_label, "; ".join(_added)))
     if _removed: die("%s: verifier removed pre-existing working-tree state: %s" % (arm_label, "; ".join(_removed)))
 
+# SPEC-300-002 R6 -- scope schema is always required; full recomputation
+# against the verifier-baseline..verifier-head diff runs only when the
+# standalone surface repo is supplied as argv[3] (requires argv[2] too).
+sc = v["scope"]
+if not isinstance(sc, dict) or not {"checked","out_of_scope","amended"}.issubset(sc):
+    die("scope must be a dict with checked/out_of_scope/amended")
+for _sk in ("checked","out_of_scope","amended"):
+    if not isinstance(sc.get(_sk), list) or not all(isinstance(p, str) for p in sc[_sk]):
+        die("scope.%s must be a list of path strings" % _sk)
+if len(sys.argv) > 3:
+    if len(sys.argv) <= 2: die("scope recomputation requires the spec-file argument (argv[2])")
+    surface_repo, spec_file_for_scope = sys.argv[3], sys.argv[2]
+    kit_dir = Path(spec_file_for_scope).resolve().parent.parent
+    sys.path.insert(0, str(kit_dir))
+    import scope_guard  # noqa: E402
+    spec_text = open(spec_file_for_scope).read()
+    scope = scope_guard.resolve_scope(spec_text)
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACDMR", "verifier-baseline", "verifier-head"],
+        cwd=surface_repo, capture_output=True, text=True,
+    )
+    diff_paths = sorted(p for p in diff.stdout.splitlines() if p.strip())
+    amend_globs = []
+    heading = re.search(r"^## Scope Amendments\s*$([\s\S]*?)(?=^## |\Z)", spec_text, re.M)
+    if heading:
+        for line in heading.group(1).split("\n"):
+            s = line.strip()
+            if not s.startswith("|") or re.match(r"^\|[\s:|-]*\|?$", s):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if not any(cells) or cells[0] == "Date" or len(cells) < 5 or not cells[1]:
+                continue
+            amend_globs.append(cells[1])
+    project_root = Path(surface_repo)
+    computed_out, computed_amended = [], []
+    for p in diff_paths:
+        d = scope_guard.classify_write(p, scope, project_root, project_root, None)
+        if d.allowed:
+            continue
+        if any(scope_guard._glob_match(g, p) for g in amend_globs):
+            computed_amended.append(p)
+        else:
+            computed_out.append(p)
+    if sorted(sc["checked"]) != diff_paths:
+        die("scope.checked disagrees with the verifier-baseline..verifier-head diff")
+    if sorted(sc["out_of_scope"]) != sorted(computed_out):
+        die("scope.out_of_scope disagrees with recomputed classification")
+    if sorted(sc["amended"]) != sorted(computed_amended):
+        die("scope.amended disagrees with recomputed classification")
+
 # R3 — per-AC status, and every AC in the spec covered.
 if not v["acs"]: die("no per-AC statuses")
 for a in v["acs"]:
     if a.get("status") not in ("pass","fail","unverifiable"): die("%s: bad status %r" % (a.get("id"), a.get("status")))
-    if not (a.get("evidence") or "").strip(): die("%s: no evidence" % a.get("id"))
+    if not isinstance(a.get("evidence"), str) or not a["evidence"].strip(): die("%s: evidence must be a non-empty string" % a.get("id"))
 if len(sys.argv) > 2:
     # Scope the AC-ID scan to the "## Acceptance Criteria" section only. A
     # whole-file scan false-positives on prose that mentions another spec's
@@ -2348,11 +2814,24 @@ for s in v["suites"]:
     # R4 — a single draw per arm may never be reported as a difference.
     need = 3 if (s.get("flaky_suspected") or b_any != h_any or b_any != b_all or h_any != h_all) else 1
     if min(b_n,h_n) < need: die("%s: %d/%d samples but %d per arm required (single-draw comparison is not a valid verdict)" % (s.get("name"), b_n, h_n, need))
+    # BUG-024: `fixed` (baseline_all - head_any) requires a 100%-baseline-failure
+    # precondition a genuinely intermittent flake almost never satisfies. `fixed`
+    # and `flake_resolved` partition baseline_any - head_any ("failed at least
+    # once in baseline, never in head") by whether the baseline failure was
+    # total (`fixed`) or partial (`flake_resolved`) -- disjoint by construction,
+    # since baseline_all and (baseline_any - baseline_all) already partition
+    # baseline_any. flaky_observed's second term is narrowed to intersect with
+    # head_any so a partial baseline flake that stops reproducing at head moves
+    # to flake_resolved instead of staying silently absorbed in flaky_observed;
+    # it stays disjoint from (head_any - head_all) since flake_resolved requires
+    # head_any empty for that name while (head_any - head_all) requires it
+    # present in head_any.
     rec = {"regressed": sorted(h_all - b_any), "newly_flaky": sorted((h_any - h_all) - b_any),
-           "flaky_observed": sorted((h_any - h_all) | (b_any - b_all)), "fixed": sorted(b_all - h_any)}
+           "flaky_observed": sorted((h_any - h_all) | ((b_any - b_all) & h_any)),
+           "fixed": sorted(b_all - h_any), "flake_resolved": sorted((b_any - b_all) - h_any)}
     dec = {k: sorted(s.get("classification", {}).get(k, [])) for k in rec}
     if dec != rec: match = False
-    lines.append("  %-24s regressed=%s newly_flaky=%s flaky_observed=%s fixed=%s" % (s.get("name"), rec["regressed"], rec["newly_flaky"], rec["flaky_observed"], rec["fixed"]))
+    lines.append("  %-24s regressed=%s newly_flaky=%s flaky_observed=%s fixed=%s flake_resolved=%s" % (s.get("name"), rec["regressed"], rec["newly_flaky"], rec["flaky_observed"], rec["fixed"], rec["flake_resolved"]))
 
 print("SCHEMA:     ok")
 print("RECOMPUTED:")
@@ -2514,7 +2993,7 @@ backfill a number for them, no matter how plausible an estimate would be. Likewi
 `self-verified` commit is not retroactively relabeled `self-verified-experimental` — Out of Scope
 for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified resolutions.
 
-**Evidence gate (all five must pass to merge):**
+**Evidence gate (all six must pass to merge):**
 
 1. **Report exists** — `reports/YYYY-MM-DD-nightshift-report.md` is present in the worktree.
 2. **Tests passed** — report contains no `❌` on test-result lines.
@@ -2537,8 +3016,128 @@ for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified
    that substitution via the trailer pair, never by leaving check 5 silently
    unaddressed. This is not available for a bare `self-verified` outcome — that
    value records a violation, not a passing gate.
+6. **Scope** (SPEC-300-002 R1) — every path in `git diff --name-only
+   <baseline>..<branch>` (added, modified, deleted, both sides of a rename)
+   is classified by `scope_guard.py` against the spec's declared write scope,
+   read from the spec file **on the configured main branch** — never the
+   worker branch or the working tree (SPEC-300 R3). Runs after check 5, before
+   the merge decision. Any `DENY` fails the gate. Skip this check, recording
+   `Nightshift-Scope-Check: not_run` and a report warning naming the missing
+   file, **only** when `scope_guard.py` is absent from the install — never
+   because the spec has no `scope:` (R9): an absent `scope:` still resolves to
+   the project-root default, which check 6 evaluates like any other scope.
 
-**If all five pass → merge and clean up:**
+   Run the embedded gate script against the candidate branch:
+
+   ```python
+   # NIGHTSHIFT-SCOPE-GATE-BEGIN
+   # usage: python3 scope_gate.py <project-root> <spec-relpath> <main-branch> <baseline> <branch>
+   #   -> one "ALLOW|AMENDED|DENY <reason> <path>" line per changed path, then:
+   #        SCOPE-CHECK: clean | amended | violated | not_run
+   #        REASON: <path> (<reason>), <path> (<reason>), ...   (omitted when clean)
+   #      exit 0 unless violated; not_run also exits 0 (R9 — a missing resolver
+   #      never blocks the run, it only forces the recorded trailer).
+   import re
+   import subprocess
+   import sys
+   from pathlib import Path
+
+   project_root, spec_relpath, main_branch, baseline, branch = sys.argv[1:6]
+   project_root = Path(project_root).resolve()
+   kit_dir = (project_root / spec_relpath).resolve().parent.parent
+   sys.path.insert(0, str(kit_dir))
+   try:
+       import scope_guard  # noqa: E402
+   except ImportError:
+       print("SCOPE-CHECK: not_run")
+       print(f"WARNING: scope_guard.py not found under {kit_dir} — check 6 skipped")
+       sys.exit(0)
+
+   scope = scope_guard.scope_from_main(project_root, spec_relpath, main_branch)
+   spec_text_main = subprocess.run(
+       ["git", "show", f"{main_branch}:{spec_relpath}"],
+       cwd=project_root, capture_output=True, text=True,
+   ).stdout
+   diff = subprocess.run(
+       ["git", "diff", "--name-only", "--diff-filter=ACDMR", f"{baseline}..{branch}"],
+       cwd=project_root, capture_output=True, text=True,
+   )
+   paths = [p for p in diff.stdout.splitlines() if p.strip()]
+
+   amend_globs = []
+   heading = re.search(r"^## Scope Amendments\s*$([\s\S]*?)(?=^## |\Z)", spec_text_main, re.MULTILINE)
+   if heading:
+       for line in heading.group(1).split("\n"):
+           s = line.strip()
+           if not s.startswith("|") or re.match(r"^\|[\s:|-]*\|?$", s):
+               continue
+           cells = [c.strip() for c in s.strip("|").split("|")]
+           if not any(cells) or cells[0] == "Date" or len(cells) < 5 or not cells[1]:
+               continue
+           amend_globs.append(cells[1])
+
+   # AC3 — a worker branch that edits its own spec's `scope:` on the branch is
+   # classified against MAIN's scope regardless (the scope resolution above
+   # already only ever reads main), but `scope_guard.classify_write`'s
+   # `spec_self` rule would otherwise let the spec's own file diff itself pass
+   # unconditionally (SPEC-300-001's carve-out for ordinary bookkeeping edits
+   # -- checklists, block_reason, etc.). Check 6 narrows that carve-out: when
+   # the branch's own copy of `scope:` differs from main's, the spec file
+   # itself is reported as an out-of-scope write (never `spec_self`), because
+   # that is exactly the self-widening SPEC-300 forbids. An ordinary edit that
+   # leaves `scope:` unchanged keeps the normal `spec_self` allow.
+   spec_text_branch = subprocess.run(
+       ["git", "show", f"{branch}:{spec_relpath}"],
+       cwd=project_root, capture_output=True, text=True,
+   ).stdout
+   # SPEC-302: compare against main's *raw* (unreconciled) scope, not the
+   # `scope` variable above — `scope_from_main` may have rolled an uncovered
+   # widening back to the last-`ready` value, and a worker branch that only
+   # ticks a checklist box in its own spec (leaving `scope:` byte-identical
+   # to main's raw frontmatter) must not be flagged for a widening it never
+   # made and cannot fix.
+   scope_self_edit = (
+       spec_relpath in paths
+       and scope_guard.resolve_scope(spec_text_branch) != scope_guard.resolve_scope(spec_text_main)
+   )
+
+   out_of_scope, amended = [], []
+   for path in paths:
+       if path == spec_relpath and scope_self_edit:
+           decision_allowed, decision_reason = False, "scope_self_edit"
+       else:
+           decision = scope_guard.classify_write(path, scope, project_root, kit_dir, spec_relpath)
+           decision_allowed, decision_reason = decision.allowed, decision.reason
+       if decision_allowed:
+           print(f"ALLOW {decision_reason} {path}")
+           continue
+       if any(scope_guard._glob_match(g, path) for g in amend_globs):
+           print(f"AMENDED {decision_reason} {path}")
+           amended.append((path, decision_reason))
+       else:
+           print(f"DENY {decision_reason} {path}")
+           out_of_scope.append((path, decision_reason))
+
+   status = "violated" if out_of_scope else ("amended" if amended else "clean")
+   print(f"SCOPE-CHECK: {status}")
+   if status != "clean":
+       offenders = out_of_scope if status == "violated" else amended
+       print("REASON: " + ", ".join(f"{p} ({r})" for p, r in offenders))
+   sys.exit(1 if status == "violated" else 0)
+   # NIGHTSHIFT-SCOPE-GATE-END
+   ```
+
+   `SCOPE-CHECK: clean` and `SCOPE-CHECK: amended` both satisfy check 6 (an
+   amendment is a human-approved widening, not a violation) and set
+   `Nightshift-Scope-Check` to that exact value on the terminal `done` commit.
+   `SCOPE-CHECK: violated` fails check 6; its `REASON:` line — one
+   `<repo-relative-path> (<reason-code>)` entry per offending path,
+   comma-separated — becomes both the spec's `block_reason` (R2) and
+   `unblock_spec.py`'s only parseable record of which paths still need an
+   amendment (R8). `SCOPE-CHECK: not_run` satisfies check 6 mechanically (R9)
+   but is still recorded verbatim, never silently folded into `clean`.
+
+**If all six pass → merge and clean up:**
 
 ```bash
 git merge --no-ff <branch>
@@ -2571,6 +3170,7 @@ Nightshift-Evidence-ACs: pass
 Nightshift-Evidence-Verifier: <pass|disputes_premise>
 Nightshift-Blocker-Class: none
 Nightshift-Blocker-Scope: none
+Nightshift-Scope-Check: <clean|amended|not_run>
 Nightshift-Unblock-Attempts: 0
 Nightshift-Unblock-Limit: 1
 Nightshift-Unblock-Rung: <0|1|2|3|4|5>
@@ -2578,6 +3178,23 @@ Nightshift-Parent-Tool-Calls: <N>
 Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
 Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
 ```
+
+**BUG-017 — one contiguous trailer paragraph, no exceptions.** If this session's
+attribution convention also requires trailers such as `Co-Authored-By:` or
+`Claude-Session:` on this commit, append them as additional lines **inside this
+same block**, directly below `Nightshift-Experimental-Sample-For`/`Nightshift-Resolution-Kind`
+— zero blank lines between any two trailer lines. Never put them in a second
+paragraph after a blank line, and never glue this block directly onto free-form
+prose with no blank line separating them either. Git's trailer parser
+(`%(trailers:...)`, which `record_metrics.py` depends on) recognizes only the
+single, last, blank-line-delimited paragraph of the commit message, and only
+when every line in it is trailer-shaped — a second trailer-shaped paragraph
+after this one silently hides this entire block from every `Nightshift-*`
+reader, and prose glued onto this block with no preceding blank line hides
+everything, including the attribution trailers. The required shape is exactly:
+one blank line between the free-form body and the trailer block, then every
+trailer — `Nightshift-*` and attribution alike — as one uninterrupted run of
+`Key: value` lines.
 
 `Nightshift-Evidence-Verifier` records the validated `VERDICT` value verbatim —
 `disputes_premise` here only ever means `premise_dispute.spec_defect: false`
@@ -2636,7 +3253,24 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel) &&
   --event run.completed --outcome passed
 ```
 
-**If any check fails or the orchestrator reports blocked/stuck → invoke the controller-backed unblock protocol:**
+**If check 6 (scope) fails → block directly; do not enter the controller-backed
+ladder automatically (SPEC-300-002 R2).** A scope violation is a
+human-decided class, not a mechanical recovery: skip straight to "block and
+escalate" below with `blocker_class: scope_violation`,
+`blocker_scope: out_of_scope`, `block_reason` set to check 6's `REASON:` line
+(one `<path> (<reason-code>)` entry per offending path), and
+`unblock_condition: scope amendment approved on main, or offending paths
+removed from the branch`. Do not call `unblock_spec.py prepare` as part of
+this automatic terminal resolution — a human adds the `## Scope Amendments`
+row on main first; only then may `unblock_spec.py prepare` be invoked (by a
+human or a later pass) and return eligible for rung 1 (R8). A worker that
+itself returned `worker-blocked` with a `## Scope Blockers` report section
+(path, reason, proposed scope change) is resolved exactly this way too — copy
+`block_reason` verbatim from that section, and never apply the worker's
+proposed scope change on its behalf (R7); the parent is not a scope
+authority.
+
+**If any other check fails or the orchestrator reports blocked/stuck → invoke the controller-backed unblock protocol:**
 
 Keep the spec `in_progress` while the parent creates the durable blocked evidence
 required by the lifecycle contract, then use `unblock_spec.py prepare` with the
@@ -2646,7 +3280,14 @@ It never asks the worker to mutate lifecycle state, merge, or finalize metrics.
 An eligible packet permits exactly one isolated,
 bounded recovery worker. A skipped or failed packet records the controller-produced
 next safe action and causal confidence, leaves the spec blocked, and forbids an
-automatic retry for the unchanged fingerprint.
+automatic retry for the unchanged fingerprint. For a `scope_violation` packet
+(SPEC-300-002 R8), `prepare` reports `eligibility: skipped` with next safe
+action "human scope decision" unless a `## Scope Amendments` row now exists on
+main covering every path named in `block_reason`, in which case it reports
+`eligibility: eligible` and rung 1 may run ordinarily — this is the one
+class where a later `prepare` call on the *same* blocked spec can flip from
+skipped to eligible without a new blocker, because the human-approved
+amendment is exactly the fact that changes.
 
 Only a verified `record_attempt(... outcome="succeeded")` followed by `finalize`
 may transition `blocked -> ready`. Rerun ordinary admission and the fresh-main
@@ -2698,8 +3339,9 @@ speculative explanation of why it worked.
    Nightshift-Evidence-Code: <pass|fail|unknown>
    Nightshift-Evidence-ACs: <pass|fail|unknown>
    Nightshift-Evidence-Verifier: <pass|fail|disputes_premise|unknown>
-   Nightshift-Blocker-Class: <implementation|test_infrastructure|fixture_drift|baseline_regression|external_input|evidence_gap|unknown>
+   Nightshift-Blocker-Class: <implementation|test_infrastructure|fixture_drift|baseline_regression|external_input|evidence_gap|scope_violation|unknown>
    Nightshift-Blocker-Scope: <in_scope|out_of_scope|mixed|unknown>
+   Nightshift-Scope-Check: <violated|not_run|clean|amended>
    Nightshift-Unblock-Attempts: <0|1>
    Nightshift-Unblock-Limit: 1
    Nightshift-Unblock-Rung: <0|1|2|3|4|5>
@@ -2707,6 +3349,15 @@ speculative explanation of why it worked.
    Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
    Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
    ```
+
+   **BUG-017 — same single-paragraph rule as the `done` commit above applies here.**
+   If attribution trailers (`Co-Authored-By:`, `Claude-Session:`, or equivalent)
+   are also required, append them as more lines inside this same trailer block —
+   never as a separate blank-line-delimited paragraph, and never with no blank
+   line at all between the one-line reason above and this block. Git's trailer
+   parser only recognizes one contiguous, fully trailer-shaped final paragraph;
+   splitting or omitting the blank line silently hides `Nightshift-*` trailers
+   from every reader, including `record_metrics.py`.
 
    The subject line is exactly `chore: mark <spec-id> blocked` with no trailing suffix —
    this is what `record_metrics.MARK_COMMIT_RE` and `hooks/commit-msg` both enforce. The
@@ -2722,9 +3373,13 @@ speculative explanation of why it worked.
    Classify the blocker by observed cause, not by the worker's status. Use
    `fixture_drift` for stale/mutated expected artifacts, `test_infrastructure`
    for harness/port/environment failures, `evidence_gap` when implementation may
-   be sound but a required gate cannot be demonstrated, and `implementation`
-   for a defect in the spec's delivered code. Scope says whether the required
-   fix belongs to the kicked-off spec.
+   be sound but a required gate cannot be demonstrated, `implementation`
+   for a defect in the spec's delivered code, and `scope_violation` (SPEC-300-002
+   R3) when evidence-gate check 6 denied a path — always with `blocker_scope:
+   out_of_scope`, and see the "check 6 fails" carve-out above for the routing
+   difference: this class never enters the controller-backed ladder
+   automatically. Scope says whether the required fix belongs to the
+   kicked-off spec.
 
 3. Write a Cortex breadcrumb:
    `mcp__cortex__cortex_breadcrumb`: `"Spec <spec-id> blocked after kickoff run: <reason>"`
@@ -3141,6 +3796,22 @@ When the Nightshift LOOP runs a spec and encounters an open question it cannot r
 2. Note: `See {PROJECT}-QUESTIONS-NNN.md for the consolidated questions tracker`
 
 If no QUESTIONS spec exists yet when the report is written, the LOOP notes the question in the report and the next `address-issues` run will pick it up and create the QUESTIONS spec.
+
+**Report-level scan vs. this command's spec-level scan (SPEC-299).** This
+command's Step 2 scan is scoped to `draft`/`blocked` *specs* — it is
+complementary to, not a replacement for, the report-level half of the flow.
+Every report the LOOP writes must carry its own `## Report Action Log`
+section (LOOP.md Step 14): a closed-vocabulary record of what happened to
+that report's own `## Open Questions`/`## Blocked Specs` content
+(`none_found` | `consolidated_into <QUESTIONS-spec-id>` | `resolved_in_report`
+| `deferred: <reason>`). The board's **COPY PROMPT** button (`board.py`'s
+`copyQuestionsPrompt()`) is the operator-facing entrypoint for that
+report-level scan: it walks unread reports, extracts `## Open Questions`/
+`## Blocked Specs`, and instructs the reader to append one `## Report Action
+Log` row per scanned report — including a `none_found` row, never a silent
+skip — to the consolidated QUESTIONS spec, so a later reader can answer "was
+this report addressed?" from the QUESTIONS spec (or the report itself)
+without re-opening every report.
 
 ---
 

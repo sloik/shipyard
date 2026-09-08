@@ -28,6 +28,19 @@ Nightshift reads git behavior from `config.yaml` -> `git`:
 Config files document fields and defaults. This file documents how those fields
 are used by the loop, orchestrator, hooks, and human review.
 
+### `deployment:` composes with `merge_on_pass` (SPEC-294)
+
+`deployment:` is optional and absent by default; when absent, `merge_on_pass`
+is the only merge decision, exactly as above. When a project opts in,
+`deployment:` adds a *further* condition on top of `merge_on_pass` -- it never
+replaces it. `merge_on_pass: false` still means "never auto-merge, leave on
+branch," regardless of environment. `merge_on_pass: true` with a candidate
+resolved to an `authorize` environment means "prepare to merge automatically,
+but not until a human authorization artifact exists for this exact SHA" -- see
+ORCHESTRATOR.md's "Serialized integration queue and fresh-main validation"
+section for the hold mechanics. `auto_merge`-resolved candidates in an opted-in
+project behave exactly as `merge_on_pass: true` already does.
+
 Nightshift control-state persistence is selected separately by
 `nightshift_state.policy`. Missing means `commit-backed`; `private-local` must be
 explicit. Invalid values stop before any lifecycle mutation or worker launch.
@@ -63,6 +76,46 @@ ID. Workers cannot transition state, and terminal transitions are idempotent.
 
 Use the source fingerprint guard when fingerprint metadata exists; stale
 source-of-truth writes must be reconciled before overwriting frontmatter.
+
+Terminal reconciliation is never newest-write-wins. A matching immutable
+terminal decision plus durable lifecycle checkpoint outranks file status and
+mtime. Board reads may reconcile newer nonterminal frontmatter inward only to
+another nonterminal state; they cannot manufacture `done` or `blocked`.
+Coordinator recovery projects terminal truth outward through the path-only
+projector. StatusStore derives exact before/expected hashes from the clean
+base-HEAD blob before accepting a receipt, and recovery recomputes the same
+contract independently. Only dirty bytes equal to that canonical target may be
+committed on replay; self-asserted hashes provide no authority. The StatusStore
+is durably bound to the repository's normalized Git common directory either
+intrinsically by location or explicitly at construction; projector use never
+claims an unbound store. Each receipt also binds the exact checkout root. Linked worktrees may share the
+common-dir owner, but an independent byte-identical clone cannot substitute for
+it during admission or recovery. Dirty mixed or
+opposite terminal edits are retained for explicit recovery; a clean tracked
+opposite value is safely corrected with the canonical `chore: mark` commit and
+trailers.
+
+Main-merge failures use a separate coordinator-owned durable classification.
+Before `git merge`, append the exact main/candidate identity and retry number.
+A zero exit proves success only through an exact clean two-parent merge shape or
+a candidate already contained by unchanged clean main. A first cleanly aborted
+content conflict, false-success postcondition mismatch, or interruption is held for one exact
+restart retry; a second becomes immutable `blocked`. A non-conflict command
+failure on unchanged clean main blocks immediately. Any dirty/divergent main or
+candidate identity mismatch remains held with recovery inputs intact. Never
+report these as validation or checked-revert failures, never expose `done`, and
+never clean the candidate worktree/branch from a failure disposition.
+Keyed prepared replay must reconcile the matching merge ledger through the same
+parent, reachability, deterministic-tree, and cleanliness proof before running
+validation. Its observed and declared surfaces must be canonical and match the
+durable ledger exactly; declared surfaces must also match the candidate handle.
+Repository-relative surface paths reject absolute paths, traversal/dot and
+internal-empty components, backslashes, URI forms, and platform drive aliases.
+The existing single trailing `/` directory marker remains valid only for
+declared/reserved touch surfaces; values are compared exactly, never rewritten.
+The candidate, main, spec, run, and bounded attempt identity must match. Missing,
+malformed, or mismatched identity is retained as a reason-coded hold. The
+prepared intent and parent shape alone never authorize `done`.
 
 ### Shared-branch correction safety (SPEC-275)
 
@@ -210,6 +263,55 @@ chmod +x .git/hooks/pre-commit
 cp .nightshift/hooks/commit-msg .git/hooks/commit-msg
 chmod +x .git/hooks/commit-msg
 ```
+
+### Write-scope guard (SPEC-300-003)
+
+`hooks/protect-write-scope.sh` is a portable backstop for a spec's declared
+`scope.write` (see SPEC-300 § Scope, `scope_guard.py`): the earliest point a
+misplaced write can be caught before it reaches a branch the parent has to
+diff, because git hooks live in the shared common directory and fire in
+every worktree regardless of harness.
+
+- **Active-spec resolution.** `scope_guard.py active_spec` — the
+  `NIGHTSHIFT_ACTIVE_SPEC` env var first, then the
+  `nightshift/<SPEC-ID>-<run-id>` branch name. With no active spec, only the
+  two universal rules apply (a new `SPEC-*.md`/`NFR-*.md`/`*-QUESTIONS-*.md`
+  must live in a known specs directory; a malformed target name — `:`, a
+  newline, or leading/trailing whitespace in the basename — is never
+  writable); everything else is allowed.
+- **With an active spec**, `scope.write` is read from the spec **as
+  committed on the configured main branch** — never from the worktree or the
+  worker's own branch, so a worker cannot widen its own scope by editing
+  `scope:` on its branch. Every staged path (`git diff --cached
+  --name-status --diff-filter=ACDMR -M -z`, both sides of a rename) is
+  classified with the shared `scope_guard.py` resolver.
+- **Dedicated exit code: 96.** (`protect-live-data.sh` already owns 97.) A
+  `DENY` on any staged path aborts the commit with exit 96 and prints every
+  offending path, its reason code, the spec ID, and the declared `write`
+  globs. Any other outcome — a resolver that fails to load, a `git diff`
+  failure, an unparsable spec — is a **fail-open**: the guard prints a
+  `[nightshift write-scope]` warning and exits 0, mirroring
+  `protect-live-data.sh`.
+- **No environment-variable bypass.** The only way to land an out-of-scope
+  path is a human-approved `## Scope Amendments` row that widens `scope.write`
+  on main, or removing the path from the index with `git reset HEAD --
+  <path>` before committing. `git commit --no-verify` still bypasses every
+  hook, as it does for all guards in this file.
+- **Install:** `sh hooks/install-write-scope-guard.sh` wires the guard into
+  the repository's pre-commit hook (marker `# SPEC-300-003
+  protect-write-scope`, inserted above a trailing `exit 0`, idempotent,
+  resolving the guard from either the Argo Home or `.nightshift/hooks/`
+  layout). It refuses to touch a pre-commit hook it does not recognise
+  rather than silently overwrite it — merge the marker and snippet by hand
+  in that case; the refusal message names the exact text to add. The
+  *managed* `hooks/pre-commit` above also calls the guard directly, when
+  present, before lint/type-check — the installer is for repositories (for
+  example the Argo Home primary checkout) that chain guards onto a
+  hand-maintained hook rather than running the managed one verbatim.
+  `hooks/guard-registry.yaml` carries the entry so
+  `preflight.check_guard_liveness` reports an opted-in protected checkout
+  that is missing it. `doctor` reports an uninstalled guard as finding `D7`
+  and `doctor --fix` runs the installer.
 
 ### Managed install payloads are release-owned (SPEC-203)
 
@@ -494,9 +596,9 @@ the resolver rejects overrides inside the repository or its synchronized ancesto
 
 Nightshift runs a mechanical startup janitor before concurrent execution starts.
 The janitor enumerates `git worktree list --porcelain`, maps linked worktrees
-back to the current project's specs, reads durable status first and frontmatter
-second, and reports any worktree it cannot confidently reconcile as skipped.
-Foreign or wrong-repo worktrees are never deleted by this pass.
+back to the current project's specs, and delegates eligible resources to the
+same coordinator-owned `CheckedCleanupProtocol` used after integration. Foreign,
+wrong-repo, or incompletely owned worktrees are retained.
 
 Retention is status and marker based:
 
@@ -505,17 +607,38 @@ Retention is status and marker based:
   the worktree root does not contain `.nightshift-keep`.
 - `.nightshift-keep` pins a blocked or failed worktree for human inspection.
 
-Before deletion, Nightshift checks for unmerged work with
-`git log <main_branch>..<branch>` or an equivalent reachability check. If the
-branch has commits not reachable from the configured main branch, the janitor
-leaves the worktree and branch intact and reports `unmerged — manual`. Unmerged
-work is never destroyed automatically, even for `done`, `blocked`, or `failed`
-specs.
+Cleanup is permitted only after the immutable terminal decision, matching
+durable lifecycle status, and clean committed terminal frontmatter agree for the
+same run. `CheckedCleanupProtocol` records an exact owner inventory in the
+append-only `cleanup_events` table before any Git mutation. Cleanup evidence is
+distinct from the current lifecycle checkpoint: retries cannot rewrite status,
+decision identity, accepted completion evidence, or terminal metrics.
 
-Actual deletion uses the shared cleanup primitive:
-`git worktree remove --force <path>` followed by `git branch -D <branch>`. The
-startup janitor uses this for stale resolved worktrees, and merge-path cleanup
-uses it immediately after a done spec is merged successfully.
+The recorded owner binds repository common directory, canonical worktree path,
+exact branch ref, and candidate revision. A retargeted ref or substituted replay
+handle is retained. Blocked or otherwise unmerged work receives a durable
+`refs/nightshift/recovery/<spec>/<run>` ref pinned to the candidate before the
+last worktree/branch reachability roots can be removed. A first attempt cannot
+claim an arbitrary absent path or ref as released; only a prior exact `started`
+inventory plus current Git-confirmed absence permits interrupted-operation
+reconciliation.
+
+Every `git worktree remove --force` and `git branch -D` result is checked, then
+Git is re-inventoried to prove the requested postcondition. Partial or failed
+cleanup records every retained/released worktree, branch/ref, keep marker, and
+recovery ref with a reason code. Exact-owner retry is idempotent after either
+terminal outcome and never chooses another terminal value. A stale `completed`
+event is also re-inventoried. The exact durable owner path is checked with
+non-following filesystem inspection as well as Git registration; an ordinary
+directory, file, symlink (including a broken symlink), registered worktree, or
+ambiguous/foreign entry at that path is retained and never followed or deleted.
+Recreated or retargeted branch/recovery refs are retained as well.
+Legacy fan-in and worktree preparation retain existing resources rather than
+performing cleanup outside this protocol.
+
+The janitor continues to classify an unmerged candidate that it cannot safely
+bind to this protocol as `unmerged — manual`; merge-path cleanup and concurrent
+paths never bypass the checked owner.
 
 ## Merge and Post-Merge Validation
 

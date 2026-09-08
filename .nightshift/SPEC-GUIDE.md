@@ -99,6 +99,57 @@ compatibility, or release proof. Zero observations are `no_samples` with a null
 value, never success; later unsupported evidence creates linked remediation and
 does not rewrite the source spec's historical status.
 
+**Live Execution evidence references (BUG-023, template v11+):** a checked
+`- [x] **LEn:**` box is not, by itself, proof that the live execution
+happened — it is checkbox text. For specs with `template_version >= 11` and
+`real_use_evidence.policy: required_before_done`, every checked LE item at
+`status: done` must carry an inline `(evidence: <path>)` reference on the same
+line, and that path must resolve to a real file relative to the spec file's
+directory or its parent (the kit/canonical root) — a safe relative path only,
+no absolute paths, `~`, `..`, or URLs. Example:
+
+```markdown
+- [x] **LE1:** Executed 2026-09-06 via BUG-023 (evidence: reports/BUG-023/live-run.md)
+```
+
+Existence is sufficient — no cryptographic hash is required (that asymmetry
+with `delegated_experiment`'s `lineage_hash` requirement is intentional: this
+closes the "checked with zero backing evidence" gap, not the gap between the
+two policies' evidentiary weight). A checked item missing a valid reference is
+a validation ERROR naming the LE id. Specs with `template_version` below 11 (or
+absent) are grandfathered — this requirement was introduced without a corpus
+backfill; existing `done` specs are not retroactively invalidated. Once a spec
+adopts `template_version: 11` it is fully subject to the requirement, so do
+not bump `template_version` on an already-`done` spec without also adding real
+evidence references to its checked LE items.
+
+---
+
+## Intent capture (optional pre-Phase-0)
+
+When the user has a half-formed idea and is not ready to commit to spec work,
+offer a lightweight intent capture before starting Phase 0. Ask only for the
+problem, trigger, who is affected, and rough outcome. Write the answers to
+`intents/<lowercase-kebab-slug>.md` using `intents/_TEMPLATE-INTENT.md`
+(`canonical/intents/` in this repository and `.nightshift/intents/` in an
+installed kit). The file is git-tracked, human-reviewable, non-committing, and
+deliberately outside `specs/`; it is never runnable, board-visible, or
+evidence that implementation has a spec.
+
+An intent never weakens or substitutes for the nine-phase interview:
+**interview guardrails apply in full to every spec regardless of intent origin**.
+When a user later brings an intent to the full interview, use
+`problem`, `trigger`, and `affected` only to pre-fill Phase 1 and
+`rough_outcome` as initial scope context. Confirm every value with the user
+rather than silently accepting it, then run all phases normally. The
+resulting spec's `## Context` records `Origin intent: intents/<slug>.md`;
+update the intent to `status: promoted` and `promoted_to: <SPEC-ID>` only
+after the spec exists.
+
+Rejecting an intent is free: set only its `status: rejected`, or delete the
+file. Neither action creates a board entry, validation finding, or lifecycle
+transition elsewhere.
+
 ---
 
 ## Phase 0: Auto-Discovery (Agent Work)
@@ -403,6 +454,17 @@ standard verifier surface.
    - Add these to frontmatter `attachments:` as mappings with `path` and `description`.
      Optional fields: `kind` (`image`, `log`, `video`, `data`, `doc`, `other`) and
      `role` (`expected`, `actual`, `annotated`, `reference`, `evidence`).
+
+5. **"Does this spec need to run on a specific model?"** (SPEC-307)
+   - Expected answer: Usually "no, parent default" — only ask when a cheaper- or
+     stronger-model policy is deliberate for this spec.
+   - Add an optional `execution:` mapping to frontmatter with `worker_model` and/or
+     `verifier_model`, each a free-form model identifier string (e.g. `sonnet`,
+     `claude-haiku-4-5-20251001`). Absent means "parent default". The board surfaces
+     both as always-visible metadata rows and appends a matching instruction line to
+     the copied run prompt, so the parent kickoff cannot miss it. `validate_specs.py`
+     rejects a non-string value or an unknown key under `execution:` (WARN at draft,
+     ERROR at ready).
 
 **Guardrails (Agent must enforce):**
 
@@ -732,6 +794,111 @@ reconciling any bounded read-only review.
 
 Optional fields `provides`, `requires`, and `touches` help the board/orchestrator explain sequencing without replacing dependency declarations. `after:` is the hard dependency graph **within this project only**. For a prerequisite owned by another registered project, use `requires_specs:` with an explicit project and spec ID; admission reads that project without mutating it and refuses only the consumer if it is not `done`, unknown, missing, or malformed. `requires` warnings tell an agent that a capability provider is missing or should probably be declared as a hard dependency. `touches` warnings prevent unsafe parallel work when two ready specs edit the same protocol file or capability.
 
+## Write scope
+
+Optional frontmatter `scope:` (template v10, SPEC-300-001) declares WHERE a
+spec's implementation may write and read, so enforcement points can catch a
+misplaced write mechanically instead of relying on kickoff-brief prose.
+`touches:` stays advisory (overlap warnings only); `scope:` is the
+enforceable boundary that SPEC-300's children (evidence-gate check 6, the
+git pre-commit guard, and the harness `PreToolUse` hook) read.
+
+```yaml
+scope:
+  write: []            # globs relative to the project root (git toplevel of the
+                       # checkout the run executes in). Absent or [] means the
+                       # whole project root: ["**"].
+  deny: []             # globs never writable even when matched by write; deny wins.
+  read: unrestricted   # unrestricted | [globs]. Absent means unrestricted.
+```
+
+Globs use the same project-root-relative convention as `touches:` (a
+`canonical/` prefix in this kit repository; paths relative to the project
+root in a deployed project). Matching is gitignore-style (`**` crosses
+directories). A path is **writable** if it matches `write` (or the default)
+**or** an implicit-allow rule below, **and** does not match `deny`, **and**
+is not a malformed target.
+
+### Defaults and implicit rules
+
+- **Default write scope is the project root, never "anywhere".** A spec
+  with no `scope:` may write anywhere inside its project root and nowhere
+  outside it. Reads are unrestricted by default. Absent `scope:` on an
+  existing or new spec means exactly this — add nothing to keep the default.
+- **Implicit allow, kit-owned evidence paths.** Relative to the *kit
+  directory* (the parent of the spec's `specs/` directory), these are always
+  writable regardless of `write`: `reports/**`, `metrics/**`,
+  `red-proofs/**`, `runs/**`, `knowledge/attempts/**`,
+  `release-handoffs/**`, `reports/_wip/**`, and the spec's own file.
+- **Implicit allow, conditional canonical-payload exception (SPEC-300-001-001).**
+  `<kit_dir>/release-manifest.json` and `<kit_dir>/CHANGELOG.md` are
+  writable, reusing the same `implicit_kit_path` reason, **only when** the
+  spec's own `scope.write` already names at least one file that is itself a
+  member of `nightshift-sync.py`'s `CANONICAL_PROTOCOL_FILES` — i.e. the spec
+  is already legitimately editing managed canonical payload (e.g. it edits
+  `scope_guard.py` or `Skills/nightshift/SKILL.md`). This absorbs the
+  recurring kickoff-protocol requirement to regenerate the release manifest
+  whenever a managed file changes, without a spec author having to add
+  either file to `write` by hand. It is scoped to exactly these two files
+  and fires for no other path; a spec with no managed-payload file in
+  `write` gets no exception — `release-manifest.json` still denies with its
+  pre-existing reason code.
+- **Heartbeat exception.** The one sanctioned write outside the worktree
+  root is the `/bin/cp` of the heartbeat to the main checkout's
+  `reports/_wip/orchestrator-progress-<SPEC-ID>.md`.
+- **Spec files have one home.** A new file matching `SPEC-*.md`,
+  `NFR-*.md`, or `*-QUESTIONS-*.md` is writable only inside the project's
+  configured specs directory, regardless of `write`. This universal rule
+  applies even with no active spec.
+- **Malformed targets are never writable.** A destination whose basename
+  contains `:` or a newline, or starts or ends with whitespace, is denied
+  regardless of scope. This universal rule applies even with no active spec.
+- **`deny` wins over everything** except the spec's own file.
+- **`path_vars` anchors (`{{PROJECT_ROOT}}`, `{{HOME}}`, ...) are refused in
+  `scope:`.** Scope must never reach outside the project via an anchor;
+  `validate_specs.py` rejects any `{{...}}` token in a `scope:` glob.
+
+### The `## Scope Amendments` table
+
+A spec whose scope needs to widen after `status: ready` records the change
+in a `## Scope Amendments` body section (same shape as `## AC Amendments`):
+
+| Date | Path or glob | Change (old → new) | Reason | Approved by |
+| --- | --- | --- | --- | --- |
+
+Every non-empty row's `Approved by` cell must be exactly `human` or
+`human:<name>` — `validate_specs.py` rejects any other value (an agent or a
+worker cannot self-approve its own scope widening). Scope is always read
+from the spec file **on the configured main branch**, never from a worker's
+branch or working tree, so a worker branch that edits its own spec's
+`scope:` is itself an out-of-scope write, not a widening. The table may be
+empty; leave it empty until an amendment is actually needed.
+
+### Controlled reason codes
+
+Every scope decision carries one of exactly ten reasons (`scope_guard.py`
+`classify_write`/`classify_read`):
+
+| Reason | Meaning |
+| --- | --- |
+| `write_glob` | Path matched an explicit `scope.write` glob. |
+| `default_root` | No narrower `scope.write`; the project-root default applies. |
+| `implicit_kit_path` | Path is a kit-owned evidence path (`reports/**`, `metrics/**`, ...), always writable; or `release-manifest.json`/`CHANGELOG.md` when `write` already touches managed canonical payload (SPEC-300-001-001). |
+| `spec_self` | Path is the spec's own file. |
+| `heartbeat` | Path is the sanctioned main-checkout heartbeat destination. |
+| `denied_glob` | Path matched `scope.deny`; deny wins over write and implicit rules. |
+| `outside_root` | Path is outside the project root, or inside it but not covered by a non-empty `scope.write`. |
+| `spec_wrong_home` | A `SPEC-*.md`/`NFR-*.md`/`*-QUESTIONS-*.md` path outside the known specs directory. |
+| `malformed_target` | Basename contains `:` or a newline, or has leading/trailing whitespace. |
+| `no_active_spec` | No spec is resolvable (`NIGHTSHIFT_ACTIVE_SPEC` unset, branch not `nightshift/*`); only the two universal rules (`spec_wrong_home`, `malformed_target`) are enforced. |
+
+Every SPEC-300 enforcement point calls the shared resolver in
+`scope_guard.py` (`resolve_scope`, `classify_write`, `classify_read`,
+`active_spec`, `scope_from_main`) rather than re-implementing the matching.
+SPEC-300-001 delivers the declaration, the resolver, the validator rules,
+and this authoring step; enforcement (evidence-gate check 6, the git
+pre-commit guard, and the harness hook) is SPEC-300-002/003/004.
+
 ## Attachment Metadata
 
 Optional frontmatter `attachments:` gives tools and agents structured references
@@ -921,6 +1088,50 @@ flowchart TD
     G -- resource --> RG[resource_gated]
     G -- gap spec --> WG[waiting_gap_spec]
     G -- open --> R[runnable]
+```
+
+**`scope_violation` blocker class and its recovery route (SPEC-300-002).** The
+evidence gate's check 6 classifies every path in the candidate branch's diff
+against the spec's declared write scope (SPEC-300's `scope:` block), read from
+main. A denied path with no covering `## Scope Amendments` row routes the spec
+to `blocked` with `blocker_class: scope_violation` and `blocker_scope:
+out_of_scope`, listing each offending path and its `scope_guard.py` reason code
+in `block_reason`. Unlike every other blocker class, this one is **never**
+auto-entered into the controller-backed unblock ladder (`unblock_spec.py
+prepare` reports `eligibility: skipped` on class membership alone) — a scope
+widening is always a human decision, recorded as a `## Scope Amendments` row
+on main with `Approved by: human`. Once a row covers every offending path,
+`prepare` recomputes coverage and reports `eligibility: eligible`, and rung 1
+of the ladder may then run ordinarily. `Nightshift-Scope-Check` on the
+terminal commit records which of `clean | amended | violated | not_run`
+applied; see `metrics/_SCHEMA.md`.
+
+**Optional `deploy_environment:` frontmatter (SPEC-294).** A project that has
+opted into a `deployment:` block in `config.yaml` (see `config-reference.yaml`)
+may set `deploy_environment: <name>` on a spec to select which of the
+project's declared environments it targets; naming an undeclared environment
+is a named validation finding (`validate_specs.py`), and the resolver fails
+closed to the most restrictive `authorize` tier rather than guessing. Absent
+`deploy_environment:`, a spec resolves to the project's `default_environment:`.
+Most Nightshift-managed projects have no `deployment:` block at all -- in that
+case this field is unused and its presence/absence has no effect.
+
+`awaiting_authorization` (SPEC-294) is a distinct, post-completion derived run
+state: it is never reached through the pre-run admission gate `G` above.
+`SerializedIntegrationQueue` reaches it after a candidate has already passed
+implementation, verification, rebase and fresh-main validation, when its
+resolved `deploy_environment` requires `on_completion: authorize` and no
+durable authorization artifact yet covers the exact candidate SHA:
+
+```mermaid
+flowchart TD
+    C[completed, verified candidate] --> M{resolved on_completion}
+    M -- auto_merge --> DONE[done]
+    M -- authorize --> AZ{authorization artifact for this SHA?}
+    AZ -- yes --> DONE
+    AZ -- no or stale --> AA[awaiting_authorization]
+    AA -- new commit lands --> AA
+    AA -- authorization recorded --> DONE
 ```
 
 When promoting an individual spec to `ready`, reconcile it against every active

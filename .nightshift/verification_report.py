@@ -52,7 +52,7 @@ VERIFIER_REPORT_ROOTS = ("reports/", ".nightshift/reports/", "canonical/reports/
 VERIFIER_METRICS_ROOTS = ("metrics/", ".nightshift/metrics/", "canonical/metrics/")
 VERIFIER_VERDICT_REQUIRED_KEYS = frozenset({
     "spec_id", "branch", "baseline_commit", "head_commit", "verdict",
-    "acs", "suites", "git_footprint", "contamination",
+    "acs", "suites", "git_footprint", "scope", "contamination",
 })
 VERIFIER_IDENTITY_SCHEMA_VERSION = "1.0.0"
 CONTAINMENT_EVIDENCE_SCHEMA_VERSION = "1.6.0"
@@ -2029,6 +2029,9 @@ def verifier_surface_self_test() -> dict[str, Any]:
                 }
                 for label in ("baseline", "head")
             },
+            # SPEC-300-002 R6: required alongside contamination in the same
+            # smoke contract.
+            "scope": {"checked": [], "out_of_scope": [], "amended": []},
         }
         missing_errors = validate_verifier_verdict_dict(verdict)
         verdict["contamination"] = None

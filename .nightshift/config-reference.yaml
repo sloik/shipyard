@@ -106,7 +106,7 @@ schema_version: "3.1.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.13.0"
+kit_version: "3.17.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -928,6 +928,62 @@ git:
   # Default:  "NIGHTSHIFT_ESCALATION_SIGNOFF"
   # The hook accepts this environment variable only after explicit Lukasz sign-off.
   escalation_signoff_env: "NIGHTSHIFT_ESCALATION_SIGNOFF"
+
+# =============================================================================
+# Deployment-environment autonomy tiers (SPEC-294)
+# =============================================================================
+# Optional, per-project. Absent entirely -> zero behavior change: every
+# candidate resolves through git.merge_on_pass exactly as it does today.
+# Once present, it is a merge-safety gate (not a UI preference like
+# board_column_defaults): a malformed or unresolvable block/environment
+# fails CLOSED to "authorize" (the most restrictive tier), never silently
+# to "auto_merge", and is reported as a named validation finding.
+#
+# This is a *different axis* from runner.tiers (model capability selected
+# per spec). deployment: environments gate *merge autonomy* for a target
+# environment; they never select a model or worker capability.
+#
+# Type:     mapping
+# Required: no
+# Keys:
+#   environments:        required if deployment: is present. Mapping of
+#                         environment name -> {on_completion: auto_merge |
+#                         authorize}.
+#   default_environment: required if deployment: is present. Must name one
+#                         of the keys under environments:. Used when a spec
+#                         has no deploy_environment: frontmatter field.
+#
+# Per-spec frontmatter (optional): deploy_environment: <name>, selecting one
+# of the project's declared environments. Absent -> default_environment.
+# Naming an undeclared environment is a named validation finding
+# (validate_specs.py) and fails closed to "authorize" at merge time.
+#
+# on_completion: auto_merge  -> unchanged today's-merge_on_pass behavior for
+#                                candidates resolved to this environment.
+# on_completion: authorize   -> the integration broker performs queueing,
+#                                overlap checks, rebase, and fresh-main
+#                                validation, then refuses the final `git
+#                                merge` until a durable SPEC-291 `decision`
+#                                artifact records a human authorization of
+#                                the exact candidate SHA. The spec is held
+#                                in the `awaiting_authorization` derived run
+#                                state (lifecycle.RUN_STATES) -- never
+#                                marked done, never marked blocked.
+#
+# Example — a project with a docs/dev environment that merges freely and a
+# prod environment that requires explicit human sign-off:
+#
+#   deployment:
+#     environments:
+#       dev:
+#         on_completion: auto_merge
+#       prod:
+#         on_completion: authorize
+#     default_environment: dev
+#
+# (No live example is set below: most Nightshift-managed projects, including
+# this canonical kit itself, have no production deploy target and must see
+# zero validation findings with this section entirely absent.)
 
 ---
 

@@ -143,6 +143,8 @@ def run_startup_janitor(
     worktree_output: str | None = None,
     status_store: Any | None = None,
 ) -> list[JanitorDecision]:
+    if status_store is None and StatusStore is not None:
+        status_store = StatusStore.for_specs_dir(Path(project_root) / "specs")
     decisions = reconcile_worktrees(
         repo_root,
         project_root,
@@ -150,7 +152,10 @@ def run_startup_janitor(
         worktree_output=worktree_output,
         status_store=status_store,
     )
-    cleanup_decisions(repo_root, decisions)
+    cleanup_decisions(
+        repo_root, decisions, status_store=status_store,
+        specs_dir=Path(project_root) / "specs",
+    )
     sweep_wip_heartbeats(project_root, status_store=status_store)
     return decisions
 
@@ -221,10 +226,17 @@ def sweep_wip_heartbeats(
     return decisions
 
 
-def cleanup_decisions(repo_root: Path, decisions: Iterable[JanitorDecision]) -> list[str]:
+def cleanup_decisions(
+    repo_root: Path, decisions: Iterable[JanitorDecision], *,
+    status_store: Any | None, specs_dir: Path,
+) -> list[str]:
     handles: list[WorktreeHandle] = []
     for decision in decisions:
         if decision.action != "gc" or not decision.spec_id:
+            continue
+        state = status_store.get_state(decision.spec_id) if status_store is not None else None
+        spec_path = _find_spec_file(Path(specs_dir), decision.spec_id)
+        if state is None or spec_path is None or not state.get("run_id"):
             continue
         handles.append(
             WorktreeHandle(
@@ -234,11 +246,15 @@ def cleanup_decisions(repo_root: Path, decisions: Iterable[JanitorDecision]) -> 
                 events_dir=decision.worktree_path / ".nightshift" / "events",
                 checkpoint_dir=decision.worktree_path / ".nightshift" / "checkpoints",
                 status="completed",
+                terminal_run_id=str(state["run_id"]),
+                canonical_spec_path=spec_path,
             )
         )
     if not handles:
         return []
-    return cleanup_worktrees(handles, Path(repo_root), force=True)
+    return cleanup_worktrees(
+        handles, Path(repo_root), force=True, status_store=status_store,
+    )
 
 
 def cleanup_merged_worktree(
@@ -248,11 +264,16 @@ def cleanup_merged_worktree(
     repo_root: Path,
     *,
     main_branch: str = "main",
+    status_store: Any | None = None,
+    spec_path: Path | None = None,
 ) -> JanitorDecision:
     """Happy-path cleanup immediately after a done spec merge."""
     decision = _decide(spec_id, Path(worktree_path), branch_name, "done", Path(repo_root), main_branch)
     if decision.action == "gc":
-        cleanup_decisions(repo_root, [decision])
+        cleanup_decisions(
+            repo_root, [decision], status_store=status_store,
+            specs_dir=(Path(spec_path).parent if spec_path is not None else Path(repo_root) / "specs"),
+        )
     return decision
 
 
