@@ -1203,3 +1203,92 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             ("schema_version", "5"),
         )
+
+
+# ---------------------------------------------------------------------------
+# SPEC-332: the board/file status-sync rule, shared by board.py (live probe)
+# and validate_specs.py (offline --status-store check). Pure functions: no
+# database access, no FastAPI, so the validator can import them cheaply.
+# ---------------------------------------------------------------------------
+
+FRONTMATTER_RECONCILE_STATUSES = frozenset({
+    "planned", "draft", "ready", "in_progress", "blocked",
+    "active", "done", "superseded", "retired",
+})
+TERMINAL_DURABLE_STATUSES = frozenset({"done", "blocked"})
+SYNC_DURABLE_TERMINAL_AHEAD = "durable-terminal-ahead-of-file"
+SYNC_DURABLE_STALE_BEHIND = "durable-stale-behind-file"
+
+
+def checkpoint_epoch(state: dict[str, Any]) -> float | None:
+    """Return a durable row's checkpoint timestamp in seconds, or None."""
+    raw = state.get("created_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def should_reconcile_frontmatter_status(
+    frontmatter_status: str,
+    durable_state: dict[str, Any],
+    file_mtime: float,
+    spec_path: Path | None = None,
+) -> bool:
+    """Whether a newer file status may repair a durable row.
+
+    A durable row already at a terminal status (`done`/`blocked`) is
+    authoritative and immutable via frontmatter (SPEC-296-008; BUG-313 R2). A
+    non-terminal row may be forward-reconciled by a newer file status whose
+    mtime is at or after the row's checkpoint (BUG-313): the documented
+    interactive workflow finalizes a spec by editing frontmatter and never
+    calls the automated terminal-decision projector.
+    """
+    durable_status = str(durable_state.get("status", ""))
+    if durable_status == frontmatter_status:
+        return False
+    if durable_status in TERMINAL_DURABLE_STATUSES:
+        return False
+    if frontmatter_status not in FRONTMATTER_RECONCILE_STATUSES:
+        return False
+    payload = durable_state.get("payload")
+    if spec_path is not None and isinstance(payload, dict):
+        checkpoint_path = payload.get("spec_path")
+        if checkpoint_path and Path(str(checkpoint_path)) != spec_path:
+            return False
+    checkpoint_mtime = checkpoint_epoch(durable_state)
+    if checkpoint_mtime is None:
+        return True
+    return file_mtime >= checkpoint_mtime
+
+
+def classify_status_sync(
+    frontmatter_status: str,
+    durable_state: dict[str, Any] | None,
+    file_mtime: float,
+    spec_path: Path | None = None,
+) -> dict[str, str] | None:
+    """SPEC-332 R1: None when the board would show the file's status; else a
+    mismatch record naming the durable value, the effective value and why.
+
+    No durable row, an equal row, or a row the BUG-313 repair would overwrite
+    are all "in sync" -- the effective status IS the file's. A terminal row
+    the file has not caught up with is `durable-terminal-ahead-of-file`; a
+    differing non-terminal row that the repair refuses (stale checkpoint or a
+    different spec path) is `durable-stale-behind-file`.
+    """
+    if not durable_state or not durable_state.get("status"):
+        return None
+    durable_status = str(durable_state["status"])
+    if durable_status == frontmatter_status:
+        return None
+    if should_reconcile_frontmatter_status(frontmatter_status, durable_state, file_mtime, spec_path):
+        return None
+    reason = (
+        SYNC_DURABLE_TERMINAL_AHEAD
+        if durable_status in TERMINAL_DURABLE_STATUSES
+        else SYNC_DURABLE_STALE_BEHIND
+    )
+    return {"durable": durable_status, "effective": durable_status, "reason": reason}

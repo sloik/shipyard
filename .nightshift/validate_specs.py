@@ -716,6 +716,9 @@ _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
     ("missing-frontmatter-close-delimiter", "missing closing frontmatter delimiter"),
     ("release-handoff-artifact-required", "release-impact spec requires a release handoff artifact"),
     ("release-handoff-awaiting-repin", "release handoff awaits coordinator re-pin"),
+    # SPEC-332: delivered-but-not-closed and board/file status divergence.
+    ("release-handoff-completed-spec-not-done", "release handoff completed"),
+    ("status-sync-mismatch", "status-sync mismatch"),
     ("ac-amendment-undocumented", "ac_amendment_undocumented:"),
 )
 
@@ -1670,7 +1673,74 @@ def validate_config_file(config_path: Path) -> list:
     return findings
 
 
-def validate_directory(specs_dir: Path) -> dict:
+def _spec_status_by_file(specs_dir: Path) -> list[tuple[Path, str, str]]:
+    """(path, id, status) for every non-template spec whose frontmatter parses."""
+    rows = []
+    for path in sorted(specs_dir.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            parsed = yaml.safe_load(path.read_text(encoding="utf-8").split("\n---", 1)[0][3:]) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("id"):
+            rows.append((path, str(parsed["id"]), str(parsed.get("status", "draft"))))
+    return rows
+
+
+def delivered_but_not_closed_findings(specs_dir: Path) -> dict[str, list[str]]:
+    """SPEC-332 R4: a spec whose release handoff is ``completed`` was
+    implemented, merged and shipped; any status other than ``done`` is an
+    inconsistency between two records the kit owns. Keyed by spec file name."""
+    canonical_root = specs_dir.parent
+    findings: dict[str, list[str]] = {}
+    for path, spec_id, status in _spec_status_by_file(specs_dir):
+        if status == "done":
+            continue
+        artifact = release_handoff.artifact_path(canonical_root, spec_id)
+        if not artifact.is_file():
+            continue
+        try:
+            record = json.loads(artifact.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict) and record.get("status") == "completed":
+            findings.setdefault(path.name, []).append(
+                f"release handoff completed ({record.get('target_version', '?')}) but spec status "
+                f"is '{status}': close the spec or retire the handoff"
+            )
+    return findings
+
+
+def status_sync_findings(specs_dir: Path, status_store_path: Path) -> dict[str, list[str]]:
+    """SPEC-332 R3: the board's effective status must equal the file's status;
+    compare the durable store to every spec file offline, without the board.
+    An unopenable store is its own error, never a pass."""
+    from status_store import StatusStore, classify_status_sync
+
+    rows = _spec_status_by_file(specs_dir)
+    findings: dict[str, list[str]] = {}
+    try:
+        store = StatusStore(Path(status_store_path))
+        states = store.get_states([spec_id for _path, spec_id, _status in rows])
+    except Exception as exc:  # noqa: BLE001 - report, never silently pass
+        findings[str(status_store_path)] = [f"status-sync mismatch check could not open status store: {exc}"]
+        return findings
+    for path, spec_id, status in rows:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        found = classify_status_sync(status, states.get(spec_id), mtime, path)
+        if found is not None:
+            findings.setdefault(path.name, []).append(
+                f"status-sync mismatch: file says '{status}', durable store says "
+                f"'{found['durable']}' ({found['reason']}); the board shows '{found['effective']}'"
+            )
+    return findings
+
+
+def validate_directory(specs_dir: Path, status_store_path: Path | None = None) -> dict:
     """Validate all .md files in specs_dir. Returns {filename: [errors]}."""
     if not specs_dir.is_dir():
         raise ValueError(f"not a directory: {specs_dir}")
@@ -1681,6 +1751,13 @@ def validate_directory(specs_dir: Path) -> dict:
         if spec_file.name.startswith("_"):
             continue  # skip template files
         results[spec_file.name] = validate_file(spec_file, all_specs=all_specs)
+
+    # SPEC-332 R4 / R3.
+    for name, findings in delivered_but_not_closed_findings(specs_dir).items():
+        results.setdefault(name, []).extend(findings)
+    if status_store_path is not None:
+        for name, findings in status_sync_findings(specs_dir, status_store_path).items():
+            results.setdefault(name, []).extend(findings)
 
     fleet_findings = fleet_uniqueness_findings(
         specs_dir,
@@ -1924,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
     show_promotion_gap_summary = False
     show_ownership_summary = False
     baseline_path: str | None = None
+    status_store_path: Path | None = None  # SPEC-332 R3
     positional = []
     i = 0
     while i < len(argv):
@@ -1938,6 +2016,9 @@ def main(argv: list[str] | None = None) -> int:
             i += 1
         elif argv[i] == "--baseline" and i + 1 < len(argv):
             baseline_path = argv[i + 1]
+            i += 2
+        elif argv[i] == "--status-store" and i + 1 < len(argv):
+            status_store_path = Path(argv[i + 1])
             i += 2
         else:
             positional.append(argv[i])
@@ -1954,7 +2035,7 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(raw_path)
         if path.is_dir():
             try:
-                path_results = validate_directory(path)
+                path_results = validate_directory(path, status_store_path=status_store_path)
             except ValueError as exc:
                 path_results = {str(path): [str(exc)]}
         elif path.is_file() and path.suffix == ".md":

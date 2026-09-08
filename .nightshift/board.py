@@ -52,6 +52,10 @@ import deployment_tiers
 import lifecycle
 import spec_artifacts
 
+# SPEC-332: the status-sync rule is shared with validate_specs.py; the module
+# is stdlib-only managed payload, so it is always importable.
+import status_store as status_store_module
+
 try:
     from status_store import StatusStore
 except Exception:
@@ -926,6 +930,41 @@ class SpecCache:
             out["_mtime"] = mtime
         return out
 
+    def status_sync(self) -> dict:
+        """SPEC-332 R2: every spec's effective-vs-file status, one batch read.
+
+        Runs through the same reconcile path as /api/specs, so a stale
+        non-terminal row is repaired here too; what remains afterwards is a
+        genuine divergence and is reported with its reason. Read-only beyond
+        that repair; never writes a terminal status.
+        """
+        self.get_all_frontmatter()
+        entries = list(self._entries.values())
+        states = self._durable_states(
+            [str(e.frontmatter.get("id")) for e in entries if e.frontmatter.get("id")]
+        )
+        mismatches = []
+        for entry in entries:
+            spec_id = entry.frontmatter.get("id")
+            if not spec_id:
+                continue
+            file_status = str(entry.frontmatter.get("status", "draft"))
+            effective = self._effective_status(entry.frontmatter, entry.mtime, states=states)
+            state = states.get(str(spec_id)) if states else None
+            found = status_store_module.classify_status_sync(
+                file_status, state, entry.mtime, entry.path
+            )
+            if effective != file_status or found is not None:
+                mismatches.append({
+                    "id": str(spec_id),
+                    "frontmatter": file_status,
+                    "durable": (found or {}).get("durable", (state or {}).get("status")),
+                    "effective": effective,
+                    "reason": (found or {}).get("reason", status_store_module.SYNC_DURABLE_STALE_BEHIND),
+                    "spec_path": str(entry.path),
+                })
+        return {"checked": len(entries), "mismatches": mismatches}
+
     def _effective_status(
         self, fm: dict, file_mtime: float = 0.0, *, states: Optional[dict] = None
     ) -> str:
@@ -1460,6 +1499,12 @@ def _db_reachable(db_path: Optional[Path]) -> bool:
         return False
 
 
+@app.get("/api/status-sync")
+def get_status_sync() -> dict:
+    """SPEC-332 R2: board effective status vs spec-file status, whole corpus."""
+    return cache.status_sync()
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Operational health — never returns 5xx itself; verdict is in the body.
@@ -1511,7 +1556,14 @@ def _health_payload() -> dict:
     if not db_ok and status == "ok":
         status = "degraded"
 
+    # SPEC-332 R2: a board whose columns disagree with the spec files is not
+    # healthy; count it here so the number is one curl away.
+    try:
+        status_sync_mismatches: Optional[int] = len(cache.status_sync()["mismatches"])
+    except Exception:  # noqa: BLE001 - health must never 500
+        status_sync_mismatches = None
     return {
+        "status_sync_mismatches": status_sync_mismatches,
         "status": status,
         "open_fds": open_fds,
         "fd_limit_soft": soft,

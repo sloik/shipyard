@@ -7,6 +7,54 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.18.1 (2026-09-08)
+
+### The board and the spec files are provably in sync; "delivered but not closed" is a static error (SPEC-332)
+
+After the 3.18.0 rollout the canonical board showed two specs `in_progress`.
+The board was right — BUG-323 and SPEC-324 had been delivered (handoffs
+completed) and never marked done — and nothing had said so. Two gaps, now
+closed:
+
+- **The board/file relation is a checked property.** The SPEC-296-008 /
+  BUG-313 reconcile rule moves into `status_store.py` as pure, shared
+  functions (`should_reconcile_frontmatter_status`, `classify_status_sync`);
+  `board.py` re-exports them unchanged. New `GET /api/status-sync` reports,
+  from the same single batch state read `/api/specs` uses, every spec whose
+  effective status differs from its file — with the reason
+  (`durable-terminal-ahead-of-file`, `durable-stale-behind-file`) — and
+  `/api/health` carries `status_sync_mismatches`. Read-only beyond the
+  existing BUG-313 repair.
+- **The same check runs without the board.** `validate_specs.py
+  --status-store <db>` compares the durable store to every spec file
+  offline; an unopenable store is its own error, never a pass.
+- **Delivered but not closed.** `validate_specs.py` now errors when a spec's
+  release handoff is `completed` while its status is not `done` — the exact
+  miss above, caught with no board at all.
+- Tests cover every path: the BUG-313 repair still fires and reports nothing;
+  a terminal row ahead of the file is reported, not hidden; a stale
+  non-terminal row is reported; R4 positive and negative; the health count.
+
+Same-version reseals stop here: 3.18.0's final fingerprint `030c0022…` is
+referenced by six completed handoffs and is retained by this bump (BUG-331).
+
+### The formal drift lane no longer vetoes an unrelated release (BUG-333)
+
+`formal/nightshift/validate_evidence.validate` treated anchor staleness — any
+change to `board.py`/`status_store.py` since the registry's pinned revision — as
+an artifact-integrity error, so `record_lane` exited 1 and a canonical-suite
+test turned every whole-kit release red until the lane owner re-baselined with
+a TLC toolchain that is not on the release machine. SPEC-304 defines the lane
+as non-blocking and SPEC-308 gives stale rows a tolerance and attention rule:
+staleness is tracked state. `validate` now accepts a stored summary that
+differs from the recomputation only in `freshness`/`coverage_state`, reports
+it stale, and still fails on any other divergence. Not payload; nothing on an
+install changes.
+
+### Migration
+
+None. `schema_version` stays `3.1.0`.
+
 ## 3.18.0 (2026-09-08)
 
 **The bug-fix release for what 3.17.0 found — and the first release whose

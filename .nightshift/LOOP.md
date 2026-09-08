@@ -1,6 +1,6 @@
 # Autonomous Execution Loop
 
-**Kit Version:** 3.18.0 | **Date:** 2026-09-08
+**Kit Version:** 3.18.1 | **Date:** 2026-09-08
 **Purpose:** The heart of the Nightshift Kit. This document describes the full 16-step autonomous cycle that an agent follows to complete a single spec and move to the next one.
 
 ---
