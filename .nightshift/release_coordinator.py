@@ -245,6 +245,20 @@ def _migration_needed(install: Path, required: str) -> bool:
     )
 
 
+
+def _is_coordinator_kit_version_write(repo: Path, relative: str, manifest: dict) -> bool:
+    """BUG-330: is the working-tree config.yaml exactly HEAD's plus this
+    release's kit_version reconciliation? Unreadable HEAD -> False (stricter)."""
+    head = _run(["git", "show", f"HEAD:{relative}"], cwd=repo)
+    if head.returncode:
+        return False
+    try:
+        current = (repo / relative).read_text()
+    except OSError:
+        return False
+    return current == config_migrations.set_kit_version(head.stdout, manifest["kit_version"])
+
+
 def _install_allowlist(repo: Path, install: Path, manifest: dict) -> set[str]:
     paths = {_relative(repo, install / entry["path"]) for entry in manifest["files"]}
     paths.add(_relative(repo, install / release.MARKER))
@@ -447,8 +461,18 @@ def preflight_repository(
     project_owned_config = {
         _relative(plan.root, install / "config.yaml") for install in plan.installs
     }
+    # BUG-330: a config.yaml whose only difference from HEAD is this release's
+    # own kit_version reconciliation is the coordinator's leftover from a
+    # refused commit (BUG-326 writes it before the commit), not project work.
+    # Anything else dirty in it still skips the repository.
+    own_reconciliation = {
+        path
+        for path in (dirty & project_owned_config)
+        if _is_coordinator_kit_version_write(plan.root, path, manifest)
+    }
     dirty_project_owned = sorted(
-        ((dirty & plan.allowed_paths) - payload_paths) | (dirty & project_owned_config)
+        ((dirty & plan.allowed_paths) - payload_paths - own_reconciliation)
+        | ((dirty & project_owned_config) - own_reconciliation)
     )
     if dirty_project_owned:
         errors.append(

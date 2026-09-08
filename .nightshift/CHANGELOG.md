@@ -138,6 +138,22 @@ gate project code; a commit with no project path has nothing for them to check.
 - New `tests/test_pre_commit_hook.py` runs the real hook in a fixture
   repository with a linter that cannot exist.
 
+### A rerun after a refused release commit recognises the coordinator's own work (BUG-330)
+
+BUG-326 writes the install's `kit_version` and stages it with the payload; when
+the repository's hook then refuses the commit, the coordinator stops and leaves
+that one-line change staged, as it should. On the rerun the runbook prescribes,
+the pre-apply boundary check read that dirty `config.yaml` as project-owned
+work and skipped the repository as `known_project_local` — forever, since only
+the coordinator would ever clear it. Observed on the second 3.18.0 apply at
+CoJezdzi, the repository the first apply had stopped on.
+
+A dirty `config.yaml` whose content equals HEAD's plus this release's own
+`kit_version` reconciliation (`config_migrations.set_kit_version`) is now the
+coordinator's leftover, not project dirt. Any other difference — another
+version, an added section, whitespace — still skips the repository, and an
+unreadable HEAD copy fails toward the stricter path.
+
 ### SPEC-254 / SPEC-255 release-handoff correction
 
 Both declared `impact: required` with `changed_managed_paths:
