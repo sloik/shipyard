@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 
 MARKER = "release-marker.json"
@@ -59,6 +61,27 @@ def release_entries(manifest: dict) -> list[dict]:
             + ", ".join(sorted(map(str, cache)))
         )
     return entries
+
+
+def is_kit_install(nightshift_dir: Path) -> bool:
+    """Return whether a ``.nightshift`` directory is a kit install at all.
+
+    BUG-323: every discovery path (``nightshift-sync.find_nightshift_dirs``,
+    ``doctor.find_projects``, ``nsm.discover_projects``,
+    ``nightshift-master._discover_projects``) used to treat the directory name
+    alone as proof of an install. A stray ``.nightshift/red-proofs/`` then
+    became an "install" with no configuration, the coordinator raised a
+    migration request it could never satisfy, and the whole repository -- real
+    installs included -- was skipped from the release.
+
+    A real install always has ``config.yaml`` (written by bootstrap) or
+    ``release-marker.json`` (written by every release); a bootstrapped but
+    never-released project has only the former, so either one suffices. This
+    single definition ships in managed payload so canonical and installs agree
+    by construction rather than by hand.
+    """
+    directory = Path(nightshift_dir)
+    return (directory / "config.yaml").is_file() or (directory / MARKER).is_file()
 
 
 def kit_version(canonical: Path) -> str:
@@ -456,6 +479,173 @@ def write_manifest(canonical: Path, names: list[str]) -> dict:
     return manifest
 
 
+# ---------------------------------------------------------------------------
+# SPEC-324: static payload gate
+#
+# The 3.17.0 rollout needed four apply attempts because canonical shipped
+# payload that its own installs' gates rejected -- and each rejection was only
+# discoverable after a full canonical-suite preflight and a real repository
+# commit. Everything below is a pure function of the canonical checkout, runs
+# in seconds inside validate_manifest (which already closes --apply on any
+# error), and asks the one question the shape checks never asked: will the
+# payload be ACCEPTED by the installs that receive it?
+# ---------------------------------------------------------------------------
+
+SKILL_PATH = "Skills/nightshift/SKILL.md"
+GUARD_PATH = "scope_guard.py"
+SHELLCHECK_INSTALL_HINT = "brew install shellcheck"
+
+
+def _manifest_paths(manifest: dict) -> list[str]:
+    return [str(entry.get("path", "")) for entry in manifest.get("files", [])]
+
+
+def payload_shell_lint_errors(canonical: Path, manifest: dict) -> list[str]:
+    """R1: every ``.sh`` payload entry passes ``shellcheck`` (BUG-322 class)."""
+    scripts = [path for path in _manifest_paths(manifest) if path.endswith(".sh")]
+    if not scripts:
+        return []
+    if shutil.which("shellcheck") is None:
+        return [
+            f"shellcheck is required to validate {len(scripts)} shell payload file(s) "
+            f"and is not on PATH ({SHELLCHECK_INSTALL_HINT})"
+        ]
+    result = subprocess.run(
+        ["shellcheck", "--format=gcc", *scripts],
+        cwd=canonical,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return []
+    findings = [line for line in result.stdout.splitlines() if line.strip()]
+    return [f"payload shell lint: {line}" for line in findings] or [
+        "payload shell lint: shellcheck failed: " + result.stderr.strip()[-400:]
+    ]
+
+
+def _load_module_from(path: Path, name: str):
+    import importlib.util
+
+    import sys
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    # Python 3.14 resolves dataclass annotations through sys.modules at class
+    # creation; an unregistered module raises inside @dataclass (the BUG-020
+    # mechanism). Register before executing, exactly as validate_install does.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def payload_scope_classification_errors(canonical: Path, manifest: dict) -> list[str]:
+    """R2: the guard that ships accepts every path that ships (BUG-321 class).
+
+    Runs the candidate payload's own ``scope_guard.classify_write`` over every
+    manifest path in two simulated layouts -- an install and a canonical
+    checkout -- with no active spec, against a scratch ``release-marker.json``
+    embedding the candidate manifest. Only when ``scope_guard.py`` is itself a
+    manifest member: fixtures that ship a single module have no guard to ask.
+    """
+    paths = _manifest_paths(manifest)
+    if GUARD_PATH not in paths:
+        return []
+    try:
+        guard = _load_module_from(canonical / GUARD_PATH, "_release_gate_scope_guard")
+    except Exception as exc:  # noqa: BLE001 - the gate must report, never crash
+        return [f"payload scope classification: cannot load {GUARD_PATH}: {exc}"]
+    errors: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="nightshift-payload-gate-") as scratch:
+        root = Path(scratch)
+        for layout in (".nightshift", "canonical"):
+            kit = root / layout
+            (kit / "specs").mkdir(parents=True)
+            (kit / MARKER).write_text(
+                json.dumps({"kit_version": manifest.get("kit_version"),
+                            "fingerprint": manifest.get("fingerprint"),
+                            "release_manifest": manifest})
+            )
+            for path in paths:
+                try:
+                    decision = guard.classify_write(
+                        f"{layout}/{path}", None, root, kit, None,
+                        known_specs_dirs={kit / "specs"},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        f"payload scope classification: {layout}/{path}: classify_write raised {exc!r}"
+                    )
+                    continue
+                if not decision.allowed:
+                    errors.append(
+                        f"payload scope classification: {layout}/{path} would be denied "
+                        f"by the shipped guard ({decision.reason})"
+                    )
+    return errors
+
+
+def skill_version_errors(canonical: Path, manifest: dict) -> list[str]:
+    """R3: ``SKILL.md``'s own ``version:`` equals ``kit_version``."""
+    if SKILL_PATH not in _manifest_paths(manifest):
+        return []
+    text = (canonical / SKILL_PATH).read_text()
+    match = re.search(r"^version:\s*([^\s#]+)", text, re.MULTILINE)
+    declared = match.group(1).strip("\"'") if match else None
+    expected = manifest.get("kit_version")
+    if declared != expected:
+        return [f"{SKILL_PATH} declares version {declared!r}; manifest kit_version is {expected!r}"]
+    return []
+
+
+def handoff_membership_errors(canonical: Path, manifest: dict) -> list[str]:
+    """R4: every pending handoff names only paths its target manifest manages.
+
+    Delegates to ``release_handoff.validate_artifact`` -- the one place that
+    knows how a record's target version resolves (current, retained, or
+    explicitly unretained) and which non-payload artifacts a record may name --
+    and surfaces only the membership failures. A record that can never re-pin
+    (SPEC-254/255 named ``canonical_copies.py``, never managed) is a release
+    error here, where the release cannot proceed past it, instead of one line
+    among a hundred authoring-time findings.
+    """
+    directory = canonical / "release-handoffs"
+    if not directory.is_dir():
+        return []
+    try:
+        handoff = _load_module_from(canonical / "release_handoff.py", "_release_gate_release_handoff")
+    except Exception as exc:  # noqa: BLE001
+        return [f"release handoff membership: cannot load release_handoff.py: {exc}"]
+    errors: list[str] = []
+    for record_path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text())
+        except json.JSONDecodeError:
+            errors.append(f"release handoff {record_path.name} is not valid JSON")
+            continue
+        if record.get("status") != "pending":
+            continue
+        for problem in handoff.validate_artifact(
+            record, spec_id=str(record.get("spec_id", "")), manifest=manifest
+        ):
+            if "unmanaged paths" in problem:
+                errors.append(f"release handoff {record_path.name}: {problem}")
+    return errors
+
+
+def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
+    """All SPEC-324 checks, in the order a reader would want to fix them."""
+    return (
+        skill_version_errors(canonical, manifest)
+        + handoff_membership_errors(canonical, manifest)
+        + payload_shell_lint_errors(canonical, manifest)
+        + payload_scope_classification_errors(canonical, manifest)
+    )
+
+
 def validate_manifest(
     canonical: Path, names: list[str]
 ) -> tuple[bool, list[str], dict | None]:
@@ -508,6 +698,7 @@ def validate_manifest(
     ):
         errors.append("managed release payload cannot contain production .nsext packages")
     errors.extend(managed_import_gaps(canonical, names))
+    errors.extend(payload_gate_errors(canonical, manifest))
     errors.extend(managed_local_resource_gaps(canonical, names))
     return not errors, errors, manifest
 

@@ -110,6 +110,32 @@ if [ -x "$WRITE_SCOPE_GUARD" ]; then
     fi
 fi
 
+# BUG-329: lint/type-check gate PROJECT code. A commit that stages only kit
+# paths (every staged path has a `.nightshift` component -- a whole-kit
+# release commit, or an edit to the kit's own config/specs) has nothing for
+# them to check, and the project's linter may not even exist on the machine
+# performing a release. Structural decision only; no environment variable can
+# trigger the skip. The scanner, spec validation and the write-scope guard
+# above have already run unchanged.
+KIT_ONLY=1
+STAGED_COUNT=0
+while IFS= read -r -d '' staged_path; do
+    STAGED_COUNT=$((STAGED_COUNT + 1))
+    case "/$staged_path" in
+        */.nightshift/*) ;;
+        *) KIT_ONLY=0 ;;
+    esac
+done < <(git diff --cached --name-only -z --diff-filter=ACDMR)
+if [ "$STAGED_COUNT" -eq 0 ]; then
+    KIT_ONLY=0
+fi
+
+if [ "$KIT_ONLY" -eq 1 ] && { [ -n "$LINT_CMD" ] || [ -n "$TYPE_CHECK_CMD" ]; }; then
+    echo "[nightshift pre-commit] Kit-only commit ($STAGED_COUNT staged path(s) under .nightshift/): project lint/type-check skipped"
+    LINT_CMD=""
+    TYPE_CHECK_CMD=""
+fi
+
 if [ -n "$LINT_CMD" ]; then
     echo "[nightshift pre-commit] Running lint: $LINT_CMD"
     if ! eval "$LINT_CMD"; then

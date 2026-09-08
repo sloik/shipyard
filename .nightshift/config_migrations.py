@@ -121,6 +121,22 @@ MIGRATIONS: dict[str, "callable[[str], str]"] = {
 }
 
 
+KIT_VERSION_LINE = re.compile(r'^(kit_version:\s*")[^"]*(")', re.MULTILINE)
+
+
+def set_kit_version(text: str, version: str) -> str:
+    """Rewrite only the quoted value on an existing ``kit_version:`` line.
+
+    BUG-326: the whole-kit release never updated an install's project-owned
+    ``kit_version``, so every delivered install failed admission on
+    ``CFG.PARSE_VERSION`` and ``KIT.MARKER`` the moment the release landed.
+    This is SPEC-127's ``write_kit_version`` semantics moved into managed
+    payload: no other byte changes, and text without the line is returned
+    unchanged (the config validator already reports the missing key).
+    """
+    return KIT_VERSION_LINE.sub(lambda m: f"{m.group(1)}{version}{m.group(2)}", text, count=1)
+
+
 def migrate(text: str, *, target: str = TARGET_SCHEMA_VERSION) -> str:
     """Apply the registered migration for ``target`` to ``text``.
 

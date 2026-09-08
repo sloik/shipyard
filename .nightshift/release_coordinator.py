@@ -80,6 +80,9 @@ SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 # guard meant to catch a hang was refusing every healthy release (BUG-320).
 CANONICAL_SUITE_TIMEOUT_S = 2100
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+# The line hooks/pre-commit identifies itself by; the write-scope installer
+# recognises the same string (BUG-329).
+KIT_HOOK_HEADER = "# Nightshift Kit \u2014 Pre-commit hook"
 
 
 def _run(
@@ -245,8 +248,12 @@ def _migration_needed(install: Path, required: str) -> bool:
 def _install_allowlist(repo: Path, install: Path, manifest: dict) -> set[str]:
     paths = {_relative(repo, install / entry["path"]) for entry in manifest["files"]}
     paths.add(_relative(repo, install / release.MARKER))
-    if _migration_needed(install, manifest["schema_version"]):
-        paths.add(_relative(repo, install / "config.yaml"))
+    # BUG-326: config.yaml is always a release-owned change now -- the
+    # coordinator reconciles the project-owned kit_version on every delivery,
+    # not only when a schema migration runs. A config.yaml that is already
+    # dirty before the release still skips the repository (project-owned work
+    # in progress is never written into).
+    paths.add(_relative(repo, install / "config.yaml"))
     return paths
 
 
@@ -321,12 +328,13 @@ def validate_release_ownership(
         marker_paths = {
             _relative(plan.root, install / release.MARKER) for install in plan.installs
         }
-        migration_paths = {
-            _relative(plan.root, install / "config.yaml")
-            for install in plan.installs
-            if _migration_needed(install, manifest["schema_version"])
+        # BUG-326: config.yaml is release-owned on every delivery (kit_version
+        # reconciliation), not only when a schema migration runs. This is the
+        # independent recomputation that _install_allowlist must agree with.
+        config_paths = {
+            _relative(plan.root, install / "config.yaml") for install in plan.installs
         }
-        expected = copy_paths | marker_paths | migration_paths
+        expected = copy_paths | marker_paths | config_paths
         if plan.allowed_paths != expected:
             errors.append(f"release allowlist mismatch for repository: {plan.root}")
         for repo_path in sorted(copy_paths):
@@ -344,6 +352,21 @@ def plan_repositories(
     grouped: dict[Path, list[Path]] = {}
     skipped: list[dict] = []
     for install in sorted({path.resolve() for path in installs}):
+        # BUG-323: a directory that is not a kit install is reported as such
+        # and never grouped with the repository's real installs, so it cannot
+        # raise the unsatisfiable migration request that used to skip them all.
+        if not release.is_kit_install(install):
+            skipped.append(
+                {
+                    "install": str(install),
+                    "classification": "phantom_install",
+                    "reason": (
+                        "directory is not a kit install: no config.yaml and "
+                        f"no {release.MARKER}"
+                    ),
+                }
+            )
+            continue
         repo = _git_root(install)
         if repo is None:
             skipped.append(
@@ -433,6 +456,81 @@ def preflight_repository(
             + ", ".join(dirty_project_owned)
         )
     return errors
+
+
+
+def reconcile_kit_version(install: Path, manifest: dict, *, dry_run: bool) -> dict | None:
+    """BUG-326: bring the install's project-owned ``kit_version`` to the release.
+
+    Returns ``{"install", "from", "to"}`` when the line differs (and writes it
+    unless ``dry_run``), ``None`` when nothing would change. Touches no other
+    byte of ``config.yaml``; a config without the line is left alone.
+    """
+    config_path = install / "config.yaml"
+    if not config_path.is_file():
+        return None
+    current = config_path.read_text()
+    updated = config_migrations.set_kit_version(current, manifest["kit_version"])
+    if updated == current:
+        return None
+    match = re.search(r'^kit_version:\s*"([^"]*)"', current, re.MULTILINE)
+    if not dry_run:
+        config_path.write_text(updated)
+    return {
+        "install": str(install),
+        "from": match.group(1) if match else None,
+        "to": manifest["kit_version"],
+    }
+
+
+def wire_pre_commit_hook(install: Path, *, dry_run: bool) -> dict | None:
+    """BUG-326: install the kit's own ``hooks/pre-commit`` when the repository
+    has none, exactly as BOOTSTRAP.md documents (copy + chmod +x).
+
+    ``INT.HOOKS``' remedy for a missing hook is "reinstall through the
+    whole-kit release", so the release does it. An existing hook is never
+    overwritten -- merging a foreign hook is a human's call (GIT.md) -- it is
+    only reported. ``.git/hooks`` lies outside the worktree, so nothing here is
+    staged or committed.
+
+    Kit-owned hooks are refreshed here AND, for committed repositories, again
+    by ``_refresh_recognized_nightshift_precommit_hooks`` at commit time (the
+    pre-existing SPEC-156 step). The two are idempotent; this one also covers
+    installs that are delivered without a coordinator commit (opt-out and
+    non-git installs), which the commit-time step never reaches.
+    """
+    source = install / "hooks" / "pre-commit"
+    if not source.is_file():
+        return None
+    hooks = _run(["git", "rev-parse", "--git-path", "hooks"], cwd=install)
+    if hooks.returncode:
+        return None
+    hooks_dir = (install / hooks.stdout.strip()).resolve() if not os.path.isabs(hooks.stdout.strip()) else Path(hooks.stdout.strip())
+    target = hooks_dir / "pre-commit"
+    if target.exists():
+        # BUG-329: a hook carrying the kit's own identifying header is
+        # kit-owned and is refreshed to the shipped payload when it differs --
+        # otherwise a fixed hook never reaches a repository that already has
+        # the broken one. (A write-scope snippet chained into it is redundant:
+        # the managed hook calls protect-write-scope.sh directly.) A hook
+        # without the header is foreign and is only reported.
+        try:
+            existing = target.read_bytes()
+        except OSError:
+            existing = b""
+        if KIT_HOOK_HEADER.encode() not in existing:
+            return {"install": str(install), "hook": str(target), "action": "kept-existing"}
+        if existing == source.read_bytes():
+            return {"install": str(install), "hook": str(target), "action": "up-to-date"}
+        if not dry_run:
+            shutil.copy2(source, target)
+            target.chmod(target.stat().st_mode | 0o111)
+        return {"install": str(install), "hook": str(target), "action": "refreshed"}
+    if not dry_run:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        target.chmod(target.stat().st_mode | 0o111)
+    return {"install": str(install), "hook": str(target), "action": "installed"}
 
 
 def build_migration_request(
@@ -572,6 +670,9 @@ def _refresh_recognized_nightshift_precommit_hooks(plan: RepositoryPlan) -> list
             continue
         try:
             shutil.copy2(source, target)
+            # BUG-329: a hook must be executable whatever mode the payload
+            # copy carries; copy2 alone inherits the source's mode.
+            target.chmod(target.stat().st_mode | 0o111)
         except OSError as exc:
             errors.append(
                 f"could not refresh recognized Nightshift pre-commit hook: {exc}"
@@ -859,6 +960,8 @@ def coordinate_release(
         "post_commit_rebuild_time_s": None,
         "release_handoffs_repinned": [],
         "release_handoffs_completed": [],
+        "config_kit_version_updates": [],
+        "hooks_wired": [],
         "skill_delivery": (
             {
                 "status": "planned" if skill_plan else "not_required",
@@ -1064,6 +1167,13 @@ def coordinate_release(
 
         if dry_run:
             result["eligible_installs"].extend(str(item) for item in plan.installs)
+            for install in plan.installs:
+                planned = reconcile_kit_version(install, manifest, dry_run=True)
+                if planned:
+                    result["config_kit_version_updates"].append(planned)
+                hook = wire_pre_commit_hook(install, dry_run=True)
+                if hook:
+                    result["hooks_wired"].append(hook)
             continue
 
         repository_errors = []
@@ -1075,6 +1185,14 @@ def coordinate_release(
             for migrated_install, worker_result in migrations:
                 if migrated_install == install:
                     _apply_migration_result(install, worker_result)
+            # BUG-326: the project-owned kit_version and the documented
+            # pre-commit wiring are part of "on this release", not extras.
+            updated = reconcile_kit_version(install, manifest, dry_run=False)
+            if updated:
+                result["config_kit_version_updates"].append(updated)
+            hook = wire_pre_commit_hook(install, dry_run=False)
+            if hook:
+                result["hooks_wired"].append(hook)
             smoke_errors = _run_declared_checks(
                 install,
                 manifest["smoke_checks"],
@@ -1191,6 +1309,18 @@ def main() -> int:
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--metrics-out", type=Path)
     parser.add_argument(
+        "--migration-runner",
+        choices=("worker", "reference"),
+        default="worker",
+        help=(
+            "BUG-326: 'reference' applies release_coordinator.default_migration_runner "
+            "-- the deterministic implementation every dispatched worker must reproduce "
+            "byte-for-byte -- so a schema-behind install with no per-install "
+            "customization is migrated in this guarded run. Default 'worker' keeps "
+            "today's behaviour: a fresh migration worker is required."
+        ),
+    )
+    parser.add_argument(
         "--include-opt-out",
         action="store_true",
         help="operator-authorized one-release override of committed_kit: opt_out",
@@ -1225,6 +1355,9 @@ def main() -> int:
         installs,
         manifest,
         dry_run=args.dry_run,
+        migration_runner=(
+            default_migration_runner if args.migration_runner == "reference" else None
+        ),
         include_opt_out=args.include_opt_out,
         release_root=args.root.resolve(),
     )
@@ -1232,6 +1365,7 @@ def main() -> int:
         f"python3 {canonical / 'release_coordinator.py'}"
         f" --root {args.root.resolve()} --apply"
         + (" --include-opt-out" if args.include_opt_out else "")
+        + (" --migration-runner reference" if args.migration_runner == "reference" else "")
     )
     output = args.metrics_out or canonical / "reports" / "_wip" / (
         f"release-{manifest['kit_version']}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"

@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.17.0
+version: 3.18.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -834,6 +834,13 @@ workers and give each worker only:
 
 The worker may not copy canonical payload, commit, push, merge, alter spec lifecycle, or touch paths
 outside its allowlist. The coordinator validates each result before integration.
+
+For an install with no per-install customization to reconcile, the coordinator
+may be run with `--migration-runner reference` (BUG-326): it applies
+`release_coordinator.default_migration_runner` — the exact function a worker
+must reproduce byte-for-byte — inside the same guarded run, and the migration
+is staged and committed with the payload. The default (`worker`) keeps today's
+behaviour: a fresh worker is required and the repository is skipped without one.
 One failed/breaching migration skips its whole repository but does not stop
 independent repositories. Multiple installs in one repository still produce at
 most one coordinator-owned commit.
@@ -847,6 +854,15 @@ coordinator:
   marker last;
 - applies the separately validated configuration migration for that install
   only after its canonical payload copy succeeds;
+- reconciles the install's project-owned `kit_version` to the release
+  (BUG-326: `config_migrations.set_kit_version`, one quoted value, no other
+  byte) and reports it under `config_kit_version_updates`; without this every
+  delivered install fails admission on `CFG.PARSE_VERSION` and `KIT.MARKER`
+  the moment the release lands;
+- installs the kit's own `hooks/pre-commit` into the repository's hooks dir
+  when **no** pre-commit hook exists (the documented BOOTSTRAP.md copy), and
+  reports it under `hooks_wired`; an existing hook is never overwritten or
+  merged, only reported as `kept-existing`;
 - runs only manifest-declared install smoke checks unless release metadata names
   a specific application integration risk;
 - stages only release-managed paths, verified config migrations and markers;

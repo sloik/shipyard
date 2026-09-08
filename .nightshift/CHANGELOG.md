@@ -7,6 +7,161 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.18.0 (2026-09-08)
+
+**The bug-fix release for what 3.17.0 found — and the first release whose
+`--apply` is closed by a static payload gate before any install is touched.**
+3.17.0 (SPEC-319) needed four apply attempts because canonical shipped payload
+that its own installs' gates rejected, one defect per ~17-minute attempt; it
+also left the phantom-install defect worked around by hand. This release fixes
+the class, not just the instances. Scope, evidence and rollout: SPEC-325.
+
+### A directory named `.nightshift` is only an install when it is one (BUG-323)
+
+Every discovery path — `nightshift-sync.find_nightshift_dirs`,
+`nsm.discover_projects`, `nightshift-master._discover_projects`,
+`doctor.find_projects` — treated the directory *name* as proof of a kit install.
+A stray `.nightshift/red-proofs/` (Cortex) or a non-Nightshift `.nightshift/tasks/`
+(Inwestomat) then became an "install" with no configuration, the coordinator
+raised a migration request it could never satisfy, and **the whole repository
+was skipped** — real installs included. Cortex lost four installs from 3.17.0
+until its phantoms were quarantined by hand; Inwestomat stayed on 3.14.0.
+
+- New `release.is_kit_install(nightshift_dir)`: true iff the directory holds
+  `config.yaml` (written by bootstrap) or `release-marker.json` (written by
+  every release). One definition, in managed payload, so canonical and installs
+  agree by construction — the `nightshift-sync.py` comment that its walker and
+  `nsm`'s "must be kept in agreement by hand" described exactly this failure.
+- Applied by the three operational walkers; a phantom is neither returned nor
+  descended into. `release_coordinator.plan_repositories` independently
+  classifies one as `skipped: phantom_install` and never groups it with the
+  repository's real installs.
+- `doctor` deliberately still walks every `.nightshift` — it is the diagnostic
+  path — and `inspect` reports a phantom as a new CRITICAL **D0** finding naming
+  the two missing files and the consequence, so it is explained rather than
+  hidden. Live: nsm's configured roots drop from six "projects" to the three
+  real ones (Inwestomat's `_System/.nightshift` and two `.argo/*/pre-edit`
+  evidence directories were phantoms).
+
+### Static payload gate at release preflight (SPEC-324)
+
+`release.validate_manifest` already ran at coordinator preflight and closed
+`--apply` on any error; it checked the manifest's *shape* and never asked
+whether installs would *accept* the payload. It now does, in seconds, before
+the suite and before any install is touched:
+
+- **Payload shell lint** — `shellcheck` over every `.sh` entry; a manifest with
+  shell payload and no `shellcheck` on `PATH` is itself an error (fails closed).
+  Would have caught BUG-322.
+- **Payload accepted by the shipped guard** — the candidate payload's own
+  `scope_guard.classify_write` over every manifest path, in a simulated install
+  layout and a simulated canonical layout, with no active spec, against a
+  scratch marker embedding the candidate manifest. Would have caught BUG-321;
+  a fixture that regresses the guard to its pre-BUG-321 rule proves it.
+- **Skill version parity** — `Skills/nightshift/SKILL.md`'s `version:` equals
+  `kit_version`. Cost a full suite run during the 3.17.0 cut.
+- **Handoff membership** — every pending `release-handoffs/*.json` names only
+  paths its target manifest manages, via `release_handoff.validate_artifact`
+  so stranded records with dispositions resolve against their retained
+  manifests exactly as at authoring time. Surfaces the SPEC-254/255 class where
+  a release cannot proceed past it.
+- `scripts/check_nightshift_drift.py` aligns **five** `kit_version` artifacts:
+  `SKILL.md` joins `config.yaml`, `config-reference.yaml`, `LOOP.md` and the
+  CHANGELOG top entry.
+
+Fixtures that ship a single module — no shell, no guard, no skill — are
+unaffected and need no shellcheck.
+
+### A delivered install is now ON the release (BUG-326)
+
+The coordinator delivered payload and marker and never touched the install's
+project-owned `config.yaml` — so its `kit_version` stayed behind, and two
+required admission invariants read exactly that value: `CFG.PARSE_VERSION`
+(config must match the marker) and `KIT.MARKER` (whose "supported release"
+comparison, run from an install, is against the install's own stale
+`kit_version`). Every rollout therefore left every install it reached DENIED at
+admission. Measured after 3.17.0, before this fix: **22 of 22 installs DENY**,
+all on those two invariants. `nightshift-sync.py` had done this correctly since
+SPEC-127; the coordinator replaced that path (SPEC-156) without inheriting it.
+
+- New `config_migrations.set_kit_version(text, version)`: rewrites only the
+  quoted value on the existing `kit_version:` line, nothing else; text without
+  the line is unchanged.
+- On every verified delivery the coordinator reconciles `kit_version` before
+  smoke checks and staging, reports it under `config_kit_version_updates`, and
+  commits it with the payload — `config.yaml` is now always on the release
+  allowlist (both of the coordinator's independent allowlist computations
+  agree). A `config.yaml` that is already dirty still skips the repository:
+  project-owned work in progress is never written into. Dry-run reports the
+  planned `from`/`to` and writes nothing.
+- The kit's own `hooks/pre-commit` is installed into the repository's hooks
+  directory when **no** pre-commit hook exists — the BOOTSTRAP.md copy, which
+  `INT.HOOKS`' remedy already assigns to "the whole-kit release" — and reported
+  under `hooks_wired`. An existing hook is never overwritten or merged, only
+  reported as `kept-existing`. `.git/hooks` is outside the worktree; nothing is
+  staged.
+- `release_coordinator.py --migration-runner reference` applies
+  `default_migration_runner` — the deterministic function a dispatched worker
+  must reproduce byte-for-byte — so a schema-behind install with nothing to
+  reconcile is migrated in the same guarded run instead of skipped forever.
+  Default behaviour is unchanged.
+- New `scripts/fleet_admission_survey.py`: runs every install's own
+  `validate_install.py` and tabulates failing invariants — the static check
+  that found this, and the check that proves the fix.
+
+Two admission failures the survey found are **not** this bug and are filed:
+`CFG.RUNNER_POLICY` (3.0.1-era configs lack `runner`, `nightshift_state`,
+`release_policy`, `parallel_admission` — SPEC-327, a registered schema
+migration) and `ROOT.IDENTITY` on nested installs (BUG-328).
+
+### The kit's pre-commit no longer lints a kit-only commit (BUG-329)
+
+`hooks/pre-commit` ran the project's configured `commands.lint` and
+`commands.type_check` on every commit — including a whole-kit release commit
+that stages only `.nightshift/` payload, the marker and the `kit_version` line.
+The 3.18.0 rollout stopped at its tenth repository because that hook, installed
+by the same run (BUG-326), invoked `swiftlint`, which does not exist on the
+release machine, against a commit containing no Swift. Lint and type-check
+gate project code; a commit with no project path has nothing for them to check.
+
+- The hook now skips exactly those two steps when every staged path has a
+  `.nightshift` component (nested installs included), printing one line that
+  says so. The decision is structural — no environment variable can trigger
+  it — and the scanner, spec validation and write-scope guard run unchanged.
+  Any staged path outside `.nightshift/` runs both as before.
+- `release_coordinator.wire_pre_commit_hook` now refreshes a **kit-owned**
+  hook (one carrying `# Nightshift Kit — Pre-commit hook`, the header the
+  write-scope installer already recognises) to the shipped payload when the
+  bytes differ (`refreshed`), leaves an identical one (`up-to-date`), and still
+  never touches a foreign hook (`kept-existing`). Without this, the hooks
+  BUG-326 installs are frozen copies and a fixed hook never reaches them.
+- New `tests/test_pre_commit_hook.py` runs the real hook in a fixture
+  repository with a linter that cannot exist.
+
+### SPEC-254 / SPEC-255 release-handoff correction
+
+Both declared `impact: required` with `changed_managed_paths:
+[canonical_copies.py]`. `canonical_copies.py` is a canonical-only pre-commit
+guard that has never been managed payload, so neither record could ever
+re-pin. Corrected to `impact: exempt` with the reason; the records are retired
+(git history retains them). `validate_specs.py` had reported this all along —
+as one line among 135 pre-existing errors.
+
+### Incidental test corrections (each verified stale at HEAD first)
+
+`test_config_migration` asserted the literal schema `3.0.0` (SPEC-269 moved it
+to `3.1.0`) and a discovery count that included phantoms; `test_nsm_roots`
+expected projects that left Argo Home in SPEC-ARGO-017; `test_ns_control`,
+`test_doctor` and `test_nsm_roots` built installs as bare directories, which
+BUG-323 defines as phantoms — their fixtures now write a `config.yaml`. No
+assertion was weakened: the phantom-count test gained a positive assertion that
+no phantom path appears.
+
+### Migration
+
+None. `schema_version` stays `3.1.0`. An install at 3.17.0 moves in one
+coordinator-applied step.
+
 ## 3.17.0 (2026-09-08)
 
 **First whole-kit rollout since 3.14.0 (2026-09-02).** 3.15.0 and 3.16.0 were cut
