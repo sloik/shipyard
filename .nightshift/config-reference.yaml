@@ -8,9 +8,11 @@
 # This file is a valid YAML document that can be loaded and parsed. It serves
 # as both documentation and a complete example of a multi-stack project config.
 #
-# Kit Version: 3.11.0 (2026-08-30)
-# Schema Version: 3.1.0 (documented `resilience.*`/`unblock.*` blocks; multi-stack
-#   support unchanged)
+# Kit Version: 3.18.1 (2026-09-08)
+# Schema Version: 3.2.0 (registers the deterministic migration that appends
+#   every REQUIRED_CONFIG_SECTIONS/CFG.RUNNER_POLICY section absent from an
+#   older install, with its documented safe default; multi-stack support
+#   unchanged)
 #
 # Backward compatibility:
 #   When the `stacks:` section is ABSENT, behavior is identical to v2.2.1.
@@ -19,7 +21,11 @@
 #   Installs below schema_version "3.1.0" are brought up to date by the
 #   registered, idempotent migration in `config_migrations.py` (SPEC-269),
 #   which adds the `resilience.*`/`unblock.*` blocks with their documented
-#   defaults only when they are absent.
+#   defaults only when they are absent. Installs below schema_version
+#   "3.2.0" additionally receive every REQUIRED_CONFIG_SECTIONS/
+#   CFG.RUNNER_POLICY section absent from the install, with its documented
+#   safe default (SPEC-327) — see `config_migrations.py`'s
+#   `add_required_config_sections`.
 #
 # =============================================================================
 
@@ -35,12 +41,15 @@
 # The SemVer version of the config schema itself. This is distinct from
 # kit_version, which tracks the Nightshift protocol/runtime bundle.
 #
-# 3.1.0 documents the `resilience.*` (SPEC-266) and `unblock.*` (SPEC-259,
-# SPEC-260) blocks in the schema and registers their deterministic install
-# migration (SPEC-269). 3.0.0 adds multi-stack support. The `stacks:` section
-# is optional; projects without it keep flat-command behavior.
+# 3.2.0 registers the deterministic migration that appends every
+# REQUIRED_CONFIG_SECTIONS/CFG.RUNNER_POLICY section absent from an older
+# install, with its documented safe default (SPEC-327). 3.1.0 documents the
+# `resilience.*` (SPEC-266) and `unblock.*` (SPEC-259, SPEC-260) blocks in the
+# schema and registers their deterministic install migration (SPEC-269).
+# 3.0.0 adds multi-stack support. The `stacks:` section is optional; projects
+# without it keep flat-command behavior.
 
-schema_version: "3.1.0"
+schema_version: "3.2.0"
 
 ---
 
@@ -106,7 +115,7 @@ schema_version: "3.1.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.18.1"
+kit_version: "3.19.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -115,6 +124,25 @@ kit_version: "3.18.1"
 # `head_commit` addresses the standalone sanitized Git surface while the opaque
 # 64-character `implementation_head_digest` binds coordinator remediation state.
 # The exact candidate Git revision remains parent-private.
+
+---
+
+# =============================================================================
+# Release Policy (SPEC-327)
+# =============================================================================
+# Type: mapping
+# Required: yes (CFG.RUNNER_POLICY denies its absence)
+#
+# This project-owned declaration is not part of the managed-kit manifest.
+# Use opt_out only when this repository intentionally forbids commits of its
+# managed .nightshift payload.
+
+release_policy:
+  # Type:     string
+  # Required: no
+  # Default:  "allow"
+  # Valid:    "allow" | "opt_out"
+  committed_kit: allow
 
 ---
 

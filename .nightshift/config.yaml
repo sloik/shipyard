@@ -1,5 +1,5 @@
-schema_version: "3.1.0"
-kit_version: "3.18.1"
+schema_version: "3.2.0"
+kit_version: "3.19.0"
 
 project:
   name: "shipyard"
@@ -181,3 +181,43 @@ resilience:
   premise: {enabled: true}
   evidence_gap: {max_passes: 1}
   transport: {max_rebinds: 2}
+
+---
+
+git:
+  main_branch: "main"             # main, develop, master — match your repo
+  branch_prefix: "nightshift"     # Spec branches: nightshift/SPEC-001, etc.
+  commit_style: "conventional"    # conventional (feat/fix/test/docs) | simple
+  commit_prefix: "spec-id"        # spec-id: [SPEC-123] prefix | none: no prefix
+  worktrees: "auto"               # auto: mandatory on concurrent paths; optional for single-agent inline
+  merge_strategy: "no-ff"         # no-ff | squash | rebase
+  merge_on_pass: true             # Merge to main_branch when tests pass and review approves
+  diff_risk_threshold: 500         # Staged added-line count requiring explicit sign-off
+  token_cost_threshold: 8000       # Approximate staged token-cost requiring explicit sign-off
+  escalation_signoff_env: "NIGHTSHIFT_ESCALATION_SIGNOFF"
+
+---
+
+nightshift_state:
+  policy: commit-backed                    # commit-backed | private-local
+  private_paths: [".nightshift"]           # privacy-gated paths in private-local mode
+
+---
+
+release_policy:
+  committed_kit: allow                    # allow | opt_out
+
+---
+
+parallel_admission:
+  worker_limit: 1                 # Maximum active worktree workers
+  missing_touches_policy: "exclusive"  # exclusive | allow
+
+---
+
+watcher:
+  enabled: false
+  poll_interval_min: 5            # How often to check for new commits
+  idle_timeout_min: 30            # Stop if no new commits for this long
+  review_file: "WATCHER-REVIEW.md"
+  lens: "general"                 # general | code | security | ux | legal | performance

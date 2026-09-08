@@ -7,6 +7,35 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.19.0 (2026-09-08)
+
+### Nested-install admission fixed, and a required-config-section migration closes the fleet's biggest CFG.RUNNER_POLICY gap
+
+- **`ROOT.IDENTITY` accepts real nested installs (BUG-328).** `check_root_identity`
+  equated "legitimate root" with "at the git toplevel", denying every nested
+  install (`Cortex/{api,core,mcp,tools}`, `Fartownik/BE`, `Argo/Skills/focus`,
+  `Nightshift/canonical` — 7 of 22 installs on the 2026-09-08 fleet survey). A
+  real (non-symlinked, non-escaping) subdirectory of the toplevel whose own
+  `.nightshift` is itself a kit install now passes with `observed=nested-install`;
+  symlinked roots, escaped roots, and a foreign `.nightshift` still fail exactly
+  as before. `INT.HOOKS` needed no change — its linked-worktree common-git-dir
+  logic already covers nested installs.
+- **Schema `3.2.0`: a registered migration adds every section `CFG.RUNNER_POLICY`
+  requires (SPEC-327).** Installs bootstrapped at kit 3.0.1 lack `runner`,
+  `nightshift_state`, `release_policy`, `parallel_admission` and were
+  permanently DENIED (17 of 22 installs on survey). The new migration appends
+  every missing required section with its documented safe default, additive-only
+  and idempotent; `validate_install.py` now imports its required-section tuples
+  from `config_migrations.py` so the validator and the migration cannot drift
+  apart again. Applied fleet-wide by this release with `--migration-runner
+  reference`.
+
+Correction to 3.18.1's note above: BUG-331 (same-version reseal orphaning a
+completed handoff's fingerprint) was **not** actually fixed in 3.18.1 — that
+line described intended, not delivered, work. BUG-331 remains open and is
+being fixed separately; this release's own manifest reseals at an unchanged
+`kit_version` (now bumped here) avoid re-triggering it in the interim.
+
 ## 3.18.1 (2026-09-08)
 
 ### The board and the spec files are provably in sync; "delivered but not closed" is a static error (SPEC-332)

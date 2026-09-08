@@ -53,6 +53,7 @@ if str(CANONICAL_DIR) not in sys.path:
 
 import release  # noqa: E402
 import managed_payload_provenance as provenance  # noqa: E402
+import config_migrations  # noqa: E402
 
 SCHEMA_VERSION = "1.0.0"
 VALIDATOR_VERSION = "1.1.0"
@@ -124,11 +125,15 @@ PLACEHOLDER_PROJECT_NAMES = {
     "your-project-name", "project-name", "example",
 }
 KIT_BOOTSTRAP_FIXTURE_MARKERS = ("_eval-project", "eval-project", "kit bootstrap fixture")
-REQUIRED_CONFIG_SECTIONS = (
-    "project", "commands", "review", "runner", "git", "nightshift_state", "release_policy",
-)
+# SPEC-327 R4: this validator's required-section sets are read from
+# config_migrations.py, not declared here, so the registered 3.2.0 migration
+# (config_migrations.add_required_config_sections) can never drift out of
+# sync with what this file actually requires — see config_migrations.py's
+# module docstring for why the import runs in this direction.
+REQUIRED_CONFIG_SECTIONS = config_migrations.REQUIRED_CONFIG_SECTIONS
+CFG_RUNNER_POLICY_SECTIONS = config_migrations.CFG_RUNNER_POLICY_SECTIONS
 RUNNER_MODES = {"inline", "orchestrator"}
-SUPPORTED_SCHEMA_VERSIONS = {"3.0.0", "3.1.0"}  # SPEC-269: registers 3.1.0 (resilience.*/unblock.* blocks)
+SUPPORTED_SCHEMA_VERSIONS = {"3.0.0", "3.1.0", "3.2.0"}  # SPEC-327: registers 3.2.0 (required CFG.RUNNER_POLICY sections)
 EFFECTIVE_DOMAINS = {"code", "research", "analysis"}
 REVIEW_MODES = {"self", "subagent", "hybrid"}
 REVIEW_PERSONAS = {"architect", "security", "performance", "domain", "quality", "user"}
@@ -350,13 +355,38 @@ def check_root_identity(ctx: ValidationContext) -> None:
         toplevel_path = Path(toplevel).resolve()
         direct_install_root = requested_root.name == ".nightshift"
         requested_project = requested_root.parent if direct_install_root else requested_root
+        requested_project_resolved = requested_project.resolve(strict=False)
         requested_symlink = (
             requested_root != requested_root.resolve(strict=False)
             or ctx.install != install
         )
-        wrong_project = ctx.profile == "installed" and requested_project.resolve() != toplevel_path
+        is_toplevel_project = requested_project_resolved == toplevel_path
+        try:
+            requested_project_resolved.relative_to(toplevel_path)
+            is_inside_toplevel = not is_toplevel_project
+        except ValueError:
+            is_inside_toplevel = False
+        # BUG-328: a requested root that is a real (non-symlinked,
+        # non-escaping) subdirectory of the repository's toplevel, whose own
+        # `.nightshift` is itself a kit install, is a legitimate nested
+        # install (Cortex/api, Fartownik/BE, canonical's own dogfood
+        # install, ...). It is bound to this Git repository exactly as
+        # tightly as a toplevel install -- just not *at* the toplevel.
+        is_nested_install = (
+            ctx.profile == "installed"
+            and is_inside_toplevel
+            and not requested_symlink
+            and install == (requested_project_resolved / ".nightshift").resolve(strict=False)
+            and release.is_kit_install(install)
+        )
+        wrong_project = (
+            ctx.profile == "installed"
+            and not is_toplevel_project
+            and not is_nested_install
+        )
         wrong_install = (
             ctx.profile == "installed"
+            and not is_nested_install
             and install != (toplevel_path / ".nightshift").resolve(strict=False)
         )
         if requested_symlink or wrong_project or wrong_install:
@@ -376,6 +406,18 @@ def check_root_identity(ctx: ValidationContext) -> None:
                 owner="operator",
                 remediation_code="NS-REM-ROOT-ESCAPE",
                 detail="selected spec identifier contains unsupported characters or length",
+            )
+        elif is_nested_install:
+            inv.set(
+                "pass",
+                observed="nested-install",
+                expected="resolved",
+                evidence=[
+                    _rel(ctx.root, install),
+                    f"toplevel={os.path.relpath(toplevel_path, requested_project_resolved)}",
+                ],
+                owner="validator",
+                remediation_code="NS-REM-NONE",
             )
         else:
             inv.set(
@@ -957,10 +999,7 @@ def check_config_invariants(ctx: ValidationContext, findings: list[ConfigFinding
     emit("CFG.PARSE_VERSION", ("<root>", "schema_version", "kit_version"))
     emit("CFG.IDENTITY", ("project",))
     emit("CFG.COMMAND_DOMAIN", ("commands", "stacks"))
-    emit("CFG.RUNNER_POLICY", (
-        "runner", "parallel_admission", "circuit_breaker", "review", "git",
-        "nightshift_state", "release_policy", "watcher", "metrics",
-    ))
+    emit("CFG.RUNNER_POLICY", CFG_RUNNER_POLICY_SECTIONS)
     emit("CFG.PATH_PRIVACY", ("path", "observability"))
 
 
