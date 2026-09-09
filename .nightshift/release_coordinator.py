@@ -73,13 +73,19 @@ class RepositoryPlan:
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
 SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 # Bounds one canonical-suite step so a hung release cannot wait forever. The
-# value tracks a real measurement: it must clear the suite's measured healthy
-# runtime with roughly as much room again to spare, which is the relation
-# test_canonical_suite_timeout_is_a_preflight_failure asserts. 600 was set
+# value is meant to clear the suite's measured healthy runtime with roughly
+# as much room again to spare, which is the relation
+# check_canonical_suite_headroom() checks against a durable, per-run
+# measurement recorded by _record_canonical_suite_duration() -- not a
+# hand-edited literal (SPEC-336; that failure mode was BUG-320). 600 was set
 # against a 305.25s suite; by 3.17.0 a green suite measured 996.10s, so the
 # guard meant to catch a hang was refusing every healthy release (BUG-320).
 CANONICAL_SUITE_TIMEOUT_S = 2100
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+# SPEC-336: durable per-run canonical-suite duration measurements are written
+# as sibling artifacts to write_metrics()'s own reports/_wip/release-*.json
+# convention, using this glob to find the most recent one.
+CANONICAL_SUITE_DURATION_GLOB = "canonical-suite-duration-*.json"
 # The line hooks/pre-commit identifies itself by; the write-scope installer
 # recognises the same string (BUG-329).
 KIT_HOOK_HEADER = "# Nightshift Kit \u2014 Pre-commit hook"
@@ -139,6 +145,95 @@ def _run_canonical_suite(
         check=False,
         timeout=CANONICAL_SUITE_TIMEOUT_S,
         env=environment,
+    )
+
+
+def _record_canonical_suite_duration(
+    canonical: Path, duration_s: float, *, suite_passed: bool
+) -> Path:
+    """Persist a durable, timestamped measurement of one canonical-suite run.
+
+    Follows write_metrics()'s existing reports/_wip timestamped-JSON
+    convention (the same one result["duration_s"] uses for whole-release
+    duration) rather than the Nightshift loop's per-spec preflight schema,
+    which has no timing field (SPEC-336 R6). ``suite_passed`` is recorded so
+    the headroom check (which cares about *healthy* runtime) can ignore a
+    duration produced by a failed or timed-out run, e.g. a run that hit
+    CANONICAL_SUITE_TIMEOUT_S itself would otherwise poison every later
+    headroom check with its own timeout as the "measured" runtime.
+    """
+    recorded_at = datetime.now(UTC)
+    record = {
+        "duration_s": round(duration_s, 3),
+        "recorded_at": recorded_at.isoformat(),
+        "canonical_suite_timeout_s": CANONICAL_SUITE_TIMEOUT_S,
+        "suite_passed": suite_passed,
+    }
+    output = (
+        canonical
+        / "reports"
+        / "_wip"
+        / f"canonical-suite-duration-{recorded_at.strftime('%Y%m%dT%H%M%S%f')}Z.json"
+    )
+    write_metrics(record, output)
+    return output
+
+
+def latest_canonical_suite_duration(canonical: Path) -> dict | None:
+    """Return the most recently recorded *healthy* canonical-suite duration.
+
+    A record whose ``suite_passed`` is false (failed or timed-out run) is
+    skipped: the headroom invariant is about healthy runtime, and a timed-out
+    run's duration is CANONICAL_SUITE_TIMEOUT_S itself, which would otherwise
+    make the headroom check fail permanently for the wrong reason. Returns
+    ``None`` on a fresh checkout with no prior recorded healthy measurement
+    (SPEC-336 R4).
+    """
+    directory = canonical / "reports" / "_wip"
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob(CANONICAL_SUITE_DURATION_GLOB), reverse=True):
+        try:
+            record = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        if record.get("suite_passed"):
+            return record
+    return None
+
+
+def check_canonical_suite_headroom(canonical: Path) -> tuple[bool, str]:
+    """Check that CANONICAL_SUITE_TIMEOUT_S still clears the last real run.
+
+    Reads the durable measurement written by _record_canonical_suite_duration
+    (SPEC-336 R3) instead of a hand-maintained literal, so the tripwire that
+    BUG-320's predecessor could never fire is real again. The relation
+    checked is the same one the removed hand-edited-literal test asserted:
+    the cap must clear the measured runtime with roughly as much room again
+    to spare.
+
+    With no durable measurement yet (fresh checkout, first run) this degrades
+    safely and reports healthy rather than hard-failing preflight purely for
+    lacking history (SPEC-336 R4).
+    """
+    record = latest_canonical_suite_duration(canonical)
+    if record is None:
+        return True, (
+            "no durable canonical-suite duration measurement recorded yet; "
+            "degrading safely (SPEC-336 R4)"
+        )
+    measured = record["duration_s"]
+    headroom = CANONICAL_SUITE_TIMEOUT_S - measured
+    if headroom >= measured:
+        return True, (
+            f"CANONICAL_SUITE_TIMEOUT_S={CANONICAL_SUITE_TIMEOUT_S}s clears the last "
+            f"measured canonical-suite runtime {measured}s (recorded "
+            f"{record['recorded_at']}) with {round(headroom, 3)}s to spare"
+        )
+    return False, (
+        f"CANONICAL_SUITE_TIMEOUT_S={CANONICAL_SUITE_TIMEOUT_S}s no longer clears the "
+        f"last measured canonical-suite runtime {measured}s (recorded "
+        f"{record['recorded_at']}) with roughly as much room again to spare"
     )
 
 
@@ -978,6 +1073,8 @@ def coordinate_release(
         "canonical_suite_runs": 0,
         "canonical_suite_probe": "not_run",
         "canonical_suite_result": "not_run",
+        "canonical_suite_duration_s": None,
+        "canonical_suite_duration_record": None,
         "smoke_checks_run": 0,
         "producer_session_evidence": {},
         "old_fingerprints": {},
@@ -1059,16 +1156,78 @@ def coordinate_release(
             result["completed_at"] = datetime.now(UTC).isoformat()
             result["exit_code"] = 1
             return result
+        suite_started = time.monotonic()
         suite_result = _run_canonical_suite_step(runner, suite_argv, canonical)
-        result["canonical_suite_runs"] = 1
-        result["canonical_suite_result"] = (
-            "passed" if suite_result.returncode == 0 else "failed"
+        suite_duration_s = time.monotonic() - suite_started
+        suite_passed = suite_result.returncode == 0
+        result["canonical_suite_duration_s"] = round(suite_duration_s, 3)
+        result["canonical_suite_duration_record"] = str(
+            _record_canonical_suite_duration(
+                canonical, suite_duration_s, suite_passed=suite_passed
+            )
         )
+        result["canonical_suite_runs"] = 1
+        result["canonical_suite_result"] = "passed" if suite_passed else "failed"
         if suite_result.returncode:
             result["failure_class"] = "canonical_preflight"
             result["unexpected_failure"] = (
                 suite_result.stdout + "\n" + suite_result.stderr
             ).strip()[-2000:]
+            result["untouched"] = [
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                }
+                for plan in plans
+            ]
+            result["duration_s"] = round(time.monotonic() - started, 3)
+            result["completed_at"] = datetime.now(UTC).isoformat()
+            result["exit_code"] = 1
+            return result
+
+        headroom_healthy, headroom_reason = check_canonical_suite_headroom(canonical)
+        result["canonical_suite_headroom_healthy"] = headroom_healthy
+        result["canonical_suite_headroom_reason"] = headroom_reason
+        if not headroom_healthy:
+            result["failure_class"] = "canonical_preflight"
+            result["unexpected_failure"] = headroom_reason
+            result["untouched"] = [
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                }
+                for plan in plans
+            ]
+            result["duration_s"] = round(time.monotonic() - started, 3)
+            result["completed_at"] = datetime.now(UTC).isoformat()
+            result["exit_code"] = 1
+            return result
+
+        # BUG-334 R2: SPEC-337's finding-family regression diff runs here, not
+        # from release.payload_gate_errors. It is canonical-only and costs a
+        # whole-corpus walk, so the per-install payload gate is the wrong host.
+        #
+        # Enforced only when this canonical actually declares a floor. A
+        # canonical with no baseline artifact has nothing to regress against,
+        # so there is nothing to enforce -- the same degrade-safe choice
+        # SPEC-336 R4 made for "no prior suite measurement recorded yet".
+        # `finding_family_regression_errors` keeps its own loud-on-missing
+        # contract for direct callers; the skip is recorded in the result
+        # rather than being silent.
+        floor_baseline = canonical / "metrics" / "validation-error-floor-baseline.json"
+        if not floor_baseline.is_file():
+            result["finding_family_regression_healthy"] = True
+            result["finding_family_regression_skipped"] = (
+                f"no finding-family floor declared at {floor_baseline}; nothing to enforce"
+            )
+            family_errors = []
+        else:
+            family_errors = release.finding_family_regression_errors(canonical, manifest)
+            result["finding_family_regression_healthy"] = not family_errors
+        if family_errors:
+            result["finding_family_regression_errors"] = family_errors
+            result["failure_class"] = "canonical_preflight"
+            result["unexpected_failure"] = "; ".join(family_errors)
             result["untouched"] = [
                 {
                     "repository": str(plan.root),
@@ -1313,6 +1472,12 @@ def coordinate_release(
         )
         result["release_handoffs_completed"] = (
             release_handoff.complete_pending_handoffs(canonical, manifest, result)
+        )
+        # SPEC-334 R5: records skipped because their source spec is not
+        # status: done -- observable in the same serialized result dict
+        # write_metrics() persists, not just in-process return values.
+        result["release_handoffs_blocked_by_spec_status"] = (
+            release_handoff.pending_handoffs_blocked_by_spec_status(canonical, manifest)
         )
     result["duration_s"] = round(time.monotonic() - started, 3)
     result["completed_at"] = datetime.now(UTC).isoformat()

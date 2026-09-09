@@ -17,6 +17,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 import lifecycle
 
 HANDOFF_DIR = "release-handoffs"
@@ -228,6 +230,46 @@ def _has_pending_manifest_placeholder(artifact: Mapping[str, Any]) -> bool:
         artifact.get("status") == "pending"
         and artifact.get("manifest_fingerprint") == PENDING_MANIFEST_FINGERPRINT
     )
+
+
+def _spec_status(canonical: Path, spec_id: str) -> str | None:
+    """Return the frontmatter ``status`` of the spec file declaring ``spec_id``.
+
+    SPEC-334: mirrors the local frontmatter-parsing convention already used by
+    ``audit_nfr._parse_frontmatter`` and ``validate_specs._spec_status_by_file``
+    rather than importing either module (``validate_specs`` already imports
+    this module, so importing it back would be circular; see SPEC-334 R4).
+    Returns ``None`` when ``spec_id`` does not resolve to any spec file on
+    disk (deleted, renamed, or malformed) -- callers must treat that the same
+    as "not done" (SPEC-334 R3), never raise.
+    """
+    specs_dir = canonical / "specs"
+    if not specs_dir.is_dir():
+        return None
+    for path in sorted(specs_dir.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        end = text.find("\n---", 3)
+        if end == -1:
+            continue
+        try:
+            frontmatter = yaml.safe_load(text[3:end]) or {}
+        except yaml.YAMLError:
+            continue
+        if isinstance(frontmatter, Mapping) and str(frontmatter.get("id", "")) == spec_id:
+            return str(frontmatter.get("status", ""))
+    return None
+
+
+def _pending_handoff_blocked_by_spec_status(canonical: Path, data: Mapping[str, Any]) -> bool:
+    """SPEC-334 R1/R2: True when the source spec is not resolvable to ``status: done``."""
+    return _spec_status(canonical, str(data.get("spec_id", ""))) != "done"
 
 
 def _is_stranded(artifact: Mapping[str, Any], manifest: Mapping[str, Any]) -> bool:
@@ -779,7 +821,14 @@ def complete_pending_handoffs(
     manifest: Mapping[str, Any],
     release_result: Mapping[str, Any],
 ) -> list[str]:
-    """Complete matching records only with coordinator-owned positive delivery."""
+    """Complete matching records only with coordinator-owned positive delivery.
+
+    SPEC-334 R2: a record is never completed unless its ``spec_id`` resolves
+    to a spec file whose own ``status`` is ``done`` -- otherwise the record
+    proves delivery of code the source spec never actually shipped. A record
+    skipped for this reason is also reported by
+    ``pending_handoffs_blocked_by_spec_status`` (R5).
+    """
     completed: list[str] = []
     if not isinstance(release_result, Mapping):
         return completed
@@ -791,6 +840,8 @@ def complete_pending_handoffs(
         if data.get("status") != "pending" or not (
             _matches_current_manifest_fingerprint(data, manifest)
         ):
+            continue
+        if _pending_handoff_blocked_by_spec_status(canonical, data):
             continue
         if validate_artifact(
             data, spec_id=str(data.get("spec_id", "")), manifest=manifest
@@ -821,6 +872,13 @@ def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list
     immediately before ``complete_pending_handoffs``.  A raw placeholder stays
     uncompletable through ``complete_pending_handoffs`` itself, preventing any
     non-coordinator path from bypassing real-fingerprint verification.
+
+    SPEC-334 R1: a placeholder is never re-pinned unless its ``spec_id``
+    resolves to a spec file whose own ``status`` is ``done`` -- otherwise a
+    draft/in-progress spec's authoring placeholder gets stamped with a real
+    fingerprint for code that was never actually shipped. A record skipped
+    for this reason is also reported by
+    ``pending_handoffs_blocked_by_spec_status`` (R5).
     """
     repinned: list[str] = []
     directory = canonical / HANDOFF_DIR
@@ -829,6 +887,8 @@ def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list
     for path in sorted(directory.glob("*.json")):
         data = json.loads(path.read_text())
         if not _has_pending_manifest_placeholder(data):
+            continue
+        if _pending_handoff_blocked_by_spec_status(canonical, data):
             continue
         candidate = dict(data)
         candidate["target_version"] = manifest.get("kit_version")
@@ -840,3 +900,34 @@ def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list
         path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
         repinned.append(str(candidate["spec_id"]))
     return repinned
+
+
+def pending_handoffs_blocked_by_spec_status(
+    canonical: Path, manifest: Mapping[str, Any]
+) -> list[str]:
+    """SPEC-334 R5: spec IDs of records ``repin``/``complete`` skipped this run.
+
+    Reports every record that would otherwise be eligible for
+    ``repin_pending_handoffs`` (a raw placeholder) or ``complete_pending_handoffs``
+    (a fingerprint-matching pending record) but whose source spec does not
+    resolve to ``status: done``. This is the caller-observable signal R5
+    requires without changing either function's existing return-value
+    contract: ``release_coordinator`` records it alongside
+    ``release_handoffs_repinned``/``release_handoffs_completed`` in its result
+    dict, which is what ``write_metrics`` serializes.
+    """
+    blocked: list[str] = []
+    directory = canonical / HANDOFF_DIR
+    if not directory.is_dir():
+        return blocked
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text())
+        eligible = _has_pending_manifest_placeholder(data) or (
+            data.get("status") == "pending"
+            and _matches_current_manifest_fingerprint(data, manifest)
+        )
+        if not eligible:
+            continue
+        if _pending_handoff_blocked_by_spec_status(canonical, data):
+            blocked.append(str(data.get("spec_id", "")))
+    return blocked

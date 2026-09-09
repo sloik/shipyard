@@ -716,20 +716,87 @@ def completed_handoff_orphan_errors(canonical: Path, manifest: dict) -> list[str
     return errors
 
 
+def finding_family_regression_errors(canonical: Path, manifest: dict) -> list[str]:
+    """SPEC-337 R2: deny a validate_specs.py finding family that is new or
+    grew relative to the stored floor, so a regression is visible instead of
+    drowned among ~700 pre-existing findings (SPEC-319 Open Questions item 3
+    / SPEC-QUESTIONS-007 Q3 option B).
+
+    A family that only shrank, or disappeared entirely, is never an error --
+    that is progress. Only ``added`` families and ``changed`` families whose
+    count increased are denied (SPEC-270 R3's ``diff_finding_family_summaries``
+    already distinguishes these).
+
+    To accept a genuine new/grown family into the floor after reviewing that
+    it is intentional (R3), regenerate the baseline from the repo root:
+
+        python3 canonical/validate_specs.py canonical/specs --format json \\
+            --ownership-summary \\
+          | python3 -c "import json, sys; data = json.load(sys.stdin); \\
+              json.dump(data['finding_family_summary'], sys.stdout, indent=2); \\
+              print()" \\
+          > canonical/metrics/validation-error-floor-baseline.json
+    """
+    specs_dir = canonical / "specs"
+    if not specs_dir.is_dir():
+        return []
+    baseline_path = canonical / "metrics" / "validation-error-floor-baseline.json"
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"validation error floor: cannot read baseline {baseline_path}: {exc}"]
+    try:
+        validate_specs = _load_module_from(
+            canonical / "validate_specs.py", "_release_gate_validate_specs"
+        )
+    except Exception as exc:  # noqa: BLE001 - the gate must report, never crash
+        return [f"validation error floor: cannot load validate_specs.py: {exc}"]
+    try:
+        results = validate_specs.validate_directory(specs_dir)
+    except ValueError as exc:
+        return [f"validation error floor: cannot validate {specs_dir}: {exc}"]
+    frontmatters = validate_specs._collect_frontmatters_for_paths([str(specs_dir)])
+    current = validate_specs.finding_family_summary(results, frontmatters)
+    diff = validate_specs.diff_finding_family_summaries(baseline, current)
+    errors: list[str] = []
+    for change in diff["changes"]:
+        if change["change"] == "added":
+            errors.append(
+                f"validation error floor: new finding family {change['family']!r} "
+                f"(count={change['count']}) not present in baseline"
+            )
+        elif change["change"] == "changed" and change["after"]["count"] > change["before"]["count"]:
+            errors.append(
+                f"validation error floor: finding family {change['family']!r} grew "
+                f"{change['before']['count']} -> {change['after']['count']}"
+            )
+    return errors
+
+
 def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
     """All SPEC-324 checks, in the order a reader would want to fix them.
 
-    BUG-331 R4 (``completed_handoff_orphan_errors``) is deliberately not wired
-    in here yet: turning it on would correctly deny this repo's own
-    KIT.PAYLOAD checks today, because 19 real historical completed handoff
-    records are already orphaned by past same-version reseals (see that
-    function's docstring). Disposing those records is a human call the
-    BUG-331 spec explicitly left out of scope. The function is implemented
-    and unit-tested; a follow-up spec wires it in once disposition lands.
+    SPEC-333 wires in BUG-331 R4 (``completed_handoff_orphan_errors``): the 19
+    real historical completed-handoff records that were orphaned by past
+    same-version reseals have been dispositioned (folded -- reset to the
+    pending sentinel so the next real rollout completes them again, same
+    pattern as the BUG-016.json precedent), so this check is clean on the
+    real checkout.
+
+    SPEC-337's finding-family baseline diff is deliberately NOT a member
+    (BUG-334). Every check here is a cheap comparison scoped to whatever
+    directory it is handed, and ``validate_install.py`` hands this function an
+    *install* directory. The finding-family diff is neither: it is
+    canonical-only (an install has its own unrelated ``specs/`` corpus and
+    never receives ``metrics/validation-error-floor-baseline.json``) and it
+    costs a whole-corpus ``validate_directory`` walk. It runs from
+    ``release_coordinator.coordinate_release`` instead, alongside
+    ``check_canonical_suite_headroom``.
     """
     return (
         skill_version_errors(canonical, manifest)
         + handoff_membership_errors(canonical, manifest)
+        + completed_handoff_orphan_errors(canonical, manifest)
         + payload_shell_lint_errors(canonical, manifest)
         + payload_scope_classification_errors(canonical, manifest)
     )

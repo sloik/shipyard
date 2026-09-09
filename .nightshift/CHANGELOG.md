@@ -7,6 +7,186 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.20.4 (2026-09-09)
+
+### The scope guard resolves the kit directory per staged path (BUG-335)
+
+BUG-321 stopped the spec-home rule denying `SPEC-GUIDE.md` — a `CANONICAL_PROTOCOL_FILES`
+member whose name matches the `SPEC-*.md` pattern — by exempting anything the release manifest
+declares as payload. That exemption was keyed on a **single** `kit_dir`, and `_cli_check`
+resolves exactly one (`project_root/canonical` when it exists).
+
+A repository can hold several kit directories. The Nightshift repository holds three: the
+canonical source at `canonical/`, plus installs at `.nightshift/` and `canonical/.nightshift/`.
+`release_coordinator.py` stages payload for every install in a repository in one commit, so the
+guard was handed paths belonging to kits other than the one it resolved and the exemption could
+not fire — `.nightshift/SPEC-GUIDE.md` resolved outside `canonical/` entirely, and
+`canonical/.nightshift/SPEC-GUIDE.md` resolved to `.nightshift/SPEC-GUIDE.md`, which the
+manifest does not list because payload is listed relative to a kit root.
+
+The 3.20.3 fleet rollout hit this after committing three repositories and halted with
+`unexpected_mid_rollout`:
+
+```
+[nightshift write-scope]   DENY spec_wrong_home .nightshift/SPEC-GUIDE.md
+[nightshift write-scope]   DENY spec_wrong_home canonical/.nightshift/SPEC-GUIDE.md
+```
+
+The guard correctly has no environment-variable bypass, so a multi-install repository could not
+be released at all until the resolution was fixed.
+
+The exemption now resolves the kit **per path**: the kit a path belongs to is the nearest
+ancestor carrying kit metadata (`release-marker.json`, which `release.apply_install` writes into
+every install, or `release-manifest.json`). Membership is then checked against that kit's own
+manifest, so any number of installs and any nesting works. The caller-supplied `kit_dir` remains
+the fallback, so single-kit callers are unaffected, and the exemption is still keyed on manifest
+membership rather than basename — a spec-shaped file inside a kit that the manifest does not
+declare is still denied.
+
+No migration required.
+
+## 3.20.3 (2026-09-09)
+
+### The finding-family gate moves out of the per-install payload check (BUG-334)
+
+3.20.2 wired SPEC-337's `finding_family_regression_errors` into
+`release.payload_gate_errors`. That host was wrong on two counts, and 3.20.2 never
+reached the fleet because of it.
+
+**Every install would have failed its payload invariant.** `payload_gate_errors` is not
+canonical-only: `validate_install.py` calls `validate_manifest(ctx.install, names)` with an
+*install* directory in the `canonical` position. Installs do have a `specs/` directory (so the
+check's guard did not fire) but never receive `metrics/validation-error-floor-baseline.json`,
+which is canonical-only and not managed payload. The check therefore took its
+unreadable-baseline branch and returned a hard error on every install — `KIT.PAYLOAD`, and so
+`doctor`, would have reported a spurious failure across all 16 fleet repositories. Delivering
+the baseline would not have helped: an install's own spec corpus has nothing to do with
+canonical's finding-family floor.
+
+**The canonical suite stopped fitting in its timeout.** The check runs
+`validate_specs.validate_directory()` over all 378 canonical specs, which shells out to
+`git log -G` and `git show` twice per spec, costing ~37 s per call. With `validate_manifest` on
+many tests' hot path, `tests/test_validate_install.py::test_artifact_hash_matches_written_bytes`
+went from **2.41 s to 40.47 s** and the suite from ~1000 s to ~3400 s — past
+`CANONICAL_SUITE_TIMEOUT_S = 2100`. The first real 3.20.2 `--apply` run refused at preflight
+(`canonical suite command exceeded 2100s`) and left all 16 repositories untouched.
+
+The check now runs from `release_coordinator.coordinate_release()`, next to
+`check_canonical_suite_headroom` — the placement SPEC-336 already established for a
+canonical-only release gate: once per release, against the canonical checkout, denying with
+`failure_class: canonical_preflight` and surfacing
+`finding_family_regression_healthy`/`finding_family_regression_errors` in the result. A
+canonical that declares no floor (no baseline artifact) is a recorded skip
+(`finding_family_regression_skipped`) rather than a silent pass, matching SPEC-336 R4's
+degrade-safe choice for "no measurement recorded yet". `finding_family_regression_errors`
+itself is unchanged and keeps its loud-on-missing contract for direct callers.
+
+No migration required.
+
+## 3.20.2 (2026-09-09)
+
+### The finding-family baseline diff is wired into the release gate (SPEC-337)
+
+SPEC-270 built `finding_family_summary()`/`diff_finding_family_summaries()` and committed a
+baseline artifact (`canonical/metrics/validation-error-floor-baseline.json`), but nothing ever
+called the diff against it — the exact gap that let the SPEC-254/255 `unmanaged paths:
+canonical_copies.py` finding sit unnoticed among ~130 pre-existing errors (SPEC-319 § Open
+Questions item 3 / SPEC-QUESTIONS-007 Q3 option B). `payload_gate_errors` (`release.py`) now has a
+new `finding_family_regression_errors` check that loads the baseline, runs
+`finding_family_summary()` against the live `canonical/specs` corpus, and denies the release on any
+finding family that is new or has grown; a shrunk or removed family is never an error. The
+baseline was refreshed to the current corpus (`719` findings across `8` families, absorbing the
+`unclassified-finding` family and the other drift SPEC-337's own Problem section measured), so this
+check is clean today and only trips on future regressions. To accept a genuine new/grown family
+after reviewing it, regenerate the baseline from the repo root:
+
+```
+python3 canonical/validate_specs.py canonical/specs --format json --ownership-summary \
+  | python3 -c "import json, sys; data = json.load(sys.stdin); \
+      json.dump(data['finding_family_summary'], sys.stdout, indent=2); print()" \
+  > canonical/metrics/validation-error-floor-baseline.json
+```
+
+## 3.20.1 (2026-09-09)
+
+### SPEC-336's headroom guard is actually wired into a real release (post-merge verifier finding)
+
+An independent verifier dispatched against the combined 3.20.0 delivery found that
+`check_canonical_suite_headroom()` (SPEC-336) was correctly implemented and unit-tested in
+isolation, but never called from `coordinate_release()`'s real suite-run path or from `main()` —
+so the BUG-320 tripwire it restores did not actually fire during a real release, only when a test
+imported and called the function directly. `coordinate_release()` now calls it immediately after
+each real canonical-suite run and refuses the release (`failure_class: canonical_preflight`) when
+the guard reports unhealthy headroom, surfacing `canonical_suite_headroom_healthy`/
+`canonical_suite_headroom_reason` in the result dict. Two new regression tests
+(`test_coordinate_release_fails_preflight_on_violated_headroom`,
+`test_coordinate_release_proceeds_with_healthy_headroom`) prove the wiring end-to-end rather than
+only the guard function in isolation.
+
+## 3.20.0 (2026-09-09)
+
+### Four follow-ups from SPEC-QUESTIONS-007 land together (SPEC-334, SPEC-335, SPEC-336, SPEC-338)
+
+Delivered as four concurrently-dispatched workers on disjoint file sets, resealed and released
+together in one combined version bump.
+
+- **SPEC-334** — `release_handoff.repin_pending_handoffs`/`complete_pending_handoffs` previously
+  completed a pending sentinel handoff regardless of the source spec's own status, letting a
+  release mark work as delivered before the spec was actually `done`. Both functions now gate on
+  `_spec_status(canonical, spec_id) == "done"`; an unresolvable `spec_id` is treated as not-done
+  without raising. Skipped-but-eligible records are now observable via the coordinator's new
+  `release_handoffs_blocked_by_spec_status` result field.
+- **SPEC-335** — `record_metrics.py`'s `mark-commit`/`correct-commit` modes resolved install paths
+  against the process's cwd instead of the actual git repository root, doubling the prefix
+  whenever `--repo` names a subdirectory (this is how the phantom `canonical/canonical/metrics/`
+  directory appeared during SPEC-319's closeout). Both call sites now anchor against a resolved
+  `_repo_root(repo)` instead; an unresolvable root is now a reported error, not a silent
+  `unknown`/no-op fallback.
+- **SPEC-336** — `CANONICAL_SUITE_TIMEOUT_S`'s headroom guard asserted against a hand-edited,
+  stale literal (`measured_healthy_runtime_s = 996.10`) that nothing kept in sync with reality —
+  the BUG-320 tripwire could never actually fire again. `coordinate_release` now records a durable,
+  timestamped measurement after every real canonical-suite run
+  (`canonical/reports/_wip/canonical-suite-duration-*.json`), and
+  `check_canonical_suite_headroom()` evaluates the same 2x-headroom relation against the latest
+  *healthy* recorded measurement instead of the literal. Degrades safely (`healthy=True`) on a
+  fresh checkout with no prior measurement.
+- **SPEC-338** — `canonical/SPEC-GUIDE.md` now documents `delivered_but_not_closed_findings`
+  (SPEC-332 R4): a release-handoff record at `status: completed` implies the spec shipped, so any
+  other spec status is a record inconsistency, fixed by closing the spec or retiring the handoff.
+
+## 3.19.3 (2026-09-09)
+
+### The completed-handoff orphan gate is wired in; 19 historical records dispositioned (SPEC-333)
+
+BUG-331 implemented `completed_handoff_orphan_errors` — a check that flags a `status: completed`
+release-handoff record whose sealed manifest fingerprint is no longer resolvable — but left it
+deliberately unwired from `payload_gate_errors` because turning it on immediately denied this
+repository's own release checks over 19 real historical records already orphaned by past
+same-version reseals (5 on 3.18.0, 14 more at 3.12.0/3.13.0/3.14.0).
+
+All 19 are now dispositioned: each was verified to have `status: done` on its own spec and every
+one of its `changed_managed_paths` present in the current canonical tree, then folded — reset to
+the pending sentinel so the next real fleet rollout completes it again, the same pattern already
+used for `BUG-016.json`. `completed_handoff_orphan_errors` is now called from
+`payload_gate_errors`, so it fires wherever `validate_manifest` does (release coordinator
+preflight, `validate_install.py`'s `KIT.PAYLOAD` invariant). A new regression test
+(`test_gate_wires_in_completed_handoff_orphan_errors`) proves the wired-in gate — not just the
+standalone function — catches a genuinely orphaned record.
+
+## 3.19.2 (2026-09-09)
+
+### BUG-331 LE1: the same-version-reseal refusal fired for real, resolved by version bump
+
+No functional change. This bump is itself BUG-331's Live Execution Checklist evidence: after
+3.19.1 fleet-delivered BUG-331 and the coordinator completed `release-handoffs/BUG-331.json`
+against that release's real fingerprint (`524e9f65…`, 20 installs verified), a same-version
+`write_manifest` call against the unchanged 3.19.1 manifest was deliberately attempted. It raised
+`SameVersionResealError`, naming `BUG-331.json` by name, exactly as designed — confirmed the
+manifest was left untouched (no write occurs before the exception). This bump is the sanctioned
+resolution path named in that error message: `kit_version` moves to 3.19.2, so `write_manifest`
+now succeeds and the 3.19.1 manifest (fingerprint `524e9f65…`) is retained in
+`retained_manifests`, keeping `BUG-331.json`'s sealed reference resolvable.
+
 ## 3.19.1 (2026-09-09)
 
 ### A same-version manifest reseal can no longer silently orphan a completed release-handoff's fingerprint (BUG-331)

@@ -667,6 +667,53 @@ def _managed_payload_names(kit_dir: Path) -> frozenset[str]:
     return frozenset()
 
 
+_KIT_METADATA_NAMES = ("release-marker.json", "release-manifest.json")
+
+
+def _candidate_kit_dirs(
+    path_str: str, project_root: Path, kit_dir: Path | None
+) -> list[Path]:
+    """BUG-335: the kit directories a staged path might belong to, nearest first.
+
+    A repository can hold more than one kit: the canonical source and any number
+    of installs, including one nested inside the canonical source. The kit a path
+    belongs to is the nearest ancestor carrying kit metadata -- exactly the files
+    ``_managed_payload_names`` already reads, so this adds no second convention.
+    ``release.apply_install`` writes ``release-marker.json`` into every install,
+    so each install root is self-identifying without reaching back to canonical.
+
+    The caller-supplied ``kit_dir`` is appended last as a fallback, preserving
+    single-kit behaviour for paths with no metadata-bearing ancestor (R4).
+    """
+    candidates: list[Path] = []
+    normalized = _norm(path_str)
+    base = Path(normalized) if os.path.isabs(normalized) else (project_root / normalized)
+    try:
+        resolved = base.resolve()
+        root = project_root.resolve()
+    except OSError:
+        resolved = None
+        root = project_root
+    if resolved is not None:
+        for ancestor in resolved.parents:
+            if any((ancestor / name).is_file() for name in _KIT_METADATA_NAMES):
+                candidates.append(ancestor)
+            if ancestor == root:
+                break
+    if kit_dir is not None and not any(
+        _same_path(kit_dir, existing) for existing in candidates
+    ):
+        candidates.append(kit_dir)
+    return candidates
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left == right
+
+
 def _is_spec_home_violation(
     path_str: str,
     project_root: Path,
@@ -680,9 +727,17 @@ def _is_spec_home_violation(
     # BUG-321: the kit's own manifest-declared payload is never a misplaced
     # spec, wherever inside the kit it sits. Keyed on manifest membership, so
     # a spec-shaped path that is NOT payload is still denied (R2).
-    if kit_dir is not None:
-        kit_rel = _kit_relative(path_str, project_root, kit_dir)
-        if kit_rel is not None and kit_rel in _managed_payload_names(kit_dir):
+    #
+    # BUG-335: resolve the kit per path, not once per invocation. A repository
+    # may hold several kit directories -- the Nightshift repo holds `canonical/`
+    # plus installs at `.nightshift/` and `canonical/.nightshift/` -- and
+    # `release_coordinator.py` stages payload for all of them in one commit. A
+    # single caller-supplied `kit_dir` recognises at most one of them, so the
+    # rest were denied and a multi-install repository could not be released.
+    # The caller's `kit_dir` remains the fallback (R4).
+    for candidate in _candidate_kit_dirs(path_str, project_root, kit_dir):
+        kit_rel = _kit_relative(path_str, project_root, candidate)
+        if kit_rel is not None and kit_rel in _managed_payload_names(candidate):
             return False, None
     specs_dirs, warning = _known_specs_dirs(project_root, known_specs_dirs)
     if not specs_dirs:

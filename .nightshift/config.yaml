@@ -1,5 +1,5 @@
 schema_version: "3.2.0"
-kit_version: "3.19.1"
+kit_version: "3.20.4"
 
 project:
   name: "shipyard"

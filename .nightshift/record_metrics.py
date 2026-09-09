@@ -294,6 +294,15 @@ def _run_git(repo: Path, args: list[str]) -> str:
         return ""
 
 
+def _repo_root(repo: Path) -> str:
+    """Return the git repository root for `repo`, or '' if it cannot be resolved.
+
+    `_changed_files` returns paths relative to this root regardless of what
+    `--repo` points at, so any join against those paths must anchor here.
+    """
+    return _run_git(repo, ["rev-parse", "--show-toplevel"])
+
+
 def derive_git(repo: Path) -> dict:
     """Derive commit hash/message and changed-line counts from the latest commit."""
     commit_hash = _run_git(repo, ["log", "-1", "--format=%H"]) or "unknown"
@@ -988,7 +997,15 @@ def main_mark_commit(argv) -> int:
     )
     if not spec_rel:
         return 0  # cannot route without a spec file in the commit
-    spec_path = repo / spec_rel
+    repo_root = _repo_root(repo)
+    if not repo_root:
+        print(
+            f"[mark-commit] ERROR: cannot resolve git repository root for --repo {args.repo!r} "
+            "(git rev-parse --show-toplevel failed).",
+            file=sys.stderr,
+        )
+        return 2
+    spec_path = Path(repo_root) / spec_rel
     install_dir = spec_path.parent.parent          # <install>/specs/X.md -> <install>
     metrics_dir = install_dir / "metrics"
     config_path = install_dir / "config.yaml"
@@ -1145,7 +1162,15 @@ def main_correct_commit(argv) -> int:
     if not spec_rel:
         print("Error: original terminal commit has no changed spec file to route its metrics row.", file=sys.stderr)
         return 2
-    install_dir = (repo / spec_rel).parent.parent
+    repo_root = _repo_root(repo)
+    if not repo_root:
+        print(
+            f"Error: cannot resolve git repository root for --repo {args.repo!r} "
+            "(git rev-parse --show-toplevel failed).",
+            file=sys.stderr,
+        )
+        return 2
+    install_dir = (Path(repo_root) / spec_rel).parent.parent
     metrics_dir = install_dir / "metrics"
     rows = metrics_paths_for_commit(metrics_dir, spec_id, bad_commit)
     if len(rows) != 1:

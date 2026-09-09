@@ -48,6 +48,12 @@ transition itself — it requires the dedicated
 run on a non-`superseded` spec, refuses an empty reason, and records a
 durable checkpoint distinct from any status-transition commit.
 
+**Delivered but not closed (SPEC-332):** A release-handoff record at
+`status: completed` means the spec shipped, so a spec status other than
+`done` on that same spec is a record inconsistency that
+`delivered_but_not_closed_findings` flags; fix it by closing the spec or
+retiring the handoff.
+
 **Historical checkbox dispositions (SPEC-204):** A project that has deliberately
 preserved unchecked Requirements or Acceptance Criteria in historical `done`
 specs may keep an optional project-owned evidence file at
