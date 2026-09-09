@@ -7,6 +7,28 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.19.1 (2026-09-09)
+
+### A same-version manifest reseal can no longer silently orphan a completed release-handoff's fingerprint (BUG-331)
+
+`write_manifest` retained the previous manifest in `retained_manifests` only when `kit_version`
+changed. A reseal at an unchanged version replaced the on-disk fingerprint and retained nothing,
+so a `release-handoffs/*.json` record already `completed` against that fingerprint became silently
+unverifiable — the provenance chain lost a link with no warning (SPEC-257 requires every sealed
+`(version, fingerprint)` pair to stay resolvable). `write_manifest` now raises
+`SameVersionResealError`, naming the offending record(s) and both sanctioned paths (bump
+`kit_version` so the previous manifest is retained, or reset the named records to `pending` first),
+whenever a same-version reseal would replace a fingerprint a completed handoff still names. A
+version bump, or a same-version reseal with nothing completed against the old fingerprint, behaves
+exactly as before.
+
+A companion function, `completed_handoff_orphan_errors`, additionally detects any *already*-orphaned
+completed record. It is implemented and unit-tested but deliberately not yet wired into the SPEC-324
+payload gate: this repository's own `release-handoffs/` carries 19 real historical records already
+orphaned by past same-version reseals (5 on 3.18.0, 14 more at 3.12.0/3.13.0/3.14.0), and wiring the
+check in today would correctly deny this repo's own release checks until a human dispositions them —
+deferred to a follow-up spec.
+
 ## 3.19.0 (2026-09-08)
 
 ### Nested-install admission fixed, and a required-config-section migration closes the fleet's biggest CFG.RUNNER_POLICY gap
@@ -35,6 +57,28 @@ completed handoff's fingerprint) was **not** actually fixed in 3.18.1 — that
 line described intended, not delivered, work. BUG-331 remains open and is
 being fixed separately; this release's own manifest reseals at an unchanged
 `kit_version` (now bumped here) avoid re-triggering it in the interim.
+
+- **`write_manifest` refuses a same-version reseal that would orphan a
+  completed handoff's fingerprint (BUG-331).** A reseal at an unchanged
+  `kit_version` replaces the on-disk fingerprint without retaining it; if a
+  `release-handoffs/*.json` record with `status: completed` names that exact
+  fingerprint, the rewrite now raises `SameVersionResealError` naming the
+  record(s) and both sanctioned paths (bump `kit_version` so the previous
+  manifest is retained, or reset the records to `pending` first). A version
+  bump, or a same-version rewrite with no completed record on the old
+  fingerprint, is unchanged. This same reseal (3.19.0, unchanged version) is
+  itself tolerated by the new check because nothing has completed against
+  the fingerprint it replaces.
+
+  A companion function, `completed_handoff_orphan_errors`, additionally
+  detects any *already*-orphaned completed record (fingerprint neither
+  current, nor retained, nor explicitly unretained) — this repository's own
+  accumulated 3.12.0/3.13.0/3.14.0/3.18.0 instances (19 records). It is
+  implemented and unit-tested but deliberately **not yet wired into the
+  SPEC-324 payload gate**: doing so today would correctly DENY this
+  repository's own KIT.PAYLOAD checks until those 19 records are
+  dispositioned, which is a human call BUG-331 explicitly left out of scope.
+  A follow-up spec wires it in once disposition lands.
 
 ## 3.18.1 (2026-09-08)
 

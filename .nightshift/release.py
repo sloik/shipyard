@@ -443,6 +443,36 @@ def resolve_retained_manifest(
     return None
 
 
+class SameVersionResealError(RuntimeError):
+    """A same-version reseal would orphan completed handoffs (BUG-331)."""
+
+
+def completed_records_on_fingerprint(canonical: Path, fingerprint: str) -> list[str]:
+    """Names of completed ``release-handoffs/*.json`` records sealed against
+    ``fingerprint``.
+
+    Per the BUG-331 gap protocol, a completed record whose own fingerprint
+    cannot be read is treated as referencing ``fingerprint`` -- the stricter
+    path -- since an unreadable record can never be positively cleared.
+    """
+    directory = canonical / "release-handoffs"
+    if not directory.is_dir():
+        return []
+    names: list[str] = []
+    for record_path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text())
+        except json.JSONDecodeError:
+            names.append(record_path.name)
+            continue
+        if not isinstance(record, dict) or record.get("status") != "completed":
+            continue
+        sealed = record.get("manifest_fingerprint")
+        if not isinstance(sealed, str) or not sealed or sealed == fingerprint:
+            names.append(record_path.name)
+    return names
+
+
 def write_manifest(canonical: Path, names: list[str]) -> dict:
     previous: dict | None = None
     path = canonical / "release-manifest.json"
@@ -467,6 +497,21 @@ def write_manifest(canonical: Path, names: list[str]) -> dict:
             if isinstance(item, dict)
         ):
             retained.append(previous)
+    elif previous:
+        # Same-version reseal (BUG-331/SPEC-257): the on-disk fingerprint is
+        # about to be replaced without being retained. That is only safe when
+        # nothing sealed a completion against it yet -- check before writing.
+        on_disk_fingerprint = previous.get("fingerprint")
+        if isinstance(on_disk_fingerprint, str) and on_disk_fingerprint:
+            offending = completed_records_on_fingerprint(canonical, on_disk_fingerprint)
+            if offending:
+                raise SameVersionResealError(
+                    "same-version reseal would orphan completed handoff record(s) "
+                    f"sealed against the on-disk fingerprint {on_disk_fingerprint}: "
+                    f"{', '.join(offending)}. Either bump kit_version (the previous "
+                    "manifest is then retained), or reset these records to status "
+                    "'pending' first so the next rollout completes them again."
+                )
     manifest = build_manifest(
         canonical,
         names,
@@ -636,8 +681,52 @@ def handoff_membership_errors(canonical: Path, manifest: dict) -> list[str]:
     return errors
 
 
+def completed_handoff_orphan_errors(canonical: Path, manifest: dict) -> list[str]:
+    """R4 (BUG-331): flag a completed record whose fingerprint is orphaned.
+
+    A completed record is only trustworthy provenance while its sealed
+    fingerprint resolves to something -- the current manifest, a retained
+    historical one, or an explicitly unretained release. When none of those
+    match, the fingerprint was silently dropped by a same-version reseal (or
+    equivalent) and the record is now unverifiable; that must be visible at
+    the next preflight, not tolerated quietly.
+    """
+    directory = canonical / "release-handoffs"
+    if not directory.is_dir():
+        return []
+    try:
+        handoff = _load_module_from(canonical / "release_handoff.py", "_release_gate_release_handoff")
+    except Exception as exc:  # noqa: BLE001 - the gate must report, never crash
+        return [f"release handoff provenance: cannot load release_handoff.py: {exc}"]
+    errors: list[str] = []
+    for record_path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("status") != "completed":
+            continue
+        outcome = handoff.resolve_manifest_membership(record, manifest)
+        if outcome.get("outcome") == "missing":
+            errors.append(
+                f"release handoff {record_path.name}: completed against fingerprint "
+                f"{record.get('manifest_fingerprint')!r}, which is neither current, "
+                "retained, nor explicitly unretained (BUG-331 orphaned fingerprint)"
+            )
+    return errors
+
+
 def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
-    """All SPEC-324 checks, in the order a reader would want to fix them."""
+    """All SPEC-324 checks, in the order a reader would want to fix them.
+
+    BUG-331 R4 (``completed_handoff_orphan_errors``) is deliberately not wired
+    in here yet: turning it on would correctly deny this repo's own
+    KIT.PAYLOAD checks today, because 19 real historical completed handoff
+    records are already orphaned by past same-version reseals (see that
+    function's docstring). Disposing those records is a human call the
+    BUG-331 spec explicitly left out of scope. The function is implemented
+    and unit-tested; a follow-up spec wires it in once disposition lands.
+    """
     return (
         skill_version_errors(canonical, manifest)
         + handoff_membership_errors(canonical, manifest)
