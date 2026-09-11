@@ -7,6 +7,49 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.21.0 (2026-09-11)
+
+### StatusStore binds one Nightshift project per git repository, not one per checkout (SPEC-340)
+
+`StatusStore.for_specs_dir` conflated a project's root with its git checkout toplevel. That
+crashed every board of a Nightshift project that is a strict subdirectory of its repository
+(`checkout_root != repository` in `_repository_identity`, which is correct and stays), and —
+because `default_db_path_for_specs_dir` resolved one DB path per git common directory — a
+repository holding several independently configured Nightshift projects had all of them writing
+into the *same* status DB before this crashed. Observed live in `Cortex/` (`core/`, `api/`,
+`mcp/`, `tools/`): all four boards down with `StatusStoreError: terminal projection checkout
+identity is invalid`, and the shared `Cortex/.git/nightshift-status.db` already held 100 rows
+commingled across all four projects, including 3 rows under an unattributable `BUG-001` id.
+
+The default DB path is now namespaced by the project's path relative to its own checkout
+toplevel — `<git-common-dir>/nightshift/<project-relpath>/nightshift-status.db` — computed from
+*that checkout's own* `git rev-parse --show-toplevel`, never from the common directory's parent,
+so linked worktrees of the same project still share one DB while sibling projects in one
+repository no longer collide. A project whose root *is* the checkout toplevel (relpath `.`) keeps
+its exact pre-3.21.0 path, `<git-common-dir>/nightshift-status.db` — every existing single-project
+install in the fleet is this case, and it is unaffected by this release. `for_specs_dir` now
+passes a real checkout root to `bind_repository` (never `project_root`); the bound identity widens
+to also record the owning project's relpath, so two Nightshift projects can never silently share
+a status DB again.
+
+**Migration required** for any repository holding more than one Nightshift project that shares a
+git checkout (i.e. only repositories in the `Cortex/`-like shape above — every single-project
+install needs no action). Run the one-shot splitter against the shared DB:
+
+```
+python status_store.py --source <repo>/.git/nightshift-status.db \
+    --project core=<repo>/core/.nightshift/specs \
+    --project api=<repo>/api/.nightshift/specs \
+    ...
+```
+
+It attributes each row to the one project whose specs dir declares that row's spec id, and it
+fails closed: any spec id attributable to zero or more than one project aborts the entire
+migration before any destination file is written, naming every offending id and its row count,
+and leaves the source database byte-identical. Not a member of the intra-DB
+`_migrate_vN_to_vN+1` chain — those migrations take a single `sqlite3.Connection` and cannot open
+or write sibling DB files, which is the entirety of what this migration does.
+
 ## 3.20.4 (2026-09-09)
 
 ### The scope guard resolves the kit directory per staged path (BUG-335)

@@ -186,26 +186,84 @@ def _run_git_common_dir(start: Path) -> Path | None:
     return path.resolve()
 
 
+def _run_git_show_toplevel(start: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    return Path(raw).resolve()
+
+
+def _project_relpath(project_root: Path, checkout_root: Path | None) -> str | None:
+    """Return ``project_root``'s POSIX-normalised path relative to its checkout.
+
+    ``"."`` means ``project_root`` *is* the checkout toplevel (SPEC-340 R2).
+    ``None`` means the relationship could not be established (e.g. ``git
+    rev-parse --show-toplevel`` failed, or returned a path that does not
+    contain ``project_root``) and the caller should fall back to the
+    pre-SPEC-340 path so existing single-project installs are unaffected.
+    """
+
+    if checkout_root is None:
+        return None
+    try:
+        relative = project_root.resolve().relative_to(checkout_root)
+    except ValueError:
+        return None
+    return relative.as_posix() if str(relative) != "." else "."
+
+
 def default_db_path_for_specs_dir(specs_dir: Path) -> Path:
     """Return a DB path shared by all git worktrees for ``specs_dir``.
 
     Worktrees have separate checked-out ``.nightshift`` directories, so storing
     the DB there would recreate the invisibility bug. The git common directory is
     shared by all worktrees of the same repository.
+
+    SPEC-340: a single repository can hold several independently configured
+    Nightshift projects, each a strict subdirectory of the checkout. The
+    default path is namespaced by the project's path relative to *its own*
+    checkout toplevel (computed per SPEC-340 R8 from that checkout's own
+    ``--show-toplevel``, never from the common directory's parent) so sibling
+    projects no longer collide. A project whose root *is* the checkout
+    toplevel (relpath ``"."``) keeps its pre-SPEC-340 path unchanged
+    (``<git-common-dir>/nightshift-status.db``, R2) -- every existing
+    single-project install in the fleet is this case, and moving it would
+    strand its history with no migration behind it.
     """
 
     specs_dir = Path(specs_dir).resolve()
     project_root = specs_dir.parent.parent if specs_dir.name == "specs" else specs_dir.parent
     common_git_dir = _run_git_common_dir(project_root)
-    if common_git_dir is not None:
+    if common_git_dir is None:
+        return project_root / ".nightshift" / _DEFAULT_DB_NAME
+    checkout_root = _run_git_show_toplevel(project_root)
+    relpath = _project_relpath(project_root, checkout_root)
+    if relpath is None or relpath == ".":
         return common_git_dir / _DEFAULT_DB_NAME
-    return project_root / ".nightshift" / _DEFAULT_DB_NAME
+    return common_git_dir / "nightshift" / relpath / _DEFAULT_DB_NAME
 
 
 class StatusStore:
     """Append-only status checkpoint store."""
 
-    def __init__(self, db_path: Path, *, repository_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        repository_root: Path | None = None,
+        project_relpath: str | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
@@ -217,17 +275,27 @@ class StatusStore:
         ):
             self._bind_repository_common_dir(intrinsic_common_dir)
         if repository_root is not None:
-            self.bind_repository(repository_root)
+            self.bind_repository(repository_root, project_relpath=project_relpath)
 
     @classmethod
     def for_specs_dir(cls, specs_dir: Path) -> "StatusStore":
         specs_dir = Path(specs_dir).resolve()
         project_root = specs_dir.parent.parent if specs_dir.name == "specs" else specs_dir.parent
+        # SPEC-340 R4: pass a real checkout root (never project_root) to
+        # repository_root -- _repository_identity's ``checkout_root !=
+        # repository`` assertion requires it, and relaxing that assertion is
+        # out of scope. The project's relpath inside that checkout (R8:
+        # computed from *this* checkout's own --show-toplevel) widens the
+        # bound identity so sibling subprojects no longer collide (R3); a
+        # relpath of "." (project root is the checkout toplevel) is not
+        # passed through, preserving every existing single-project install's
+        # binding exactly as before this change (R2).
+        checkout_root = _run_git_show_toplevel(project_root)
+        relpath = _project_relpath(project_root, checkout_root)
         return cls(
             default_db_path_for_specs_dir(specs_dir),
-            repository_root=(
-                project_root if _run_git_common_dir(project_root) is not None else None
-            ),
+            repository_root=checkout_root,
+            project_relpath=relpath if relpath not in (None, ".") else None,
         )
 
     @staticmethod
@@ -256,17 +324,32 @@ class StatusStore:
             "checkout_root": str(checkout_root),
         }
 
-    def bind_repository(self, repo_root: Path) -> dict[str, str]:
+    def bind_repository(
+        self, repo_root: Path, *, project_relpath: str | None = None,
+    ) -> dict[str, str]:
         """Durably bind this store to one Git common directory.
 
         Linked worktrees deliberately share this identity. Independent clones do
         not, even when their revisions and blobs are byte-identical.
+
+        SPEC-340 R3: when ``project_relpath`` is given, the bound identity
+        widens to also record which project (by its path inside the
+        checkout) owns this store, so two sibling projects that somehow
+        addressed the same DB file could never be silently treated as one.
+        ``project_relpath=None`` (the toplevel-rooted case, R2, and every
+        pre-SPEC-340 caller) leaves the ``project_relpath`` meta key
+        untouched -- an existing single-project DB has no such key and none
+        is required of it.
         """
         identity = self._repository_identity(repo_root)
-        self._bind_repository_common_dir(Path(identity["repo_common_dir"]))
+        self._bind_repository_common_dir(
+            Path(identity["repo_common_dir"]), project_relpath=project_relpath,
+        )
         return identity
 
-    def _bind_repository_common_dir(self, common_dir: Path) -> None:
+    def _bind_repository_common_dir(
+        self, common_dir: Path, *, project_relpath: str | None = None,
+    ) -> None:
         normalized = str(Path(common_dir).resolve())
         with closing(self._connect()) as conn:
             with conn:
@@ -283,6 +366,23 @@ class StatusStore:
                         "INSERT INTO meta (key, value) VALUES (?, ?)",
                         ("repository_common_dir", normalized),
                     )
+                if project_relpath is not None:
+                    relpath_row = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        ("project_relpath",),
+                    ).fetchone()
+                    if (
+                        relpath_row is not None
+                        and str(relpath_row["value"]) != project_relpath
+                    ):
+                        raise StatusStoreError(
+                            "durable status store belongs to a different Nightshift project"
+                        )
+                    if relpath_row is None:
+                        conn.execute(
+                            "INSERT INTO meta (key, value) VALUES (?, ?)",
+                            ("project_relpath", project_relpath),
+                        )
 
     def require_repository(self, repo_root: Path) -> dict[str, str]:
         """Return identity only when this store already owns the repository.
@@ -1292,3 +1392,259 @@ def classify_status_sync(
         else SYNC_DURABLE_STALE_BEHIND
     )
     return {"durable": durable_status, "effective": durable_status, "reason": reason}
+
+
+# ---------------------------------------------------------------------------
+# SPEC-340 R6: one-shot cross-DB migration splitting a shared status DB
+# (one repository, several Nightshift projects) into one DB per project.
+#
+# Deliberately NOT a member of the intra-DB ``_migrate_vN_to_vN+1`` chain
+# above: every function in that chain takes a single ``sqlite3.Connection``
+# and cannot open, create, or write sibling DB files -- which is the entirety
+# of what this migration does.
+# ---------------------------------------------------------------------------
+
+_MIGRATION_SPEC_ID_TABLES = (
+    "status_checkpoints",
+    "terminal_decisions",
+    "cleanup_events",
+    "terminal_projection_events",
+    "merge_attempt_events",
+)
+
+
+def _collect_project_spec_ids(specs_dir: Path) -> set[str]:
+    """Return every spec id declared by a Markdown frontmatter under ``specs_dir``.
+
+    Used only for migration attribution (R7); template files are excluded
+    since they never carry a real, addressable spec id.
+    """
+    from spec_frontmatter import FrontmatterError, parse_spec_file
+
+    ids: set[str] = set()
+    specs_dir = Path(specs_dir)
+    if not specs_dir.is_dir():
+        return ids
+    for md_file in specs_dir.rglob("*.md"):
+        if md_file.name.startswith("_TEMPLATE"):
+            continue
+        try:
+            parsed = parse_spec_file(md_file)
+        except FrontmatterError:
+            continue
+        spec_id = parsed.frontmatter.get("id")
+        if spec_id:
+            ids.add(str(spec_id))
+    return ids
+
+
+def migrate_split_shared_db(
+    source_db_path: Path,
+    project_specs_dirs: dict[str, Path],
+) -> dict[str, Any]:
+    """SPEC-340 R6: split one shared status DB into one DB per project.
+
+    ``project_specs_dirs`` maps each project's relpath inside its checkout
+    (``"."`` for the toplevel-rooted project, else the POSIX relpath
+    ``_project_relpath`` would compute for it) to that project's specs
+    directory. Row attribution is by set membership: a spec id belongs to a
+    project when some spec file under that project's ``specs_dir`` declares
+    that id in its frontmatter.
+
+    Fail-closed (R7, AC7): a spec id present in the source but attributable
+    to zero or more than one project aborts the *entire* migration before
+    any destination file is created and before the source is touched --
+    ``StatusStoreError`` names every offending id and its row count across
+    all spec-id-bearing tables. The source DB is opened **read-only** via a
+    ``file:...?mode=ro`` URI (never through ``StatusStore._connect``, which
+    sets ``PRAGMA journal_mode=WAL`` and would rewrite the file header even
+    on a path that goes on to refuse), so a refused migration leaves the
+    source byte-identical.
+
+    Returns a summary: ``{"source": ..., "projects": {relpath: {"db_path":
+    ..., "rows": {table: row_count, ...}}}}``.
+    """
+    source_db_path = Path(source_db_path).resolve()
+    if not source_db_path.is_file():
+        raise StatusStoreError(f"migration source database not found: {source_db_path}")
+
+    project_ids: dict[str, set[str]] = {
+        relpath: _collect_project_spec_ids(Path(specs_dir))
+        for relpath, specs_dir in project_specs_dirs.items()
+    }
+
+    source_uri = f"file:{source_db_path.as_posix()}?mode=ro"
+    with closing(sqlite3.connect(source_uri, uri=True)) as source_conn:
+        source_conn.row_factory = sqlite3.Row
+        existing_tables = {
+            row["name"]
+            for row in source_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        rows_by_table: dict[str, list[sqlite3.Row]] = {}
+        for table in _MIGRATION_SPEC_ID_TABLES:
+            if table not in existing_tables:
+                continue
+            rows_by_table[table] = source_conn.execute(f"SELECT * FROM {table}").fetchall()
+
+        meta_row = source_conn.execute(
+            "SELECT value FROM meta WHERE key = ?", ("repository_common_dir",),
+        ).fetchone()
+        repository_common_dir = str(meta_row["value"]) if meta_row is not None else None
+
+        # --- attribution pass: nothing is written anywhere until every row
+        # across every table has resolved to exactly one project. ---
+        unattributable: dict[str, int] = {}
+        attribution: dict[str, dict[str, list[sqlite3.Row]]] = {
+            relpath: {table: [] for table in rows_by_table} for relpath in project_ids
+        }
+        for table, rows in rows_by_table.items():
+            for row in rows:
+                spec_id = str(row["spec_id"])
+                owners = [relpath for relpath, ids in project_ids.items() if spec_id in ids]
+                if len(owners) != 1:
+                    unattributable[spec_id] = unattributable.get(spec_id, 0) + 1
+                    continue
+                attribution[owners[0]][table].append(row)
+
+        if unattributable:
+            detail = ", ".join(
+                f"{spec_id} ({count} row(s))"
+                for spec_id, count in sorted(unattributable.items())
+            )
+            raise StatusStoreError(
+                "SPEC-340 migration refused: unattributable spec id(s) -- "
+                f"{detail}. No destination database was written and the "
+                f"source database ({source_db_path}) is unchanged. Resolve "
+                "the ambiguity -- each id must belong to exactly one "
+                "project's specs dir -- and re-run."
+            )
+
+        common_dir = (
+            Path(repository_common_dir)
+            if repository_common_dir is not None
+            else source_db_path.parent
+        )
+        dest_paths: dict[str, Path] = {
+            relpath: (
+                common_dir / _DEFAULT_DB_NAME
+                if relpath == "."
+                else common_dir / "nightshift" / relpath / _DEFAULT_DB_NAME
+            )
+            for relpath in project_specs_dirs
+        }
+        # Computed and checked up front, before any destination file is
+        # opened: a mixed-shape repository (a toplevel-rooted project's
+        # relpath "." alongside subproject relpaths) would otherwise resolve
+        # "." to common_dir / _DEFAULT_DB_NAME -- the source file itself --
+        # and silently mutate it mid-migration, partial-output and all (R7).
+        for relpath, dest_path in dest_paths.items():
+            if dest_path.resolve() == source_db_path.resolve():
+                raise StatusStoreError(
+                    f"SPEC-340 migration refused: project {relpath!r}'s destination "
+                    f"database ({dest_path}) is the source database itself. No "
+                    "destination database was written and the source database "
+                    f"({source_db_path}) is unchanged. Pass a source DB that is not "
+                    "already one of the destination paths."
+                )
+        collisions: dict[Path, list[str]] = {}
+        for relpath, dest_path in dest_paths.items():
+            collisions.setdefault(dest_path.resolve(), []).append(relpath)
+        for dest_path, relpaths in collisions.items():
+            if len(relpaths) > 1:
+                raise StatusStoreError(
+                    "SPEC-340 migration refused: projects "
+                    f"{', '.join(sorted(relpaths))!r} all resolve to the same "
+                    f"destination database ({dest_path}). No destination database "
+                    f"was written and the source database ({source_db_path}) is "
+                    "unchanged."
+                )
+
+        summary: dict[str, Any] = {"source": str(source_db_path), "projects": {}}
+        for relpath, specs_dir in project_specs_dirs.items():
+            dest_path = dest_paths[relpath]
+            dest_store = StatusStore(dest_path)
+            dest_store._bind_repository_common_dir(
+                common_dir,
+                project_relpath=None if relpath == "." else relpath,
+            )
+            project_summary: dict[str, int] = {}
+            with closing(dest_store._connect()) as dest_conn:
+                with dest_conn:
+                    for table, rows in attribution[relpath].items():
+                        for row in rows:
+                            columns = row.keys()
+                            placeholders = ", ".join("?" for _ in columns)
+                            column_list = ", ".join(columns)
+                            dest_conn.execute(
+                                f"INSERT INTO {table} ({column_list}) VALUES ({placeholders})",
+                                tuple(row[column] for column in columns),
+                            )
+                        project_summary[table] = len(rows)
+            summary["projects"][relpath] = {"db_path": str(dest_path), "rows": project_summary}
+        return summary
+
+
+def _parse_migration_project_arg(value: str):
+    import argparse
+
+    if "=" not in value:
+        raise argparse.ArgumentTypeError(
+            "expected RELPATH=SPECS_DIR (e.g. '.=./specs' or 'core=core/specs')"
+        )
+    relpath, _, specs_dir = value.partition("=")
+    relpath = relpath.strip()
+    if not relpath:
+        raise argparse.ArgumentTypeError("RELPATH must not be empty")
+    return relpath, Path(specs_dir.strip())
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the SPEC-340 R6 migration.
+
+    Example::
+
+        python status_store.py --source Cortex/.git/nightshift-status.db \\
+            --project core=Cortex/core/.nightshift/specs \\
+            --project api=Cortex/api/.nightshift/specs \\
+            --project mcp=Cortex/mcp/.nightshift/specs \\
+            --project tools=Cortex/tools/.nightshift/specs
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "SPEC-340 R6: split a shared Nightshift status DB (one repository, "
+            "several projects) into one DB per project, attributed by which "
+            "project's specs dir declares each row's spec id. Fails closed: "
+            "any unattributable spec id aborts with no partial output."
+        ),
+    )
+    parser.add_argument(
+        "--source", required=True, type=Path, help="Path to the shared source DB.",
+    )
+    parser.add_argument(
+        "--project", dest="projects", action="append", required=True,
+        type=_parse_migration_project_arg, metavar="RELPATH=SPECS_DIR",
+        help=(
+            "One per project sharing --source. RELPATH is '.' for the "
+            "toplevel-rooted project, else the project's POSIX path inside "
+            "the checkout (e.g. 'core'). Repeatable."
+        ),
+    )
+    args = parser.parse_args(argv)
+    project_specs_dirs = dict(args.projects)
+    try:
+        summary = migrate_split_shared_db(args.source, project_specs_dirs)
+    except StatusStoreError as exc:
+        print(str(exc))
+        return 1
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

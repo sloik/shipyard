@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.20.4
+version: 3.21.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1849,7 +1849,9 @@ those use the same mandatory dispatch with the adapted brief in (a-alt) below,
 never a parent self-check (SPEC-ARGO-061 R1/R2). The only sanctioned exception to
 mandatory dispatch is the narrow, explicitly-labeled `self-verified-experimental`
 path defined in Step 6's `Nightshift-Resolution-Kind` documentation, reserved for
-`SPEC-ARGO-038-001`'s own measurement — not a routine fallback for any other spec.
+a pre-designated self-verified-arm measurement (originally `SPEC-ARGO-038-001`,
+now superseded by canonical `SPEC-223` — see that Resolution-Kind section for the
+currently-live designator) — not a routine fallback for any other spec.
 
 > **Why this pays, and the failure mode it must avoid.** A verifier the parent does
 > not check is just a second worker whose report is trusted — the exact problem
@@ -2985,14 +2987,20 @@ this pass actually did (SPEC-ARGO-061 R1/R3):
   row exist to capture, and it is not evidence of a bypassed Step 5c the way a self-verified value
   would be.
 - **`self-verified-experimental`** — dispatch was **deliberately** not performed for this pass,
-  solely because this run was pre-designated, before it started, as one of `SPEC-ARGO-038-001`'s
-  bounded set of comparison samples for its self-verified-arm measurement. This is the **only**
-  sanctioned use of self-verification going forward — narrow, pre-declared, and never opportunistic
-  ("this one looked easy to self-check" is not a qualifying reason). A pass using this value MUST
-  also carry a `Nightshift-Experimental-Sample-For: SPEC-ARGO-038-001` trailer and a one-line reason
-  in the commit body naming which comparison pair it fills. `SPEC-ARGO-038-001`'s own spec file
-  states exactly how many such passes are needed and when they are produced — see its Context
-  section.
+  solely because this run was pre-designated, before it started, as a bounded comparison sample for
+  a self-verified-arm measurement. This is the **only** sanctioned use of self-verification going
+  forward — narrow, pre-declared, and never opportunistic ("this one looked easy to self-check" is
+  not a qualifying reason). A pass using this value MUST also carry a
+  `Nightshift-Experimental-Sample-For: <designating-spec-id>` trailer and a one-line reason in the
+  commit body naming which comparison pair it fills. The originating designation was
+  `SPEC-ARGO-038-001` (project-local, Argo Home); **`SPEC-ARGO-038-001` is superseded by canonical
+  `SPEC-223`** (`canonical/specs/SPEC-223-measure-verified-versus-self-verified-context-spend.md`),
+  which is itself currently blocked pending exactly this sample type. Before designating a new
+  sample, read the currently-live designating spec's own file for the exact count/status required —
+  do not assume `SPEC-ARGO-038-001` is still the live target, and do not assume `SPEC-223` will
+  remain the only legitimate designator going forward; a later spec may supersede it in turn.
+  `SPEC-ARGO-038-001` remains the historical discovery/partial-evidence record and is not deleted
+  from this text.
 - **`self-verified`** (without `-experimental`) — reserved for a pass where this convention did not
   exist yet or was not followed. **As of SPEC-ARGO-061, a bare `self-verified` on any new commit is
   itself a protocol violation, not a legitimate outcome** — R1's decision closed the "rare case
@@ -3027,8 +3035,10 @@ for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified
    `blocked`, per R3), then re-evaluate the gate. **The one sanctioned
    substitute for check 5** is a pass whose `Nightshift-Resolution-Kind` will be
    `self-verified-experimental` (SPEC-ARGO-061 R3): no Step 5c verdict exists
-   because dispatch was deliberately skipped for `SPEC-ARGO-038-001`'s sampling,
-   so the parent evaluates checks 1–4 and the ACs directly instead, and records
+   because dispatch was deliberately skipped for a pre-designated sampling run
+   (originally `SPEC-ARGO-038-001`, now superseded by canonical `SPEC-223` — see
+   the Resolution-Kind section above for the currently-live designator), so the
+   parent evaluates checks 1–4 and the ACs directly instead, and records
    that substitution via the trailer pair, never by leaving check 5 silently
    unaddressed. This is not available for a bare `self-verified` outcome — that
    value records a violation, not a passing gate.
@@ -3192,7 +3202,7 @@ Nightshift-Unblock-Limit: 1
 Nightshift-Unblock-Rung: <0|1|2|3|4|5>
 Nightshift-Parent-Tool-Calls: <N>
 Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
-Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
+Nightshift-Experimental-Sample-For: <currently-live designating spec (e.g. canonical SPEC-223, which supersedes the original SPEC-ARGO-038-001 designation — read that spec's own file for the live target before writing this trailer) | omit unless Resolution-Kind is self-verified-experimental>
 ```
 
 **BUG-017 — one contiguous trailer paragraph, no exceptions.** If this session's
@@ -3363,7 +3373,7 @@ speculative explanation of why it worked.
    Nightshift-Unblock-Rung: <0|1|2|3|4|5>
    Nightshift-Parent-Tool-Calls: <N>
    Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
-   Nightshift-Experimental-Sample-For: <SPEC-ARGO-038-001 | omit unless Resolution-Kind is self-verified-experimental>
+   Nightshift-Experimental-Sample-For: <currently-live designating spec (e.g. canonical SPEC-223, which supersedes the original SPEC-ARGO-038-001 designation — read that spec's own file for the live target before writing this trailer) | omit unless Resolution-Kind is self-verified-experimental>
    ```
 
    **BUG-017 — same single-paragraph rule as the `done` commit above applies here.**
