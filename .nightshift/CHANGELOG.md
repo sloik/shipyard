@@ -7,6 +7,165 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.21.7 (2026-09-12)
+
+### Drag-and-drop status no longer flickers back to the old column (SPEC-348)
+
+`onCardDrop()` optimistically flips a dragged card's status and repaints
+before the blocking `window.prompt()` reason dialog, then issues the
+persisting `PUT`. If the 10s status poll's queued fetch returned while the
+prompt was open and reached the server before the drop's own PUT committed,
+the poll's unconditional `specs = fresh` overwrite snapped the card back to
+its old column — visible as a flicker, sometimes stuck until the next poll.
+A module-level `pendingMoves` map (spec id → `{newStatus, sinceMtime}`) is
+now set right after the optimistic status assignment and cleared in all
+three PUT outcomes (success, non-ok, network error). A new pure
+`mergeFreshSpecs(prevSpecs, freshSpecs, pendingMoves)` replaces the
+unconditional overwrite in `pollSpecs()`: it keeps the optimistic status
+unless the fresh snapshot's `_mtime` is strictly newer than `sinceMtime`, in
+which case fresh wins and the pending entry clears. Specs with no pending
+move are unaffected. Regression coverage: 8 new unit tests in
+`canonical/tests/test_board_status_poll_merge.py`, extracting the embedded
+JS and running it in Node, including a red/green proof against the pre-fix
+`board.py`. Patch-only: no config/protocol schema changes.
+
+## 3.21.6 (2026-09-12)
+
+### Board panel gains configurable side (left/right) and draggable top offset (SPEC-347)
+
+The sliding detail panel was hard-coded right-docked and full-viewport-height,
+with no way to move it to the left or shrink it. A new `#panel-side-toggle`
+button switches the panel between right-docked (default) and left-docked via
+a single `.side-left` CSS class that mirrors position, border, and the
+width-resize handle's edge; `startPanelResize`'s width-delta sign is
+captured per-drag and mirrored for left-docked mode so dragging still grows
+and shrinks the panel correctly on either side. A new `#panel-top-resize`
+handle lets the operator drag the panel's top offset while it stays
+anchored to the viewport bottom, clamped between the board header and a
+minimum panel height. `panelSide`/`panelTopOffset` persist through the
+existing `saveSettings()`/`loadSettings()` mechanism (already project-scoped,
+so this is per-board with no new plumbing). A `panelDragActive` guard keeps
+the click-outside-closes-panel listener from misfiring on either drag.
+Cross-board syncing of these preferences is a deferred nice-to-have (see the
+spec's Out of Scope). Regression coverage: 8 new Playwright tests in
+`canonical/tests/test_board_browser.py`. Patch-only: no config/protocol
+schema changes.
+
+## 3.21.5 (2026-09-12)
+
+### Board panel gains "reveal in Finder" and "open in Terminal" actions (SPEC-345)
+
+The sliding detail panel already let an operator jump into a spec's file via the
+"↗ OPEN/EDIT" (VS Code) button, but had no way to jump into the spec's containing
+folder in Finder or a Terminal window rooted there. Two new endpoints mirror the
+existing `_open_in_vscode`/`/api/open/spec/{spec_id}` pattern:
+`POST /api/open/spec/{spec_id}/finder` runs `open -R <path>`;
+`POST /api/open/spec/{spec_id}/terminal` opens Terminal.app via `osascript`,
+passing the spec's parent directory as a trailing argv element (never
+interpolated into the AppleScript source text) and applying `quoted form of`
+before it reaches any shell — no string concatenation into a shell command
+anywhere in either new function. Both endpoints match the existing
+404/400/500/503 error contract. Two new panel buttons call them, matching the
+existing toast-on-failure pattern. Regression coverage: 11 new FastAPI
+`TestClient` tests and 4 new Playwright tests. Patch-only: no config/protocol
+schema changes; macOS-only, matching the existing VS Code open path's own
+darwin special-case.
+
+## 3.21.4 (2026-09-12)
+
+### Board panel's details toggle no longer closes the sliding panel (SPEC-346)
+
+Clicking the sliding detail panel's "details" metadata toggle (`#panel-meta-toggle`)
+closed the whole panel instead of expanding/collapsing the group. Its `onclick` handler
+(`toggleMetaCollapsed`) calls `renderPanelMeta()`, which replaces `#panel-meta`'s
+`innerHTML` — including the clicked button — before the click event bubbles to the
+document-level "click outside closes panel" listener, which checked
+`panel.contains(e.target)`. Since `e.target` was by then a detached node, the check
+wrongly read false and closed the panel. The listener now checks `e.composedPath()`
+(captured at dispatch time, immune to later DOM mutation) instead of `e.target`,
+structurally fixing this for any panel-internal control, not just this one toggle.
+Regression coverage: 3 new Playwright tests in `canonical/tests/test_board_browser.py`.
+Patch-only: no config/protocol schema changes.
+
+## 3.21.3 (2026-09-12)
+
+### Run reports embed spec identity so distinct runs can never silently collide (SPEC-343)
+
+A completed run's final narrative report was silently overwritten by a different run's
+report finalized later the same day, because both wrote to the same shared, destructive,
+date-only path (`reports/YYYY-MM-DD-nightshift-report.md`). The earlier narrative survived
+only in Git history; neither project's board `/api/reports` listing surfaced the
+root-level file at all. Source: a weekly Cortex smoke check (Core/Tools incident).
+
+Step 14 of `LOOP.md` (and the matching prose in `Skills/nightshift/SKILL.md`) now directs
+every run to `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md`. `board.py` gains
+`finalize_report()`: an identical-content write to an occupied target is idempotent, and a
+differing-content write (e.g. a same-spec same-day rerun) is deterministically disambiguated
+with a `-run2`, `-run3`, … suffix rather than truncating the prior file — never a silent
+overwrite. `board.get_reports()` now also parses and returns `spec_id`/`run_suffix`
+attribution per report (`None`/`None` for legacy date-only reports, which remain listed and
+readable — no existing report was renamed or deleted). Project attribution continues to
+reuse SPEC-340's existing project-root scoping (`_project_root_for_reports()`); a sibling
+project sharing one Git repository is not attributed to the wrong board. The independent
+verifier-report-blinding mechanism (SPEC-228/239/282) is root-prefix-based, not
+filename-based, and the new convention's spec-ID-in-filename is actually a strict
+improvement for same-spec path-based exclusion (`same_spec_report_exclusions`'s existing
+`-SPEC-XXX-`-suffix precedent). Regression coverage:
+`canonical/tests/test_spec343_report_collision_regression.py` — a disposable temporary Git
+repository with two project roots, two same-day runs, a same-spec rerun, a legacy
+date-only negative control routed through the same production `finalize_report()` function
+(proving the regression oracle is real, not a tautology), and an assertion that board
+discoverability and independent-verifier exclusion hold independently for the same report.
+Known remaining gap (out of this spec's `touches:`): `nightshift_coordinator.py`'s
+`_record_run_spend_ceiling_breach` still appends to the shared date-only path; flagged for
+a follow-up spec. Patch-only: no config/protocol schema changes; existing reports are
+unaffected and unmoved.
+
+## 3.21.2 (2026-09-12)
+
+### Verifier surface no longer drops tracked-and-ignored retained files (SPEC-342)
+
+`verification_report.py` builds each verifier arm by materializing every path tracked in
+the source repository at that ref, then running `git add -A` in the standalone destination
+repository. `git add -A` honours `.gitignore` — and the destination's own `.gitignore` is
+itself a source-tracked file that gets copied in, so a file that is genuinely tracked in the
+source *and* matches one of that project's own ignore patterns (a legitimate, intentional
+combination: a force-added, retained evidence/report file living under an otherwise-ignored
+directory such as `reports/_wip/`) was silently absent from the arm's commit even though it
+was present on disk. The September 8 kit 3.17.0 refresh introduced this by replacing a
+per-arm force-add with the current plain `add -A`; source: Cortex SPEC-CTX-CORE-061.
+
+`_materialize_ref` now also returns every path it wrote from the source ref's tracked tree,
+and `prepare_verifier_surface` force-adds exactly those paths (`_force_add_tracked_paths`,
+using `git add -f --pathspec-from-file`/`--pathspec-file-nul` to stay correct under very
+large tracked-path counts and non-UTF-8 filenames) before the existing plain `add -A` picks
+up everything else. No file that was never tracked in the source is force-included, and the
+SPEC-228/239/282 containment/exclusion rules that deliberately withhold same-spec and
+excluded reports are unchanged. Regression coverage:
+`canonical/tests/test_spec342_verifier_retained_ignored_files.py` (hermetic dispatch +
+committed-object read-back, a negative control that reproduces the pre-fix drop in-process,
+and a tamper-detection case) and
+`canonical/tests/test_spec342_managed_refresh_integration.py` (refresh integration test
+against a disposable temporary project via the real `nightshift-sync.py canonical_sync`
+path, with a positive and a negative candidate). Patch-only: no config/protocol schema
+changes; `verification_report.py` is managed payload (`CANONICAL_PROTOCOL_FILES`), so
+installed copies need this refresh once released.
+
+## 3.21.1 (2026-09-12)
+
+### Fleet collection no longer crashes on incomplete validation evidence (SPEC-344)
+
+A real fleet collection crashed in `fleet_metrics.py::_metric_summary` comparing
+`validation.test_pass_rate: null` with an integer (`TypeError: '>=' not supported
+between instances of 'NoneType' and 'int'`), producing no snapshot at all. Null,
+missing, wrong-type, boolean, negative, and out-of-range validation values are now
+treated as explicitly *unknown* rather than crashing or silently counting as
+passing. A new, purely additive `evidence_quality.fleet_validation_unknown_rate`
+snapshot metric distinguishes "no evidence" from "evidence shows failure"; the
+schema version is unchanged and both existing consumers (`analyze_fleet_snapshot`,
+`fleet_evidence_summary`) already forward the whole dict, so neither needed a code
+change. Patch-only: no config/protocol changes.
+
 ## 3.21.0 (2026-09-11)
 
 ### StatusStore binds one Nightshift project per git repository, not one per checkout (SPEC-340)

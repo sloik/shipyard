@@ -62,6 +62,39 @@ def _iso(value: Any) -> str | None:
     return value if value.endswith("Z") and "T" in value else None
 
 
+def _valid_test_pass_rate(value: Any) -> float | None:
+    """Return the rate as a float if it is a genuine, in-range numeric value.
+
+    Booleans are rejected even though ``bool`` is a subclass of ``int`` in
+    Python (``True >= 1`` would otherwise silently read as a passing rate).
+    Missing, null, string, and out-of-range ([0, 1]) values are all treated
+    the same way: not a valid rate, so evidence stays unknown rather than
+    being coerced into a pass or a fail.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not (0 <= value <= 1):
+        return None
+    return float(value)
+
+
+def _validation_status(validation: dict[str, Any]) -> tuple[bool, bool]:
+    """Return ``(validation_passed, validation_unknown)`` for a validation block.
+
+    Unknown evidence (missing/null/wrong-type/out-of-range ``build_pass`` or
+    ``test_pass_rate``) never counts as passing, but it is also kept distinct
+    from an explicit failure so consumers can tell "no evidence" apart from
+    "evidence shows it failed".
+    """
+    build_pass = validation.get("build_pass")
+    build_known = isinstance(build_pass, bool)
+    rate = _valid_test_pass_rate(validation.get("test_pass_rate"))
+    rate_known = rate is not None
+    unknown = not (build_known and rate_known)
+    passed = bool(build_known and build_pass is True and rate_known and rate >= 1)
+    return passed, unknown
+
+
 def _metric_summary(data: dict[str, Any]) -> dict[str, Any]:
     """Return an allowlisted summary; never copy untrusted strings from metrics."""
     phases = data.get("phases") if isinstance(data.get("phases"), dict) else {}
@@ -79,13 +112,15 @@ def _metric_summary(data: dict[str, Any]) -> dict[str, Any]:
         else blocker_class if blocker_class in SAFE_BLOCKER_CLASSES
         else None
     )
+    validation_passed, validation_unknown = _validation_status(validation)
     return {
         "outcome": outcome if outcome in SAFE_OUTCOMES else "unknown",
         "failure_category": failure_category,
         "started_at": _iso(data.get("started_at")),
         "completed_at": _iso(data.get("completed_at")),
         "duration_s": int(validation.get("duration_s") or 0) if isinstance(validation.get("duration_s"), (int, float)) else 0,
-        "validation_passed": validation.get("build_pass") is True and validation.get("test_pass_rate", 1) >= 1,
+        "validation_passed": validation_passed,
+        "validation_unknown": validation_unknown,
         "rerun": bool((data.get("resolution") or {}).get("attempt", 1) > 1) if isinstance(data.get("resolution"), dict) else False,
     }
 
@@ -244,6 +279,7 @@ def normalize_project_results(results: list[dict[str, Any]], registered: int, *,
     ]
     all_rows = [row for item in reachable for row in item["rows"]]
     unknown_outcomes = sum(row.get("outcome") == "unknown" for row in all_rows)
+    unknown_validations = sum(bool(row.get("validation_unknown")) for row in all_rows)
     blocked_rows = [row for row in all_rows if row.get("outcome") == "blocked"]
     classified_blocked = sum(
         bool(row.get("failure_category")) and row.get("failure_category") != "unknown"
@@ -288,6 +324,7 @@ def normalize_project_results(results: list[dict[str, Any]], registered: int, *,
         "evidence_quality": {
             "fleet_unknown_outcome_rate": quality_metric(unknown_outcomes, len(all_rows)),
             "fleet_blocked_classification_rate": quality_metric(classified_blocked, len(blocked_rows)),
+            "fleet_validation_unknown_rate": quality_metric(unknown_validations, len(all_rows)),
         },
         "collection_failures": len(missing),
         "release_coverage": {

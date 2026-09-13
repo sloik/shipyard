@@ -2152,8 +2152,18 @@ reasoning are unavailable to the standard verification gate by construction.
    report instead of hidden in the YAML. ≥3 warnings additionally emit
    `metrics_fidelity_low` (severity `high`) to `events.jsonl`; the run
    still completes.
-3. Write to `reports/YYYY-MM-DD-nightshift-report.md`
-4. **Verify the file exists** — confirm `reports/YYYY-MM-DD-nightshift-report.md` is present and non-empty before continuing. If it is missing or empty, write it again.
+3. **Write to `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` (SPEC-343).**
+   The filename embeds the spec ID so that two distinct runs — a different
+   spec finalizing on the same date, or a rerun of the same spec on the same
+   date — can never silently overwrite each other's report. The bare
+   date-only `reports/YYYY-MM-DD-nightshift-report.md` path is a
+   **backward-compatible read path only** (existing pre-SPEC-343 reports keep
+   working); never write a new report there. If a report already exists at
+   the exact target path with different content (e.g. a same-day rerun of
+   the same spec), disambiguate deterministically by appending `-run2`,
+   `-run3`, etc. — never truncate the prior file. `board.finalize_report()`
+   implements this convention; reuse it rather than hand-rolling the path.
+4. **Verify the file exists** — confirm `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` is present and non-empty before continuing. If it is missing or empty, write it again.
    For a bounded parallel run, the parent coordinator (not the worker) must
    create the completion receipt after independent review. Bind it to the exact
    candidate commit and dispatcher run, record the independently observed diff,
@@ -2238,7 +2248,7 @@ own report by hand to carry the same three sections; this closes that gap.
 **What to do:**
 1. Return to step 2 (Task Selection) to pick the next spec
 2. Or, if no more ready specs:
-   - **Gate: verify `reports/YYYY-MM-DD-nightshift-report.md` exists and is non-empty.** If it does not exist, go back to Step 14 now — do not exit without it.
+   - **Gate: verify `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` exists and is non-empty.** If it does not exist, go back to Step 14 now — do not exit without it.
    - Commit all changes
    - **Ingest into cross-project history DB (SPEC-040):** after per-spec metrics have been finalized, call `execution_history.ingest_run_and_log()` for the completed run. Ingestion is **idempotent** (keyed on `run_id` — re-running the same run is a no-op) and **non-fatal**: any failure logs a `history_ingest_failed` event to the run's `events.jsonl` and the loop continues to exit cleanly.
 
@@ -2443,7 +2453,7 @@ All behavior is configurable in `config.yaml`. Key sections:
 
 **Key outputs:**
 - Metrics: `metrics/YYYY-MM-DD_NNN_<spec-id>.yaml`
-- Report: `reports/YYYY-MM-DD-nightshift-report.md`
+- Report: `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` (SPEC-343; bare date-only path is legacy-read-only)
 - Blocked: `reports/BLOCKED-<spec-id>-<timestamp>.md`
 - Failed approaches: `knowledge/attempts/SPEC-XXX-description.md`
 - TODOs: `reports/TODOs-discovered.md`

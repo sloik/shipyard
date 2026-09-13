@@ -1871,6 +1871,76 @@ def _iter_report_files(root: Path):
                 yield Path(dirpath) / fname
 
 
+def _parse_report_identity(filename: str) -> dict:
+    """Best-effort spec/run attribution parsed from a report's basename.
+
+    SPEC-343: the collision-safe naming convention is
+    `YYYY-MM-DD-nightshift-report-<SPEC-ID>[-runN].md`. Legacy date-only
+    reports (no spec suffix) parse to `spec_id=None` — the documented
+    backward-compatible case; they remain listed and readable, just without
+    spec/run attribution.
+    """
+    m = _REPORT_DATE_PREFIX_RE.match(filename)
+    if not m:
+        return {"report_date": None, "spec_id": None, "run_suffix": None}
+    date, suffix = m.group(1), m.group(3)
+    if not suffix:
+        return {"report_date": date, "spec_id": None, "run_suffix": None}
+    run_m = _REPORT_RUN_SUFFIX_RE.match(suffix)
+    if run_m:
+        return {
+            "report_date": date,
+            "spec_id": run_m.group("spec"),
+            "run_suffix": f"run{run_m.group('run')}",
+        }
+    return {"report_date": date, "spec_id": suffix, "run_suffix": None}
+
+
+_REPORT_DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-nightshift-report(-(.+))?\.md$")
+_REPORT_RUN_SUFFIX_RE = re.compile(r"^(?P<spec>.+)-run(?P<run>\d+)$")
+
+
+def finalize_report(
+    root: Path, date: str, spec_id: str, content: str, *, legacy_date_only: bool = False,
+) -> Path:
+    """Write a run report, embedding spec identity in the filename so distinct
+    runs can never collide on one shared destructive path (SPEC-343 R1).
+
+    Convention: `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md`. A write
+    whose target already holds byte-identical content is idempotent (returns
+    the existing path, nothing changes). A write whose target already holds
+    *different* content (e.g. a same-spec same-day rerun) is deterministically
+    disambiguated with a `-runN` suffix rather than silently truncating the
+    prior file.
+
+    `legacy_date_only=True` reproduces the pre-SPEC-343 shared date-only path
+    (`reports/YYYY-MM-DD-nightshift-report.md`) and DOES silently overwrite —
+    it exists only so regression tests can prove the historical incident
+    through the same production function, not a hand-rolled tautology. Do not
+    pass it for real runs.
+    """
+    reports_root = root / "reports"
+    reports_root.mkdir(parents=True, exist_ok=True)
+    if legacy_date_only:
+        candidate = reports_root / f"{date}-nightshift-report.md"
+        candidate.write_text(content, encoding="utf-8")
+        return candidate
+    encoded = content.encode("utf-8")
+    base = f"{date}-nightshift-report-{spec_id}"
+    candidate = reports_root / f"{base}.md"
+    if candidate.exists():
+        if candidate.read_bytes() == encoded:
+            return candidate
+        n = 2
+        while True:
+            candidate = reports_root / f"{base}-run{n}.md"
+            if not candidate.exists():
+                break
+            n += 1
+    candidate.write_text(content, encoding="utf-8")
+    return candidate
+
+
 def _resolve_report_path(filename: str) -> tuple[Path, Path]:
     root = _project_root_for_reports()
     if root is None:
@@ -1921,6 +1991,80 @@ def _open_in_vscode(path: Path) -> dict:
     return {"ok": True, "path": target}
 
 
+def _reveal_in_finder(path: Path) -> dict:
+    """SPEC-345 R1: reveal a spec's file in Finder via `open -R <path>`.
+
+    Mirrors `_open_in_vscode`'s spec-ID-to-path resolution and unresolved-
+    path-token refusal; darwin-only (no non-`code`-CLI fallback exists for
+    Finder the way `_open_in_vscode` falls back to `open -a`).
+    """
+    target = str(path.resolve())
+    if "{{" in target:
+        raise HTTPException(
+            status_code=400,
+            detail="unresolved path token in target — refusing to open",
+        )
+    if sys.platform != "darwin":
+        raise HTTPException(status_code=503, detail="Finder reveal only supported on macOS")
+    cmd = ["open", "-R", target]
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to reveal in Finder: {e}")
+    return {"ok": True, "path": target}
+
+
+def _open_in_terminal(path: Path) -> dict:
+    """SPEC-345 R2: open a new Terminal.app window rooted at a spec file's
+    *parent* directory.
+
+    The directory is never concatenated into a shell string by this process:
+    it is handed to `osascript` as a trailing argv element (`--` separated),
+    and the AppleScript itself applies `quoted form of` to produce a
+    POSIX-shell-safe token before building the `cd '<dir>' && ...` command
+    that Terminal's own shell will run. `subprocess.Popen` is called with an
+    argv list and `shell=False` (the default) throughout — no unsanitized
+    string concatenation into a shell command ever occurs in this process.
+    """
+    target = str(path.resolve())
+    if "{{" in target:
+        raise HTTPException(
+            status_code=400,
+            detail="unresolved path token in target — refusing to open",
+        )
+    if sys.platform != "darwin":
+        raise HTTPException(status_code=503, detail="Terminal open only supported on macOS")
+    directory = str(Path(target).parent)
+    script = (
+        "on run argv\n"
+        '  tell application "Terminal"\n'
+        '    do script ("cd " & quoted form of (item 1 of argv))\n'
+        "    activate\n"
+        "  end tell\n"
+        "end run"
+    )
+    cmd = ["osascript", "-e", script, "--", directory]
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to open Terminal: {e}")
+    return {"ok": True, "path": target}
+
+
 @app.get("/api/reports")
 def get_reports() -> list[dict]:
     """List every Markdown file inside any `reports/` directory in the project,
@@ -1941,11 +2085,16 @@ def get_reports() -> list[dict]:
             stat = path.stat()
         except OSError:
             continue
+        identity = _parse_report_identity(path.name)
         result.append({
             "filename": rel_str,        # unique identifier (path under project root)
             "name": path.name,           # short display name
             "mtime": stat.st_mtime,
             "is_read": rel_str in read_set,
+            # SPEC-343 R2: parsed spec/run attribution for the new naming
+            # convention; None/None for legacy date-only reports (unaffected).
+            "spec_id": identity["spec_id"],
+            "run_suffix": identity["run_suffix"],
         })
     # Newest first by mtime
     result.sort(key=lambda r: r["mtime"], reverse=True)
@@ -1965,6 +2114,22 @@ def open_spec_in_vscode(spec_id: str) -> dict:
     if path is None:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     return _open_in_vscode(path)
+
+
+@app.post("/api/open/spec/{spec_id}/finder")
+def open_spec_in_finder(spec_id: str) -> dict:
+    path = cache.get_path(spec_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    return _reveal_in_finder(path)
+
+
+@app.post("/api/open/spec/{spec_id}/terminal")
+def open_spec_in_terminal(spec_id: str) -> dict:
+    path = cache.get_path(spec_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    return _open_in_terminal(path)
 
 
 @app.post("/api/open/report/{filename:path}")
@@ -2691,24 +2856,39 @@ body {
 }
 
 /* ── Detail panel ── */
+/* SPEC-347: the panel docks right by default. `--panel-top` (set via JS,
+   falls back to the header height) controls the top offset / height, and
+   `.side-left` mirrors every right-docked assumption below for left-docked
+   mode (position, border, and the width-resize handle's edge). */
 #panel {
   --pw: 40%;
   position: fixed;
   right: calc(-1 * var(--pw));
-  top: var(--header-h, 0px);
+  top: var(--panel-top, var(--header-h, 0px));
   width: var(--pw);
   min-width: 280px;
-  height: calc(100vh - var(--header-h, 0px));
+  height: calc(100vh - var(--panel-top, var(--header-h, 0px)));
+  min-height: 200px;
   background: var(--surface);
   border-left: 1px solid var(--border);
   z-index: 500;
   display: flex;
   flex-direction: column;
-  transition: right 0.25s ease;
+  transition: right 0.25s ease, left 0.25s ease;
   overflow: hidden;
 }
 
 #panel.open { right: 0; }
+
+/* SPEC-347 R2: left-docked mirror — slides in from the left, border moves
+   to the content-facing (right) edge. */
+#panel.side-left {
+  right: auto;
+  left: calc(-1 * var(--pw));
+  border-left: none;
+  border-right: 1px solid var(--border);
+}
+#panel.side-left.open { left: 0; right: auto; }
 
 #panel-resize {
   position: absolute;
@@ -2722,6 +2902,41 @@ body {
   transition: background 0.15s;
 }
 #panel-resize:hover, #panel-resize.dragging { background: var(--c-theme); opacity: 0.5; }
+
+/* SPEC-347 R2: when left-docked, the width-resize handle moves to the
+   panel's right edge (the edge now facing the board content). */
+#panel.side-left #panel-resize {
+  left: auto;
+  right: -3px;
+}
+
+/* SPEC-347 R3: draggable top-offset handle, along the panel's top edge.
+   Side-agnostic — the top edge is the same regardless of docking side. */
+#panel-top-resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+#panel-top-resize:hover, #panel-top-resize.dragging { background: var(--c-theme); opacity: 0.5; }
+
+/* SPEC-347 R1: small toggle button, docked next to #panel-close, letting the
+   operator switch panel docking side. */
+#panel-side-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+#panel-side-toggle:hover { color: var(--text); }
 
 #panel-header {
   display: flex;
@@ -3478,12 +3693,14 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
 <!-- Detail panel -->
 <div id="panel">
   <div id="panel-resize" onmousedown="startPanelResize(event)"></div>
+  <div id="panel-top-resize" onmousedown="startPanelTopResize(event)"></div>
   <div id="panel-header">
     <div class="panel-header-left">
       <button id="panel-back-btn" onclick="panelGoBack()" style="display:none">← BACK</button>
       <span id="panel-id"></span>
       <button id="btn-copy-id" onclick="copySpecId()" title="Copy spec ID" style="display:none">⎘</button>
     </div>
+    <button id="panel-side-toggle" onclick="togglePanelSide()" title="Dock panel to the other side">⇄</button>
     <button id="panel-close" onclick="clearSelection()">✕</button>
   </div>
   <div id="panel-body">
@@ -3499,6 +3716,8 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
         <button class="btn" id="panel-run-prompt-btn" onclick="copyRunPrompt()" title="Copy a parent-agent prompt for kicking off and monitoring this Nightshift spec">▶ COPY RUN PROMPT</button>
         <button class="btn" id="panel-drive-to-done-btn" onclick="copyDriveToDonePrompt()" title="Copy a parent-agent prompt to drive this blocked spec to done" style="display:none">⛒ COPY DRIVE-TO-DONE PROMPT</button>
         <button class="btn" id="panel-open-vscode-btn" onclick="openCurrentSpecInVSCode()" title="Open this spec in a new VS Code window">↗ OPEN/EDIT</button>
+        <button class="btn" id="panel-reveal-finder-btn" onclick="revealCurrentSpecInFinder()" title="Reveal this spec's file in Finder">↗ REVEAL IN FINDER</button>
+        <button class="btn" id="panel-open-terminal-btn" onclick="openCurrentSpecInTerminal()" title="Open a Terminal window in this spec's folder">↗ OPEN IN TERMINAL</button>
       </div>
       <hr class="panel-divider">
       <div class="panel-md" id="panel-md"></div>
@@ -3582,6 +3801,14 @@ const STATUS_TO_CSSVAR = {
 const STATUS_COL_INDEX = Object.fromEntries(STATUS_IDS.map((s, i) => [s, i]));
 
 let specs = [];
+// SPEC-348: specs with a drag-triggered status write in flight. Keyed by spec
+// id -> { newStatus, sinceMtime }. `sinceMtime` is the spec's _mtime at the
+// moment the optimistic move began; pollSpecs()'s merge (mergeFreshSpecs)
+// keeps the optimistic newStatus for these ids unless a fresher server
+// _mtime proves the fetched snapshot postdates the write. Cleared on all
+// three PUT outcomes in onCardDrop (success, non-ok, network error) and by
+// mergeFreshSpecs itself when fresher data supersedes the pending move.
+let pendingMoves = {};
 let depsMode = false;
 let activeTab = 'board'; // 'board' | 'graph'
 let network = null;
@@ -3602,6 +3829,13 @@ let recentSpecs = [];          // [{id, title, status}], newest first, max 20
 let columnOrder = COLUMNS.map(c => c.id); // ordered list of column ids
 let cardOrder = {};            // { colId: [specId, ...] } — intra-column card order
 let panelWidth = null;         // px — null means use CSS default (40%)
+let panelSide = 'right';       // SPEC-347: 'left' | 'right' — docking side, right is default
+let panelTopOffset = null;     // SPEC-347: px from viewport top — null means use CSS default (header height)
+let panelDragActive = false;   // SPEC-347: true for the duration of a #panel-resize/#panel-top-resize
+                                // drag (mousedown..mouseup), so the click-outside listener's synthetic
+                                // click (whose composedPath may not include #panel at all, since the
+                                // browser fires it on the common ancestor of mousedown/mouseup targets)
+                                // never misclassifies a drag as an outside click.
 let graphPositions = {};       // { specId: {x, y} } — user-dragged graph node positions
 let worktreeStatus = {};       // { specId: [{branch, status, path}, ...] } — sibling worktrees with differing status
 let metaCollapsed = true;      // SPEC-307 R5/R6: #panel-meta collapsible-group state, global not per-spec
@@ -3675,6 +3909,8 @@ function saveSettings() {
       columnOrder,
       cardOrder,
       panelWidth,
+      panelSide,
+      panelTopOffset,
       graphPositions,
       graphSnap,
       metaCollapsed,
@@ -3707,6 +3943,8 @@ function loadSettings() {
     }
     if (s.cardOrder) cardOrder = s.cardOrder;
     if (s.panelWidth) panelWidth = s.panelWidth;
+    if (s.panelSide === 'left' || s.panelSide === 'right') panelSide = s.panelSide;
+    if (s.panelTopOffset) panelTopOffset = s.panelTopOffset;
     if (s.graphPositions) graphPositions = s.graphPositions;
     if (s.graphSnap !== undefined) graphSnap = s.graphSnap;
     if (s.metaCollapsed !== undefined) metaCollapsed = s.metaCollapsed;
@@ -3728,6 +3966,45 @@ function loadSettings() {
 function applyPanelWidth() {
   if (!panelWidth) return;
   document.getElementById('panel').style.setProperty('--pw', panelWidth + 'px');
+}
+
+// SPEC-347 R1/R2: reflects `panelSide` onto the DOM. All of the actual
+// left/right mirroring (position, border, #panel-resize edge) lives in CSS
+// via the `.side-left` class — this just toggles that class and the toggle
+// button's affordance.
+function applyPanelSide() {
+  const panel = document.getElementById('panel');
+  if (!panel) return;
+  panel.classList.toggle('side-left', panelSide === 'left');
+  const btn = document.getElementById('panel-side-toggle');
+  if (btn) btn.title = panelSide === 'left' ? 'Dock panel right' : 'Dock panel left';
+}
+
+function togglePanelSide() {
+  panelSide = panelSide === 'left' ? 'right' : 'left';
+  applyPanelSide();
+  saveSettings();
+}
+
+// SPEC-347 R3: clamp panelTopOffset so it never goes above the board header
+// nor pushes the panel's height below MIN_PANEL_HEIGHT, then apply it as the
+// --panel-top CSS variable consumed by #panel's `top`/`height` rules.
+const MIN_PANEL_HEIGHT = 200; // mirrors #panel's `min-width: 280px` pattern
+function clampPanelTopOffset(top) {
+  const headerH = document.getElementById('header').offsetHeight;
+  const maxTop = Math.max(headerH, window.innerHeight - MIN_PANEL_HEIGHT);
+  return Math.min(maxTop, Math.max(headerH, top));
+}
+
+function applyPanelTopOffset() {
+  const panel = document.getElementById('panel');
+  if (!panel) return;
+  if (panelTopOffset == null) {
+    panel.style.removeProperty('--panel-top');
+    return;
+  }
+  panelTopOffset = clampPanelTopOffset(panelTopOffset);
+  panel.style.setProperty('--panel-top', panelTopOffset + 'px');
 }
 
 function applyArchivedBtnState() {
@@ -3766,11 +4043,18 @@ function startPanelResize(e) {
   const handle = document.getElementById('panel-resize');
   const startX = e.clientX;
   const startW = panel.offsetWidth;
+  const side = panelSide; // SPEC-347: capture at drag-start so mirroring is stable mid-drag
+  panelDragActive = true;
   handle.classList.add('dragging');
 
   function onMove(ev) {
-    // Dragging left = wider, dragging right = narrower
-    const newW = Math.max(280, Math.min(Math.round(window.innerWidth * 0.85), startW + startX - ev.clientX));
+    // Right-docked: the handle sits on the panel's left edge (facing board
+    // content, which is to the handle's left) — dragging left = wider.
+    // Left-docked: the handle mirrors onto the panel's right edge (facing
+    // board content, which is now to the handle's right) — dragging right =
+    // wider. Same width-delta math, sign flipped for the mirrored edge.
+    const delta = side === 'left' ? (ev.clientX - startX) : (startX - ev.clientX);
+    const newW = Math.max(280, Math.min(Math.round(window.innerWidth * 0.85), startW + delta));
     panelWidth = newW;
     panel.style.setProperty('--pw', newW + 'px');
   }
@@ -3779,6 +4063,38 @@ function startPanelResize(e) {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     saveSettings();
+    // Deferred: the synthetic `click` that follows this mouseup must still
+    // see panelDragActive === true so the click-outside listener ignores it.
+    setTimeout(() => { panelDragActive = false; }, 0);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// SPEC-347 R3: drag the panel's top edge. The panel stays visually anchored
+// to the bottom of the viewport (height is derived from --panel-top to
+// 100vh in CSS) — dragging down increases top offset (shrinks the panel),
+// dragging up decreases it (grows the panel), clamped by clampPanelTopOffset.
+function startPanelTopResize(e) {
+  e.preventDefault();
+  const panel = document.getElementById('panel');
+  const handle = document.getElementById('panel-top-resize');
+  const startY = e.clientY;
+  const startTop = panel.getBoundingClientRect().top;
+  panelDragActive = true;
+  handle.classList.add('dragging');
+
+  function onMove(ev) {
+    const newTop = clampPanelTopOffset(Math.round(startTop + (ev.clientY - startY)));
+    panelTopOffset = newTop;
+    panel.style.setProperty('--panel-top', newTop + 'px');
+  }
+  function onUp() {
+    handle.classList.remove('dragging');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    saveSettings();
+    setTimeout(() => { panelDragActive = false; }, 0);
   }
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -4475,6 +4791,11 @@ function onCardDrop(evt) {
     return;
   }
   if (spec) spec.status = newStatus;
+  // SPEC-348: track this optimistic move so pollSpecs()'s merge doesn't snap
+  // the card back to a stale status fetched before this PUT commits. Record
+  // AFTER the NFR-refusal early return above so a refused drop (no PUT ever
+  // issued) never leaves a permanently-pinned entry.
+  if (spec) pendingMoves[specId] = { newStatus, sinceMtime: spec._mtime };
   expandColumnForStatus(newStatus);
   // Also update the dragged card's data-status so the left-border CSS
   // (.card[data-status="..."] { border-left-color: ... }) repaints immediately,
@@ -4495,6 +4816,10 @@ function onCardDrop(evt) {
     body: JSON.stringify({ status: newStatus, reason: dragReason }),
   }).then(async r => {
     if (!r.ok) {
+      // SPEC-348 R4: clear in-flight tracking on the non-ok outcome too, so a
+      // refused write never leaves the spec permanently pinned to the
+      // optimistic status in a later poll's merge.
+      delete pendingMoves[specId];
       // Revert
       const detail = await statusWriteErrorDetail(r);
       if (spec) spec.status = oldStatus;
@@ -4517,6 +4842,9 @@ function onCardDrop(evt) {
       showToast(statusWriteFailureToastText(specId, detail));
       return;
     }
+    // SPEC-348 R4: the write committed — clear in-flight tracking for every
+    // transition, not just the 'done' bump handled below.
+    delete pendingMoves[specId];
     // On a successful move into done, bump local _mtime so the auto-sort
     // (most-recent on top) puts the just-completed spec at the column head.
     if (newStatus === 'done' && spec) {
@@ -4529,6 +4857,8 @@ function onCardDrop(evt) {
       if (sel) { sel.value = newStatus; sel.dataset.status = newStatus; }
     }
   }).catch(() => {
+    // SPEC-348 R4: clear in-flight tracking on the network-error outcome too.
+    delete pendingMoves[specId];
     if (spec) spec.status = oldStatus;
     // SPEC-303: same orphaned-node hazard as the not-ok branch above.
     if (wasPending || !evt.item.isConnected || !evt.from.isConnected) {
@@ -5729,18 +6059,43 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Click outside panel closes it (but not clicks on cards or search UI)
+// Click outside panel closes it (but not clicks on cards or search UI).
+//
+// SPEC-346: use e.composedPath() instead of e.target/closest(). composedPath()
+// is captured at dispatch time and lists every ancestor the click actually
+// passed through (including #panel itself when the click landed on a
+// descendant) -- so it stays correct even if an in-panel onclick handler that
+// runs before this listener (e.g. toggleMetaCollapsed() -> renderPanelMeta())
+// synchronously replaces innerHTML and detaches the literal e.target from the
+// document before this bubbling listener runs. panel.contains(e.target) does
+// not survive that detachment (a detached node is contained by nothing), which
+// is exactly what caused clicking #panel-meta-toggle to close the whole panel.
+// This is a structural fix: it protects every current and future in-panel
+// control that replaces a panel descendant's innerHTML on click, not just
+// #panel-meta-toggle (see canonical/tests/test_board_browser.py for a second
+// exercise of the same detach-during-bubble mechanism).
 document.addEventListener('click', (e) => {
+  // SPEC-347: a #panel-resize/#panel-top-resize drag's mousedown and mouseup
+  // targets can differ enough (mousedown on the handle, mouseup anywhere over
+  // the board) that the browser fires the resulting synthetic `click` on
+  // their common ancestor -- which may not include #panel or the handle in
+  // its composedPath() at all. panelDragActive covers that gap; the pathHas
+  // exclusions below remain as the direct-click-on-handle case.
+  if (panelDragActive) return;
   const panel = document.getElementById('panel');
+  const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target];
+  const pathHas = (selector) => path.some(el => el instanceof Element && el.matches(selector));
   if (panel.classList.contains('open') &&
-      !panel.contains(e.target) &&
-      !e.target.closest('.card') &&
-      !e.target.closest('#search') &&
-      !e.target.closest('#btn-clear-search') &&
-      !e.target.closest('#search-results') &&
-      !e.target.closest('.col-resize') &&
-      !e.target.closest('#panel-resize') &&
-      !e.target.closest('#graph-container')) {
+      !pathHas('#panel') &&
+      !pathHas('.card') &&
+      !pathHas('#search') &&
+      !pathHas('#btn-clear-search') &&
+      !pathHas('#search-results') &&
+      !pathHas('.col-resize') &&
+      !pathHas('#panel-resize') &&
+      !pathHas('#panel-top-resize') &&
+      !pathHas('#panel-side-toggle') &&
+      !pathHas('#graph-container')) {
     closePanel();
   }
   // Close col-vis dropdown when clicking outside it
@@ -6092,6 +6447,30 @@ async function openCurrentSpecInVSCode() {
   }
 }
 
+async function revealCurrentSpecInFinder() {
+  if (!openPanelId) { showToast('no spec selected'); return; }
+  const specId = openPanelId;
+  try {
+    const r = await fetch(`/api/open/spec/${encodeURIComponent(specId)}/finder`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    showToast(`↗ revealed ${specId} in Finder`);
+  } catch (e) {
+    showToast('⚠ Finder reveal failed');
+  }
+}
+
+async function openCurrentSpecInTerminal() {
+  if (!openPanelId) { showToast('no spec selected'); return; }
+  const specId = openPanelId;
+  try {
+    const r = await fetch(`/api/open/spec/${encodeURIComponent(specId)}/terminal`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    showToast(`↗ opened ${specId} in Terminal`);
+  } catch (e) {
+    showToast('⚠ Terminal open failed');
+  }
+}
+
 async function openCurrentReportInVSCode() {
   if (!currentReportFilename) { showToast('no report selected'); return; }
   const encoded = currentReportFilename.split('/').map(encodeURIComponent).join('/');
@@ -6401,6 +6780,36 @@ function hasSpecsChange(change) {
   return !!(change.added.length || change.removed.length || change.statusChanged.length || change.onlyMtimeChanged.length);
 }
 
+// SPEC-348: pure poll-merge step. A drag-triggered status PUT can still be
+// in flight (blocked behind the blocking `window.prompt` in
+// promptTransitionReason()) when a concurrent /api/specs poll resolves with
+// a snapshot fetched before that PUT committed server-side. Without this
+// guard, pollSpecs()'s prior unconditional `specs = fresh` would snap the
+// card back to its pre-drag column (the flicker this spec fixes).
+//
+// For each fresh spec with a pending move (id present in `pendingMoves`),
+// keep the optimistic `newStatus` unless the fresh snapshot's `_mtime` is
+// strictly newer than the mtime recorded when the move began
+// (`pending.sinceMtime`) — a newer mtime proves the snapshot reflects a real
+// server-side change (the write itself landing, or a separate concurrent
+// edit) rather than staleness, so the fresh data wins and the pending-move
+// entry is cleared (R2). Specs with no pending move are returned unchanged
+// (R5) — fresh data always replaces local state for them, exactly as before
+// this fix. `pendingMoves` is mutated in place (entries superseded here are
+// deleted) so callers sharing the same map see the clear.
+function mergeFreshSpecs(prevSpecs, freshSpecs, pendingMoves) {
+  return freshSpecs.map(fresh => {
+    const pending = pendingMoves[fresh.id];
+    if (!pending) return fresh;
+    if (Number.isFinite(fresh._mtime) && Number.isFinite(pending.sinceMtime) &&
+        fresh._mtime > pending.sinceMtime) {
+      delete pendingMoves[fresh.id];
+      return fresh;
+    }
+    return { ...fresh, status: pending.newStatus };
+  });
+}
+
 function graphNeedsFullRebuild(change) {
   return !!(change.added.length || change.removed.length || change.statusChanged.length);
 }
@@ -6510,7 +6919,13 @@ async function pollSpecs() {
       fetch('/api/specs'),
       fetch('/api/worktree-status').catch(() => null),
     ]);
-    const fresh = await specsR.json();
+    const freshRaw = await specsR.json();
+    // SPEC-348: route the raw fetch through the pending-move merge before any
+    // downstream consumer (classifySpecsChange, renderBoardDiff,
+    // updateGraphFromSpecs, the open-panel lookups below) sees it, so a
+    // drag-in-flight spec's optimistic status survives a poll that raced the
+    // status PUT.
+    const fresh = mergeFreshSpecs(prevSpecs, freshRaw, pendingMoves);
     const freshWs = wsR && wsR.ok ? await wsR.json() : {};
     const change = classifySpecsChange(prevSpecs, fresh, prevWorktreeStatus, freshWs);
     const specsChanged = hasSpecsChange(change);
@@ -6576,10 +6991,12 @@ loadSettings();
 applyDarkMode();
 applyThemeColor();
 applyPanelWidth();
+applyPanelSide();
 applyArchivedBtnState();
 renderRecentBar();
 syncHeaderHeight();
-window.addEventListener('resize', syncHeaderHeight);
+applyPanelTopOffset(); // SPEC-347: clamp/apply after the header height is known
+window.addEventListener('resize', () => { syncHeaderHeight(); applyPanelTopOffset(); });
 // SPEC-064: load cross-project registry early so external chips render with
 // the right state on the first paint. Don't block on it — failures degrade
 // gracefully (chips render as internal "missing spec" placeholders).

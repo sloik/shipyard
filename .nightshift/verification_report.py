@@ -282,6 +282,40 @@ class GitFootprint:
     porcelain: str
 
 
+def _force_add_tracked_paths(worktree: Path, paths: Iterable[str]) -> None:
+    """Force-add exactly *paths* into *worktree*'s index (SPEC-342).
+
+    Uses ``--pathspec-from-file``/``--pathspec-file-nul`` rather than a plain
+    argv pathspec list for two reasons that a small fixture cannot surface but
+    a real kit checkout (thousands of tracked paths) can: argv length limits
+    (``ARG_MAX``), and paths whose bytes are not valid UTF-8 (materialized via
+    ``surrogateescape`` upstream in ``_materialize_ref``, then round-tripped
+    here through ``os.fsencode`` rather than a text-mode subprocess argv).
+    """
+    paths = list(paths)
+    if not paths:
+        return
+    payload = b"\0".join(os.fsencode(path) for path in paths)
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=".pathspec")
+    try:
+        handle.write(payload)
+        handle.close()
+        result = subprocess.run(
+            [
+                "git", "-C", str(worktree), "add", "-f",
+                f"--pathspec-from-file={handle.name}", "--pathspec-file-nul",
+            ],
+            capture_output=True, check=False, env=_git_environment(),
+        )
+        if result.returncode:
+            raise RuntimeError(
+                result.stderr.decode("utf-8", "replace").strip()
+                or "git add -f --pathspec-from-file failed"
+            )
+    finally:
+        os.unlink(handle.name)
+
+
 def _run_git(worktree: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(worktree), *args],
@@ -1151,18 +1185,25 @@ def _materialize_ref(
     report_paths: Iterable[str],
     retained_report_paths: Iterable[str] = (),
     same_spec_metrics_paths: Iterable[str] = (),
-) -> tuple[list[str], list[dict[str, str]]]:
+) -> tuple[list[str], list[dict[str, str]], list[str]]:
     """Materialize one tracked snapshot without sharing the source object DB.
 
-    Returns the withheld paths and the per-entry record of every tracked symlink
-    materialized as something other than a symlink (SPEC-285). The two lists are
-    kept apart deliberately: a withheld path must be *unreachable* from the
-    surface, while a transformed entry is still present and committed.
+    Returns the withheld paths, the per-entry record of every tracked symlink
+    materialized as something other than a symlink (SPEC-285), and every path
+    actually written to *destination* from the source ref's tracked tree (SPEC-342).
+    The withheld-paths list and the materialized-paths list are kept apart
+    deliberately: a withheld path must be *unreachable* from the surface, while a
+    materialized entry is present on disk and must survive into the arm's commit
+    even if the destination's own (also source-tracked) ``.gitignore`` would
+    otherwise cause a plain ``git add -A`` to skip it -- a source-tracked file
+    that also matches an ignore pattern (e.g. a force-added, intentionally
+    retained report) must still end up in the commit with identical bytes.
     """
     _clear_snapshot(destination)
     surface_root = destination.resolve()
     excluded: list[str] = []
     transformed: list[dict[str, str]] = []
+    materialized: list[str] = []
     retained = set(retained_report_paths)
     same_spec_metrics = set(same_spec_metrics_paths)
     entries = _git_bytes(source_repository, "ls-tree", "-rz", ref).split(b"\0")
@@ -1193,7 +1234,8 @@ def _materialize_ref(
         else:
             target.write_bytes(body)
             target.chmod(0o755 if mode == "100755" else 0o644)
-    return sorted(excluded), sorted(transformed, key=lambda record: record["path"])
+        materialized.append(path)
+    return sorted(excluded), sorted(transformed, key=lambda record: record["path"]), sorted(materialized)
 
 
 def prepare_verifier_surface(
@@ -1356,7 +1398,7 @@ def prepare_verifier_surface(
         GIT_COMMITTER_DATE="2000-01-01T00:00:00Z",
     )
     for label, ref in refs:
-        excluded_by_ref[label], transformed_by_ref[label] = _materialize_ref(
+        excluded_by_ref[label], transformed_by_ref[label], materialized_paths = _materialize_ref(
             source_repository,
             destination,
             ref,
@@ -1367,6 +1409,17 @@ def prepare_verifier_surface(
         projected_paths = _project_external_inputs(
             destination, resolved_inputs, input_records
         )
+        # SPEC-342: force-add exactly the paths this ref's source tree actually
+        # tracked (and this function chose to materialize). A plain `add -A`
+        # respects the destination's own `.gitignore` -- which is itself a
+        # source-tracked file and may deliberately match a retained, tracked
+        # path (e.g. a force-added report under an otherwise-ignored
+        # directory) -- and would silently drop that file from the arm's
+        # commit even though it is genuinely tracked in the source at *ref*.
+        # Everything else (external-input projections, worktree bookkeeping)
+        # still goes through a plain `add -A` and remains subject to
+        # `.gitignore` exactly as before.
+        _force_add_tracked_paths(destination, materialized_paths)
         _run_git(destination, "add", "-A")
         result = subprocess.run(
             ["git", "-C", str(destination), "commit", "--allow-empty", "-qm", f"verifier {label} snapshot"],
