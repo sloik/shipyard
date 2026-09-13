@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.21.7
+version: 3.21.8
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -2758,7 +2758,7 @@ if len(sys.argv) > 3:
     spec_text = open(spec_file_for_scope).read()
     scope = scope_guard.resolve_scope(spec_text)
     diff = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=ACDMR", "verifier-baseline", "verifier-head"],
+        ["git", "diff", "--name-only", "--diff-filter=ACDMR", "verifier-baseline", "verifier-head", "--"],
         cwd=surface_repo, capture_output=True, text=True,
     )
     diff_paths = sorted(p for p in diff.stdout.splitlines() if p.strip())
@@ -2774,9 +2774,24 @@ if len(sys.argv) > 3:
                 continue
             amend_globs.append(cells[1])
     project_root = Path(surface_repo)
+    # BUG-336 R2: classify_write's spec_relpath must be comparable to the
+    # diff paths above, which git reports relative to project_root
+    # (surface_repo). spec_file_for_scope is the CLI-supplied spec path
+    # (matching scope_gate.py's spec_relpath argument) but, per this
+    # embedded validator's own established convention (see
+    # test_verifier_gate.py's `_surface_repo_for_scope_recomputation`), is
+    # given as a real filesystem path *inside* the standalone surface, not
+    # already project-root-relative -- so it is re-expressed relative to
+    # project_root here. A spec file that (unusually) lives outside the
+    # surface falls back to the raw value, matching prior (non-matching,
+    # but no-worse) behavior rather than raising.
+    try:
+        spec_relpath = str(Path(spec_file_for_scope).resolve().relative_to(project_root.resolve()))
+    except ValueError:
+        spec_relpath = spec_file_for_scope
     computed_out, computed_amended = [], []
     for p in diff_paths:
-        d = scope_guard.classify_write(p, scope, project_root, project_root, None)
+        d = scope_guard.classify_write(p, scope, project_root, kit_dir, spec_relpath)
         if d.allowed:
             continue
         if any(scope_guard._glob_match(g, p) for g in amend_globs):

@@ -2980,11 +2980,29 @@ body {
   flex-shrink: 0;
   transition: background 0.1s, border-color 0.1s, color 0.1s;
 }
-#btn-copy-id:hover, #btn-copy-id:focus {
+#btn-copy-id:hover, #btn-copy-id:focus,
+#btn-copy-id-title:hover, #btn-copy-id-title:focus {
   background: var(--hover);
   border-color: var(--c-theme);
   color: var(--c-theme);
   outline: none;
+}
+#btn-copy-id-title {
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  line-height: 1;
+  opacity: 1;
+  flex-shrink: 0;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
 }
 
 #panel-body {
@@ -3699,6 +3717,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <button id="panel-back-btn" onclick="panelGoBack()" style="display:none">← BACK</button>
       <span id="panel-id"></span>
       <button id="btn-copy-id" onclick="copySpecId()" title="Copy spec ID" style="display:none">⎘</button>
+      <button id="btn-copy-id-title" onclick="copyIdAndTitle()" title="Copy spec ID and title" style="display:none">⧉</button>
     </div>
     <button id="panel-side-toggle" onclick="togglePanelSide()" title="Dock panel to the other side">⇄</button>
     <button id="panel-close" onclick="clearSelection()">✕</button>
@@ -5110,7 +5129,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   const body = data.body_md || '';
 
   document.getElementById('panel-id').textContent = specId;
-  document.getElementById('panel-title').textContent = title;
+  document.getElementById('panel-title').textContent = panelDisplayTitle(specId, title);
 
   renderPanelMeta(specId, fm);
 
@@ -6259,6 +6278,7 @@ function setPanelView(view) {
   document.getElementById('panel-view-report-content').style.display  = view === 'report-content' ? '' : 'none';
   const backBtn = document.getElementById('panel-back-btn');
   const copyIdBtn = document.getElementById('btn-copy-id');
+  const copyIdTitleBtn = document.getElementById('btn-copy-id-title');
   if (view === 'spec') {
     if (specNavStack.length > 0) {
       backBtn.style.display = '';
@@ -6267,14 +6287,17 @@ function setPanelView(view) {
       backBtn.style.display = 'none';
     }
     copyIdBtn.style.display = '';
+    copyIdTitleBtn.style.display = '';
   } else if (view === 'reports') {
     copyIdBtn.style.display = 'none';
+    copyIdTitleBtn.style.display = 'none';
     // Back-to-spec only makes sense if we *came from* a spec; from the header
     // REPORTS button there's no spec to go back to, so hide.
     backBtn.style.display = openPanelId ? '' : 'none';
     backBtn.textContent = '← SPEC';
   } else { // 'report-content'
     copyIdBtn.style.display = 'none';
+    copyIdTitleBtn.style.display = 'none';
     backBtn.style.display = '';
     backBtn.textContent = '← REPORTS';
   }
@@ -6327,6 +6350,37 @@ async function copySpecId() {
   const copied = await copyText(openPanelId);
   if (copied) {
     const btn = document.getElementById('btn-copy-id');
+    const prev = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  } else {
+    showToast('⚠ clipboard write failed');
+  }
+}
+
+// Spec H1s conventionally already start with the spec ID (e.g. "BUG-336 —
+// verdict validator's scope..."), but not every spec follows that
+// convention. The panel title must always show both — prefix the ID only
+// when the raw title doesn't already carry it, so we never double it up.
+function panelDisplayTitle(specId, title) {
+  const t = (title || '').trim();
+  const id = (specId || '').trim();
+  if (!id) return t;
+  if (!t) return id;
+  const regexChars = '.+*?^$()[]{}|\\\\';
+  const escapedId = [...id].map(ch => regexChars.includes(ch) ? `\\\\${ch}` : ch).join('');
+  const prefixPattern = new RegExp('^' + escapedId + '\\s*(?:[-\u2013\u2014:]\\s*)?', 'i');
+  if (prefixPattern.test(t)) return t;
+  return id + ' \u2014 ' + t;
+}
+
+async function copyIdAndTitle() {
+  if (!openPanelId) return;
+  const panelTitle = document.getElementById('panel-title');
+  const text = panelDisplayTitle(openPanelId, panelTitle ? panelTitle.textContent : '');
+  const copied = await copyText(text);
+  if (copied) {
+    const btn = document.getElementById('btn-copy-id-title');
     const prev = btn.textContent;
     btn.textContent = '✓';
     setTimeout(() => { btn.textContent = prev; }, 1500);

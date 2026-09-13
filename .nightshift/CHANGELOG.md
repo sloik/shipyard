@@ -7,6 +7,42 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.21.8 (2026-09-13)
+
+### Verdict validator's scope recomputation no longer rejects correct verdicts (BUG-336)
+
+`Skills/nightshift/SKILL.md`'s embedded `NIGHTSHIFT-VERDICT-VALIDATOR`
+(SPEC-300-002 R6 scope recomputation, only exercised when a standalone
+verifier surface is supplied as its third argument) had two independent
+defects that both made it reject a verdict that was actually correct.
+First, `git diff --name-only --diff-filter=ACDMR verifier-baseline
+verifier-head` had no trailing `--`, so it was ambiguous whenever the
+surface repo's working tree also contained paths literally named
+`verifier-baseline`/`verifier-head` — always true, since those are
+SPEC-282's two arm working directories. git refused with "ambiguous
+argument", stderr was discarded, and the diff was silently read as empty,
+failing the very next comparison against the verifier's real
+`scope.checked`. Second, the per-path `classify_write` call passed
+`project_root` twice and a literal `None` instead of the real kit
+directory and spec-relative path (the shape `scope_gate.py`, a few hundred
+lines earlier in the same file, already uses correctly), so the `spec_self`
+reason code could never fire and the spec's own file — touched by ordinary
+lifecycle bookkeeping in essentially every real run — was misclassified
+`outside_root`. Fixed both: the diff invocation now ends with a bare `--`
+to disambiguate the two refs from pathspecs, and `classify_write` now
+receives the already-computed `kit_dir` and a `spec_relpath` re-expressed
+relative to the surface repo (the validator's own established convention
+of passing the spec file as a real path inside the standalone surface,
+confirmed against `test_verifier_gate.py`'s existing AC5 fixture). New
+regression coverage in `canonical/tests/test_bug_336_verdict_validator_scope_recomputation.py`:
+a realistic fixture with `verifier-baseline`/`verifier-head` directories
+literally at the surface root and a real two-commit history that changes
+the spec's own file plus an in-scope write, run both against the fixed
+script (accepts a correct verdict, still rejects a genuine unreported
+out-of-scope write) and against single-defect mutants of the script that
+independently reproduce each original bug. Patch-only: no config/protocol
+schema changes.
+
 ## 3.21.7 (2026-09-12)
 
 ### Drag-and-drop status no longer flickers back to the old column (SPEC-348)
