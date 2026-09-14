@@ -7,6 +7,31 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.22.0 (2026-09-14)
+
+### Board detail panel: opacity slider + full-width bottom docking (SPEC-349)
+
+The board's sliding detail panel (`#panel`, extended from SPEC-347's left/
+right docking) gains:
+
+- An opacity slider (40%–100%, default 100%) in the panel header, applying
+  plain CSS `opacity` to the whole panel (background, text, and chips fade
+  together) so the board and the open spec's detail can be read at once
+  without one fully occluding the other.
+- A third docking position, bottom, reached by cycling the existing side
+  toggle (right → bottom → left → right). Bottom-docked spans the full
+  viewport width and reuses the existing top-edge drag handle to resize
+  height.
+- The panel's height now always leaves room above `#recent-bar` (the
+  RECENT spec-history strip) in every docking mode, not only bottom-docked —
+  it never covers that strip, though it may still overlap the kanban columns
+  above it.
+- A visible top-edge border, matching the existing side border, hinting that
+  the top edge is draggable (previously only the left/right resize edge had
+  a visible border at rest).
+
+No config schema or protocol changes; UI-only.
+
 ## 3.21.8 (2026-09-13)
 
 ### Verdict validator's scope recomputation no longer rejects correct verdicts (BUG-336)

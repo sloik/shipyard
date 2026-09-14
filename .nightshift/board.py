@@ -2859,22 +2859,35 @@ body {
 /* SPEC-347: the panel docks right by default. `--panel-top` (set via JS,
    falls back to the header height) controls the top offset / height, and
    `.side-left` mirrors every right-docked assumption below for left-docked
-   mode (position, border, and the width-resize handle's edge). */
+   mode (position, border, and the width-resize handle's edge).
+   SPEC-349: `--panel-opacity` (set via JS, default 1) is plain CSS `opacity`
+   on the whole panel — an earlier background-only-alpha approach left crisp
+   text/chips over a faded backdrop, which read as messy; a uniform fade
+   looks cleaner even though it dims panel text along with the background.
+   `.side-bottom` is a third docking mode — full width, anchored above
+   `#recent-bar` instead of the viewport bottom. The panel's height always
+   subtracts `--recent-bar-h` (tracked the same way `--header-h` is) so it
+   never covers the "RECENT" spec-history strip, in every docking mode —
+   not just bottom-docked. A visible `border-top` hints that the top edge is
+   draggable, matching the existing side border's hint for width-resize. */
 #panel {
   --pw: 40%;
+  --panel-opacity: 1;
   position: fixed;
   right: calc(-1 * var(--pw));
   top: var(--panel-top, var(--header-h, 0px));
   width: var(--pw);
   min-width: 280px;
-  height: calc(100vh - var(--panel-top, var(--header-h, 0px)));
+  height: calc(100vh - var(--panel-top, var(--header-h, 0px)) - var(--recent-bar-h, 0px));
   min-height: 200px;
   background: var(--surface);
+  opacity: var(--panel-opacity);
   border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   z-index: 500;
   display: flex;
   flex-direction: column;
-  transition: right 0.25s ease, left 0.25s ease;
+  transition: right 0.25s ease, left 0.25s ease, bottom 0.25s ease;
   overflow: hidden;
 }
 
@@ -2889,6 +2902,25 @@ body {
   border-right: 1px solid var(--border);
 }
 #panel.side-left.open { left: 0; right: auto; }
+
+/* SPEC-349 R2/R4: bottom-docked — full width, anchored above `#recent-bar`
+   rather than the viewport bottom. Height/top offset reuse the existing
+   `--panel-top` mechanism (SPEC-347 R3) unchanged; height itself is already
+   the base rule's above (recent-bar-aware in every mode). */
+#panel.side-bottom {
+  right: 0;
+  left: 0;
+  top: auto;
+  bottom: calc(-1 * (100vh - var(--panel-top, var(--header-h, 0px))));
+  width: 100%;
+  border-left: none;
+  border-right: none;
+  border-top: 1px solid var(--border);
+}
+#panel.side-bottom.open { bottom: var(--recent-bar-h, 0px); }
+
+/* SPEC-349 R3: width-resize is meaningless at full width. */
+#panel.side-bottom #panel-resize { display: none; }
 
 #panel-resize {
   position: absolute;
@@ -2937,6 +2969,15 @@ body {
   padding: 0 4px;
 }
 #panel-side-toggle:hover { color: var(--text); }
+
+/* SPEC-349 R1: panel-background opacity slider, next to the side toggle. */
+#panel-opacity-slider {
+  width: 60px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--c-theme);
+  margin: 0 4px;
+}
 
 #panel-header {
   display: flex;
@@ -3719,6 +3760,8 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <button id="btn-copy-id" onclick="copySpecId()" title="Copy spec ID" style="display:none">⎘</button>
       <button id="btn-copy-id-title" onclick="copyIdAndTitle()" title="Copy spec ID and title" style="display:none">⧉</button>
     </div>
+    <input type="range" id="panel-opacity-slider" min="40" max="100" step="5" value="100"
+           oninput="setPanelOpacity(this.value / 100)" title="Panel background opacity">
     <button id="panel-side-toggle" onclick="togglePanelSide()" title="Dock panel to the other side">⇄</button>
     <button id="panel-close" onclick="clearSelection()">✕</button>
   </div>
@@ -3848,8 +3891,9 @@ let recentSpecs = [];          // [{id, title, status}], newest first, max 20
 let columnOrder = COLUMNS.map(c => c.id); // ordered list of column ids
 let cardOrder = {};            // { colId: [specId, ...] } — intra-column card order
 let panelWidth = null;         // px — null means use CSS default (40%)
-let panelSide = 'right';       // SPEC-347: 'left' | 'right' — docking side, right is default
+let panelSide = 'right';       // SPEC-347/349: 'left' | 'right' | 'bottom' — docking side, right is default
 let panelTopOffset = null;     // SPEC-347: px from viewport top — null means use CSS default (header height)
+let panelOpacity = 1;          // SPEC-349: 0.4-1.0 background alpha — 1 means fully opaque (default)
 let panelDragActive = false;   // SPEC-347: true for the duration of a #panel-resize/#panel-top-resize
                                 // drag (mousedown..mouseup), so the click-outside listener's synthetic
                                 // click (whose composedPath may not include #panel at all, since the
@@ -3930,6 +3974,7 @@ function saveSettings() {
       panelWidth,
       panelSide,
       panelTopOffset,
+      panelOpacity,
       graphPositions,
       graphSnap,
       metaCollapsed,
@@ -3962,8 +4007,9 @@ function loadSettings() {
     }
     if (s.cardOrder) cardOrder = s.cardOrder;
     if (s.panelWidth) panelWidth = s.panelWidth;
-    if (s.panelSide === 'left' || s.panelSide === 'right') panelSide = s.panelSide;
+    if (s.panelSide === 'left' || s.panelSide === 'right' || s.panelSide === 'bottom') panelSide = s.panelSide;
     if (s.panelTopOffset) panelTopOffset = s.panelTopOffset;
+    if (typeof s.panelOpacity === 'number' && s.panelOpacity >= 0.4 && s.panelOpacity <= 1) panelOpacity = s.panelOpacity;
     if (s.graphPositions) graphPositions = s.graphPositions;
     if (s.graphSnap !== undefined) graphSnap = s.graphSnap;
     if (s.metaCollapsed !== undefined) metaCollapsed = s.metaCollapsed;
@@ -3987,20 +4033,28 @@ function applyPanelWidth() {
   document.getElementById('panel').style.setProperty('--pw', panelWidth + 'px');
 }
 
-// SPEC-347 R1/R2: reflects `panelSide` onto the DOM. All of the actual
-// left/right mirroring (position, border, #panel-resize edge) lives in CSS
-// via the `.side-left` class — this just toggles that class and the toggle
-// button's affordance.
+// SPEC-347 R1/R2, SPEC-349 R2/R5: reflects `panelSide` onto the DOM. All of
+// the actual left/right/bottom mirroring (position, border, #panel-resize
+// visibility/edge) lives in CSS via the `.side-left`/`.side-bottom` classes —
+// this just toggles those classes and the toggle button's affordance.
 function applyPanelSide() {
   const panel = document.getElementById('panel');
   if (!panel) return;
   panel.classList.toggle('side-left', panelSide === 'left');
+  panel.classList.toggle('side-bottom', panelSide === 'bottom');
   const btn = document.getElementById('panel-side-toggle');
-  if (btn) btn.title = panelSide === 'left' ? 'Dock panel right' : 'Dock panel left';
+  if (!btn) return;
+  // SPEC-349 R5: tooltip states the position clicking it switches TO, i.e.
+  // the next stop in the right -> bottom -> left -> right cycle.
+  const nextLabel = { right: 'Dock panel to bottom (full width)', bottom: 'Dock panel left', left: 'Dock panel right' };
+  btn.title = nextLabel[panelSide] || 'Dock panel to the other side';
 }
 
+// SPEC-349 R5: cycles right -> bottom -> left -> right (was a two-way
+// left/right toggle prior to SPEC-349).
 function togglePanelSide() {
-  panelSide = panelSide === 'left' ? 'right' : 'left';
+  const next = { right: 'bottom', bottom: 'left', left: 'right' };
+  panelSide = next[panelSide] || 'right';
   applyPanelSide();
   saveSettings();
 }
@@ -4008,11 +4062,34 @@ function togglePanelSide() {
 // SPEC-347 R3: clamp panelTopOffset so it never goes above the board header
 // nor pushes the panel's height below MIN_PANEL_HEIGHT, then apply it as the
 // --panel-top CSS variable consumed by #panel's `top`/`height` rules.
+// SPEC-349: the panel's floor is `#recent-bar`'s top edge rather than the
+// viewport bottom in EVERY docking mode (not just bottom-docked) — #panel's
+// own height rule always subtracts --recent-bar-h, so the same
+// MIN_PANEL_HEIGHT must be preserved above `#recent-bar` unconditionally.
 const MIN_PANEL_HEIGHT = 200; // mirrors #panel's `min-width: 280px` pattern
 function clampPanelTopOffset(top) {
   const headerH = document.getElementById('header').offsetHeight;
-  const maxTop = Math.max(headerH, window.innerHeight - MIN_PANEL_HEIGHT);
+  const recentBarH = document.getElementById('recent-bar')?.offsetHeight || 0;
+  const maxTop = Math.max(headerH, window.innerHeight - recentBarH - MIN_PANEL_HEIGHT);
   return Math.min(maxTop, Math.max(headerH, top));
+}
+
+// SPEC-349: applies `panelOpacity` as plain CSS `opacity` (via the
+// `--panel-opacity` custom property) on the whole panel, so text/chips fade
+// together with the background instead of leaving crisp text over a faded
+// backdrop — also keeps the header slider in sync (e.g. after loadSettings()
+// restores a saved value before the slider exists).
+function applyPanelOpacity() {
+  const panel = document.getElementById('panel');
+  if (panel) panel.style.setProperty('--panel-opacity', panelOpacity);
+  const slider = document.getElementById('panel-opacity-slider');
+  if (slider) slider.value = Math.round(panelOpacity * 100);
+}
+
+function setPanelOpacity(value) {
+  panelOpacity = Math.min(1, Math.max(0.4, Number(value) || 1));
+  applyPanelOpacity();
+  saveSettings();
 }
 
 function applyPanelTopOffset() {
@@ -4178,6 +4255,7 @@ function renderRecentBar() {
     });
     chips.appendChild(chip);
   }
+  syncRecentBarHeight(); // SPEC-349 R4: recent-bar's rendered height can vary; keep the bottom-docked panel's floor accurate
 }
 
 // Transient highlight on the matching card and/or graph node.
@@ -6191,6 +6269,15 @@ function syncHeaderHeight() {
   document.documentElement.style.setProperty('--header-h', h + 'px');
 }
 
+// SPEC-349 R4: keep --recent-bar-h in sync so the bottom-docked panel stops
+// flush above the "RECENT" spec-history strip instead of covering it. Not a
+// fixed constant — its content-driven min-height can change.
+function syncRecentBarHeight() {
+  const el = document.getElementById('recent-bar');
+  const h = el ? el.offsetHeight : 0;
+  document.documentElement.style.setProperty('--recent-bar-h', h + 'px');
+}
+
 // ── Column visibility ──
 function buildColVisDropdown() {
   const dd = document.getElementById('col-vis-dropdown');
@@ -7046,11 +7133,13 @@ applyDarkMode();
 applyThemeColor();
 applyPanelWidth();
 applyPanelSide();
+applyPanelOpacity();
 applyArchivedBtnState();
 renderRecentBar();
 syncHeaderHeight();
+syncRecentBarHeight();
 applyPanelTopOffset(); // SPEC-347: clamp/apply after the header height is known
-window.addEventListener('resize', () => { syncHeaderHeight(); applyPanelTopOffset(); });
+window.addEventListener('resize', () => { syncHeaderHeight(); syncRecentBarHeight(); applyPanelTopOffset(); });
 // SPEC-064: load cross-project registry early so external chips render with
 // the right state on the first paint. Don't block on it — failures degrade
 // gracefully (chips render as internal "missing spec" placeholders).
