@@ -7,6 +7,44 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.23.0 (2026-09-16)
+
+### Per-install sync policy and opt-out enforcement (SPEC-356)
+
+`nightshift-sync.py`'s `canonical_sync()` job now honours a project's
+`release_policy.committed_kit` declaration — an install declaring `opt_out`
+is left completely untouched (no `kit_version` write-through, no
+`CANONICAL_PROTOCOL_FILES` copy, no seed files, no hooks/templates sweep),
+matching what `release_coordinator.py` already enforced for the whole-kit
+release path. This closes a confirmed gap: the sync job previously planned
+writes into every opted-out install it found.
+
+Adds an optional `release_policy.sync_files: {include: [...], exclude: [...]}`
+declaration so an install can narrow (or, under `opt_out`, deliberately
+re-admit) exactly which managed files it wants kept current, without joining
+the whole-kit release cadence. `include` selects only from the managed file
+list and is the only widening operator; `exclude` never widens. Resolved by
+one shared, pure function, `release.resolve_sync_selection()`. See
+`config-reference.yaml`'s `release_policy` block for the full field
+reference.
+
+### Repeated-same-AC-failure detection for AC review (SPEC-351)
+
+Nightshift now flags when an independent verifier's failure cites the same
+AC(s) as a prior recorded attempt (this spec's own recorded attempts plus its
+immediate parent's), routing repeat failures toward AC review instead of a
+fresh, uninformed retry.
+
+### Manual-triage path for `unknown_critical_failure` blockers (SPEC-350)
+
+A new, explicitly human-triage-required path for the `unknown_critical_failure`
+blocker class in the controller-backed unblock protocol.
+
+### `devkb_sweep.py` — DevKB-updates promotion engine (SPEC-352)
+
+New promotion sweep engine for `/nightshift knowledge import --devkb`, plus a
+fix for a pending-apply ledger entry that was silently skipped on `--apply`.
+
 ## 3.22.0 (2026-09-14)
 
 ### Board detail panel: opacity slider + full-width bottom docking (SPEC-349)

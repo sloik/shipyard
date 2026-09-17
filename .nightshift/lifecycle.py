@@ -55,6 +55,14 @@ BLOCKER_CLASSES = frozenset({
     # mechanism (unblock_spec.py special-cases this class; see SAFE_CLASSES).
     "scope_violation",
 })
+# SPEC-350 R2: blocker classes with no automated recovery path at all -- not
+# in `unblock_spec.SAFE_CLASSES` (never auto-retried) and not folded into
+# `unblock_spec.SKIP_CLASSES` either, since a permanent, silent skip is
+# exactly the stuck-forever failure mode this spec fixes. A human must review
+# the pinned blocker evidence and record an explicit decision (see
+# `unblock_spec.triage`). Single source of truth so `unblock_spec.py` and any
+# future renderer agree on membership.
+MANUAL_TRIAGE_CLASSES = frozenset({"unknown_critical_failure"})
 ATTEMPT_OUTCOMES_REQUIRING_ASSESSMENT = frozenset({
     "blocked", "failed", "refused", "stalled", "unavailable",
 })

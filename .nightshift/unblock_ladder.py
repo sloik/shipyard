@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import yaml
 from ac_review import validate as validate_ac_review
 from loop_events import open_run_log
-from unblock_spec import prepare
+from unblock_spec import AC_REVIEW_ELIGIBILITY, prepare
 
 
 class LadderError(ValueError):
@@ -168,6 +168,14 @@ def drive_to_done(spec_file: Path, project_root: Path, run_id: str, *,
     if current == 1 and packet["eligibility"] == "skipped":
         entered.append(_emit(root, packet, 1, "skipped", _refs(packet, {})))
         current = 2
+    elif current == 1 and packet["eligibility"] == AC_REVIEW_ELIGIBILITY:
+        # SPEC-351 R3: this spec/AC combination already failed independent
+        # verification 2+ times -- route straight to rung 4 (AC review)
+        # instead of burning another blind bounded-repair/work-to-done/
+        # coverage attempt on the same AC.
+        for skipped_rung in (1, 2, 3):
+            entered.append(_emit(root, packet, skipped_rung, "skipped", _refs(packet, {})))
+        current = 4
 
     while current <= 4:
         if current == 4:

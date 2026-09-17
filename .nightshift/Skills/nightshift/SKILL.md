@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.22.0
+version: 3.23.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -753,6 +753,59 @@ Check all entries for staleness — if specs have been completed since the knowl
 ### `import`
 Read recent Nightshift reports and metrics. Extract lessons (what failed, what worked, what patterns emerged) and add them to knowledge/ entries or create new ones.
 
+### `import --devkb` — DevKB updates promotion sweep (SPEC-352)
+
+Distinct from the report/metrics `import` above: this sweeps the
+`devkb-updates/` **staging area** — the files agents write per LOOP.md §1770
+when `devkb.writeback: true` — and promotes them into the external, cross-project
+DevKB (`devkb.path` in `config.yaml`), rather than into this project's local
+`knowledge/` directory.
+
+**Why a separate step exists:** the staging contract (BOOTSTRAP.md §B8/E1a,
+LOOP.md §1770/§1805) always described this as "reviewed and merged... by a
+human or scheduled task (outside the loop)" — but that scheduled task never
+existed, so nothing staged there was ever promoted. `canonical/devkb_sweep.py`
+is that task.
+
+**Run on demand:**
+
+```bash
+python3 canonical/devkb_sweep.py sweep \
+  --devkb <path-to-DevKB-dir> \
+  --source canonical/knowledge/devkb-updates \
+  [--source <fleet-project>/.nightshift/knowledge/devkb-updates ...] \
+  [--apply] [--json]
+```
+
+- Without `--apply`: decision-only. Every staged file is parsed, its target
+  DevKB file/section resolved, and a decision recorded in the ledger
+  (`<source>/.sweep-ledger.json`): `auto_merge` (no existing heading collision
+  — safe to land) or `needs_review` (a heading with the same title already
+  exists in the target file — never auto-applied; surfaced for a human
+  accept/reject/edit call, and recorded `rejected` with a reason until one is
+  made).
+- With `--apply`: `auto_merge` decisions are actually appended to
+  `<devkb>/<target-file>.md`, `<devkb>/INDEX.md` is updated if it tracks
+  section-level entries, and the staged file is moved to a `merged/`
+  subdirectory next to its source. Re-running is idempotent — the ledger is
+  keyed by content hash, so an already-decided file (merged OR rejected) is
+  never re-surfaced or re-merged.
+- Writing into an out-of-repo DevKB checkout from an isolated Nightshift
+  worktree run is itself a cross-repo write; treat it the same way
+  `SPEC-241`'s own staged lesson prescribes — do not attempt it silently from
+  a run whose declared write scope doesn't cover that path. Decide the
+  backlog (no `--apply`, or `--apply` targeting a path the run is actually
+  scoped to write) and hand the real DevKB write to the operator/actor that
+  owns that checkout.
+
+**Run periodically (R4):** since "a human remembers to run it" is the exact
+failure mode this closes, schedule `devkb_sweep.py sweep --apply` (with a real
+`--devkb` path the runner is scoped to write) as a recurring task — e.g. a
+cron/launchd job or a step at the start of `/nightshift run`'s Phase A
+re-entry check, whichever the fleet operator's scheduling story already uses.
+On-demand invocation (above) remains valid at any time; the periodic run is
+additive, not a replacement.
+
 ---
 
 ## `/nightshift release` — Publish and Roll Out One Exact Kit
@@ -790,8 +843,29 @@ release_policy:
 
 `allow` keeps the existing guarded local-commit path. `opt_out` is a known
 project-local skip: the coordinator leaves that whole repository untouched and
-continues independent repositories. Commit hooks that own a compatible explicit
-policy may expose it with an executable commit-hook marker:
+continues independent repositories. `release_coordinator.py` reads
+`committed_kit` only and never delivers a partial manifest — a release is
+always the whole managed kit or nothing for a given repository.
+
+An install may additionally narrow what the separate, non-sealing
+`nightshift-sync.py canonical` sweep delivers, independent of `committed_kit`
+(SPEC-356):
+
+```yaml
+release_policy:
+  committed_kit: allow  # or: opt_out
+  sync_files:            # optional; nightshift-sync.py honours this, release_coordinator.py never reads it
+    include: ["board.py", "validate_specs.py"]  # only from the managed set; the only widening operator
+    exclude: ["Skills/nightshift/SKILL.md"]       # subtracted after include; never widens
+```
+
+`nightshift-sync.py canonical` honours `sync_files`: an install whose resolved
+selection is a strict subset of the managed set is narrowed, receiving only
+the selected files (with `kit_version`, seed files, hooks/, templates and the
+metrics schema all suppressed). `release_coordinator.py` never reads
+`sync_files` and never delivers a partial manifest under any declaration.
+Commit hooks that own a compatible explicit `committed_kit` policy may expose
+it with an executable commit-hook marker:
 
 ```sh
 # nightshift-release-policy: committed-kit=opt_out

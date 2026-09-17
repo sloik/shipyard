@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Mapping, Optional
 
 MARKER = "release-marker.json"
 PYTHON_CACHE_SUFFIXES = frozenset({".pyc", ".pyo"})
@@ -61,6 +63,59 @@ def release_entries(manifest: dict) -> list[dict]:
             + ", ".join(sorted(map(str, cache)))
         )
     return entries
+
+
+def resolve_sync_selection(
+    declaration: Optional[Mapping], managed_names: list[str]
+) -> set[str]:
+    """Resolve which of ``managed_names`` a per-install sync should deliver
+    (SPEC-356 R2).
+
+    Pure and total: ``declaration`` is whatever sits at an install's
+    ``release_policy`` key. ``None`` and ``{}`` both mean "this install
+    declares no release_policy" and resolve to the full ``managed_names`` set.
+    This function never reads YAML and never distinguishes an absent
+    ``release_policy`` from a malformed one — a caller that requires a valid
+    ``committed_kit`` (``allow``/``opt_out``) must reject the malformed case
+    before calling this resolver.
+
+    Resolution: when ``sync_files.include`` is a non-empty list, the candidate
+    set is the members of ``managed_names`` matching any ``include`` glob
+    (``include`` can never admit a name outside ``managed_names``); otherwise
+    the candidate set is all of ``managed_names`` unless ``committed_kit`` is
+    ``"opt_out"``, in which case it starts empty. ``sync_files.exclude``
+    globs are then subtracted from the candidate set — exclude only narrows,
+    it never widens, so excluding from an already-empty (opt_out, no include)
+    set stays empty.
+    """
+    managed = list(managed_names)
+    if not declaration:
+        return set(managed)
+
+    committed_kit = declaration.get("committed_kit") if isinstance(declaration, Mapping) else None
+    sync_files = declaration.get("sync_files") if isinstance(declaration, Mapping) else None
+
+    include: list[str] = []
+    exclude: list[str] = []
+    if isinstance(sync_files, Mapping):
+        raw_include = sync_files.get("include")
+        if isinstance(raw_include, list):
+            include = [glob for glob in raw_include if isinstance(glob, str)]
+        raw_exclude = sync_files.get("exclude")
+        if isinstance(raw_exclude, list):
+            exclude = [glob for glob in raw_exclude if isinstance(glob, str)]
+
+    if include:
+        candidate = {name for name in managed if any(fnmatch.fnmatch(name, glob) for glob in include)}
+    elif committed_kit == "opt_out":
+        candidate = set()
+    else:
+        candidate = set(managed)
+
+    if exclude:
+        candidate = {name for name in candidate if not any(fnmatch.fnmatch(name, glob) for glob in exclude)}
+
+    return candidate
 
 
 def is_kit_install(nightshift_dir: Path) -> bool:

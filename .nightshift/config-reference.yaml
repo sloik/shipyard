@@ -142,7 +142,35 @@ release_policy:
   # Required: no
   # Default:  "allow"
   # Valid:    "allow" | "opt_out"
+  #
+  # Read by `release_coordinator.py` only (fleet-release commit machinery):
+  # `opt_out` skips this whole repository's release-manifest commit unless the
+  # operator passes `--include-opt-out`. The coordinator never delivers a
+  # partial manifest — it is all-or-nothing per repository.
   committed_kit: allow
+
+  # Type:     mapping
+  # Required: no
+  # Default:  absent (no narrowing)
+  #
+  # Read by `nightshift-sync.py`'s `canonical_sync()` only (SPEC-356). Lets an
+  # install narrow which managed files that non-sealing sync mechanism
+  # delivers, independent of `committed_kit`. `include` is the only widening
+  # operator — it can select ONLY from the kit's managed file set
+  # (`CANONICAL_PROTOCOL_FILES`) and can never admit an unmanaged path;
+  # `exclude` only narrows and never widens. An install whose resolved
+  # selection is a strict subset of the managed set is "narrowed": only the
+  # per-file protocol sync fires for the selected files, and the six other
+  # write sites (kit_version write-through, seed files, hooks/, template
+  # sweep, metrics schema, git-hook install) are suppressed — a narrowed
+  # install never has its kit_version bumped for payload it does not have.
+  # `committed_kit: opt_out` with `sync_files.include: ["**"]` resolves to the
+  # full managed set and is therefore NOT narrowed (deliberately equivalent to
+  # `allow`) — `include` is a genuine widening operator, by the install's own
+  # declaration in its own config.yaml.
+  # sync_files:
+  #   include: ["board.py", "validate_specs.py"]  # gitignore-style globs, matched against managed names only
+  #   exclude: ["Skills/nightshift/SKILL.md"]      # subtracted after include resolution
 
 ---
 

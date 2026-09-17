@@ -1160,7 +1160,7 @@ listing values inline.
 | `feature` | New capability the system does not have yet |
 | `bugfix` | Fixing broken behaviour that violates an existing spec's AC — use `_TEMPLATE-BUGFIX.md` |
 | `refactor` | Improving existing code without changing user-visible behaviour |
-| `eval` | Time-boxed investigation or proof-of-concept |
+| `eval` | Time-boxed investigation or proof-of-concept — see [output artifact placement](#output-artifact-placement-for-report-verified-evals-spec-354) if ACs describe report content |
 | `nfr` | Non-functional requirement: standing quality constraint with no done or blocked state — use `_TEMPLATE-NFR.md` |
 | `main` | Parent spec grouping sub-specs; never executed directly by the loop |
 
@@ -1168,7 +1168,7 @@ listing values inline.
 
 | Value | When to use |
 |-------|-------------|
-| `research` | Open-ended investigation with a synthesis deliverable |
+| `research` | Open-ended investigation with a synthesis deliverable — see [output artifact placement](#output-artifact-placement-for-report-verified-evals-spec-354) if ACs describe report content |
 | `distillation` | Condensing multiple sources into a structured summary |
 | `fact-check` | Verifying specific claims against authoritative sources |
 | `review` | Structured evaluation of a document, codebase, or approach |
@@ -1203,6 +1203,35 @@ listing values inline.
 - The loop selects `bugfix` specs before `feature` specs of equal layer and priority.
 - `main` specs are never executed directly — the orchestrator fans out to their children.
 - If a project needs a type not listed here, use the nearest match or open a spec to propose a new canonical entry.
+
+### Output artifact placement for report-verified evals (SPEC-354)
+
+The verifier-gate same-spec withholding rule (SPEC-228/239) makes every tracked
+path under `reports/`, `.nightshift/reports/`, or `canonical/reports/` whose
+path or content names the spec under verification structurally unreachable
+from that spec's own independent verifier — by design, so a verifier can never
+read the author's own conclusion. This is correct for an ordinary code spec,
+whose report is a summary the verifier can independently re-derive from the
+diff and test results. It is a trap for an `eval`/`research`-type spec (or any
+spec whose Acceptance Criteria literally describe report *content* — "the
+report shows...", "the report contains...") when that spec's `output_artifact`
+lives under one of those same withheld roots: several ACs then become
+structurally `unverifiable` through no fault of the work, because the verifier
+was never given anything to check the claim against (confirmed live on
+SPEC-353 and SPEC-297).
+
+**Rule: when a spec's own Acceptance Criteria describe the content of its
+deliverable document — not just that a report exists with certain sections —
+declare that document's `output_artifact` outside `reports/<SPEC-ID>/`.**
+`knowledge/` is a proven, already-in-use location (SPEC-295); a project-local
+non-report directory (e.g. `eval-specs/<slug>/`) works equally well for
+supporting code, fixtures, and machine-checkable evidence a verifier can
+independently recompute against. Keep the ordinary LOOP-mandated dated run
+report (`reports/YYYY-MM-DD-nightshift-report.md`) under `reports/` as usual —
+only the AC-verified deliverable itself needs to move. This is a
+spec-authoring convention, not a change to the withholding mechanism itself:
+weakening same-spec withholding to carve out exceptions would risk exactly the
+guarantee SPEC-228/239 exists to provide.
 
 ---
 

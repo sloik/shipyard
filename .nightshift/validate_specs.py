@@ -167,6 +167,41 @@ def _validate_scope_glob_list(key: str, value: object) -> list[str]:
     return errors
 
 
+def validate_resolved_blocker_fields(fm: dict) -> list[str]:
+    """SPEC-355 R2: a spec outside ``status: blocked`` should never carry a
+    live top-level blocker field.
+
+    ``unblock_spec.py::finalize()`` relocates these six fields into
+    ``unblock_history[-1].resolved_blocker`` on a successful ``blocked ->
+    ready`` transition (SPEC-355 R1); this is the mechanical, non-model
+    backstop that catches any other path (a hand-edit, a different tool, a
+    prior version of this kit before SPEC-355) that left them live instead.
+
+    ``WARNING``, not a hard error (SPEC-244 lesson: a check compared against
+    historical state, not the policy in force when it was written, can never
+    be satisfied — 37 already-``done`` specs in this repository alone predate
+    this fix and would otherwise fail pre-commit the moment anyone touches
+    them for an unrelated reason). Every *new* ``blocked -> ready`` transition
+    is clean by construction as of SPEC-355; this warning exists to surface
+    the pre-existing backlog for a future mechanical repair (``doctor.py
+    --fix``), not to block unrelated work on old specs.
+    """
+    if fm.get("status") == "blocked":
+        return []
+    from unblock_spec import RESOLVED_BLOCKER_FIELDS
+
+    present = [key for key in RESOLVED_BLOCKER_FIELDS if key in fm]
+    if not present:
+        return []
+    return [
+        "WARNING: resolved blocker field(s) still present at status "
+        f"{fm.get('status')!r}: {', '.join(present)} "
+        "(unblock_spec.py::finalize() should have relocated these into "
+        "unblock_history[-1].resolved_blocker on the blocked -> ready "
+        "transition — SPEC-355)"
+    ]
+
+
 def validate_scope(fm: dict) -> list[str]:
     """Validate the optional ``scope:`` block (SPEC-300-001 R6).
 
@@ -1301,6 +1336,7 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     errors.extend(validate_ac_amendments(content, spec_file))
     errors.extend(validate_scope(fm))
     errors.extend(validate_scope_amendments(body))
+    errors.extend(validate_resolved_blocker_fields(fm))
     # R8: a ready code spec with neither scope: nor touches: silently gets
     # the project-root default — surface that as a warning, never an error,
     # so historical specs are not retroactively required to declare either.

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -903,6 +904,58 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
     if release_policy.get("committed_kit", "allow") not in {"allow", "opt_out"}:
         findings.append(ConfigFinding("release_policy.committed_kit", "error", "NS-CFG-RELEASE-POLICY",
                                        "operator", "use allow or opt_out"))
+
+    # SPEC-356 R3: release_policy.sync_files (include/exclude glob lists).
+    # Structural faults (wrong shapes) are errors — they are unambiguous
+    # regardless of what any particular install currently has installed.
+    # Glob *membership* is a warning only: an install's managed name list
+    # comes from its own release-marker.json, a snapshot of the release it
+    # last received, so a legitimately managed file added since that release
+    # must never deny admission over a stale marker.
+    sync_files = release_policy.get("sync_files")
+    if sync_files is not None:
+        if not isinstance(sync_files, dict):
+            findings.append(ConfigFinding("release_policy.sync_files", "error", "NS-CFG-RELEASE-POLICY-SYNC-FILES",
+                                           "operator", "sync_files must be a mapping"))
+        else:
+            structural_error = False
+            globs: list[str] = []
+            for list_key in ("include", "exclude"):
+                value = sync_files.get(list_key)
+                if value is None:
+                    continue
+                if not isinstance(value, list):
+                    structural_error = True
+                    continue
+                for item in value:
+                    if not isinstance(item, str):
+                        structural_error = True
+                    else:
+                        globs.append(item)
+            if structural_error:
+                findings.append(ConfigFinding("release_policy.sync_files", "error", "NS-CFG-RELEASE-POLICY-SYNC-FILES",
+                                               "operator", "sync_files include/exclude must be lists of strings"))
+            elif globs:
+                try:
+                    managed_names = {
+                        str(entry.get("path"))
+                        for entry in provenance.retained_manifest(ctx.config_path.parent).get("files", [])
+                    }
+                    resolvable = True
+                except (provenance.MetadataError, OSError, ValueError, KeyError):
+                    managed_names = set()
+                    resolvable = False
+                unmatched = (
+                    not resolvable
+                    or any(not any(fnmatch.fnmatch(name, glob) for name in managed_names) for glob in globs)
+                )
+                if unmatched:
+                    findings.append(ConfigFinding(
+                        "release_policy.sync_files", "warning", "NS-CFG-RELEASE-POLICY-SYNC-FILES",
+                        "operator",
+                        "a sync_files glob does not match this install's currently managed files "
+                        "(or the managed name list could not be resolved) — verify it is intentional",
+                    ))
 
     main_branch = (config.get("git") or {}).get("main_branch") if isinstance(config.get("git"), dict) else None
     if not isinstance(main_branch, str) or not main_branch.strip():
