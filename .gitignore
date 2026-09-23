@@ -39,7 +39,7 @@ shipyard.jsonl
 .claude/
 
 # Internal context
-.argo/
+.agent-context/
 
 # Xcode (legacy — v0.x was SwiftUI)
 **/xcuserdata/
