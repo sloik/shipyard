@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 3
 type: bugfix
-status: ready
+status: done
 after: [SPEC-BUG-173]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -34,24 +34,24 @@ column. `GET /api/traffic` confirms the stored request row keeps
 
 ## Requirements
 
-- [ ] R1: When a response is correlated to a request, the request's stored
+- [x] R1: When a response is correlated to a request, the request's stored
   status becomes the response outcome (`ok` / `error`).
-- [ ] R2: Requests that are never answered stay `pending`; notifications
+- [x] R2: Requests that are never answered stay `pending`; notifications
   (no `id`) show no pending status (they expect no response).
-- [ ] R3: The Traffic view reflects R1 both on reload and live (building on
+- [x] R3: The Traffic view reflects R1 both on reload and live (building on
   SPEC-BUG-173's live row update).
-- [ ] R4: The status badge label for a successful response matches the
+- [x] R4: The status badge label for a successful response matches the
   design wording, or the design is updated to the implementation's wording —
   record the decision in this spec's run report.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Go store test: insert request, insert matching response ⇒ request
+- [x] AC1: Go store test: insert request, insert matching response ⇒ request
   row status equals response status; unmatched request stays `pending`.
-- [ ] AC2: Headless check: after a tool call, the REQ row shows the success
+- [x] AC2: Headless check: after a tool call, the REQ row shows the success
   badge, not `pending`.
-- [ ] AC3: A `notifications/initialized` row does not show `pending`.
-- [ ] AC4: `go test -race ./...`, `go vet ./...`, `go build ./...` pass.
+- [x] AC3: A `notifications/initialized` row does not show `pending`.
+- [x] AC4: `go test -race ./...`, `go vet ./...`, `go build ./...` pass.
 
 ## Out of Scope
 
@@ -65,3 +65,25 @@ column. `GET /api/traffic` confirms the stored request row keeps
 - `internal/web/ui/index.html` — `statusBadge()`, `renderRow()` (~1350)
 - `.nightshift/specs/UX-002-dashboard-design.pen` — frame `rRx2E`, rows
   `row-1` … `row-6`
+
+## Resolution — 2026-09-24
+
+- R1: `linkResponse()` writes the response's status onto the request row
+  alongside `latency_ms` and `matched_id`.
+- R2: the proxy marks a message `pending` only when it has an ID. A
+  notification keeps the existing default `ok`: it was delivered and expects
+  no reply. `TestCaptureMessage_NotificationStatus` and
+  `TestRun_RealSubprocessCleanExchange` were updated from the old "pending"
+  expectations.
+- Existing data: schema v4 migration (`migrateToV4`) backfills answered
+  requests with their response's status and turns pending notifications into
+  `ok`. It skips legacy tables that lack the columns it reads.
+- R3: live update via SPEC-BUG-173's `updateMatchedRequestRow()`.
+- R4 decision: keep the `ok` / `error` labels and do not adopt the design's
+  `200 OK`. MCP over stdio has no HTTP status, so `200 OK` would be made up.
+  The `.pen` rows should be relabelled when the design is next edited.
+- Tests: `TestSPECBUG174_CorrelatedRequestTakesResponseStatus` (both insert
+  paths, ok and error, plus an unanswered request) and
+  `TestSPECBUG174_MigrationV4BackfillsRequestStatus`. The smoke script checks
+  that the live REQ row and the `notifications/initialized` row are not
+  `pending`.

@@ -103,7 +103,7 @@ Checked against a `-tags server` build driven headlessly (Chromium, 1440×900,
 | AC | Result | Evidence / follow-up |
 |----|--------|----------------------|
 | AC-1 | pass | `.pen` has Phase 0–3 frames plus Phase 4 and per-state frames |
-| AC-2 | **fail** | SPEC-BUG-173 (live rows miss method/latency), SPEC-BUG-174 (REQ rows stay `pending`), SPEC-BUG-175 (filter bar drift) |
+| AC-2 | **fail** | SPEC-BUG-175 (filter bar drift). Fixed: SPEC-BUG-173 (live rows missed method/latency), SPEC-BUG-174 (REQ rows stayed `pending`; `ok`/`error` labels kept instead of the design's `200 OK`) |
 | AC-3 | pass | alternate rows use `rgba(177,186,196,0.03)` = design `$row-alt` `#b1bac408`; expanded row has 3 px accent left border |
 | AC-4 | pass | `relativeTime()` text with `title` = absolute UTC timestamp |
 | AC-5 | pass | REQUEST/RESPONSE panes side by side; line-level `jt-*` colours per design |

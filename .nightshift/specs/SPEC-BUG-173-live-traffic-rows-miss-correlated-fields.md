@@ -4,7 +4,7 @@ template_version: 3
 priority: 2
 layer: 3
 type: bugfix
-status: ready
+status: done
 after: []
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -50,21 +50,21 @@ should be checked for the same issue.
 
 ## Requirements
 
-- [ ] R1: Live response events carry the correlated method (as stored).
-- [ ] R2: When a response is correlated, the already-rendered request row in
+- [x] R1: Live response events carry the correlated method (as stored).
+- [x] R2: When a response is correlated, the already-rendered request row in
   the Traffic view updates its latency (and status per SPEC-BUG-174 if that
   lands first) without a reload.
-- [ ] R3: Live and reloaded renderings of the same traffic are identical for
+- [x] R3: Live and reloaded renderings of the same traffic are identical for
   the method, latency and status columns.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Go test: capturing a request then its response broadcasts a
+- [x] AC1: Go test: capturing a request then its response broadcasts a
   response event whose `method` equals the request's method.
-- [ ] AC2: Headless check: with the Traffic view open, invoke a tool; the
+- [x] AC2: Headless check: with the Traffic view open, invoke a tool; the
   new RES row shows `tools/call` and the REQ row shows a latency value — and
   the rendered cells equal those after `page.reload()`.
-- [ ] AC3: `go test -race ./...`, `go vet ./...`, `go build ./...` pass.
+- [x] AC3: `go test -race ./...`, `go vet ./...`, `go build ./...` pass.
 
 ## Out of Scope
 
@@ -77,3 +77,23 @@ should be checked for the same issue.
 - `internal/capture/store.go` — `Insert()` correlation (~455–510)
 - `internal/web/ui/index.html` — `ws.onmessage` live insert (~2118–2135),
   `renderRow()` (~1350)
+
+## Resolution — 2026-09-24
+
+- `capture.Store` now links correlated pairs in one shared `linkResponse()`
+  helper used by both `Insert` and `InsertWithSession` (previously duplicated
+  in each). It sets the new output field
+  `TrafficEntry.MatchedID` to the request's row ID.
+- `proxy.captureMessage` broadcasts `entry.Method` (filled from the request
+  for responses) and `MatchedID`. `manager.go` only broadcasts server-status
+  and schema-change events, not traffic, so it needed no change.
+- UI: `ws.onmessage` calls `updateMatchedRequestRow(evt)` for any event with
+  `matched_id`, even while filters are active, and rewrites that request row's
+  status and latency cells.
+- Tests: `TestSPECBUG173_ResponseBroadcastCarriesCorrelatedFields` (proxy),
+  `TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow` (UI), and a
+  live-vs-reload section in `test/smoke/traffic_smoke.mjs`. All fail with the
+  fix reverted.
+- Verification: `go test -race` and `go vet` pass for `./internal/...` and
+  `cmd/shipyard-mcp`. `cmd/shipyard` fails the same two tests before and after
+  this change in a GTK-less container (a desktop build and desktop mode).
