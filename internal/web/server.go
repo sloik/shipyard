@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -511,7 +512,11 @@ func (s *Server) recordPerformanceRollup(sample capture.PerformanceRollupSample)
 		return
 	}
 	sample.Goroutines = int64(current.Goroutines)
-	sample.HeapAllocBytes = int64(current.Memory.HeapAllocBytes)
+	// Clamp instead of wrapping: heap size is uint64, the rollup column int64.
+	sample.HeapAllocBytes = math.MaxInt64
+	if heap := current.Memory.HeapAllocBytes; heap <= math.MaxInt64 {
+		sample.HeapAllocBytes = int64(heap)
+	}
 	sample.DBFileSizeBytes = current.Store.DBFileSizeBytes
 	sample.TrafficRows = current.Store.TrafficRows
 	sample.SchemaSnapshotRows = current.Store.SchemaSnapshotRows
