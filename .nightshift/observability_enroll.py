@@ -67,6 +67,12 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/verifier_feedback.py", ".nightshift/vocabulary-registry.yaml", ".nightshift/vocabulary.py",
     ".nightshift/watchdog_cleanup.py", ".nightshift/worktree_janitor.py", ".nightshift/worktree_paths.py",
     ".nightshift/release-marker.json",
+    # SPEC-383: drifted out before tests/test_observability_enroll.py guarded it.
+    ".nightshift/artifact_reachability.py", ".nightshift/config_migrations.py",
+    ".nightshift/deployment_tiers.py", ".nightshift/liveness_classifier.py",
+    ".nightshift/resilience_ladder.py", ".nightshift/scope_guard.py",
+    ".nightshift/spec_artifacts.py", ".nightshift/spec_promotion.py",
+    ".nightshift/token_usage.py",
 }
 PRIVATE_PREFIXES = (
     ".nightshift/reports/", ".nightshift/metrics/", ".nightshift/knowledge/",

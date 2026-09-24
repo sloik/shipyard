@@ -7,6 +7,51 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.24.4 (2026-09-24)
+
+### Observability classifier covers every managed kit file (SPEC-383)
+
+`observability_enroll.MANAGED_PUBLIC_FILES` is a hand-kept copy of `CANONICAL_PROTOCOL_FILES`
+and had drifted: 9 managed kit files (`artifact_reachability.py`, `config_migrations.py`,
+`deployment_tiers.py`, `liveness_classifier.py`, `resilience_ladder.py`, `scope_guard.py`,
+`spec_artifacts.py`, `spec_promotion.py`, `token_usage.py`) classified as `unknown`, so
+`release_disposition` skipped any repository that tracks its kit (lmac-run-mcp) as
+`tracked_private_artifacts_unresolved`. The missing entries are added, and
+`tests/test_observability_enroll.py` now fails whenever a `CANONICAL_PROTOCOL_FILES` member is
+not classified as managed public kit. No migration.
+
+## 3.24.3 (2026-09-24)
+
+### Reseal after merging SPEC-381 (BUG-331 orphaned-fingerprint)
+
+SPEC-381's own worktree resealed `release-manifest.json` at unchanged `kit_version` 3.24.1,
+against a baseline that predated SPEC-382's real completion on main at fingerprint 3.24.2.
+Merging it as-is would have left the manifest's recorded file hashes stale relative to
+`hooks/pre-commit`'s and `tests/test_hooks_pre_commit.py`'s actual post-merge content
+(`validate_install.py` correctly DENYing `KIT.PAYLOAD` with "manifest files does not match
+canonical" immediately after the merge). Fix: same BUG-331 repair pattern as SPEC-382 --
+bump `kit_version` to 3.24.3 (config.yaml, config-reference.yaml, Skills/nightshift/SKILL.md)
+and reseal against the current, post-merge canonical tree. No migration.
+
+## 3.24.2 (2026-09-24)
+
+### Restore cross-spec finding coverage a commit causes in an untouched spec (SPEC-382)
+
+SPEC-380's `is_new`/`bytes_changed` gate on `validate_staged` correctly stopped an unrelated
+pre-existing finding from blocking an unrelated commit, but also hid a cross-spec finding a
+commit CAUSES in an untouched spec (e.g. deleting a spec another spec's
+`followup.source_spec_id` references, or breaking its evidence anchor) — the exact follow-up
+condition attached when accepting SPEC-380's verifier dispute. Fix: for a non-reportable path
+whose cross-spec checks produce a finding, lazily build a baseline snapshot (`git ls-tree` at
+the baseline revision) and re-run the same check against it; only findings NEW to the staged
+run relative to that baseline are reported (a finding present at both predates this commit and
+stays silent, preserving SPEC-380's R2 intent). `followup.source_spec_id does not resolve` now
+names the id that failed to resolve. `kit_version` bumped 3.24.1 → 3.24.2: SPEC-382's own
+worktree branch resealed the manifest against a baseline that predated the real fleet-sync's
+completion of SPEC-376/SPEC-380's release-handoffs at fingerprint `28da2f17…`; merging without a
+version bump would have silently dropped that fingerprint from `retained_manifests`, orphaning
+those two completed handoffs (BUG-331). Bumping retains it properly. No migration.
+
 ## 3.24.1 (2026-09-24)
 
 ### `validate_staged` must scope reported findings to changed/new files, not the whole corpus (SPEC-380)
@@ -55,6 +100,51 @@ empty set instead, which makes `_known_specs_dirs` fall open (no
 spec-home violation) for that one `classify_write` call -- no other consumer
 or path shape is affected. No migration; the release handoff remains pending
 and `kit_version` is unchanged.
+
+### `validate_staged` now catches a cross-spec finding this commit itself causes in an untouched spec (SPEC-382)
+
+SPEC-380's R2 (above) narrowed `validate_staged` to report a path's findings
+only when that path itself is new or its own bytes changed -- correctly
+silencing pre-existing, uncaused debt in untouched specs. As a side effect it
+also silenced a cross-spec finding an untouched spec's OWN corpus check
+would newly raise because of what THIS commit did elsewhere: deleting,
+renaming, or editing a spec that the untouched spec's `followup.
+source_spec_id` (or a state-rationale evidence anchor) points at. A commit
+could delete a referenced spec while leaving a referencing spec pointing at
+nothing, and still be accepted. Fix: for every path that is not itself
+reportable, `validate_staged` now also runs the same corpus-dependent checks
+against a lazily-built snapshot of the BASELINE corpus (only built when at
+least one untouched path shows any finding at all, to avoid doubling cost on
+the common all-clean case) and reports only the findings that are new
+relative to that baseline -- a finding present in both stays silent (R2
+preserved), a finding new to the staged corpus was caused by this commit and
+is now reported, named under the untouched spec's own path.
+`followup.source_spec_id does not resolve` now also names the id that failed
+to resolve. One disclosed test-assertion flip:
+`test_state_cross_spec_evidence_tracks_changed_target`
+(`test_hooks_pre_commit.py`) previously asserted that editing only an
+evidence target succeeded even though it broke an untouched declaring
+spec's anchor -- that was precisely SPEC-382's defect, not a spec-mandated
+behavior, and the assertion now expects rejection. No migration;
+`kit_version` unchanged.
+
+### Root-level paths in a dual-install repository are no longer rejected as "ambiguous root ownership" (SPEC-381)
+
+`hooks/pre-commit`'s `resolve_install_root` walk correctly detects that a
+staged path outside every install root is ambiguous when a repository holds
+both a root `.nightshift/` install and a `canonical/`-style install (the
+Nightshift repository's own shape), but the caller hard-failed the whole
+commit on every such path regardless of what it was — including an ordinary
+project file rename and the release's own `Skills/nightshift/SKILL.md`
+delivery, both observed blocking real commits on 2026-09-24. Fix: the
+ambiguous-root case now goes through the exact same narrow path-shape check
+the caller already used for the sibling "unresolvable ownership" case — only
+a `specs/`- or `reports/`-shaped path under an install root is still a hard
+failure; any other root-level path is silently skipped for install-root
+purposes (it resolves to no install and has nothing to check against).
+Single-install repositories are unaffected (the ambiguity only exists where
+two roots both claim a config.yaml). No migration; the release handoff
+remains pending and `kit_version` is unchanged.
 
 ## 3.24.0 (2026-09-19)
 

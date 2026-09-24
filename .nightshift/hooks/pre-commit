@@ -94,10 +94,17 @@ for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
         if [ "$already" -eq 0 ]; then INSTALL_ROOTS+=("$resolved"); fi
     else
         result=$?
-        if [ "$result" -eq 2 ]; then exit 1; fi
+        # SPEC-381: an ambiguous root (result 2, "Ambiguous root ownership" already
+        # printed by resolve_install_root) is only a hard failure for a specs/ or
+        # reports/-shaped path -- same narrow scoping as the unresolvable case
+        # (result 1) below. Any other root-level path (project files, delivered
+        # skills, .gitignore, etc.) is silently skipped for install-root purposes;
+        # it has nothing to check against and isn't spec/report-shaped.
         case "/$staged_path" in
             */.nightshift/specs/*|*/.nightshift/reports/*|/canonical/specs/*|/canonical/reports/*)
-                echo "[nightshift pre-commit] Cannot resolve owning install for $staged_path; restore config and sync the validator" >&2
+                if [ "$result" -ne 2 ]; then
+                    echo "[nightshift pre-commit] Cannot resolve owning install for $staged_path; restore config and sync the validator" >&2
+                fi
                 exit 1 ;;
         esac
     fi

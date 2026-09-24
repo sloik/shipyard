@@ -15,6 +15,7 @@ Usage:
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import sys
@@ -2026,7 +2027,12 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
             else:
                 corpus = all_specs if all_specs is not None else _load_directory_frontmatters(spec_file.parent)
                 if source_id not in {str(candidate.get("id", "")) for candidate in corpus}:
-                    errors.append("followup.source_spec_id does not resolve")
+                    # SPEC-382 R1: name the id that broke, not just the check
+                    # that fired -- a staged deletion/rename of that spec is
+                    # what causes this, and this spec (the untouched
+                    # referencing one) is already named by the caller's
+                    # results-dict key.
+                    errors.append(f"followup.source_spec_id does not resolve: {source_id}")
             reference = followup.get("lineage_record")
             if not isinstance(reference, str) or not reference.strip():
                 errors.append("followup.lineage_record must be a non-empty relative path")
@@ -2657,6 +2663,50 @@ def _snapshot_blobs(repo_root: Path, entries: dict) -> dict[str, bytes]:
     return blobs
 
 
+def _git_tree_entries(repo_root: Path, revision: str, prefix: str) -> dict[str, dict[str, str]]:
+    """SPEC-382: one `git ls-tree` spawn -> path -> {mode, sha} at `revision`.
+
+    Generalizes the SPEC-380 baseline-sha scan (kept separately below for its
+    existing narrower ``specs/``-prefix callers) to the whole kit, with mode
+    retained, so a baseline snapshot can be materialized the same way the
+    staged snapshot already is.
+    """
+    tree = _run_git(repo_root, ["ls-tree", "-r", "-z", revision, "--", prefix])
+    result: dict[str, dict[str, str]] = {}
+    for record in tree.stdout.split("\0"):
+        if not record:
+            continue
+        meta, tree_path = record.split("\t", 1)
+        mode, _obj_type, sha = meta.split(" ")
+        result[tree_path] = {"mode": mode, "sha": sha}
+    return result
+
+
+def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[str, str]], blobs: dict[str, bytes]) -> None:
+    """SPEC-382: write `entries` (path -> {mode, sha}) into `snapshot`/kit.
+
+    Shared by the staged snapshot (whose own symlink-escape handling stays
+    inline in ``validate_staged`` so its existing findings are unaffected)
+    and the lazily-built baseline snapshot used only as read substrate for
+    the R1/R2 differential -- an escaping baseline symlink is simply left
+    missing there, never surfaced as its own finding.
+    """
+    links = []
+    for path, entry in entries.items():
+        if not path.startswith(kit + "/") or not lifecycle.is_safe_relative_posix_path(path):
+            continue
+        target = snapshot / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if entry["mode"] == "120000":
+            links.append((target, blobs[entry["sha"]].decode("utf-8")))
+        elif entry["mode"] in {"100644", "100755"}:
+            target.write_bytes(blobs[entry["sha"]])
+    for target, destination in links:
+        resolved = (target.parent / destination).resolve()
+        if not Path(destination).is_absolute() and resolved.is_relative_to(snapshot / kit):
+            target.symlink_to(destination)
+
+
 def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
     """Validate inert files from one captured index, running only this trusted module.
 
@@ -2718,43 +2768,95 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
         except (OSError, ValueError, yaml.YAMLError) as exc:
             results[f"{kit}/config.yaml"] = [f"staged_configuration_invalid: {exc}"]
         corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
-        for path in sorted(entries):
-            if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
-                continue
-            # R2 (SPEC-380): determine is_new/bytes_changed from the blob sha
-            # up front -- by index sha, not decoded text -- so the gate below
-            # applies uniformly to every branch that can populate `results`
-            # for this path (symlink-mode, frontmatter-parse-error, and the
-            # normal validate_file path), not only the last one.
-            baseline_sha = baseline_shas.get(path)
-            is_new = baseline_sha is None
-            bytes_changed = baseline_sha != entries[path]["sha"]
-            reportable = is_new or bytes_changed
-            if entries[path]["mode"] == "120000":
+        # SPEC-382 R1/R2: lazily-built baseline snapshot/corpus, used only to
+        # tell apart a cross-spec finding this commit CAUSED (absent at
+        # baseline, present now -- report it) from one that already existed
+        # (present at both -- stay silent, preserving SPEC-380's R2 intent).
+        # Built at most once, and only if some untouched path actually shows
+        # a finding worth checking.
+        _baseline_snapshot_holder: list[Path] = []
+        _baseline_corpus_holder: list[list[dict]] = []
+
+        def _baseline_findings_for(rel_path: str) -> list[str]:
+            if not has_head:
+                return []
+            if not _baseline_snapshot_holder:
+                baseline_kit_entries = _git_tree_entries(repo_root, baseline_revision, kit + "/")
+                baseline_blobs = _snapshot_blobs(repo_root, baseline_kit_entries)
+                base_dir = Path(tempfile.mkdtemp(prefix="nightshift-index-baseline-"))
+                _materialize_kit_snapshot(base_dir, kit, baseline_kit_entries, baseline_blobs)
+                _baseline_snapshot_holder.append(base_dir)
+                _baseline_corpus_holder.append(_load_directory_frontmatters(base_dir / specs_relative_dir))
+            base_dir = _baseline_snapshot_holder[0]
+            base_path = base_dir / rel_path
+            if not base_path.is_file():
+                return []
+            base_config = base_dir / kit / "config.yaml"
+            base_findings = validate_file(
+                base_path, config_path=base_config, all_specs=_baseline_corpus_holder[0],
+                check_adoption=False, git_root=repo_root,
+            )
+            return [finding.replace(str(base_dir), "<index>") for finding in base_findings]
+
+        try:
+            for path in sorted(entries):
+                if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
+                    continue
+                # R2 (SPEC-380): determine is_new/bytes_changed from the blob sha
+                # up front -- by index sha, not decoded text -- so the gate below
+                # applies uniformly to every branch that can populate `results`
+                # for this path (symlink-mode, frontmatter-parse-error, and the
+                # normal validate_file path), not only the last one.
+                baseline_sha = baseline_shas.get(path)
+                is_new = baseline_sha is None
+                bytes_changed = baseline_sha != entries[path]["sha"]
+                reportable = is_new or bytes_changed
+                if entries[path]["mode"] == "120000":
+                    if reportable:
+                        results.setdefault(path, []).append("state_rationale_evidence_path_escape: spec must be a regular index file")
+                    continue
+                spec_path = snapshot / path
+                text = spec_path.read_bytes().decode("utf-8")
+                fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
+                if parse_errors:
+                    if reportable:
+                        results[path] = parse_errors
+                    continue
+                findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
+                base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
+                baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
+                base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
                 if reportable:
-                    results.setdefault(path, []).append("state_rationale_evidence_path_escape: spec must be a regular index file")
-                continue
-            spec_path = snapshot / path
-            text = spec_path.read_bytes().decode("utf-8")
-            fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
-            if parse_errors:
-                if reportable:
-                    results[path] = parse_errors
-                continue
-            findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
-            base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
-            baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
-            base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
-            findings.extend(state_rationale_adoption_findings(
-                fm, body, baseline_fm=base_fm, baseline_body=base_body,
-                is_new=is_new, bytes_changed=bytes_changed))
-            # R2 (SPEC-380): only report findings for a path this commit actually
-            # touched (new or changed bytes) — an untouched pre-existing spec's
-            # findings never block a commit that didn't change it. The full
-            # corpus is still loaded above (R3) so cross-spec context (e.g.
-            # duplicate-ID checks) keeps working for the paths that DO report.
-            if reportable:
-                results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
+                    # R2 (SPEC-380): only these adoption findings depend purely on
+                    # this path's own bytes vs its own baseline, never on the rest
+                    # of the corpus -- keep them scoped to reportable paths, as
+                    # before.
+                    findings = findings + state_rationale_adoption_findings(
+                        fm, body, baseline_fm=base_fm, baseline_body=base_body,
+                        is_new=is_new, bytes_changed=bytes_changed)
+                    results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
+                    continue
+                # SPEC-382 R1/R2: this path's own bytes are unchanged (not
+                # `reportable`), but `findings` (validate_file's cross-spec
+                # checks: followup.source_spec_id resolution, evidence-anchor
+                # resolution, duplicate-ID, etc.) were evaluated against the
+                # STAGED corpus, which this commit CAN still have altered
+                # (deletion, rename, or edit of a spec THIS path references).
+                # Compare against the same checks run against the BASELINE
+                # corpus: a finding present in both predates this commit and
+                # stays silent (R2); a finding new to the staged run was
+                # caused by this commit and must be reported (R1), named
+                # under this untouched spec's own path.
+                normalized = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
+                if not normalized:
+                    continue
+                baseline_findings = list(dict.fromkeys(_baseline_findings_for(path)))
+                new_findings = [finding for finding in normalized if finding not in baseline_findings]
+                if new_findings:
+                    results[path] = new_findings
+        finally:
+            if _baseline_snapshot_holder:
+                shutil.rmtree(_baseline_snapshot_holder[0], ignore_errors=True)
     return {"baseline": "head" if has_head else "none", "results": results,
             "counts": rationale_counts(results), "finding_families": finding_family_summary(results, [])}
 
