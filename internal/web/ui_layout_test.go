@@ -5287,3 +5287,49 @@ func TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow(t *testing.T) {
 		t.Error("SPEC-BUG-173 FAIL: matched-row update must run even when filters are active")
 	}
 }
+
+// TestSPECBUG175_FilterBarMatchesDesign verifies the Traffic filter bar
+// follows UX-002: fixed 160px Server/Method selects, 11px top-aligned labels,
+// a content-sized bar with 8/16 padding, and no extra entry-count badge.
+func TestSPECBUG175_FilterBarMatchesDesign(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	block := func(selector string) string {
+		m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+		if m == nil {
+			t.Fatalf("SPEC-BUG-175 FAIL: CSS block %q not found", selector)
+		}
+		return m[1]
+	}
+	for selector, decls := range map[string][]string{
+		"#filter-bar":                     {"height: auto;", "padding: 8px 16px;", "align-items: flex-start;"},
+		"#filter-bar .input-label":        {"font-size: var(--font-size-sm);"},
+		"#filter-bar #clear-filters-btn":  {"align-self: center;"},
+		"#filter-server,\n#filter-method": {"width: 160px;"},
+	} {
+		body := block(selector)
+		for _, d := range decls {
+			if !strings.Contains(body, d) {
+				t.Errorf("SPEC-BUG-175 FAIL: %s missing %q", selector, d)
+			}
+		}
+	}
+
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	if strings.Contains(content, `id="traffic-count"`) {
+		t.Error("SPEC-BUG-175 FAIL: the filter-bar entry badge is not in the UX-002 design")
+	}
+	if !strings.Contains(content, "function updateTimelineCount()") {
+		t.Fatal("SPEC-BUG-175 FAIL: updateTimelineCount not found")
+	}
+	if strings.Count(content, "updateTimelineCount();") < 2 {
+		t.Error("SPEC-BUG-175 FAIL: the entry count must update on page loads and live inserts")
+	}
+}

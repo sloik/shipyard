@@ -64,6 +64,28 @@ const failures = await withHarness(async ({ page, base }) => {
     return !m || Number(m[1]) === s.rows;
   }
 
+  // --- Filter bar layout (SPEC-BUG-175) -------------------------------------
+  const bar = await page.evaluate(() => {
+    const box = (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, bottom: b.bottom, right: b.right }; };
+    const barBox = box(document.getElementById('filter-bar'));
+    const labels = [...document.querySelectorAll('#filter-bar .input-label')].map((l) => ({ y: box(l).y, size: getComputedStyle(l).fontSize }));
+    const controls = [...document.querySelectorAll('#filter-bar .input-group > :not(.input-label), #clear-filters-btn')].map(box);
+    const counts = [...document.querySelectorAll('#timeline-content *')]
+      .filter((e) => e.children.length === 0 && /\bentries\b/.test(e.textContent) && e.getClientRects().length > 0);
+    return {
+      server: box(document.getElementById('filter-server')).w,
+      method: box(document.getElementById('filter-method')).w,
+      labels, barBox, controls, countEls: counts.length, badge: !!document.getElementById('traffic-count'),
+    };
+  });
+  check(`Server/Method selects are 160px (got ${bar.server}/${bar.method})`, bar.server === 160 && bar.method === 160);
+  check('filter labels are 11px', bar.labels.length === 3 && bar.labels.every((l) => l.size === '11px'));
+  check('filter labels share one baseline', new Set(bar.labels.map((l) => Math.round(l.y))).size === 1);
+  check('filter controls fit inside the filter bar',
+    bar.controls.every((c) => c.y >= bar.barBox.y && c.bottom <= bar.barBox.bottom && c.right <= bar.barBox.right));
+  check('no filter-bar entry badge', !bar.badge);
+  check(`one visible entry count (got ${bar.countEls})`, bar.countEls === 1);
+
   // --- Direction toggle (SPEC-BUG-171) --------------------------------------
   // A new entry can land between the click and the API count, so allow the
   // view to trail the API by the few entries one refresh produces.
@@ -151,6 +173,20 @@ const failures = await withHarness(async ({ page, base }) => {
   await live.waitForSelector(ROWS, { timeout: 10000 });
   const reloaded = { res: await cells(liveRes?.id), req: await cells(liveReq?.id) };
   check('live rows render the same as after a reload', isDeepStrictEqual(liveCells, reloaded));
+  // The single entry count follows live rows (SPEC-BUG-175).
+  await fetch(base + '/api/tools/call', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ server: 'alpha', tool: 'echo', arguments: { message: 'count' } }),
+  });
+  await live.waitForTimeout(1000);
+  const liveCount = await live.evaluate((sel) => ({
+    rows: document.querySelectorAll(sel).length,
+    info: document.getElementById('timeline-scroll-info').textContent,
+  }), ROWS);
+  const countMatch = liveCount.info.match(/Showing (\d+) of (\d+)/);
+  check(`entry count follows live rows (${liveCount.info}, ${liveCount.rows} rows)`,
+    countMatch !== null && Number(countMatch[1]) === liveCount.rows && Number(countMatch[2]) === liveCount.rows);
   const notification = await live.evaluate((sel) => [...document.querySelectorAll(sel)]
     .filter((r) => r.querySelector('[data-col=method]').textContent.trim() === 'notifications/initialized')
     .map((r) => r.querySelector('[data-col=status]').textContent.trim()), ROWS);

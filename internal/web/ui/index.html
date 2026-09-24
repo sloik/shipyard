@@ -129,7 +129,6 @@
         </div>
       </div>
       <button class="btn btn-ghost" id="clear-filters-btn" style="gap:4px;margin-left:auto;"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear</button>
-      <span id="traffic-count" class="badge badge-neutral"></span>
     </div>
 
     <!-- Table Header -->
@@ -831,7 +830,6 @@
   var filterMethod    = document.getElementById('filter-method');
   var dirToggle       = document.getElementById('dir-toggle');
   var clearFiltersBtn = document.getElementById('clear-filters-btn');
-  var trafficCount    = document.getElementById('traffic-count');
   var timelineSentinel  = document.getElementById('timeline-sentinel');
   var timelineLoadingEl = document.getElementById('timeline-loading');
   var timelineScrollInfo = document.getElementById('timeline-scroll-info');
@@ -1964,6 +1962,17 @@
     timelineScrollInfo.style.display = 'none';
   }
 
+  // The one entry count on the Traffic view (SPEC-BUG-175): the design's
+  // footer "Showing N of M entries", kept current on every load and live row.
+  function updateTimelineCount() {
+    if (timelineTotal > 0) {
+      timelineScrollInfo.textContent = 'Showing ' + Math.min(timelineOffset, timelineTotal) + ' of ' + timelineTotal + ' entries';
+      timelineScrollInfo.style.display = '';
+    } else {
+      timelineScrollInfo.style.display = 'none';
+    }
+  }
+
   function activeTimelineRowCount() {
     return trafficBody.querySelectorAll('.table-row').length;
   }
@@ -2038,8 +2047,6 @@
         var items = data.items || [];
         trackFilters(items);
 
-        trafficCount.textContent = timelineTotal + ' entries';
-
         var existingCount = trafficBody.querySelectorAll('.table-row:not([data-detail-for])').length;
         for (var i = 0; i < items.length; i++) {
           trafficBody.insertAdjacentHTML('beforeend', renderRow(items[i], existingCount + i));
@@ -2051,11 +2058,8 @@
         // Check if we've loaded everything
         if (timelineOffset >= timelineTotal || items.length === 0) {
           timelineAllLoaded = true;
-          if (timelineTotal > 0) {
-            timelineScrollInfo.textContent = 'Showing ' + timelineOffset + ' of ' + timelineTotal + ' entries';
-            timelineScrollInfo.style.display = '';
-          }
         }
+        updateTimelineCount();
         recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal, active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
       })
       .catch(function(err) {
@@ -2144,7 +2148,7 @@
 
           timelineTotal++;
           timelineOffset++;
-          trafficCount.textContent = timelineTotal + ' entries';
+          updateTimelineCount();
           recordClientTelemetry('timeline.live.insert', telemetryStart, { active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
         }
       } catch(err) {

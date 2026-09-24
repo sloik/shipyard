@@ -587,6 +587,8 @@ body {
 #filter-server,
 #filter-method {
   font-size: var(--font-size-md);
+  /* SPEC-BUG-175: fixed 160px per UX-002 fServer/fMethod */
+  width: 160px;
 }
 
 /* ==========================================================================
@@ -862,8 +864,22 @@ body {
 }
 
 /* SPEC-BUG-084: filter bar gap is 12px per UX-002 design */
+/* SPEC-BUG-175: design padding 8/16 with content-sized height (the fixed
+   48px app-bar height clipped the labelled controls), and top-aligned groups
+   so the Server/Method/Direction labels share one baseline. */
 #filter-bar {
   gap: 12px;
+  height: auto;
+  padding: 8px 16px;
+  align-items: flex-start;
+}
+
+#filter-bar .input-label {
+  font-size: var(--font-size-sm);
+}
+
+#filter-bar #clear-filters-btn {
+  align-self: center;
 }
 
 #tab-nav,
