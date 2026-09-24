@@ -86,9 +86,9 @@ Checklist for each spec:
 - [x] AC-3: Traffic rows have alternating backgrounds and clear visual hierarchy
 - [x] AC-4: Relative timestamps ("2s ago") with absolute on hover
 - [x] AC-5: Detail panel shows request + matched response side by side with JSON highlighting
-- [ ] AC-6: Copy-to-clipboard button on JSON payloads
+- [x] AC-6: Copy-to-clipboard button on JSON payloads
 - [x] AC-7: Server filter populated dynamically from actual traffic data
-- [ ] AC-8: Direction toggle (all / client→server / server→client) works
+- [x] AC-8: Direction toggle (all / client→server / server→client) works
 - [ ] AC-9: Empty state matches design
 - [ ] AC-10: No visual element exists in the implementation that isn't in the design
 - [x] AC-11: No external dependencies — all CSS/JS inline in single HTML file
@@ -107,9 +107,9 @@ Checked against a `-tags server` build driven headlessly (Chromium, 1440×900,
 | AC-3 | pass | alternate rows use `rgba(177,186,196,0.03)` = design `$row-alt` `#b1bac408`; expanded row has 3 px accent left border |
 | AC-4 | pass | `relativeTime()` text with `title` = absolute UTC timestamp |
 | AC-5 | pass | REQUEST/RESPONSE panes side by side; line-level `jt-*` colours per design |
-| AC-6 | **fail** | buttons exist, but copied text has line numbers and no newlines — SPEC-BUG-172 |
+| AC-6 | pass (fixed) | copy put line numbers on the clipboard and dropped newlines; fixed by SPEC-BUG-172 |
 | AC-7 | pass | `#filter-server` options built from observed traffic (`All servers`, `alpha`) |
-| AC-8 | **fail** | "All" empties the table (also History toggles) — SPEC-BUG-171 |
+| AC-8 | pass (fixed) | "All" emptied the table (History toggles too); fixed by SPEC-BUG-171 |
 | AC-9 | **fail** | layout/copy differ from `ApsQe` — SPEC-BUG-176 (draft, copy decision needed) |
 | AC-10 | **fail** | extra filter-bar entry badge — SPEC-BUG-175. Known sanctioned deviation: infinite scroll replaced the design's pagination footer (SPEC-BUG-113); the `.pen` footer was not updated |
 | AC-11 | pass | no remote/CDN assets; `ds.css`/`ds.js` are embedded, the documented SPEC-005 exception |

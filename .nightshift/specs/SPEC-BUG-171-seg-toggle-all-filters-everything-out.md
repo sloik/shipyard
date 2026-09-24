@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: ready
+status: done
 after: []
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -74,29 +74,29 @@ server total. With a direction filter active the footer reads e.g.
 
 ## Requirements
 
-- [ ] R1: A segmented-toggle button with an explicitly empty `data-value`
+- [x] R1: A segmented-toggle button with an explicitly empty `data-value`
   emits `""` as its value (use `hasAttribute('data-value')`, not truthiness).
-- [ ] R2: Traffic Direction "All" shows every row, including after switching
+- [x] R2: Traffic Direction "All" shows every row, including after switching
   from REQ/RES back to All.
-- [ ] R3: History Direction "All" and History time-range "All" apply no
+- [x] R3: History Direction "All" and History time-range "All" apply no
   direction / no time bound (no `direction=All` or NaN window reaches the API).
-- [ ] R4: With a Traffic direction filter active, the "Showing N of M" footer
+- [x] R4: With a Traffic direction filter active, the "Showing N of M" footer
   and paging offset are consistent with the rows actually displayed and do
   not stall infinite scroll.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Headless check: after load, clicking All / REQ → / All / ← RES /
+- [x] AC1: Headless check: after load, clicking All / REQ → / All / ← RES /
   All in `#dir-toggle` yields row counts N / req / N / res / N where N is the
   unfiltered count and req + res = N.
-- [ ] AC2: Clicking History's direction "All" and time "All" after another
+- [x] AC2: Clicking History's direction "All" and time "All" after another
   option returns the unfiltered history list; no request carries
   `direction=All`.
-- [ ] AC3: With REQ → active, the footer never reports fewer shown entries
+- [x] AC3: With REQ → active, the footer never reports fewer shown entries
   than rows visible.
-- [ ] AC4: A regression test covers `handleSegToggle` emitting `""` for
+- [x] AC4: A regression test covers `handleSegToggle` emitting `""` for
   `data-value=""` (UI layout/unit test or smoke script).
-- [ ] AC5: `go test ./...`, `go vet ./...`, `go build ./...` pass.
+- [x] AC5: `go test ./...`, `go vet ./...`, `go build ./...` pass.
 
 ## Out of Scope
 
@@ -110,3 +110,19 @@ server total. With a direction filter active the footer reads e.g.
 - `internal/web/ui/index.html` — `#dir-toggle` (~126), `#history-time-toggle`
   (~321), `#history-dir-toggle` (~338); `dirToggle` change handler and
   `loadPage()` (~1910–2060); `historyDirToggle` handler (~3313)
+
+## Resolution — 2026-09-24
+
+- `ds.js` `handleSegToggle()` now emits `""` for an explicit `data-value=""`
+  (`hasAttribute`), fixing all three "All" toggles.
+- Traffic `loadPage()` sends `direction` to `/api/traffic` (the store already
+  filters by exact direction) instead of filtering after paging, so offset,
+  total and the "Showing N of M" footer match the visible rows (R4). A filter
+  that matches nothing keeps the filter bar visible instead of showing the
+  "No traffic yet" state.
+- Tests: `TestSPECBUG171_*` in `internal/web/ui_layout_test.go` (fail on the
+  pre-fix UI); `test/smoke/traffic_smoke.mjs` added to `make smoke-full`
+  (fails on the pre-fix build, passed 3/3 runs after).
+- Verification: `go test -race ./...` and `go vet ./...` pass for every
+  package that builds in a GTK-less Linux container; `cmd/shipyard` needs the
+  desktop GTK/WebKit libraries that CI installs.

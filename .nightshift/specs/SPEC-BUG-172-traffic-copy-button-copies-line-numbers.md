@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 3
 type: bugfix
-status: ready
+status: done
 after: []
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -47,22 +47,22 @@ and has no newline between the `div`s.
 
 ## Requirements
 
-- [ ] R1: The Traffic detail copy buttons copy the pretty-printed payload
+- [x] R1: The Traffic detail copy buttons copy the pretty-printed payload
   exactly as displayed, without line numbers, with newlines preserved.
-- [ ] R2: The copied request/response text parses as JSON whenever the
+- [x] R2: The copied request/response text parses as JSON whenever the
   captured payload is JSON.
-- [ ] R3: Any other viewer that derives copy text from a line-numbered
+- [x] R3: Any other viewer that derives copy text from a line-numbered
   `.json-viewer` via `textContent` gets the same fix.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Headless check: click the request copy button in an expanded
+- [x] AC1: Headless check: click the request copy button in an expanded
   traffic row; `navigator.clipboard.readText()` parses with `JSON.parse` and
   deep-equals the captured payload.
-- [ ] AC2: Same for the response copy button.
-- [ ] AC3: Copy text contains no line-number prefixes (`/^\d+\{/` does not
+- [x] AC2: Same for the response copy button.
+- [x] AC3: Copy text contains no line-number prefixes (`/^\d+\{/` does not
   match; line count equals the viewer's line count).
-- [ ] AC4: `go test ./...`, `go vet ./...`, `go build ./...` pass.
+- [x] AC4: `go test ./...`, `go vet ./...`, `go build ./...` pass.
 
 ## Out of Scope
 
@@ -80,3 +80,17 @@ and has no newline between the `div`s.
 - Research-acceptable gaps:
   - Audit History, Sessions and Schema views for the same
     `textContent`-of-line-numbered-viewer pattern (R3).
+
+## Resolution — 2026-09-24
+
+- New `DS.jsonViewerText(viewer)` in `ds.js` rebuilds text from each
+  `.json-line .lc` joined with `\n`. `wireCopyButtons()` and the generic
+  `handleCopy()` fallback both use it (R3). No other view copies from a
+  line-numbered viewer's `textContent`.
+- The copy covers the whole payload even while the JSON filter hides lines.
+- Tests: `TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers`; the
+  SPEC-BUG-142 wiring assertion now expects `DS.jsonViewerText(jv)`;
+  `test/smoke/traffic_smoke.mjs` reads the clipboard for both panes, parses
+  it and deep-compares it with the payload from `/api/traffic/{id}`.
+- Verification: same as SPEC-BUG-171 (`go test -race`/`go vet` pass except
+  `cmd/shipyard`, which needs the desktop GTK/WebKit libraries CI installs).
