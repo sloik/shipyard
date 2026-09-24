@@ -133,8 +133,15 @@ security-govulncheck:
 security-govulncheck-offline-fixture:
 	GOPROXY=off GOSUMDB=off GOVCS='*:off' "$(GOVULNCHECK)" -C "$(GOVULNCHECK_OFFLINE_FIXTURE)" -db "$(GOVULNCHECK_OFFLINE_DB)" ./...
 
+# gosec walks directories itself, so it would also load the nested Go modules
+# below. It cannot type-check them from the root module, and those load errors
+# fail the gate even with zero findings. They are not part of the shipped
+# module (`go list ./...` excludes them), and the fixture has its own offline
+# govulncheck target above.
+GOSEC_EXCLUDE_DIRS := -exclude-dir=spike/wails-websocket -exclude-dir=test/security-fixtures/govulncheck-offline
+
 security-gosec:
-	"$(GOSEC)" -exclude-generated -severity high ./...
+	"$(GOSEC)" -exclude-generated -severity high $(GOSEC_EXCLUDE_DIRS) ./...
 
 security-run: security-config-check security-govulncheck security-gosec
 
