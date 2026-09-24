@@ -5242,3 +5242,48 @@ func TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers(t *testing.T) {
 		t.Error("SPEC-BUG-172 R3 FAIL: generic copy fallback still copies raw viewer textContent")
 	}
 }
+
+// TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow verifies the WebSocket
+// handler updates the already-rendered request row when its response arrives,
+// so live rows match a reload.
+func TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	idx := strings.Index(content, "function updateMatchedRequestRow(evt)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-173 FAIL: updateMatchedRequestRow not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	for _, needle := range []string{
+		`'.table-row[data-id="' + evt.matched_id + '"]:not([data-detail-for])'`,
+		"statusBadge(evt.status)",
+		"latencyPill(evt.latency_ms)",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-173 FAIL: updateMatchedRequestRow missing %q", needle)
+		}
+	}
+
+	wsIdx := strings.Index(content, "ws.onmessage = function(e) {")
+	if wsIdx == -1 {
+		t.Fatal("SPEC-BUG-173 FAIL: traffic ws.onmessage not found")
+	}
+	wsBody := content[wsIdx:]
+	if end := strings.Index(wsBody, "retryBtn.addEventListener"); end > 0 {
+		wsBody = wsBody[:end]
+	}
+	if !strings.Contains(wsBody, "if (evt.matched_id) updateMatchedRequestRow(evt);") {
+		t.Error("SPEC-BUG-173 FAIL: live handler must update the matched request row")
+	}
+	// The update must not be gated on "no filters active", unlike the prepend.
+	if strings.Index(wsBody, "updateMatchedRequestRow(evt)") > strings.Index(wsBody, "if (!filterServer.value") {
+		t.Error("SPEC-BUG-173 FAIL: matched-row update must run even when filters are active")
+	}
+}

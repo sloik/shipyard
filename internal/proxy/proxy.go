@@ -536,7 +536,9 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 	if msg.Error != nil {
 		status = "error"
 	}
-	if !isResponse && method != "" {
+	// Only a request with an ID awaits a response; a notification (no ID)
+	// is never answered, so it must not read "pending" forever.
+	if !isResponse && method != "" && msgID != "" {
 		status = "pending"
 	}
 
@@ -570,11 +572,14 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 		Timestamp:  ts.UnixMilli(),
 		Direction:  direction,
 		ServerName: p.name,
-		Method:     method,
-		MessageID:  msgID,
-		Status:     status,
-		LatencyMs:  latencyMs,
-		Payload:    string(raw),
+		// entry.Method: for a response the store fills in the request's method.
+		Method:    entry.Method,
+		MessageID: msgID,
+		Status:    status,
+		LatencyMs: latencyMs,
+		Payload:   string(raw),
+		// Lets live viewers update the already-rendered request row.
+		MatchedID: entry.MatchedID,
 	}
 
 	data, _ := json.Marshal(evt)

@@ -120,6 +120,42 @@ const failures = await withHarness(async ({ page, base }) => {
   check('History toggles never send direction=All or from_ts=NaN',
     trafficURLs.length > 0 && !trafficURLs.some((u) => /direction=All|from_ts=NaN/.test(u)));
 
+  // --- Live rows match a reload (SPEC-BUG-173/174) --------------------------
+  // A fresh page with the WebSocket connected, so the tool call's rows arrive live.
+  const live = await page.context().newPage();
+  await live.goto(base);
+  await live.waitForSelector(ROWS, { timeout: 10000 });
+  await live.waitForTimeout(1000);
+  await fetch(base + '/api/tools/call', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ server: 'alpha', tool: 'echo', arguments: { message: 'live' } }),
+  });
+  await live.waitForTimeout(1000);
+  const newest = (await (await fetch(base + '/api/traffic?method=tools%2Fcall&page_size=2')).json()).items;
+  const liveRes = newest.find((e) => e.direction === RES);
+  const liveReq = newest.find((e) => e.direction === REQ);
+  async function cells(id) {
+    return live.evaluate((rowID) => {
+      const row = document.querySelector(`#timeline-content .table-row[data-id="${rowID}"]:not([data-detail-for])`);
+      if (!row) return null;
+      const text = (col) => row.querySelector(`[data-col=${col}]`).textContent.trim();
+      return { method: text('method'), status: text('status'), latency: text('latency') };
+    }, id);
+  }
+  const liveCells = { res: await cells(liveRes?.id), req: await cells(liveReq?.id) };
+  check('live RES row shows the correlated method', liveCells.res?.method === 'tools/call');
+  check('live REQ row is no longer pending', liveCells.req !== null && liveCells.req.status !== 'pending');
+  check('live REQ row shows a latency', liveCells.req !== null && /\d+m?s/.test(liveCells.req.latency));
+  await live.reload();
+  await live.waitForSelector(ROWS, { timeout: 10000 });
+  const reloaded = { res: await cells(liveRes?.id), req: await cells(liveReq?.id) };
+  check('live rows render the same as after a reload', isDeepStrictEqual(liveCells, reloaded));
+  const notification = await live.evaluate((sel) => [...document.querySelectorAll(sel)]
+    .filter((r) => r.querySelector('[data-col=method]').textContent.trim() === 'notifications/initialized')
+    .map((r) => r.querySelector('[data-col=status]').textContent.trim()), ROWS);
+  check('notifications/initialized row is not pending', notification.length > 0 && !notification.includes('pending'));
+
   return failures;
 });
 

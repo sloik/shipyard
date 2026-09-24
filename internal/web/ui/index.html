@@ -1364,6 +1364,15 @@
     '</div>';
   }
 
+  function updateMatchedRequestRow(evt) {
+    var row = trafficBody.querySelector('.table-row[data-id="' + evt.matched_id + '"]:not([data-detail-for])');
+    if (!row) return;
+    var statusCell = row.querySelector('[data-col="status"]');
+    var latencyCell = row.querySelector('[data-col="latency"]');
+    if (statusCell) statusCell.innerHTML = statusBadge(evt.status);
+    if (latencyCell) latencyCell.innerHTML = latencyPill(evt.latency_ms);
+  }
+
   function renderDetailPanel(entry, matched) {
     var reqEntry = null;
     var resEntry = null;
@@ -2119,6 +2128,10 @@
 
         // Track filters
         trackFilters([evt]);
+
+        // A correlated response updates its already-rendered request row, so
+        // live rows match what a reload shows (SPEC-BUG-173/174).
+        if (evt.matched_id) updateMatchedRequestRow(evt);
 
         // Prepend new live entries when no filters are active
         if (!filterServer.value && !filterMethod.value && !getDirectionFilter()) {

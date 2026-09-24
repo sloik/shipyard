@@ -14,7 +14,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 var openSQLiteDB = func(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
@@ -98,6 +98,12 @@ func (s *Store) migrate() error {
 	if version < 3 {
 		if err := s.migrateToV3(); err != nil {
 			return fmt.Errorf("migrate to v3: %w", err)
+		}
+	}
+
+	if version < 4 {
+		if err := s.migrateToV4(); err != nil {
+			return fmt.Errorf("migrate to v4: %w", err)
 		}
 	}
 
@@ -211,6 +217,41 @@ func (s *Store) migrateToV3() error {
 	return s.createPerformanceRollupSchema()
 }
 
+// migrateToV4 backfills request statuses (SPEC-BUG-174): a request that was
+// matched to a response takes the response's status, and a notification (no
+// message ID, so no response is expected) is no longer left "pending".
+func (s *Store) migrateToV4() error {
+	// Tolerate legacy/partial traffic tables: the backfill only applies to
+	// tables that have the columns it reads.
+	for _, col := range []string{"status", "direction", "matched_id", "message_id"} {
+		exists, err := s.columnExists("traffic", col)
+		if err != nil {
+			return fmt.Errorf("check %s column: %w", col, err)
+		}
+		if !exists {
+			return nil
+		}
+	}
+	if _, err := s.db.Exec(`
+		UPDATE traffic
+		SET status = (SELECT r.status FROM traffic r WHERE r.id = traffic.matched_id)
+		WHERE status = 'pending' AND direction = ? AND matched_id IS NOT NULL
+		  AND EXISTS (SELECT 1 FROM traffic r WHERE r.id = traffic.matched_id)`,
+		DirectionClientToServer,
+	); err != nil {
+		return fmt.Errorf("backfill answered request status: %w", err)
+	}
+	if _, err := s.db.Exec(`
+		UPDATE traffic
+		SET status = 'ok'
+		WHERE status = 'pending' AND direction = ? AND (message_id IS NULL OR message_id = '')`,
+		DirectionClientToServer,
+	); err != nil {
+		return fmt.Errorf("backfill notification status: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) createPerformanceRollupSchema() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS performance_rollups (
@@ -255,6 +296,9 @@ type TrafficEntry struct {
 	Payload    string
 	Status     string
 	IsResponse bool
+	// MatchedID is set by Insert/InsertWithSession when a response is
+	// correlated to its request: the request's row ID.
+	MatchedID int64
 }
 
 // TrafficEvent is the JSON shape sent to the web UI.
@@ -454,6 +498,25 @@ func (s *Store) PerformanceStats() (PerformanceStats, error) {
 	return stats, nil
 }
 
+// linkResponse cross-links a correlated response (row rowID) with its request
+// row. The request takes the response's latency and status, so an answered
+// request no longer reads "pending" (SPEC-BUG-174), and entry.MatchedID is set
+// so callers can tell live viewers which request row changed (SPEC-BUG-173).
+// Caller must hold s.mu.
+func (s *Store) linkResponse(entry *TrafficEntry, rowID int64, latencyMs *int64) {
+	var reqID int64
+	err := s.db.QueryRow(
+		`SELECT id FROM traffic WHERE message_id = ? AND direction = ? AND id != ? ORDER BY id DESC LIMIT 1`,
+		entry.MessageID, DirectionClientToServer, rowID,
+	).Scan(&reqID)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`UPDATE traffic SET matched_id = ?, latency_ms = ?, status = ? WHERE id = ?`, rowID, latencyMs, entry.Status, reqID)
+	s.db.Exec(`UPDATE traffic SET matched_id = ? WHERE id = ?`, reqID, rowID)
+	entry.MatchedID = reqID
+}
+
 // Insert stores a traffic entry and returns the row ID and optional latency.
 func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 	s.mu.Lock()
@@ -471,11 +534,6 @@ func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 				entry.Method = req.method
 			}
 			delete(s.pending, entry.MessageID)
-
-			// Update the original request row with latency and matched_id (will set after insert)
-			defer func(reqID int64, lat int64) {
-				// We'll update both rows after we get the response row ID
-			}(req.rowID, lat)
 		}
 	}
 
@@ -501,16 +559,7 @@ func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 
 	// Cross-link request and response
 	if entry.IsResponse && entry.MessageID != "" && latencyMs != nil {
-		// Find the request row and update matched_id
-		var reqID int64
-		err := s.db.QueryRow(
-			`SELECT id FROM traffic WHERE message_id = ? AND direction = ? AND id != ? ORDER BY id DESC LIMIT 1`,
-			entry.MessageID, DirectionClientToServer, rowID,
-		).Scan(&reqID)
-		if err == nil {
-			s.db.Exec(`UPDATE traffic SET matched_id = ?, latency_ms = ? WHERE id = ?`, rowID, latencyMs, reqID)
-			s.db.Exec(`UPDATE traffic SET matched_id = ? WHERE id = ?`, reqID, rowID)
-		}
+		s.linkResponse(entry, rowID, latencyMs)
 	}
 
 	// If this is a request, track it for correlation
@@ -1022,9 +1071,6 @@ func (s *Store) InsertWithSession(entry *TrafficEntry, sessionID int64) (int64, 
 				entry.Method = req.method
 			}
 			delete(s.pending, entry.MessageID)
-
-			defer func(reqID int64, lat int64) {
-			}(req.rowID, lat)
 		}
 	}
 
@@ -1056,15 +1102,7 @@ func (s *Store) InsertWithSession(entry *TrafficEntry, sessionID int64) (int64, 
 
 	// Cross-link request and response
 	if entry.IsResponse && entry.MessageID != "" && latencyMs != nil {
-		var reqID int64
-		err := s.db.QueryRow(
-			`SELECT id FROM traffic WHERE message_id = ? AND direction = ? AND id != ? ORDER BY id DESC LIMIT 1`,
-			entry.MessageID, DirectionClientToServer, rowID,
-		).Scan(&reqID)
-		if err == nil {
-			s.db.Exec(`UPDATE traffic SET matched_id = ?, latency_ms = ? WHERE id = ?`, rowID, latencyMs, reqID)
-			s.db.Exec(`UPDATE traffic SET matched_id = ? WHERE id = ?`, reqID, rowID)
-		}
+		s.linkResponse(entry, rowID, latencyMs)
 	}
 
 	// If this is a request, track it for correlation
