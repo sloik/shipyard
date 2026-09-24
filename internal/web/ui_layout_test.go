@@ -5333,3 +5333,54 @@ func TestSPECBUG175_FilterBarMatchesDesign(t *testing.T) {
 		t.Error("SPEC-BUG-175 FAIL: the entry count must update on page loads and live inserts")
 	}
 }
+
+// TestSPECBUG176_TimelineEmptyStateMatchesDesign verifies the Traffic empty
+// state uses the UX-002 design copy and its scoped layout rules.
+func TestSPECBUG176_TimelineEmptyStateMatchesDesign(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	start := strings.Index(content, `<div id="timeline-empty" class="empty-state">`)
+	end := strings.Index(content, "<!-- Traffic Content (hidden until data arrives) -->")
+	if start == -1 || end == -1 || end < start {
+		t.Fatal("SPEC-BUG-176 FAIL: #timeline-empty block not found")
+	}
+	block := content[start:end]
+	for _, needle := range []string{
+		`<div class="empty-title">No traffic yet</div>`,
+		`<div class="empty-desc">Start your MCP server through Shipyard to see traffic here.</div>`,
+		`<div class="step-title">Wrap your MCP server</div>`,
+		`<code class="step-code">shipyard wrap -- npx -y @mcp/server /tmp</code>`,
+		`<div class="step-title">Point your AI client at Shipyard</div>`,
+		`Traffic will appear here automatically as your client communicates with the server.`,
+	} {
+		if !strings.Contains(block, needle) {
+			t.Errorf("SPEC-BUG-176 FAIL: empty state missing design copy %q", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for selector, decls := range map[string][]string{
+		"#timeline-empty":                            {"min-height: 100%;", "gap: 16px;"},
+		"#timeline-empty .empty-title":               {"font-size: var(--font-size-2xl);"},
+		"#timeline-empty #onboard-cards":             {"width: 480px;", "text-align: left;"},
+		"#timeline-empty .onboard-step .step-number": {"background: var(--accent-emphasis);", "color: var(--text-on-emphasis);"},
+	} {
+		m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+		if m == nil {
+			t.Errorf("SPEC-BUG-176 FAIL: CSS block %q not found", selector)
+			continue
+		}
+		for _, d := range decls {
+			if !strings.Contains(m[1], d) {
+				t.Errorf("SPEC-BUG-176 FAIL: %s missing %q", selector, d)
+			}
+		}
+	}
+}

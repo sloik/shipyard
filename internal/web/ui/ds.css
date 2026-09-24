@@ -2156,6 +2156,87 @@ textarea {
   min-width: 0;
 }
 
+/* SPEC-BUG-176: Traffic empty state per UX-002 frame "Phase 0 — Empty State"
+   (ApsQe). Scoped to #timeline-empty so the other views' empty states and
+   onboarding steps keep their styles. */
+#timeline-empty {
+  min-height: 100%;
+  box-sizing: border-box;
+  gap: 16px;
+}
+
+#timeline-empty .empty-icon,
+#timeline-empty .empty-title,
+#timeline-empty .empty-desc {
+  margin: 0;
+}
+
+#timeline-empty .empty-title {
+  font-size: var(--font-size-2xl);
+  font-weight: 600;
+}
+
+#timeline-empty .empty-desc {
+  max-width: 360px;
+  font-size: var(--font-size-lg);
+  color: var(--text-secondary);
+}
+
+#timeline-empty #onboard-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 480px;
+  max-width: 100%;
+  padding-top: 16px;
+  text-align: left;
+}
+
+#timeline-empty .onboard-step {
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-l);
+}
+
+#timeline-empty .onboard-step .step-number {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background: var(--accent-emphasis);
+  color: var(--text-on-emphasis);
+  font-size: var(--font-size-base);
+  font-weight: 600;
+}
+
+#timeline-empty .step-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#timeline-empty .step-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+#timeline-empty .step-code {
+  display: block;
+  padding: 6px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-s);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+#timeline-empty .step-desc {
+  max-width: 360px;
+  font-size: var(--font-size-base);
+  color: var(--text-muted);
+}
+
 .onboard-step.is-done {
   border-color: var(--success-fg);
 }

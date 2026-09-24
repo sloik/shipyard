@@ -192,6 +192,41 @@ const failures = await withHarness(async ({ page, base }) => {
     .map((r) => r.querySelector('[data-col=status]').textContent.trim()), ROWS);
   check('notifications/initialized row is not pending', notification.length > 0 && !notification.includes('pending'));
 
+  // --- Empty state matches the design (SPEC-BUG-176) ------------------------
+  const empty = await page.context().newPage();
+  await empty.setViewportSize({ width: 1440, height: 900 });
+  await empty.routeWebSocket('**/ws', () => {});
+  await empty.route('**/api/traffic?*', (r) => r.fulfill({ json: { items: [], total_count: 0 } }));
+  await empty.goto(base);
+  await empty.waitForSelector('#timeline-empty .empty-title', { state: 'visible', timeout: 10000 });
+  const es = await empty.evaluate(() => {
+    const box = (s) => document.querySelector(s).getBoundingClientRect();
+    const style = (s) => getComputedStyle(document.querySelector(s));
+    const view = box('#view-timeline');
+    const icon = box('#timeline-empty .empty-icon');
+    const cards = box('#onboard-cards');
+    return {
+      title: document.querySelector('#timeline-empty .empty-title').textContent.trim(),
+      titleSize: style('#timeline-empty .empty-title').fontSize,
+      desc: document.querySelector('#timeline-empty .empty-desc').textContent.trim(),
+      stepTitles: [...document.querySelectorAll('#timeline-empty .step-title')].map((e) => e.textContent.trim()),
+      code: document.querySelector('#timeline-empty .step-code')?.textContent.trim(),
+      cardsWidth: cards.width,
+      chipBg: style('#timeline-empty .step-number').backgroundColor,
+      // Centre of the icon-to-cards block relative to the view's centre.
+      offset: Math.abs((icon.top + cards.bottom) / 2 - (view.top + view.bottom) / 2),
+    };
+  });
+  check('empty state copy matches the design',
+    es.title === 'No traffic yet'
+    && es.desc === 'Start your MCP server through Shipyard to see traffic here.'
+    && es.stepTitles.join('|') === 'Wrap your MCP server|Point your AI client at Shipyard'
+    && es.code === 'shipyard wrap -- npx -y @mcp/server /tmp');
+  check(`empty state title is 20px (got ${es.titleSize})`, es.titleSize === '20px');
+  check(`empty state steps are 480px wide (got ${es.cardsWidth})`, es.cardsWidth === 480);
+  check(`step chips use the solid accent (got ${es.chipBg})`, es.chipBg === 'rgb(31, 111, 235)');
+  check(`empty state is vertically centred (offset ${Math.round(es.offset)}px)`, es.offset <= 4);
+
   return failures;
 });
 
