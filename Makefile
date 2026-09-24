@@ -29,7 +29,8 @@ build:
 # (the Go suite) so a missing browser/node never blocks unrelated work.
 #
 # `make smoke`      - fast path: Tool Browser only (the common case).
-# `make smoke-full` - opt-in: Tool Browser + Servers view (SPEC-BUG-150).
+# `make smoke-full` - opt-in: Tool Browser + Servers + Traffic views
+#                    (SPEC-BUG-150, SPEC-BUG-171/172).
 #
 # Skips gracefully (exit 0): node missing -> guarded here; Chrome or
 # playwright-core missing -> guarded inside lib/harness.mjs.
@@ -61,6 +62,9 @@ smoke-full:
 	SHIPYARD_BIN="$(SMOKE_BIN_DIR)/shipyard-smoke" \
 	STUBCHILD_BIN="$(SMOKE_BIN_DIR)/stubchild-smoke" \
 	node test/smoke/servers_smoke.mjs
+	SHIPYARD_BIN="$(SMOKE_BIN_DIR)/shipyard-smoke" \
+	STUBCHILD_BIN="$(SMOKE_BIN_DIR)/stubchild-smoke" \
+	node test/smoke/traffic_smoke.mjs
 
 # Builds, smoke-tests, and then atomically promotes the sole launchd runtime.
 # The script refuses to archive legacy binaries until launchd proves the

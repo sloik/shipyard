@@ -84,20 +84,20 @@
     <div id="timeline-empty" class="empty-state">
     <div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></div>
     <div class="empty-title">No traffic yet</div>
-    <div class="empty-desc">Waiting for MCP messages. <a href="#servers" style="color:var(--accent-primary, #58a6ff);">Set up servers</a> to start capturing traffic.</div>
+    <div class="empty-desc">Start your MCP server through Shipyard to see traffic here.</div>
     <div id="onboard-cards">
       <div class="onboard-step">
         <div class="step-number">1</div>
         <div class="step-content">
-          <strong>Add MCP servers</strong><br>
-          <a href="#servers" style="color:var(--accent-primary, #58a6ff);">Auto-import</a> from Claude Desktop / Claude Code, or provide a config file.
+          <div class="step-title">Wrap your MCP server</div>
+          <code class="step-code">shipyard wrap -- npx -y @mcp/server /tmp</code>
         </div>
       </div>
       <div class="onboard-step">
         <div class="step-number">2</div>
         <div class="step-content">
-          <strong>Traffic appears here</strong><br>
-          Every JSON-RPC message between your client and servers shows up in real time.
+          <div class="step-title">Point your AI client at Shipyard</div>
+          <div class="step-desc">Traffic will appear here automatically as your client communicates with the server.</div>
         </div>
       </div>
     </div>
@@ -129,7 +129,6 @@
         </div>
       </div>
       <button class="btn btn-ghost" id="clear-filters-btn" style="gap:4px;margin-left:auto;"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear</button>
-      <span id="traffic-count" class="badge badge-neutral"></span>
     </div>
 
     <!-- Table Header -->
@@ -831,7 +830,6 @@
   var filterMethod    = document.getElementById('filter-method');
   var dirToggle       = document.getElementById('dir-toggle');
   var clearFiltersBtn = document.getElementById('clear-filters-btn');
-  var trafficCount    = document.getElementById('traffic-count');
   var timelineSentinel  = document.getElementById('timeline-sentinel');
   var timelineLoadingEl = document.getElementById('timeline-loading');
   var timelineScrollInfo = document.getElementById('timeline-scroll-info');
@@ -1364,6 +1362,15 @@
     '</div>';
   }
 
+  function updateMatchedRequestRow(evt) {
+    var row = trafficBody.querySelector('.table-row[data-id="' + evt.matched_id + '"]:not([data-detail-for])');
+    if (!row) return;
+    var statusCell = row.querySelector('[data-col="status"]');
+    var latencyCell = row.querySelector('[data-col="latency"]');
+    if (statusCell) statusCell.innerHTML = statusBadge(evt.status);
+    if (latencyCell) latencyCell.innerHTML = latencyPill(evt.latency_ms);
+  }
+
   function renderDetailPanel(entry, matched) {
     var reqEntry = null;
     var resEntry = null;
@@ -1471,7 +1478,7 @@
         if (!panel) return;
         var jv = panel.querySelector('.json-viewer');
         if (jv) {
-          btn.setAttribute('data-copy', jv.textContent);
+          btn.setAttribute('data-copy', DS.jsonViewerText(jv));
         }
       })(copyBtns[i]);
     }
@@ -1955,6 +1962,17 @@
     timelineScrollInfo.style.display = 'none';
   }
 
+  // The one entry count on the Traffic view (SPEC-BUG-175): the design's
+  // footer "Showing N of M entries", kept current on every load and live row.
+  function updateTimelineCount() {
+    if (timelineTotal > 0) {
+      timelineScrollInfo.textContent = 'Showing ' + Math.min(timelineOffset, timelineTotal) + ' of ' + timelineTotal + ' entries';
+      timelineScrollInfo.style.display = '';
+    } else {
+      timelineScrollInfo.style.display = 'none';
+    }
+  }
+
   function activeTimelineRowCount() {
     return trafficBody.querySelectorAll('.table-row').length;
   }
@@ -2002,7 +2020,10 @@
     var mt = filterMethod.value;
     if (sv) params.set('server', sv);
     if (mt) params.set('method', mt);
-    // Note: direction filter is client-side since the API doesn't support it
+    // Direction is filtered server-side so offset/total stay consistent with
+    // the rows shown (SPEC-BUG-171).
+    var dirVal = getDirectionFilter();
+    if (dirVal) params.set('direction', dirVal);
 
     fetch('/api/traffic?' + params)
       .then(function(resp) { return resp.json(); })
@@ -2011,7 +2032,9 @@
         timelineLoadingEl.style.display = 'none';
         timelineTotal = data.total_count;
 
-        if (timelineTotal === 0 && timelineOffset === 0) {
+        // Only the unfiltered empty result is "no traffic yet"; a filter that
+        // matches nothing must keep the filter bar visible so it can be undone.
+        if (timelineTotal === 0 && timelineOffset === 0 && !sv && !mt && !dirVal) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
           recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0, active_rows: 0, budget: timelineActiveRowBudget });
@@ -2024,16 +2047,6 @@
         var items = data.items || [];
         trackFilters(items);
 
-        // Apply client-side direction filter
-        var dirVal = getDirectionFilter();
-        if (dirVal) {
-          items = items.filter(function(item) {
-            return item.direction === dirVal;
-          });
-        }
-
-        trafficCount.textContent = timelineTotal + ' entries';
-
         var existingCount = trafficBody.querySelectorAll('.table-row:not([data-detail-for])').length;
         for (var i = 0; i < items.length; i++) {
           trafficBody.insertAdjacentHTML('beforeend', renderRow(items[i], existingCount + i));
@@ -2045,11 +2058,8 @@
         // Check if we've loaded everything
         if (timelineOffset >= timelineTotal || items.length === 0) {
           timelineAllLoaded = true;
-          if (timelineTotal > 0) {
-            timelineScrollInfo.textContent = 'Showing ' + timelineOffset + ' of ' + timelineTotal + ' entries';
-            timelineScrollInfo.style.display = '';
-          }
         }
+        updateTimelineCount();
         recordClientTelemetry('timeline.load', telemetryStart, { rows: items.length, total: timelineTotal, active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
       })
       .catch(function(err) {
@@ -2123,6 +2133,10 @@
         // Track filters
         trackFilters([evt]);
 
+        // A correlated response updates its already-rendered request row, so
+        // live rows match what a reload shows (SPEC-BUG-173/174).
+        if (evt.matched_id) updateMatchedRequestRow(evt);
+
         // Prepend new live entries when no filters are active
         if (!filterServer.value && !filterMethod.value && !getDirectionFilter()) {
           timelineEmpty.style.display = 'none';
@@ -2134,7 +2148,7 @@
 
           timelineTotal++;
           timelineOffset++;
-          trafficCount.textContent = timelineTotal + ' entries';
+          updateTimelineCount();
           recordClientTelemetry('timeline.live.insert', telemetryStart, { active_rows: activeTimelineRowCount(), budget: timelineActiveRowBudget });
         }
       } catch(err) {

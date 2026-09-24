@@ -343,7 +343,8 @@ func TestRun_RealSubprocessCleanExchange(t *testing.T) {
 
 	waitForStoreCount(t, store, 2)
 	events := queryTrafficEvents(t, store, 10)
-	if !hasTrafficEvent(events, capture.DirectionClientToServer, "tools/list", "pending", "1") {
+	// The answered request takes its response's status (SPEC-BUG-174).
+	if !hasTrafficEvent(events, capture.DirectionClientToServer, "tools/list", "ok", "1") {
 		t.Fatalf("expected captured client request, got %+v", events)
 	}
 	if !hasTrafficEvent(events, capture.DirectionServerToClient, "", "ok", "1") {

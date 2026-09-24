@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,9 +89,10 @@ func TestCaptureMessage_NotificationStatus(t *testing.T) {
 	p.captureMessage([]byte(msg), capture.DirectionClientToServer, time.Now())
 
 	evt := lastEvent(t, store)
-	// Notifications are requests without an ID — status should be "pending"
-	if evt.Status != "pending" {
-		t.Fatalf("expected status 'pending' for notification, got '%s'", evt.Status)
+	// Notifications have no ID, so no response will ever arrive; they must not
+	// read "pending" forever (SPEC-BUG-174).
+	if evt.Status != "ok" {
+		t.Fatalf("expected status 'ok' for notification, got '%s'", evt.Status)
 	}
 }
 
@@ -212,5 +214,45 @@ func TestCaptureMessage_StatusNeverRequest(t *testing.T) {
 		if evt.Status == tc.wantNot {
 			t.Fatalf("%s: status must not be '%s'", tc.name, tc.wantNot)
 		}
+	}
+}
+
+// TestSPECBUG173_ResponseBroadcastCarriesCorrelatedFields verifies that the
+// live event for a correlated response carries the request's method and row
+// ID, so the UI can render it and update the request row without a reload.
+func TestSPECBUG173_ResponseBroadcastCarriesCorrelatedFields(t *testing.T) {
+	p, _ := newTestProxy(t)
+	recv := p.hub.Subscribe()
+	defer p.hub.Unsubscribe(recv)
+
+	now := time.Now()
+	p.captureMessage([]byte(`{"jsonrpc":"2.0","method":"tools/call","id":5}`), capture.DirectionClientToServer, now)
+	p.captureMessage([]byte(`{"jsonrpc":"2.0","id":5,"result":{}}`), capture.DirectionServerToClient, now.Add(3*time.Millisecond))
+
+	var events []capture.TrafficEvent
+	for len(events) < 2 {
+		select {
+		case msg := <-recv:
+			var evt capture.TrafficEvent
+			if err := json.Unmarshal(msg, &evt); err != nil {
+				t.Fatalf("unmarshal broadcast: %v", err)
+			}
+			events = append(events, evt)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected 2 broadcasts, got %d", len(events))
+		}
+	}
+	req, res := events[0], events[1]
+	if req.Status != "pending" {
+		t.Fatalf("request broadcast status = %q, want pending", req.Status)
+	}
+	if res.Method != "tools/call" {
+		t.Fatalf("AC1: response broadcast method = %q, want tools/call", res.Method)
+	}
+	if res.MatchedID != req.ID {
+		t.Fatalf("response broadcast matched_id = %d, want request id %d", res.MatchedID, req.ID)
+	}
+	if res.LatencyMs == nil {
+		t.Fatal("response broadcast missing latency")
 	}
 }

@@ -1961,3 +1961,117 @@ func TestColumnExists(t *testing.T) {
 		t.Fatal("expected 'session_id' column to exist on traffic table")
 	}
 }
+
+// trafficByID returns the stored traffic events keyed by row ID.
+func trafficByID(t *testing.T, s *Store) map[int64]TrafficEvent {
+	t.Helper()
+	page, err := s.Query(1, 100, "", "")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	out := make(map[int64]TrafficEvent, len(page.Items))
+	for _, evt := range page.Items {
+		out[evt.ID] = evt
+	}
+	return out
+}
+
+// TestSPECBUG174_CorrelatedRequestTakesResponseStatus verifies that answering
+// a request replaces its "pending" status with the response's status, for both
+// insert paths, and that an unanswered request stays pending.
+func TestSPECBUG174_CorrelatedRequestTakesResponseStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		resStatus string
+		insert    func(s *Store, e *TrafficEntry) (int64, *int64)
+	}{
+		{"insert ok", "ok", func(s *Store, e *TrafficEntry) (int64, *int64) { return s.Insert(e) }},
+		{"insert error", "error", func(s *Store, e *TrafficEntry) (int64, *int64) { return s.Insert(e) }},
+		{"insert with session", "ok", func(s *Store, e *TrafficEntry) (int64, *int64) { return s.InsertWithSession(e, 0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			now := time.Now()
+			reqID, _ := tc.insert(s, &TrafficEntry{
+				Timestamp: now, Direction: DirectionClientToServer, ServerName: "alpha",
+				Method: "tools/call", MessageID: "7", Payload: `{"id":7}`, Status: "pending",
+			})
+			openID, _ := tc.insert(s, &TrafficEntry{
+				Timestamp: now, Direction: DirectionClientToServer, ServerName: "alpha",
+				Method: "tools/list", MessageID: "8", Payload: `{"id":8}`, Status: "pending",
+			})
+			res := &TrafficEntry{
+				Timestamp: now.Add(5 * time.Millisecond), Direction: DirectionServerToClient, ServerName: "alpha",
+				MessageID: "7", Payload: `{"id":7}`, Status: tc.resStatus, IsResponse: true,
+			}
+			resID, latency := tc.insert(s, res)
+			if latency == nil {
+				t.Fatal("expected response to correlate")
+			}
+			if res.MatchedID != reqID {
+				t.Fatalf("SPEC-BUG-173: entry.MatchedID = %d, want request row %d", res.MatchedID, reqID)
+			}
+			if res.Method != "tools/call" {
+				t.Fatalf("SPEC-BUG-173: response method = %q, want tools/call", res.Method)
+			}
+
+			rows := trafficByID(t, s)
+			if got := rows[reqID].Status; got != tc.resStatus {
+				t.Fatalf("AC1: request status = %q, want %q", got, tc.resStatus)
+			}
+			if rows[reqID].MatchedID != resID || rows[reqID].LatencyMs == nil {
+				t.Fatalf("request row not linked: %+v", rows[reqID])
+			}
+			if got := rows[openID].Status; got != "pending" {
+				t.Fatalf("AC1: unanswered request status = %q, want pending", got)
+			}
+		})
+	}
+}
+
+// TestSPECBUG174_MigrationV4BackfillsRequestStatus verifies that upgrading a
+// v3 database resolves request rows left "pending" by older builds.
+func TestSPECBUG174_MigrationV4BackfillsRequestStatus(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	jsonlPath := filepath.Join(dir, "test.jsonl")
+
+	s, err := NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	insert := func(direction, method, msgID, status string) int64 {
+		res, err := s.db.Exec(`INSERT INTO traffic (ts, direction, server_name, method, message_id, payload, status)
+			VALUES (?, ?, 'alpha', ?, ?, '{}', ?)`, ts, direction, method, msgID, status)
+		if err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	answered := insert(DirectionClientToServer, "tools/call", "1", "pending")
+	failedRes := insert(DirectionServerToClient, "tools/call", "1", "error")
+	unanswered := insert(DirectionClientToServer, "tools/list", "2", "pending")
+	notification := insert(DirectionClientToServer, "notifications/initialized", "", "pending")
+	if _, err := s.db.Exec(`UPDATE traffic SET matched_id = ? WHERE id = ?`, failedRes, answered); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("set version: %v", err)
+	}
+	s.Close()
+
+	s, err = NewStore(dbPath, jsonlPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	rows := trafficByID(t, s)
+	for id, want := range map[int64]string{answered: "error", unanswered: "pending", notification: "ok", failedRes: "error"} {
+		if got := rows[id].Status; got != want {
+			t.Errorf("row %d (%s) status = %q, want %q", id, rows[id].Method, got, want)
+		}
+	}
+}
