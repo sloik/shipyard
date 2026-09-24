@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 3
 type: bugfix
-status: draft
+status: done
 after: []
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -38,7 +38,7 @@ design's `State — Auto-Import Discovery` frame) and the Servers view instead o
 `shipyard wrap`, so the **copy** may be an intentional improvement rather than
 a regression.
 
-## Open Question (blocks `ready`)
+## Open Question (resolved 2026-09-24: design wins)
 
 - Q1: Should the implementation follow the design's copy (wrap command +
   "Point your AI client"), or should the `.pen` design be updated to the
@@ -50,23 +50,47 @@ style) follow the design either way.
 
 ## Requirements
 
-- [ ] R1: Empty state is vertically centered in the content area.
-- [ ] R2: Title 20 px / 600; description 14 px, `$text-secondary`, max 360 px.
-- [ ] R3: Step cards 480 px wide, left-aligned content, solid accent number
+- [x] R1: Empty state is vertically centered in the content area.
+- [x] R2: Title 20 px / 600; description 14 px, `$text-secondary`, max 360 px.
+- [x] R3: Step cards 480 px wide, left-aligned content, solid accent number
   chips.
-- [ ] R4: Copy per the Q1 decision; if the design is updated instead, update
+- [x] R4: Copy per the Q1 decision; if the design is updated instead, update
   `UX-002-dashboard-design.pen` in Pencil.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Headless screenshot with `/api/traffic` stubbed empty matches the
+- [x] AC1: Headless screenshot with `/api/traffic` stubbed empty matches the
   design frame's structure (centered block, two steps, per R1–R3).
-- [ ] AC2: Copy matches whichever source Q1 selects; the other source is
+- [x] AC2: Copy matches whichever source Q1 selects; the other source is
   updated so the design and the implementation agree.
-- [ ] AC3: `go test ./...` passes.
+- [x] AC3: `go test ./...` passes.
 
 ## Code Pointers
 
 - `internal/web/ui/index.html` — `#timeline-empty` (~84–105)
 - `internal/web/ui/ds.css` — `.empty-state`
 - `.nightshift/specs/UX-002-dashboard-design.pen` — frame `ApsQe`
+
+## Resolution — 2026-09-24
+
+- Q1: the user chose **design wins**, so the implementation now uses the
+  `.pen` copy verbatim: "Start your MCP server through Shipyard to see
+  traffic here.", step 1 "Wrap your MCP server" with the code block
+  `shipyard wrap -- npx -y @mcp/server /tmp` (`--name` is optional, so the
+  command works as written), and step 2 "Point your AI client at Shipyard".
+  The design needs no change.
+- Layout (`ds.css`, scoped to `#timeline-empty`, so the other views' empty
+  states and onboarding steps are unchanged): the empty state fills the view
+  and is centred vertically, with 16px gaps; the title is 20px / 600; the
+  description is 14px `--text-secondary`, max 360px; the step cards are
+  480px wide, left-aligned, with 12px padding, `--radius-l` and a
+  `--border-default` border; the number chips are 24px solid
+  `--accent-emphasis` with `--text-on-emphasis`; the command sits in a
+  `--bg-inset` mono code block.
+- Measured at 1440×900 (traffic stubbed empty, WebSocket blocked): content is
+  centred to within 0px of the view centre; the title is 20px; the cards are
+  480px; the chip colour is `rgb(31, 111, 235)` (dark) and `--accent-emphasis`
+  in light theme too.
+- Tests: `TestSPECBUG176_TimelineEmptyStateMatchesDesign` (fails on the
+  pre-fix UI) and an empty-state section in `test/smoke/traffic_smoke.mjs`.
+  The Tool Browser and Servers smoke harnesses still pass.

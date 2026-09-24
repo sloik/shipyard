@@ -89,7 +89,7 @@ Checklist for each spec:
 - [x] AC-6: Copy-to-clipboard button on JSON payloads
 - [x] AC-7: Server filter populated dynamically from actual traffic data
 - [x] AC-8: Direction toggle (all / client→server / server→client) works
-- [ ] AC-9: Empty state matches design
+- [x] AC-9: Empty state matches design
 - [x] AC-10: No visual element exists in the implementation that isn't in the design
 - [x] AC-11: No external dependencies — all CSS/JS inline in single HTML file
 - [x] AC-12: Phase 1-3 designs are present in the .pen file (implementation deferred to their respective specs)
@@ -110,7 +110,7 @@ Checked against a `-tags server` build driven headlessly (Chromium, 1440×900,
 | AC-6 | pass (fixed) | copy put line numbers on the clipboard and dropped newlines; fixed by SPEC-BUG-172 |
 | AC-7 | pass | `#filter-server` options built from observed traffic (`All servers`, `alpha`) |
 | AC-8 | pass (fixed) | "All" emptied the table (History toggles too); fixed by SPEC-BUG-171 |
-| AC-9 | **fail** | layout/copy differ from `ApsQe` — SPEC-BUG-176 (draft, copy decision needed) |
+| AC-9 | pass (fixed) | layout and copy differed from `ApsQe`; fixed by SPEC-BUG-176 using the design's copy ("design wins") |
 | AC-10 | pass (fixed) | extra filter-bar entry badge removed by SPEC-BUG-175. Known sanctioned deviation: infinite scroll replaced the design's pagination footer (SPEC-BUG-113); the `.pen` footer was not updated |
 | AC-11 | pass | no remote/CDN assets; `ds.css`/`ds.js` are embedded, the documented SPEC-005 exception |
 | AC-12 | pass | Phase 1–3 frames present (`d1yZ4`, `YAgf3`, `t7hu7`, …) |
