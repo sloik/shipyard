@@ -211,6 +211,71 @@ Nightshift ships two git hooks:
   and rejects `chore: mark <id> done|blocked` unless every required terminal
   lifecycle trailer is present and non-empty.
 
+### Staged spec validation (SPEC-358)
+
+`hooks/pre-commit` validates specs by invoking
+`python3 validate_specs.py --staged <repo-root>`, which reads the Git
+**index snapshot** (`git ls-files --stage` + `git cat-file`) — never the
+working tree — so it always checks the exact bytes about to be committed,
+never a stale or since-edited on-disk copy. It fires on any commit that
+adds/modifies/copies/renames/deletes a `specs/*.md` file, an
+`artifacts/index.json`, or a file under `reports/<id>/artifacts/`; an
+unrelated commit is not gated at all. HEAD is the baseline for
+adoption/transition comparisons only; a brand-new repo with no HEAD gets an
+explicit empty baseline. An unresolved (unmerged) index entry refuses
+validation outright rather than guessing.
+
+BUG-338's nearest-install resolver maps each affected path to its owning kit,
+configuration and spec root. `hooks/pre-commit --resolve-owners` exposes those
+four fields per path, NUL-delimited, without running checks. Canonical paths
+have explicit canonical ownership; ambiguous root ownership refuses. Each
+affected install is checked once. Missing validators refuse with a sync repair
+instruction. Both sides of renames and deleted artifact paths are triggers.
+
+Findings for the `## State rationale` section follow one severity matrix: a
+`WARNING: state_rationale_*` finding never blocks the commit (e.g.
+`state_rationale_legacy_missing` on an untouched old spec, or
+`state_rationale_record_pending` on a new draft with no record yet); any
+other `state_rationale_*` finding is fatal and rejects the commit. Repair by
+adding/fixing the `## State rationale` section (see SPEC-GUIDE.md) or, for a
+missing record, running the `record-transition`/`author-decision` capture
+command before committing — never by loosening the section or deleting it.
+
+| Adoption/state | Section | Matching record | Severity |
+| --- | --- | --- | --- |
+| New draft (absent from Git baseline), or version 12 / section opt-in | Required | May be pending in draft | Missing section errors; pending draft record warns |
+| New or adopted planned/ready/in_progress/blocked/done/superseded | Required | Required | Missing, malformed or stale declaration errors |
+| Unchanged pre-adoption spec | Optional | No invented history | `legacy_missing` warning |
+| Any byte edit to legacy nonterminal, or transition to terminal | Required | Required except draft | Backfill before commit |
+| Unchanged terminal history, or metadata-only edit to terminal legacy | Optional | No invented history | `legacy_missing` warning |
+| Strict planned/ready admission, including private-local runtime | Required | Required | Legacy audit exemption does not permit promotion |
+| Template / main / questions / NFR family | Not required | Not required | A declared malformed section still errors outside templates |
+
+Version/section removal cannot undo adoption. Artifact-only changes validate
+declared history without adopting an untouched legacy spec. A non-Git audit can
+enforce only version/section opt-in and reports `baseline_unavailable`.
+
+The executable and imported modules are the trusted installed validator, not
+code loaded from the index. It materializes only an inert temporary data tree;
+no copied program is executed. Configuration, NFR declarations, records and local
+evidence come from the captured index. Worktree edits cannot change those bytes.
+Changing the installed validator itself changes that trust boundary; review and
+CI must use a separately trusted validator executable.
+
+Because hooks can be bypassed, CI runs that trusted executable explicitly:
+`python3 validate_specs.py <specs-dir> --base-revision <merge-base-or-parent> --format json`.
+Without a supplied revision, file/directory mode compares to HEAD; a non-Git
+audit reports `baseline_unavailable`. `--baseline` remains the unrelated
+finding-family inventory comparison and never exempts a changed violating spec.
+
+Commit-backed specs require both record and index in the same staged snapshot.
+Private-local runtime admission reads the configured private spec/report root;
+its records need not enter Git. A committed declaration cannot rely solely on
+those invisible files. External project/URL availability is warning-only
+`state_rationale_unverified_external`; hooks perform no network checks. Structural
+validity never proves prose truth: specific-but-false reasoning needs QUESTIONS
+review. Terminal evidence rules remain enforced by the ordinary validator.
+
 ### Terminal lifecycle evidence contract (SPEC-221)
 
 Every `chore: mark <id> done` or `chore: mark <id> blocked` commit must contain
@@ -345,6 +410,88 @@ cleanup and preserves HEAD, index, branch, worktree, and divergent payload.
 
 Hooks are enforcement implementations. If this policy changes, update this file
 first, then update hooks and drift checks to match.
+
+### Receipt-bound canonical-source authoring (SPEC-365)
+
+The strict installed-payload gate remains the default, including in a directory
+named `canonical`. Environment signoffs, worker output, a regenerated admission,
+or a self-labelled authority record cannot enable source authoring. Dogfooded
+`.nightshift` copies retain strict protection. This policy performs no deployment.
+
+Before dispatch the parent retains user authorization, repository common-directory
+identity, exact source/worktree identity, original admission receipt coordinates,
+baseline revision, approved main scope revision and policy outside the candidate's
+writable surface. A legacy receipt is unchanged: the parent independently chooses
+a retained Git baseline whose manifest fingerprint and complete inventory match
+the receipt and records that reconstruction. The original invocation/run identity
+and 24-hour freshness checks still apply; a controller run ID cannot replace them.
+
+Only the parent injects `authoring_provider(install, spec_id)` into
+`managed_payload_provenance.verify_terminal_integrity`. The provider returns
+`AuthoringAnchor(authority_path, authority_sha256, main_ref="refs/heads/main")`.
+The path must be external to the candidate; the expected digest and authoritative
+main ref come from retained parent state. Location alone is not authentication on
+a shared host. Never load this provider or expected digest from `resultAcceptance`,
+worker outcomes, candidate configuration, or the authority file itself. There is
+no command-line or environment authoring override.
+
+The JSON record has schema `1.0.0` and these exact fields:
+
+- `authorization_id`: parent-issued immutable attempt ID; `policy`:
+  `canonical-authoring-v1`; `user_authorization_sha256`: retained authorization digest.
+- `binding`: original Git common-directory, worktree and install-relative hashes;
+  `source_relative`, `spec_id`, and `spec_path`: exact authorized repository paths/ID.
+- `receipt_sha256`, `invocation_id`, `receipt_run_id`: original admission identities.
+- `baseline_revision`, `baseline_manifest_fingerprint`, `baseline_inventory_sha256`:
+  independently reconstructed admitted baseline.
+- `scope_revision`, `scope`: approved main revision and the `write`, `deny`, `read`
+  projection rederived with `scope_guard.scope_from_main` at that exact revision.
+- `main_revision`, `candidate_commit`, `candidate_tree`,
+  `candidate_manifest_fingerprint`: full frozen Git and manifest identities.
+- `independent_verification`: normalized parent-retained `verifier_identity_sha256`,
+  `verdict_sha256`, `candidate_commit`, `candidate_tree`, and `policy`. The parent
+  supplies this only after independently validating the actual verdict's schema,
+  identity, independence, complete AC coverage, and clean verifier footprint.
+
+Under existing serialization, the parent pins fresh main. The candidate must be
+clean, committed, and contain that exact revision. Main movement requires a new
+composition, verification and authorization ID. Comparison covers the union of
+baseline and candidate managed inventories: existing entries cannot disappear;
+new entries need approved scope and exact runtime-resource closure; unchanged
+entries keep baseline bytes/modes. Every managed file must also match its pinned
+Git blob. Unsafe paths, symlinks, aliases and conflicting main changes reject.
+The manifest remains the sole inventory.
+
+Results live separately in `reports/_wip/managed-payload-integrity/authoring-results/`,
+keyed by authorization ID. Atomic write-once persistence makes identical replay
+idempotent and quarantines contradictory bindings/results. Original receipts and
+strict indeterminate results remain immutable. Incomplete proof or artifact failure
+accepts nothing and permits no lifecycle advancement, merge, post-merge validation,
+or cleanup. Preserve the candidate and evidence for bounded parent recovery.
+
+The eight entries in `TERMINAL_ENTRYPOINT_INVENTORY` are the coverage contract.
+Executable callers are Coordinator, `accept_instruction_result` (all five official
+instruction routes), `run_validation`, and the existing `parallel_executor`
+parent `terminal_gate` callback. Instruction-only routes are LOOP, ORCHESTRATOR,
+BOOTSTRAP and the canonical skill. Pass `authoring_provider` separately from
+worker packets; Coordinator also accepts a parent-selected `integrity_install`
+when working on canonical sources in a repository with a dogfooded install.
+Its shared-control-plane check stays strict; only the selected worker gate receives
+the provider. There is still one serialized integration queue and lifecycle writer,
+bounded dispatch, overlap containment, and distinct fresh-main validation (NFR-001).
+
+**First use for SPEC-365:** preserve the old strict result and original receipt;
+freeze and independently review the exact new gate implementation under the
+explicit prerequisite authorization. This bounded review collects evidence only:
+it advances no lifecycle and merges/cleans nothing. The verifier evaluates this
+contract, including negative authority and installed-drift controls, and grants no
+exception. The parent validates and externally retains the verdict and exact
+candidate binding, then loads only that pinned implementation and injects its
+separately anchored authoring record. Missing independent verdict or external user
+authorization refuses bootstrap. Changed candidate bytes require fresh independent
+verification and a new authorization ID. Normal scope/release metadata gates,
+independent verdict, full canonical suite, exact fresh-main suite and lifecycle
+gates remain mandatory; the versioned release handoff remains pending.
 
 ### The kit's own detector fixtures (SPEC-197)
 

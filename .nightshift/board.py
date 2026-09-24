@@ -31,11 +31,12 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,7 @@ from dependency_registry import DependencyRegistryResolver, DependencyResolution
 from spec_frontmatter import promotion_transition_error
 import deployment_tiers
 import lifecycle
+import skill_tutorial
 import spec_artifacts
 
 # SPEC-332: the status-sync rule is shared with validate_specs.py; the module
@@ -316,6 +318,10 @@ class CacheEntry:
     mtime: float
     frontmatter: dict
     body_md: Optional[str] = None  # None = not yet loaded (Tier 2)
+    # SPEC-359 R4/R6: the parsed ``## State rationale`` section, captured while
+    # the file is already being read so the corpus pass never re-reads bodies:
+    # ("absent" | "present" | "malformed", section-or-error-text).
+    rationale: tuple = ("absent", None)
 
 
 class SpecCache:
@@ -341,6 +347,16 @@ class SpecCache:
         # recomputing the corpus; a changed input invalidates it.
         self._projection: dict[str, dict] = {}
         self._projection_signature: tuple | None = None
+        # SPEC-359: full run-state explanations derived in the same pass as
+        # `_projection` (so a detail request reuses them), plus the per-refresh
+        # memos: one batched Git snapshot per signature, and each spec's
+        # rationale resolution keyed by the stamps of the files it read.
+        self._explanations: dict[str, dict] = {}
+        # SPEC-366: what an in-progress spec's explanation is recomposed from when its detail is
+        # requested, so the heartbeat age is read against the request's clock, not the projection's.
+        self._recompose: dict[str, tuple[dict, dict]] = {}
+        self._pass_memo: tuple | None = None  # (signature, snapshot, parallel, qualified)
+        self._rationale_memo: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -380,7 +396,37 @@ class SpecCache:
 
     def _invalidate_projection(self) -> None:
         self._projection = {}
+        self._explanations = {}
+        self._recompose = {}
         self._projection_signature = None
+
+    def get_explanation(self, spec_id: str) -> Optional[dict]:
+        """The full SPEC-359 run-state explanation for the last projection (no new derivation)."""
+        with self._lock:
+            if spec_id not in self._explanations and spec_id in self._entries:
+                # An entry reload between the projection fetch and this call reset the memo.
+                self._get_all_frontmatter_locked()
+            explanation = self._explanations.get(spec_id)
+            if explanation is None:
+                return None
+            pending = self._recompose.get(spec_id)
+            return dict(self._with_heartbeat(spec_id, pending, explanation) if pending else explanation)
+
+    def _with_heartbeat(self, spec_id: str, pending: tuple[dict, dict], explanation: dict) -> dict:
+        """SPEC-366: an in-progress spec's detail explanation, with its heartbeat's liveness result.
+
+        One bounded heartbeat read per request for that spec alone; the memoized projection and the
+        list `run_state_summary` derived from it are untouched, and a failure keeps the memoized one.
+        """
+        item, kwargs = pending
+        now = datetime.now(timezone.utc)
+        try:
+            evidence = spec_artifacts.read_heartbeat_evidence(kwargs["reports_root"], spec_id, now=now)
+            return spec_artifacts.compose_run_state_explanation(
+                item, **{**kwargs, "now": now, "heartbeat_evidence": evidence})
+        except Exception:
+            log.exception("heartbeat evidence unavailable for %s; the explanation omits it", spec_id)
+            return explanation
 
     def _corpus_signature(self) -> tuple:
         """Every input the corpus projection is derived from, cheaply.
@@ -430,7 +476,37 @@ class SpecCache:
                     stamps.append((stat.st_mtime, stat.st_size))
                 except OSError:
                     stamps.append(None)
-        return (files, tuple(artifacts), tuple(stamps))
+        return (files, tuple(artifacts), tuple(stamps), self._explanation_stamp(parent))
+
+    def _explanation_stamp(self, project_root: Path) -> tuple:
+        """SPEC-359 R6: stat-only stamps of every extra input an explanation reads.
+
+        Each spec's selected rationale record and artifact index, the Git
+        index/HEAD/branch-ref and state-policy config the persistence snapshot
+        reads, and the spec file of each resolved cross-project prerequisite.
+        Stat calls only: this runs on every signature check and must never spawn
+        a process, scan recursively or read a network path.
+        """
+        reports_root = project_root / "reports"
+        rationale = []
+        for spec_id, entry in self._entries.items():
+            kind, data = entry.rationale
+            record = data.get("record") if kind == "present" and isinstance(data, dict) else None
+            rationale.append((spec_id, spec_artifacts.rationale_stamp(reports_root, spec_id, record)))
+        external = []
+        specs_dir = Path(self._specs_dir).resolve()
+        for record in self._dependency_resolution.resolved.values():
+            if record.spec_path.parent != specs_dir:
+                try:
+                    info = record.spec_path.stat()
+                    external.append((str(record.spec_path), info.st_mtime_ns, info.st_size))
+                except OSError:
+                    external.append((str(record.spec_path), None, None))
+        return (
+            tuple(sorted(rationale)),
+            spec_artifacts.persistence_stamp(Path(self._specs_dir)),
+            tuple(sorted(external)),
+        )
 
     def get_all_frontmatter(self) -> list[dict]:
         """Return all frontmatter dicts, checking mtime for staleness."""
@@ -504,6 +580,8 @@ class SpecCache:
                 Path(self._specs_dir) / "placeholder.md"
             ) / "_wip"
 
+            admissions: dict[str, tuple] = {}  # SPEC-359: id -> (displayed AdmissionResult, hold detail)
+
             def _derive_admission() -> None:
                 for item in public:
                     if item.get("status") in {"done", "superseded", "active", "retired"}:
@@ -515,6 +593,7 @@ class SpecCache:
                         admission_specs,
                         self._dependency_resolution.errors,
                     )
+                    hold_detail = None
                     item["readiness"] = admission.readiness.level.value
                     item["readiness_evidence"] = list(admission.readiness.findings)
                     item["readiness_dimensions"] = [
@@ -535,20 +614,30 @@ class SpecCache:
                         # queue's own durable evidence; never the merge gate
                         # itself (that is check_candidate_authorization at
                         # merge time).
-                        held, reason, candidate_sha = deployment_tiers.pending_authorization_hold(
+                        hold_detail = deployment_tiers.pending_authorization_hold_detail(
                             _reports_wip_dir, str(item.get("id"))
                         )
+                        held = hold_detail["held"]
+                        reason, candidate_sha = hold_detail["reason"], hold_detail["candidate_sha"]
                         if held:
                             item["run_state"] = "awaiting_authorization"
                             item["run_state_reason"] = reason
+                            admission = lifecycle.apply_authorization_overlay(admission, hold_detail)
                             # SPEC-294-001-001 R2: read-only surface of the
                             # persisted candidate SHA (R1) for the approve
                             # control's prefill (R3). Never authoritative --
                             # the merge gate re-checks the live ref itself.
                             item["run_state_candidate_sha"] = candidate_sha
+                    admissions[str(item.get("id"))] = (admission, hold_detail)
                     item["_help"] = dict(help_text)
 
-            performance_registry.measure("cache.admission_derivation", _derive_admission)
+            def _derive_and_explain() -> None:
+                _derive_admission()
+                # SPEC-359: describe the results just derived, in the same pass and
+                # under the same span, so it never adds a request-time derivation.
+                self._project_explanations(public, states, admissions, admission_specs, signature)
+
+            performance_registry.measure("cache.admission_derivation", _derive_and_explain)
         # SPEC-303 R6: memoize the finished projection against the signature of
         # the inputs it came from, so a single-spec fetch can reuse it.
         self._projection = {
@@ -557,6 +646,106 @@ class SpecCache:
         self._projection_signature = signature
         performance_registry.record("cache.frontmatter", time.monotonic() - start)
         return [dict(item) for item in public]
+
+    @staticmethod
+    def _admission_settings(specs_dir: Path) -> tuple[int, str]:
+        """`parallel_admission` defaults from the project's config, as the `admission` command reads them."""
+        config = specs_dir.parent / "config.yaml"
+        configured: dict = {}
+        try:
+            for document in yaml.safe_load_all(config.read_text(encoding="utf-8")):
+                if isinstance(document, dict):
+                    configured.update(document.get("parallel_admission") or {})
+        except (OSError, yaml.YAMLError, AttributeError, TypeError):
+            configured = {}
+        limit = configured.get("worker_limit", 1)
+        policy = configured.get("missing_touches_policy", "exclusive")
+        return (limit if isinstance(limit, int) and limit >= 0 else 1,
+                policy if policy in ("exclusive", "allow") else "exclusive")
+
+    def _pass_context(self, signature: tuple, public: list[dict]) -> tuple:
+        """SPEC-359 R6: one batched Git snapshot and one parallel-admission pass per refresh signature.
+
+        Reused by every later request under the same signature (so a detail
+        fetch spawns nothing); recomputed when any stamped input changes.
+        """
+        memo = self._pass_memo
+        if memo is not None and memo[0] == signature:
+            return memo[1], memo[2], memo[3]
+        specs_dir = Path(self._specs_dir)
+        snapshot = spec_artifacts.collect_persistence_snapshot(specs_dir)
+        parallel: dict = {}
+        qualified: dict = {}
+        try:
+            from parallel_executor import parallel_admission_decisions
+            worker_limit, policy = self._admission_settings(specs_dir)
+            parallel, qualified = parallel_admission_decisions(
+                {str(item["id"]): item for item in public if item.get("id")},
+                self._dependency_resolver, worker_limit=worker_limit, missing_touches_policy=policy,
+            )
+        except Exception:
+            log.exception("parallel admission evidence unavailable; explanations omit it")
+        self._pass_memo = (signature, snapshot, parallel, qualified)
+        return snapshot, parallel, qualified
+
+    def _rationale_for(self, spec_id: str, entry: CacheEntry, reports_root: Path) -> Optional[dict]:
+        """Resolve one spec's rationale record, memoized by the stamps of the files it read."""
+        kind, data = entry.rationale
+        record = data.get("record") if kind == "present" and isinstance(data, dict) else None
+        key = (entry.mtime, spec_artifacts.rationale_stamp(reports_root, spec_id, record))
+        cached = self._rationale_memo.get(spec_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        result = spec_artifacts.resolve_state_rationale(entry.frontmatter, entry.rationale, reports_root)
+        self._rationale_memo[spec_id] = (key, result)
+        return result
+
+    def _project_explanations(
+        self, public: list[dict], states: Optional[dict], admissions: dict,
+        admission_specs: dict, signature: tuple,
+    ) -> None:
+        """SPEC-359: derive every spec's run-state explanation from this pass's own results.
+
+        Read-only: no artifact write, status transition or merge decision. A
+        failure while explaining one spec yields that spec's unavailable
+        explanation and never disturbs the rest of the board.
+        """
+        specs_dir = Path(self._specs_dir)
+        reports_root, specs_prefix = spec_artifacts.explanation_layout(specs_dir)
+        snapshot, parallel, qualified = self._pass_context(signature, public)
+        now = datetime.now(timezone.utc)
+        explanations: dict[str, dict] = {}
+        recompose: dict[str, tuple[dict, dict]] = {}
+        for item in public:
+            spec_id = str(item.get("id") or "")
+            entry = self._entries.get(spec_id)
+            if not spec_id or entry is None:
+                continue
+            try:
+                admission, hold = admissions.get(spec_id, (None, None))
+                # The one shared composer (spec_artifacts): the CLI calls the same function.
+                kwargs = dict(
+                    file_frontmatter=entry.frontmatter, rationale_parsed=entry.rationale,
+                    mtime=entry.mtime, path=entry.path,
+                    durable_state=states.get(spec_id) if states else None,
+                    admission=admission, hold=hold, admission_specs=admission_specs,
+                    dependency_errors=self._dependency_resolution.errors,
+                    parallel_decision=parallel.get(spec_id), qualified=qualified.get(spec_id),
+                    snapshot=snapshot, reports_root=reports_root, specs_prefix=specs_prefix,
+                    rationale=self._rationale_for(spec_id, entry, reports_root), now=now,
+                )
+                explanation = spec_artifacts.compose_run_state_explanation(item, **kwargs)
+                if item.get("status") == "in_progress":
+                    recompose[spec_id] = (dict(item), kwargs)
+            except Exception as exc:
+                log.exception("run-state explanation failed for %s", spec_id)
+                explanation = lifecycle.unavailable_run_state_explanation(
+                    spec_id, str(item.get("status", "")), f"explanation derivation failed: {type(exc).__name__}",
+                )
+            explanations[spec_id] = explanation
+            item["run_state_summary"] = lifecycle.run_state_summary(explanation)
+        self._explanations = explanations
+        self._recompose = recompose
 
     def _durable_states(self, spec_ids: list[str]) -> Optional[dict]:
         """Batch-read durable status, or None when there is no store."""
@@ -640,7 +829,11 @@ class SpecCache:
             })
         return results
 
-    def update_status(self, spec_id: str, status: str, *, reason: str | None = None) -> None:
+    def update_status(
+        self, spec_id: str, status: str, *, reason: str | None = None,
+        reconsider_when: str | None = None,
+        state_evidence: list[dict] | None = None,
+    ) -> None:
         """Write new status to spec frontmatter and the durable checkpoint store.
 
         SPEC-291 R3: this is a board-manual move, so a judgment transition
@@ -649,12 +842,26 @@ class SpecCache:
         gate in this method. A ``status-transition`` artifact is written for
         every successful transition, whether or not a durable store is
         configured, so no deployment mode is left without R3's durable trace.
+
+        SPEC-357: the same transition upserts the spec's ``## State
+        rationale`` section when ``reconsider_when`` is supplied for a
+        ``draft``/``planned``/``blocked`` target. When it is omitted (this
+        UI does not send it yet), the durable status-transition artifact is
+        still written but the section is left untouched; a reader querying
+        it afterwards sees ``lifecycle.evidence_quality_label`` return
+        ``stale`` (never a false ``current``) until SPEC-358 teaches this
+        endpoint to supply the field.
         """
         with self._lock:
-            self._update_status_locked(spec_id, status, reason=reason)
+            self._update_status_locked(
+                spec_id, status, reason=reason, reconsider_when=reconsider_when,
+                state_evidence=state_evidence,
+            )
 
     def _update_status_locked(
-        self, spec_id: str, status: str, *, reason: str | None = None
+        self, spec_id: str, status: str, *, reason: str | None = None,
+        reconsider_when: str | None = None,
+        state_evidence: list[dict] | None = None,
     ) -> None:
         entry = self._entries.get(spec_id)
         if entry is None:
@@ -671,18 +878,37 @@ class SpecCache:
             self._record_transfer_refusal(entry, refusal)
             raise ValueError(refusal)
         if status == "done":
+            # BUG-337: release-manifest.json is canonical-only release
+            # bookkeeping (see release_handoff.py's comment on
+            # managed_paths) and is deliberately never distributed to
+            # fleet installs. `canonical` here always resolves to this
+            # running copy's own directory, which on a fleet install is
+            # that install's `.nightshift/`, not the true canonical kit
+            # repository. Mirror validate_specs.py's `manifest_path.is_file()`
+            # guard (validate_specs.py ~line 1377): an install with no
+            # manifest has nothing to validate a release-handoff
+            # declaration against, so the check is skipped -- not failed
+            # -- and the transition proceeds. This applies uniformly, even
+            # if the spec itself carries an explicit `release_handoff:`
+            # declaration, exactly as validate_specs.py already treats it:
+            # release-handoff declarations are only checked against an
+            # actual manifest. Where a manifest is present (the canonical
+            # repository itself), this branch is unchanged and still hard
+            # gates release-impact specs per SPEC-189 AC2.
             import release_handoff
             canonical = Path(__file__).resolve().parent
-            try:
-                manifest = json.loads((canonical / "release-manifest.json").read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                self._record_transfer_refusal(entry, str(exc))
-                raise ValueError(f"release handoff validation unavailable: {exc}") from exc
-            errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
-            if errors:
-                joined = "; ".join(errors)
-                self._record_transfer_refusal(entry, joined)
-                raise ValueError(joined)
+            manifest_path = canonical / "release-manifest.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except (OSError, json.JSONDecodeError) as exc:
+                    self._record_transfer_refusal(entry, str(exc))
+                    raise ValueError(f"release handoff validation unavailable: {exc}") from exc
+                errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
+                if errors:
+                    joined = "; ".join(errors)
+                    self._record_transfer_refusal(entry, joined)
+                    raise ValueError(joined)
 
         current_status = str(entry.frontmatter.get("status") or "")
         reason_text = reason.strip() if isinstance(reason, str) else ""
@@ -699,6 +925,8 @@ class SpecCache:
             self._status_store.transition_commit_backed(
                 entry.path, status, run_id=f"board-{spec_id}-{uuid4().hex[:8]}",
                 source="board", reason=reason_text,
+                reconsider_when=reconsider_when,
+                state_rationale_evidence=state_evidence or (),
             )
             entry.mtime = os.stat(entry.path).st_mtime
             entry.frontmatter["status"] = status
@@ -709,6 +937,9 @@ class SpecCache:
             spec_artifacts.reports_root_for_spec_path(entry.path), spec_id,
             from_status=current_status, to_status=status,
             actor="board", reason=reason_text, run_id=None,
+            spec_path=entry.path, expected_status=current_status,
+            reconsider_when=reconsider_when,
+            state_rationale_evidence=state_evidence or (),
         )
         self._update_status_file(entry, status)
         self._clear_transfer_refusal(entry)
@@ -723,6 +954,26 @@ class SpecCache:
         return spec_artifacts.read_index(
             spec_artifacts.reports_root_for_spec_path(path), spec_id
         )
+
+    def _artifact_reports_root(self, spec_id: str) -> Path:
+        with self._lock:
+            entry = self._entries.get(spec_id)
+            if entry is None:
+                raise KeyError(f"spec not found: {spec_id}")
+            path = entry.path
+        return spec_artifacts.reports_root_for_spec_path(path)
+
+    def get_artifact_index(self, spec_id: str) -> tuple[str, list[dict], str]:
+        """SPEC-360 R2: ``(state, entries, detail)`` for one spec's artifact index.
+
+        ``state`` distinguishes missing, invalid, unavailable, empty and available
+        rather than collapsing them to a silent empty list; no artifact content is read.
+        """
+        return spec_artifacts.read_index_state(self._artifact_reports_root(spec_id), spec_id)
+
+    def read_artifact(self, spec_id: str, key: object) -> dict:
+        """SPEC-360 R4: one bounded preview of an exact key in *this spec's* index."""
+        return spec_artifacts.read_indexed_artifact(self._artifact_reports_root(spec_id), spec_id, key)
 
     def record_deployment_authorization(
         self, spec_id: str, *, actor: str, sha: str, environment: str,
@@ -887,7 +1138,10 @@ class SpecCache:
         spec_id = fm.get("id")
         if not spec_id:
             return  # Skip files without an id field
-        entry = CacheEntry(path=path, mtime=mtime, frontmatter=fm, body_md=None)
+        entry = CacheEntry(
+            path=path, mtime=mtime, frontmatter=fm, body_md=None,
+            rationale=spec_artifacts.parse_rationale_section(body),
+        )
         # We don't store body in Tier 1 — only load it on demand
         self._entries[spec_id] = entry
         self._invalidate_projection()
@@ -899,6 +1153,7 @@ class SpecCache:
         old_id = entry.frontmatter.get("id")
         entry.mtime = mtime
         entry.frontmatter = fm
+        entry.rationale = spec_artifacts.parse_rationale_section(body)
         entry.body_md = None  # Invalidate Tier 2 on file change
         self._invalidate_projection()
         if new_id and new_id != old_id:
@@ -1040,10 +1295,18 @@ def _parse_spec_file(path: Path) -> tuple[dict, str]:
     snippet = "\n".join(section_lines).strip()
     if snippet:
         # Strip leading bullet/quote/heading markup for cleaner tooltip text
-        snippet = re.sub(r"(?m)^\s*[#*\->`]+\s*", "", snippet)
+        # Only a fence marker (3+ backticks) is stripped: removing one backtick of a
+        # line-leading inline code span unpairs the rest of the snippet's spans.
+        snippet = re.sub(r"(?m)^\s*(?:[#*\->]+|`{3,})\s*", "", snippet)
         snippet = re.sub(r"\s+", " ", snippet).strip()
         if snippet:
-            fm["_problem"] = snippet[:280]
+            snippet = snippet[:280]
+            if snippet.count("`") % 2:
+                # The cut fell inside an inline code span; drop the unclosed tail so a
+                # path that was exempt inside the span is not left bare in the snippet.
+                snippet = snippet[:snippet.rindex("`")].rstrip()
+            if snippet:
+                fm["_problem"] = snippet
 
     return fm, body
 
@@ -1137,6 +1400,7 @@ async def _log_unhandled(request: Request, exc: Exception) -> PlainTextResponse:
 
 cache: SpecCache  # initialized in __main__
 project_name: str = "PROJECT"  # set in __main__
+board_port: int = 0  # SPEC-371-003 R4: set in __main__ alongside the startup banner's port
 reports_dir: Optional[Path] = None  # set in __main__
 history_db_dir: Optional[Path] = None  # set in __main__
 reads_file: Optional[Path] = None   # set in __main__
@@ -1460,6 +1724,346 @@ def _save_read_set(read_set: set[str]) -> None:
     os.replace(tmp, reads_file)
 
 
+# --- SPEC-371-001: prompt snippet storage — schema, three scopes --------------
+# Shared storage layer for the Prompt Snippet Library (SPEC-371). Plain
+# functions only; no HTTP surface here (that is SPEC-371-002). See the R1
+# schema in the spec: id/title/scope/body are required, tags/harness_overrides/
+# variables have declared defaults, created_at/updated_at default to "" (never
+# fabricated on read — a read-time now() would make load_snippets
+# non-deterministic and mutate data that was never written).
+
+SNIPPET_SCOPES = ("prebuilt", "repo", "project")
+
+_SNIPPET_REQUIRED_KEYS = frozenset({"id", "title", "scope", "body"})
+_SNIPPET_DEFAULTS = {
+    "tags": [],
+    "harness_overrides": {},
+    "variables": [],
+    "created_at": "",
+    "updated_at": "",
+}
+
+
+def prebuilt_prompts_path() -> Path:
+    """Kit-shipped prebuilt snippets, resolved relative to board.py itself."""
+    return Path(__file__).resolve().parent / "Skills" / "nightshift" / "prompts" / "prebuilt.json"
+
+
+def repo_prompts_path(project_root: Path) -> "Path | None":
+    """Shared repo-level snippets file at the git repo root, or None outside a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None  # R3: no git binary, or it hung — never raise
+    if result.returncode != 0:
+        return None
+    toplevel = result.stdout.strip()
+    if not toplevel:
+        return None
+    return Path(toplevel) / ".nightshift-prompts.json"
+
+
+def project_prompts_path(specs_dir: Path) -> Path:
+    """Project-local snippets file, sibling of the specs/ directory."""
+    return specs_dir.parent / "prompts.json"
+
+
+def _is_valid_snippet_entry(entry: object) -> bool:
+    return isinstance(entry, dict) and _SNIPPET_REQUIRED_KEYS.issubset(entry.keys())
+
+
+def _normalize_snippet(entry: dict) -> dict:
+    normalized = dict(_SNIPPET_DEFAULTS)
+    normalized.update(entry)
+    return normalized
+
+
+def load_snippets(scope: str, path: "Path | None") -> list[dict]:
+    """Read a scope's snippets file. Never raises, never creates the file (R4/R7)."""
+    if path is None or not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("could not read snippets file %s (scope=%s): %s", path, scope, exc)
+        return []
+    if not isinstance(data, list) or not all(_is_valid_snippet_entry(e) for e in data):
+        log.warning(
+            "malformed snippets file %s (scope=%s): expected a list of dicts with %s",
+            path, scope, sorted(_SNIPPET_REQUIRED_KEYS),
+        )
+        return []
+    return [_normalize_snippet(e) for e in data]
+
+
+def save_snippets(path: Path, snippets: list[dict]) -> None:
+    """Atomically write a scope's snippets file (R5). Never creates parent dirs
+    for the prebuilt scope, which always ships inside the kit."""
+    if path != prebuilt_prompts_path():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(snippets, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def find_snippet(id: str, snippets: list[dict]) -> "dict | None":
+    """Linear lookup by id (R6)."""
+    for snippet in snippets:
+        if snippet.get("id") == id:
+            return snippet
+    return None
+
+
+# --- SPEC-371-002: prompt snippet CRUD API ------------------------------------
+# HTTP surface on top of the SPEC-371-001 storage primitives above. All error
+# bodies use the flat `{"error": "<code>"}` shape given verbatim in the spec
+# (a third shape alongside the two already in this file); this spec's
+# requirements fix that shape, so it is followed exactly rather than reused
+# from `_artifact_error` or the plain `HTTPException(detail=...)` routes.
+
+def _current_project_snippet_paths() -> dict:
+    """R7: resolve the three scope paths for the board's *current* project.
+
+    Reuses the same specs_dir -> project_root resolution as the existing
+    `_project_root_for_specs_dir` helper (already used by /api/worktree-status)
+    — no second resolution mechanism.
+    """
+    specs_dir = cache._specs_dir
+    project_root = _project_root_for_specs_dir(specs_dir)
+    return {
+        "prebuilt": prebuilt_prompts_path(),
+        "repo": repo_prompts_path(project_root),
+        "project": project_prompts_path(specs_dir),
+    }
+
+
+def _slugify_prompt_title(text: str) -> str:
+    """Same slug style already used for spec/file slugs in this repo
+    (see spec_artifacts._slugify): lowercase, non-[a-z0-9] runs -> '-'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    return slug or "snippet"
+
+
+def _prompt_error(status: int, **content) -> JSONResponse:
+    return JSONResponse(status_code=status, content=content)
+
+
+def _snippet_utc_now() -> str:
+    """Microsecond-precision UTC timestamp for created_at/updated_at.
+
+    Unlike the second-truncated `_utc_now()` helpers in spec_artifacts.py and
+    status_store.py, this keeps microseconds: AC5 requires `updated_at` to
+    compare strictly later than `created_at`, and a request round-trip
+    through TestClient/curl routinely completes inside one second.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@app.get("/api/prompts")
+def list_prompts() -> JSONResponse:
+    """R1/R8: merged snippet list across all three scopes for the current
+    project. Repo scope is simply omitted (no error) when unresolvable."""
+    paths = _current_project_snippet_paths()
+    merged: list[dict] = []
+    for scope in SNIPPET_SCOPES:
+        merged.extend(load_snippets(scope, paths[scope]))
+    return JSONResponse(merged)
+
+
+@app.get("/api/prompts/{scope}/{id}")
+def get_prompt(scope: str, id: str) -> JSONResponse:
+    """R2: single snippet lookup, or 404/400 per the spec's flat error shape."""
+    if scope not in SNIPPET_SCOPES:
+        return _prompt_error(400, error="invalid_scope")
+    paths = _current_project_snippet_paths()
+    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
+    if snippet is None:
+        return _prompt_error(404, error="not_found")
+    return JSONResponse(snippet)
+
+
+@app.post("/api/prompts/{scope}")
+def create_prompt(scope: str, payload: dict) -> JSONResponse:
+    """R3/R4/R8: create a repo/project snippet; prebuilt is never writable,
+    and a fresh id may not collide with the *other two* scopes."""
+    if scope not in SNIPPET_SCOPES:
+        return _prompt_error(400, error="invalid_scope")
+    if scope == "prebuilt":
+        return _prompt_error(403, error="prebuilt_read_only")
+    paths = _current_project_snippet_paths()
+    if scope == "repo" and paths["repo"] is None:
+        return _prompt_error(400, error="no_repo_root")
+
+    title = payload.get("title", "")
+    new_id = payload.get("id") or _slugify_prompt_title(title)
+
+    for other in SNIPPET_SCOPES:
+        if other == scope:
+            continue
+        if find_snippet(new_id, load_snippets(other, paths[other])) is not None:
+            return _prompt_error(409, error="id_collision", existing_scope=other)
+
+    now = _snippet_utc_now()
+    entry = {
+        "id": new_id,
+        "title": title,
+        "scope": scope,
+        "body": payload.get("body", ""),
+        "tags": payload.get("tags", []),
+        "variables": payload.get("variables", []),
+        "harness_overrides": payload.get("harness_overrides", {}),
+        "created_at": now,
+        "updated_at": now,
+    }
+    target_path = paths[scope]
+    snippets = load_snippets(scope, target_path)
+    snippets.append(entry)
+    save_snippets(target_path, snippets)
+    return JSONResponse(status_code=201, content=entry)
+
+
+@app.put("/api/prompts/{scope}/{id}")
+def update_prompt(scope: str, id: str, payload: dict) -> JSONResponse:
+    """R5: update title/body/tags/variables/harness_overrides; id/scope are
+    immutable; bumps updated_at. prebuilt/missing behave like R3/R2."""
+    if scope not in SNIPPET_SCOPES:
+        return _prompt_error(400, error="invalid_scope")
+    if scope == "prebuilt":
+        return _prompt_error(403, error="prebuilt_read_only")
+    paths = _current_project_snippet_paths()
+    if scope == "repo" and paths["repo"] is None:
+        return _prompt_error(400, error="no_repo_root")
+    target_path = paths[scope]
+    snippets = load_snippets(scope, target_path)
+    snippet = find_snippet(id, snippets)
+    if snippet is None:
+        return _prompt_error(404, error="not_found")
+    for field in ("title", "body", "tags", "variables", "harness_overrides"):
+        if field in payload:
+            snippet[field] = payload[field]
+    snippet["updated_at"] = _snippet_utc_now()
+    save_snippets(target_path, snippets)
+    return JSONResponse(snippet)
+
+
+@app.delete("/api/prompts/{scope}/{id}")
+def delete_prompt(scope: str, id: str) -> JSONResponse:
+    """R6: delete a repo/project snippet; last-snippet delete leaves an empty
+    JSON list on disk (via save_snippets), not a deleted file."""
+    if scope not in SNIPPET_SCOPES:
+        return _prompt_error(400, error="invalid_scope")
+    if scope == "prebuilt":
+        return _prompt_error(403, error="prebuilt_read_only")
+    paths = _current_project_snippet_paths()
+    if scope == "repo" and paths["repo"] is None:
+        return _prompt_error(400, error="no_repo_root")
+    target_path = paths[scope]
+    snippets = load_snippets(scope, target_path)
+    if find_snippet(id, snippets) is None:
+        return _prompt_error(404, error="not_found")
+    remaining = [s for s in snippets if s.get("id") != id]
+    save_snippets(target_path, remaining)
+    return JSONResponse({"ok": True})
+
+
+# --- SPEC-371-003: prompt snippet render endpoint -----------------------------
+# Turns a stored snippet into copy-ready text: harness_overrides[harness]
+# falling back to body (R2), {{variable}} substitution (R3), server-side
+# board_url auto-fill that a caller can never override (R4), and an advisory
+# stale-command scan against skill_tutorial.py's own registry (R5).
+
+_PROMPT_VARIABLE_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+
+# R5 (SPEC-372): `/nightshift <action>` and `$nightshift <action>` are the
+# only forms this check covers. Both are unambiguous — the next token is
+# always the intended action — because the tool itself emits them; bare
+# "nightshift <word>" prose is not under this tool's control and was removed
+# (SPEC-372) after false-positiving on ordinary English such as "...per the
+# nightshift worker brief".
+_NIGHTSHIFT_ACTION_RE = re.compile(r"([/$])\bnightshift\s+([a-z][a-z-]*)", re.IGNORECASE)
+
+
+def _skill_md_path() -> Path:
+    """Same directory-relative resolution as prebuilt_prompts_path (R5 context)."""
+    return Path(__file__).resolve().parent / "Skills" / "nightshift" / "SKILL.md"
+
+
+def _board_url() -> str:
+    """R4: the board's own bind address, same form as the startup banner."""
+    return f"http://localhost:{board_port}"
+
+
+def _known_nightshift_actions() -> set:
+    """R5: reuse skill_tutorial.load_registry directly; never duplicate the
+    registry. Advisory-only, so a missing/drifted SKILL.md degrades to an
+    empty set (no stale-command warnings) rather than failing the render."""
+    try:
+        registry = skill_tutorial.load_registry(_skill_md_path())
+    except (OSError, ValueError):
+        return set()
+    return {entry["name"] for entry in registry}
+
+
+def _stale_command_warnings(text: str, known_actions: set) -> list:
+    """R5 (SPEC-372): scan `text` for /nightshift and $nightshift action
+    references; warn once per action name not present in the registry."""
+    warnings: list = []
+    seen: set = set()
+    for match in _NIGHTSHIFT_ACTION_RE.finditer(text):
+        action = match.group(2).lower()
+        if action in known_actions or action in seen:
+            continue
+        seen.add(action)
+        warnings.append(f"stale_command:{action}")
+    return warnings
+
+
+@app.post("/api/prompts/{scope}/{id}/render")
+def render_prompt(scope: str, id: str, payload: "dict | None" = None) -> JSONResponse:
+    """R1-R6: render a stored snippet into copy-ready text.
+
+    Lookup mirrors get_prompt's (SPEC-371-002) exact pattern, including its
+    404/400 error shapes (R6)."""
+    if scope not in SNIPPET_SCOPES:
+        return _prompt_error(400, error="invalid_scope")
+    paths = _current_project_snippet_paths()
+    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
+    if snippet is None:
+        return _prompt_error(404, error="not_found")
+
+    body = payload or {}
+    harness = body.get("harness") or "other"
+    variables = dict(body.get("variables") or {})
+    variables["board_url"] = _board_url()  # R4: never client-overridable
+
+    overrides = snippet.get("harness_overrides") or {}
+    text = overrides.get(harness)  # R2: harness_overrides[harness] ?? body
+    if text is None:
+        text = snippet.get("body", "")
+
+    warnings: list = []
+
+    def _substitute(match: "re.Match") -> str:
+        name = match.group(1)
+        if name in variables:
+            return str(variables[name])
+        if name not in warnings_seen:
+            warnings_seen.add(name)
+            warnings.append(f"missing_variable:{name}")
+        return match.group(0)
+
+    warnings_seen: set = set()
+    text = _PROMPT_VARIABLE_RE.sub(_substitute, text)
+
+    warnings.extend(_stale_command_warnings(text, _known_nightshift_actions()))
+    return JSONResponse({"text": text, "warnings": warnings})
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = HTML_TEMPLATE
@@ -1671,15 +2275,49 @@ def get_spec(spec_id: str) -> JSONResponse:
     if not fm:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     body = cache.get_body(spec_id)
+    # SPEC-360 R2: the state separates a missing/invalid/unavailable index from an empty one;
+    # `artifacts` stays the existing entry list ([] unless the index is valid). No content.
+    index_state, index_entries, index_detail = cache.get_artifact_index(spec_id)
     payload = {
         "frontmatter": fm,
         "body_md": body,
         "title": fm.get("_title", spec_id),
-        "artifacts": cache.get_artifacts(spec_id),
+        "artifacts": index_entries,
+        "artifact_index_state": index_state,
+        "artifact_index_detail": index_detail,
+        "artifact_preview_available": True,
+        # SPEC-359: the full explanation derived in the same pass as `frontmatter`
+        # (list responses carry only its bounded `run_state_summary`).
+        "run_state_explanation": cache.get_explanation(spec_id),
     }
     return performance_registry.measure(
         "server.selected_response_serialization", lambda: JSONResponse(jsonable_encoder(payload))
     )
+
+
+def _artifact_error(status: int, code: str, message: str) -> JSONResponse:
+    """SPEC-360 R4: every rejected artifact read is `{error: {code, message}}` with no content or host path."""
+    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
+
+
+@app.get("/api/spec/{spec_id}/artifact")
+def get_spec_artifact(spec_id: str, path: Optional[str] = None) -> JSONResponse:
+    """SPEC-360 R4/R5: read-only preview of one artifact indexed by *this* spec.
+
+    Not `async def`: it does file I/O, so it must run in the threadpool (SPEC-303). It is
+    deliberately not built on the broad report-file resolver: `path` must be an exact key of
+    this spec's own artifact index and is contained by realpath under its artifact directory.
+    """
+    try:
+        payload = cache.read_artifact(spec_id, path)
+    except KeyError:
+        return _artifact_error(404, "spec_not_found", f"spec not found: {spec_id}")
+    except spec_artifacts.ArtifactReadError as exc:
+        return _artifact_error(exc.status, exc.code, exc.message)
+    except Exception:
+        log.exception("artifact read failed for %s", spec_id)
+        return _artifact_error(503, "artifact_unavailable", "the artifact could not be read")
+    return JSONResponse(payload)
 
 
 @app.put("/api/spec/{spec_id}/status")
@@ -1688,8 +2326,13 @@ def update_status(spec_id: str, payload: dict) -> dict:
     if not status:
         raise HTTPException(status_code=400, detail="status required")
     reason = payload.get("reason")
+    reconsider_when = payload.get("reconsider_when")
+    state_evidence = payload.get("state_evidence")
     try:
-        cache.update_status(spec_id, status, reason=reason)
+        cache.update_status(
+            spec_id, status, reason=reason, reconsider_when=reconsider_when,
+            state_evidence=state_evidence,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
     except ValueError as e:
@@ -1960,6 +2603,32 @@ def _resolve_report_path(filename: str) -> tuple[Path, Path]:
     return root, candidate
 
 
+# BUG-340: the board is often started by a supervisor (launchd) whose PATH is
+# `/usr/bin:/bin:/usr/sbin:/sbin`, so `shutil.which("code")` finds nothing even
+# though VS Code is installed. These are the places its `code` launcher lives;
+# the first is what `/usr/local/bin/code` symlinks to, so it survives a missing
+# PATH entry and a missing symlink alike.
+_VSCODE_CLI_CANDIDATES: tuple[str, ...] = (
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+    "~/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+    "/usr/local/bin/code",
+    "/opt/homebrew/bin/code",
+)
+_VSCODE_LAUNCH_WAIT_S = 3.0
+
+
+def _find_vscode_cli() -> Optional[str]:
+    """Resolve the `code` launcher: PATH first, then the known install locations."""
+    found = shutil.which("code")
+    if found:
+        return found
+    for candidate in _VSCODE_CLI_CANDIDATES:
+        expanded = os.path.expanduser(candidate)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+    return None
+
+
 def _open_in_vscode(path: Path) -> dict:
     target = str(path.resolve())
     # SPEC-071 R8: a path that still carries an unresolved path token must never
@@ -1970,25 +2639,46 @@ def _open_in_vscode(path: Path) -> dict:
             status_code=400,
             detail="unresolved path token in target — refusing to open",
         )
-    code_bin = shutil.which("code")
+    code_bin = _find_vscode_cli()
     if code_bin:
         cmd = [code_bin, "-n", target]
     elif sys.platform == "darwin":
-        cmd = ["open", "-n", "-a", "Visual Studio Code", target]
+        # No `-n` here (BUG-340): `open -n -a` starts a second app instance that
+        # hands off to the running one and drops the file argument, leaving VS
+        # Code up without the file. Plain `-a` delivers the file to the app.
+        cmd = ["open", "-a", "Visual Studio Code", target]
     else:
         raise HTTPException(status_code=503, detail="VS Code CLI not found")
-    try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"failed to open VS Code: {e}")
-    return {"ok": True, "path": target}
+    with tempfile.TemporaryFile() as launcher_stderr:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=launcher_stderr,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"failed to open VS Code: {e}")
+        # The launchers hand the file to the app and exit within a moment. A
+        # non-zero exit in that window is a failed launch, not a success; a
+        # launcher still running after the window is left to finish detached.
+        try:
+            returncode = proc.wait(timeout=_VSCODE_LAUNCH_WAIT_S)
+        except subprocess.TimeoutExpired:
+            returncode = 0
+        if returncode != 0:
+            launcher_stderr.seek(0)
+            tail = launcher_stderr.read()[-300:].decode("utf-8", "replace").strip()
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"failed to open VS Code: {Path(cmd[0]).name} exited with "
+                    f"status {returncode}" + (f": {tail}" if tail else "")
+                ),
+            )
+    return {"ok": True, "path": target, "launcher": cmd[0]}
 
 
 def _reveal_in_finder(path: Path) -> dict:
@@ -3243,6 +3933,134 @@ body {
   padding: 4px 0;
   border-bottom: 1px solid var(--border);
 }
+/* SPEC-360 R2: each row is a real <button> (keyboard-operable "Open" control). */
+button.artifact-row {
+  width: 100%;
+  background: transparent;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.artifact-row:hover { background: var(--hover); }
+button.artifact-row:focus-visible,
+.help-target:focus-visible,
+.why-focus-btn:focus-visible,
+.artifacts-open-btn:focus-visible,
+.artifact-copy-btn:focus-visible,
+.recent-chip:focus-visible,
+.card:focus-visible,
+.chip:focus-visible,
+.spec-link:focus-visible,
+#panel-why-section:focus-visible,
+.why-toggle:focus-visible,
+#panel-back-btn:focus-visible {
+  outline: 2px solid var(--c-theme);
+  outline-offset: 1px;
+}
+.artifact-actor {
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-open-label {
+  color: var(--c-theme);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.artifacts-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  font-size: 11px;
+}
+.artifacts-open-btn {
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.artifacts-open-btn:hover { border-color: var(--text-muted); }
+.artifact-state-note { color: var(--text-muted); }
+.artifact-state-note.artifact-state-problem { color: var(--c-blocked); }
+.artifact-error {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-blocked);
+  border-left: 3px solid var(--c-blocked);
+  border-radius: 3px;
+  font-size: 11px;
+}
+.artifact-note { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
+.artifact-head { font-size: 11px; margin-bottom: 6px; }
+.artifact-head .artifact-type { margin-right: 6px; }
+.artifact-locator { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 11px; }
+.artifact-locator code { background: var(--surface-hi); padding: 1px 5px; border-radius: 2px; overflow-wrap: anywhere; }
+.artifact-copy-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+  font-family: inherit; font-size: 10px; padding: 1px 6px; border-radius: 2px; cursor: pointer;
+}
+.artifact-pre {
+  margin: 6px 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 3px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: none; overflow-x: auto;
+}
+.artifact-img { display: block; max-width: 100%; height: auto; margin: 8px 0; border: 1px solid var(--border); }
+.artifact-list-heading { font-size: 12px; font-weight: bold; margin: 4px 0 8px; }
+
+/* SPEC-360 R1: "Why this state?" — three visually distinct kinds of statement. */
+.panel-why { margin: 10px 0; }
+.why-section { border: 1px solid var(--border); border-radius: 3px; padding: 8px 10px; font-size: 11px; background: var(--surface); }
+.why-heading { font-size: 12px; font-weight: bold; margin: 0 0 6px; }
+.why-section:not(.why-open) .why-heading { margin: 0; }
+/* SPEC-369: collapsed-by-default disclosure; the summary line (state + headline) is always visible. */
+.why-toggle {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; margin: 0; padding: 0; text-align: left;
+  background: transparent; border: none; color: var(--text); font: inherit; cursor: pointer;
+}
+.why-toggle:hover .why-hint { color: var(--text); }
+.why-marker { flex: 0 0 auto; color: var(--text-muted); }
+.why-title { flex: 0 0 auto; font-weight: bold; }
+.why-summary { flex: 1 1 auto; min-width: 0; text-align: left; font-weight: normal; color: var(--text-muted); overflow-wrap: anywhere; }
+.why-summary b { color: var(--text); font-weight: 600; }
+.why-hint { flex: 0 0 auto; font-size: 10px; color: var(--text-muted); text-decoration: underline; }
+.why-body[hidden] { display: none; }
+.why-block { margin: 6px 0; padding: 4px 0 4px 8px; border-left: 3px solid var(--border); }
+.why-block.why-authored { border-left-color: var(--c-ready); }
+.why-block.why-computed { border-left-color: var(--c-in-progress); }
+.why-block.why-history { border-left-color: var(--text-muted); }
+.why-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 2px; }
+.why-kv { margin: 2px 0; overflow-wrap: anywhere; }
+.why-kv b { font-weight: 600; }
+.why-gates { margin: 2px 0 0; padding-left: 16px; }
+.why-uncommitted { color: var(--c-blocked); font-weight: 600; }
+.why-persist { display: inline-block; border: 1px solid var(--border); border-radius: 2px; padding: 0 5px; margin-right: 4px; font-size: 10px; }
+.why-persist.why-uncommitted { border-color: var(--c-blocked); }
+.why-missing { color: var(--text-muted); }
+.why-evidence { margin: 2px 0 2px 12px; }
+.why-focus-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--text); font-family: inherit;
+  font-size: 11px; padding: 1px 7px; border-radius: 2px; cursor: pointer;
+}
+.why-focus-btn:hover { border-color: var(--text-muted); }
+.why-focus-btn[data-artifact-path] { text-align: left; overflow-wrap: anywhere; }
+.help-target { cursor: help; }
+.tt-help-title { font-size: 10px; font-weight: 600; color: var(--c-theme); margin-bottom: 3px; }
+.tt-current { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); font-size: 11px; }
+.tt-current .tt-label, .tt-help .tt-label { font-size: 9px; text-transform: uppercase; color: var(--text-muted); display: block; }
+.tt-help { margin-top: 3px; font-size: 11px; color: var(--text-muted); }
 .artifact-type {
   display: inline-flex;
   align-items: center;
@@ -3452,6 +4270,167 @@ body {
   margin-bottom: 10px;
 }
 .reports-empty { color: var(--text-muted); font-size: 12px; margin-top: 24px; text-align: center; }
+/* ── Snippets view (SPEC-371-005) ── */
+#snippets-filter {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 2px;
+  outline: none;
+}
+#snippets-filter:focus { border-color: var(--c-theme); }
+#snippets-filter::placeholder { color: var(--text-muted); }
+#btn-snippets-filter-clear {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 0 8px;
+  cursor: pointer;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+#btn-snippets-filter-clear:hover { color: var(--text); border-color: var(--text-muted); }
+.snippet-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 6px 8px 9px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 2px;
+}
+.snippet-info { flex: 1; min-width: 0; }
+.snippet-title {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.snippet-preview {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.snippet-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  margin-top: 1px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.snippet-badge[data-scope="prebuilt"] { border-left-color: var(--c-retired); }
+.snippet-badge[data-scope="repo"]     { border-left-color: var(--c-ready); }
+.snippet-badge[data-scope="project"]  { border-left-color: var(--c-done); }
+
+/* ── Snippet detail expand/copy (SPEC-371-006) ── */
+.snippet-item { cursor: pointer; }
+.snippet-detail {
+  padding: 8px 6px 10px 9px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--c-theme) 6%, var(--surface));
+}
+.snippet-detail-body {
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 8px;
+}
+.snippet-var-placeholder {
+  background: color-mix(in srgb, var(--c-in-progress) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-in-progress) 45%, var(--border));
+  border-radius: 2px;
+  padding: 0 2px;
+}
+.snippet-detail-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.snippet-var-field { display: flex; flex-direction: column; gap: 2px; }
+.snippet-var-field label { font-size: 10px; color: var(--text-muted); }
+.snippet-var-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 2px;
+  outline: none;
+}
+.snippet-var-input:focus { border-color: var(--c-theme); }
+.snippet-detail-warnings:empty { display: none; }
+.snippet-warning {
+  font-size: 10px;
+  color: var(--c-blocked);
+  margin-bottom: 2px;
+}
+.snippet-copy-btn { font-size: 10px; padding: 3px 8px; }
+
+/* ── Snippet add/edit/duplicate editor (SPEC-371-007) ── */
+.snippet-row-actions {
+  display: flex;
+  gap: 4px;
+  padding: 0 6px 8px 9px;
+  border-bottom: 1px solid var(--border);
+}
+.snippet-edit-btn, .snippet-delete-btn, .snippet-duplicate-btn { font-size: 9px; padding: 2px 6px; white-space: nowrap; }
+.snippet-editor {
+  padding: 8px 6px 10px 9px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--c-theme) 6%, var(--surface));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.snippet-editor-field { display: flex; flex-direction: column; gap: 2px; }
+.snippet-editor-field label { font-size: 10px; color: var(--text-muted); }
+.snippet-editor-field input[type="text"],
+.snippet-editor-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 2px;
+  outline: none;
+}
+.snippet-editor-textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 6px;
+  border-radius: 2px;
+  outline: none;
+  resize: vertical;
+  min-height: 90px;
+}
+.snippet-editor-field input[type="text"]:focus,
+.snippet-editor-select:focus,
+.snippet-editor-textarea:focus { border-color: var(--c-theme); }
+.snippet-editor-error { font-size: 10px; color: var(--c-blocked); }
+.snippet-editor-actions { display: flex; gap: 6px; }
+.snippet-editor-submit-btn, .snippet-editor-cancel-btn { font-size: 10px; padding: 3px 8px; }
 .reports-actions-bar {
   display: flex;
   gap: 6px;
@@ -3705,6 +4684,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <button class="btn" id="btn-deps" onclick="toggleDeps()">⌥ DEPS</button>
     <button class="btn" id="btn-graph" onclick="showGraph()">▣ GRAPH</button>
     <button class="btn" id="btn-all-reports" onclick="openReportsViewFromHeader()" title="Browse all human-review reports across the project">📋 REPORTS</button>
+    <button class="btn" id="btn-snippets" onclick="openSnippetsViewFromHeader()" title="Browse prompt snippets (prebuilt, repo, project scopes)">⧉ SNIPPETS</button>
     <button class="btn" id="btn-archived" onclick="toggleArchived()">🗄 ARCHIVED</button>
     <button class="btn" id="btn-fit-cols" onclick="fitColumns()" title="Distribute visible expanded columns to fill board width — resets manual resize gaps">⇔ FIT</button>
     <button class="btn" id="btn-reset-cols" onclick="resetColumnLayout()" title="Reset column layout to canonical defaults (collapsed/hidden/order) — preserves card order, widths, and other preferences">↺ RESET COLS</button>
@@ -3771,6 +4751,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <div id="panel-title"></div>
       <table class="meta-table" id="panel-meta"></table>
       <div id="panel-deploy-auth" class="panel-deploy-auth" style="display:none"></div>
+      <div id="panel-why" class="panel-why"></div>
       <div id="panel-chips"></div>
       <div id="panel-artifacts"></div>
       <div id="panel-reports-btn-wrap">
@@ -3806,10 +4787,28 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <hr class="panel-divider">
       <div class="panel-md" id="panel-report-md"></div>
     </div>
+    <!-- View: prompt snippets list (SPEC-371-005) -->
+    <div id="panel-view-snippets" style="display:none">
+      <div class="reports-filter-bar">
+        <input type="text" id="snippets-filter" placeholder="░ search snippets..." autocomplete="off">
+        <button id="btn-snippets-filter-clear" onclick="clearSnippetsFilter()" title="Clear search">✕</button>
+        <button class="btn" id="btn-add-prompt" onclick="openAddPromptEditor()" title="Create a new repo- or project-scope prompt snippet">+ ADD PROMPT</button>
+      </div>
+      <div id="panel-snippets-list"></div>
+    </div>
+    <!-- SPEC-360 views: the spec's artifact list, and one artifact's content. Content is only ever
+         written with textContent / element properties, never innerHTML. -->
+    <div id="panel-view-artifacts" style="display:none">
+      <div id="panel-artifacts-list"></div>
+    </div>
+    <div id="panel-view-artifact-content" style="display:none">
+      <div id="panel-artifact-head" class="artifact-head"></div>
+      <div id="panel-artifact-body" aria-live="polite"></div>
+    </div>
   </div>
 </div>
 
-<div id="spec-tooltip"></div>
+<div id="spec-tooltip" role="tooltip"></div>
 <div id="toast" class="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
@@ -3925,12 +4924,36 @@ function isArchived(spec) {
 }
 
 // Reports panel state
-let panelView = 'spec'; // 'spec' | 'reports' | 'report-content'
+let panelView = 'spec'; // 'spec' | 'reports' | 'report-content' | 'artifacts' | 'artifact-content' | 'snippets'
+// SPEC-360: artifact navigation state. The origin (owner + body scroll) is kept apart from the
+// spec-to-spec `specNavStack`; the request identity reuses `panelRequestVersion`.
+let panelArtifacts = { specId: null, entries: [], state: 'missing', detail: '', previewAvailable: true };
+let panelExplanation = null;   // SPEC-359 run_state_explanation of the open spec (rendered, never recomputed)
+let whyExpandedSpec = null;    // SPEC-369: id of the spec whose "Why this state?" the operator expanded (null = collapsed)
+let artifactViewOrigin = null; // {specId, scrollTop} — where Back returns to
+let artifactAbort = null;      // AbortController of the in-flight artifact request
+let currentArtifact = null;    // {specId, path} of the artifact view (or in-flight load)
+let artifactSpecStale = false; // the open spec changed on disk while an artifact view was showing
+let REGISTRY_HELP = {};        // key -> registry short_help (fallback for specs without `_help`)
 let currentReportFilename = null;
 let reportsCache = [];
 let reportsFilter = '';   // case-insensitive substring filter on report list
 let reportsListScrollTop = 0; // scroll position saved when entering a report, restored on back
 let specNavStack = [];        // [{specId, scrollTop}] — back-navigation history for spec:// link hops
+// Snippets panel state (SPEC-371-005)
+let promptsCache = [];    // GET /api/prompts result: merged prebuilt/repo/project snippets
+let snippetsFilter = '';  // case-insensitive substring filter on title/body/tags
+// `var` (not `let`/`const`): hoisted and pre-initialized to `undefined` even if
+// an earlier top-level statement throws before execution reaches this line —
+// unlike `let`, which would stay in an uninitialized TDZ forever in that case
+// (observed via the node test harness, which deliberately swallows top-level
+// throws so hoisted function declarations stay usable).
+var expandedSnippetId = null; // SPEC-371-006 R1: id of the one inline-expanded snippet row, or null
+// SPEC-371-007: at most one add/edit/duplicate editor open at a time.
+// null, or { anchor: 'top' | <snippet id>, mode: 'add'|'edit'|'duplicate',
+//   scope, id (existing snippet id for 'edit' only, else null),
+//   title, body, tagsText, error }
+var snippetEditor = null;
 
 const THEME_COLORS = [
   '#74c0fc', // sky (default)
@@ -4242,7 +5265,18 @@ function renderRecentBar() {
     const chip = document.createElement('span');
     chip.className = 'recent-chip' + (s.id === openPanelId ? ' active' : '');
     chip.textContent = s.id;
+    // SPEC-360 R6: keyboard/tap reachable with an accessible name that carries the current run state.
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    const chipSpec = specs.find(x => x.id === s.id);
+    const chipState = chipSpec && chipSpec.run_state_summary ? runStateSummaryText(chipSpec.run_state_summary) : '';
+    chip.setAttribute('aria-label', `${s.id}: ${s.title || ''}${chipState ? '. ' + chipState : ''}`);
     chip.addEventListener('click', () => openPanel(s.id));
+    chip.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPanel(s.id); }
+    });
+    chip.addEventListener('focus', () => showSpecTooltip(chip, specs.find(x => x.id === s.id) || s));
+    chip.addEventListener('blur', hideSpecTooltip);
     chip.addEventListener('mouseenter', () => {
       // Tooltip uses the freshest spec object (which has _problem/_title) when available
       const liveSpec = specs.find(x => x.id === s.id) || s;
@@ -4414,9 +5448,26 @@ function showSpecTooltip(anchor, spec) {
     ).join('<br>')}</div>`;
   }
   if (problem) html += `<div class="tt-problem">${_escHtml(problem)}</div>`;
+  // SPEC-360 R6: the value-specific run-state meaning/current reason comes from SPEC-359's bounded
+  // `run_state_summary` already on the list item — no detail request. Generic field help stays a
+  // separate, labelled block from this spec's own evidence.
+  if (spec.run_state_summary) {
+    const generic = registryHelp(spec, 'run_state');
+    if (generic) html += `<div class="tt-help"><span class="tt-label">About run state</span>${_escHtml(generic)}</div>`;
+    html += runStateSummaryHtml(spec.run_state_summary);
+  }
+  placeTooltip(anchor, html);
+}
+
+// One placement path for every tooltip variant (spec preview and field/value help).
+let tooltipAnchor = null;
+function placeTooltip(anchor, html) {
+  const tt = document.getElementById('spec-tooltip');
+  if (tooltipAnchor && tooltipAnchor !== anchor && tooltipAnchor.removeAttribute) tooltipAnchor.removeAttribute('aria-describedby');
+  tooltipAnchor = anchor;
+  if (anchor && anchor.setAttribute) anchor.setAttribute('aria-describedby', 'spec-tooltip');
   tt.innerHTML = html;
   tt.style.display = 'block';
-
   const r = anchor.getBoundingClientRect();
   const ttW = tt.offsetWidth;
   const ttH = tt.offsetHeight;
@@ -4431,11 +5482,113 @@ function showSpecTooltip(anchor, spec) {
 
 function hideSpecTooltip() {
   document.getElementById('spec-tooltip').style.display = 'none';
+  if (tooltipAnchor && tooltipAnchor.removeAttribute) tooltipAnchor.removeAttribute('aria-describedby');
+  tooltipAnchor = null;
+}
+
+function tooltipIsVisible() {
+  return document.getElementById('spec-tooltip').style.display === 'block';
 }
 
 function registryHelp(spec, field) {
-  return (spec && spec._help && spec._help[field]) || '';
+  return (spec && spec._help && spec._help[field]) || REGISTRY_HELP[field] || '';
 }
+
+// SPEC-360 R6: loaded once from the existing /api/vocabulary export so every field/badge has help even
+// for specs whose list item carries no `_help` (terminal specs). Best-effort; the static export
+// answers the same route from its bundled blob.
+async function loadRegistryHelp() {
+  try {
+    const r = await fetch('/api/vocabulary');
+    if (!r.ok) return;
+    const data = await r.json();
+    const map = {};
+    for (const c of ((data && data.concepts) || [])) {
+      if (c && c.key) map[c.key] = c.short_help || c.definition || '';
+    }
+    REGISTRY_HELP = map;
+  } catch (_) { /* help is optional; the panel still renders */ }
+}
+
+const _PERSIST_LABEL = {
+  committed: 'committed', staged: 'staged (not committed)', working_tree_only: 'working tree only (uncommitted)',
+  private_local: 'private local', unknown: 'unknown', not_applicable: 'n/a',
+};
+const _QUALITY_LABEL = {
+  recorded: 'recorded', reconstructed: 'reconstructed', legacy_missing: 'legacy: no recorded decision',
+  stale: 'stale', malformed: 'malformed', unavailable: 'unavailable', not_applicable: 'not applicable',
+};
+
+// The bounded SPEC-359 summary as a labelled "this spec now" block (hover, focus and tap share it).
+function runStateSummaryHtml(summary) {
+  if (!summary) return '';
+  const state = summary.run_state ? String(summary.run_state).replaceAll('_', ' ') : 'not applicable';
+  const rows = [`<div><b>${_escHtml(state)}</b></div>`];
+  if (summary.meaning) rows.push(`<div>${_escHtml(summary.meaning)}</div>`);
+  if (summary.reason) rows.push(`<div><span class="tt-label">Current reason</span>${_escHtml(summary.reason)}</div>`);
+  if (summary.next_condition) rows.push(`<div><span class="tt-label">Next condition</span>${_escHtml(summary.next_condition)}</div>`);
+  const p = summary.persistence || {};
+  rows.push(`<div><span class="tt-label">Decision record</span>${_escHtml(_QUALITY_LABEL[summary.rationale_quality] || summary.rationale_quality || 'unknown')}`
+    + ` · spec ${_escHtml(_PERSIST_LABEL[p.spec] || p.spec || 'unknown')}`
+    + ` · record ${_escHtml(_PERSIST_LABEL[p.record] || p.record || 'unknown')}</div>`);
+  const cut = summary.truncated_fields || [];
+  if (cut.length) {
+    rows.push(`<div class="tt-help">Shortened here (${_escHtml(cut.join(', '))}). The complete text is under &quot;Why this state?&quot; in the detail panel.</div>`);
+  }
+  return `<div class="tt-current"><span class="tt-label">This spec now</span>${rows.join('')}</div>`;
+}
+
+function runStateSummaryText(summary) {
+  if (!summary) return '';
+  const state = summary.run_state ? String(summary.run_state).replaceAll('_', ' ') : 'not applicable';
+  return [state, summary.meaning, summary.reason ? 'Reason: ' + summary.reason : '',
+    summary.next_condition ? 'Next: ' + summary.next_condition : ''].filter(Boolean).join('. ');
+}
+
+// Field/value help for the detail panel: any element with data-help-field is keyboard focusable and
+// shows the same registry text (plus this spec's own run-state evidence) on focus or tap, as hover
+// gives through `title`. Escape dismisses it.
+function helpAnchorSpec(anchor) {
+  const id = anchor.dataset.helpSpec || openPanelId;
+  if (currentPanelFm && currentPanelFm.id === id) return currentPanelFm;
+  return specById(id);
+}
+
+function showFieldHelp(anchor) {
+  const field = anchor.dataset.helpField;
+  if (!field) return;
+  const spec = helpAnchorSpec(anchor);
+  const label = anchor.dataset.helpLabel || field.replaceAll('_', ' ');
+  const help = registryHelp(spec, field) || 'No registry help is defined for this field.';
+  let html = `<div class="tt-help-title">${_escHtml(label)}</div><div class="tt-help">${_escHtml(help)}</div>`;
+  if (field === 'run_state' && spec.run_state_summary) html += runStateSummaryHtml(spec.run_state_summary);
+  placeTooltip(anchor, html);
+}
+
+function helpTargetAttrs(spec, field, label, extraClass) {
+  const help = registryHelp(spec, field);
+  const shown = label || field.replaceAll('_', ' ');
+  return `class="help-target${extraClass ? ' ' + extraClass : ''}" tabindex="0" data-help-field="${_escHtml(field)}" data-help-label="${_escHtml(shown)}"`
+    + ` data-help-spec="${_escHtml((spec && spec.id) || '')}" title="${_escHtml(help)}"`
+    + ` aria-label="${_escHtml(shown + (help ? ': ' + help : ''))}"`;
+}
+
+let lastHelpFocusAt = 0;
+document.addEventListener('focusin', (e) => {
+  const el = e.target instanceof Element ? e.target.closest('[data-help-field]') : null;
+  if (el) { lastHelpFocusAt = Date.now(); showFieldHelp(el); }
+});
+document.addEventListener('focusout', (e) => {
+  const el = e.target instanceof Element ? e.target.closest('[data-help-field]') : null;
+  if (el) hideSpecTooltip();
+});
+document.addEventListener('click', (e) => {
+  const el = e.target instanceof Element ? e.target.closest('[data-help-field]') : null;
+  if (!el || el.closest('button, a, select')) return;
+  if (Date.now() - lastHelpFocusAt < 400) return; // this same gesture's focus already showed it
+  // Tap: toggle, so a second tap dismisses without needing a keyboard.
+  if (tooltipIsVisible() && tooltipAnchor === el) hideSpecTooltip(); else showFieldHelp(el);
+});
 
 // Backwards-compat shims (older call sites used the recent-bar names)
 const showRecentTooltip = showSpecTooltip;
@@ -4458,6 +5611,19 @@ function attachSpecRefPreview(root) {
   root.querySelectorAll('.spec-ref[data-spec-id]').forEach(el => {
     el.addEventListener('mouseenter', () => showSpecTooltip(el, specById(el.dataset.specId)));
     el.addEventListener('mouseleave', hideSpecTooltip);
+    // SPEC-360 R6: dependency chips/links get the same info on keyboard focus (and tap = click).
+    if (!el.hasAttribute('tabindex')) el.tabIndex = 0;
+    if (!el.getAttribute('href') && !el.hasAttribute('role')) el.setAttribute('role', 'button');
+    const chipSpec = specById(el.dataset.specId);
+    const chipState = chipSpec && chipSpec.run_state_summary ? runStateSummaryText(chipSpec.run_state_summary) : '';
+    if (!el.dataset.external) el.setAttribute('aria-label', `${el.dataset.specId}${chipState ? ': ' + chipState : ''}`);
+    el.addEventListener('focus', () => showSpecTooltip(el, specById(el.dataset.specId)));
+    el.addEventListener('blur', hideSpecTooltip);
+    if (!el.getAttribute('href')) {
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); }
+      });
+    }
   });
 }
 
@@ -4725,8 +5891,10 @@ function renderCard(spec, blocksMap) {
   const readinessBadge = spec.readiness
     ? `<span class="badge readiness-${spec.readiness.toLowerCase()}" title="${_escHtml(registryHelp(spec, 'readiness'))}">${_escHtml(spec.readiness)}</span>`
     : '';
+  const runStateTip = registryHelp(spec, 'run_state')
+    + (spec.run_state_summary ? ' | This spec: ' + runStateSummaryText(spec.run_state_summary) : '');
   const runStateBadge = spec.run_state
-    ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'run_state'))}">${_escHtml(spec.run_state.replaceAll('_', ' '))}</span>`
+    ? `<span class="badge" title="${_escHtml(runStateTip)}">${_escHtml(spec.run_state.replaceAll('_', ' '))}</span>`
     : '';
 
   let depHtml = '';
@@ -4773,6 +5941,17 @@ function renderCard(spec, blocksMap) {
   // Hover preview — title, status (in its color), and the problem snippet
   card.addEventListener('mouseenter', () => showSpecTooltip(card, spec));
   card.addEventListener('mouseleave', hideSpecTooltip);
+  // SPEC-360 R6: the same preview on keyboard focus; Enter/Space opens like a click. The accessible
+  // name carries the run state so the reason is not hover-only.
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label',
+    `${spec.id}: ${title}. ${status}${spec.run_state_summary ? '. ' + runStateSummaryText(spec.run_state_summary) : ''}`);
+  card.addEventListener('focus', () => showSpecTooltip(card, spec));
+  card.addEventListener('blur', hideSpecTooltip);
+  card.addEventListener('keydown', (e) => {
+    if (e.target === card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); card.click(); }
+  });
 
   return card;
 }
@@ -5099,7 +6278,6 @@ function renderPanelMeta(specId, fm) {
     ['layer', fm.layer !== undefined ? fm.layer : ''],
     ['priority', fm.priority],
     ['readiness', fm.readiness],
-    ['run_state', fm.run_state],
     ['blocker_class', fm.blocker_class],
     ['blocker_scope', fm.blocker_scope],
     ['block_reason', fm.block_reason],
@@ -5108,19 +6286,32 @@ function renderPanelMeta(specId, fm) {
     ['created', fm.created],
   ];
   if (fm.stack) fields.push(['stack', fm.stack]);
+  // SPEC-360 R6: a declared scope is a read-only collapsible row.
+  if (fm.scope && typeof fm.scope === 'object' && !Array.isArray(fm.scope)) {
+    const scopeText = Object.entries(fm.scope)
+      .map(([k, v]) => k + ': ' + (Array.isArray(v) ? v.join(', ') : String(v))).join(' · ');
+    if (scopeText) fields.push(['scope', scopeText]);
+  }
 
   const metaEl = document.getElementById('panel-meta');
-  const statusRow = `<tr><td title="${_escHtml(registryHelp(fm, 'status'))}">status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  const statusRow = `<tr><td ${helpTargetAttrs(fm, 'status', 'status')}>status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  // SPEC-360 R1/R6: the run-state control stays above the fold and moves focus to "Why this state?".
+  const runStateText = fm.run_state ? String(fm.run_state).replaceAll('_', ' ') : 'not applicable';
+  const runStateValueHelp = fm.run_state_summary ? runStateSummaryText(fm.run_state_summary) : '';
+  const runStateRow = `<tr class="meta-row-runstate"><td ${helpTargetAttrs(fm, 'run_state', 'run state')}>run_state</td>`
+    + `<td><button type="button" class="why-focus-btn" id="panel-why-focus-btn" onclick="focusWhyThisState()"`
+    + ` title="${_escHtml(runStateValueHelp)}"`
+    + ` aria-label="${_escHtml('run state: ' + runStateText + '. Show why this state')}">${_escHtml(runStateText)} · why?</button></td></tr>`;
   // SPEC-307 R2: an optional execution: {worker_model, verifier_model}
   // override is surfaced as two always-visible rows next to status, matching
   // buildRunPrompt (R3), which appends the same values to the copied prompt.
   const execution = (fm.execution && typeof fm.execution === 'object') ? fm.execution : {};
   let modelRows = '';
   if (execution.worker_model) {
-    modelRows += `<tr><td>worker model</td><td>${_escHtml(String(execution.worker_model))}</td></tr>`;
+    modelRows += `<tr><td ${helpTargetAttrs(fm, 'execution', 'worker model')}>worker model</td><td>${_escHtml(String(execution.worker_model))}</td></tr>`;
   }
   if (execution.verifier_model) {
-    modelRows += `<tr><td>verifier model</td><td>${_escHtml(String(execution.verifier_model))}</td></tr>`;
+    modelRows += `<tr><td ${helpTargetAttrs(fm, 'execution', 'verifier model')}>verifier model</td><td>${_escHtml(String(execution.verifier_model))}</td></tr>`;
   }
   // SPEC-290: block_reason and transfer_refusal get subtle, distinct
   // background hints (reddish / amber) so a stuck-vs-refused spec is
@@ -5133,7 +6324,8 @@ function renderPanelMeta(specId, fm) {
     const dismissBtn = k === 'transfer_refusal'
       ? ` <button type="button" class="meta-dismiss-btn" title="Dismiss" onclick="dismissTransferRefusal('${specId}')">×</button>`
       : '';
-    return `<tr${rowClass}><td title="${_escHtml(registryHelp(fm, k))}">${k}</td><td>${_escHtml(String(v))}${dismissBtn}</td></tr>`;
+    const labelAttrs = registryHelp(fm, k) ? helpTargetAttrs(fm, k, k) : '';
+    return `<tr${rowClass}><td ${labelAttrs}>${k}</td><td>${_escHtml(String(v))}${dismissBtn}</td></tr>`;
   };
   const populatedFields = fields.filter(([k, v]) => v !== undefined && v !== null && v !== '');
   // SPEC-307 R5: hint rows (block_reason/transfer_refusal) stay always-visible
@@ -5146,7 +6338,7 @@ function renderPanelMeta(specId, fm) {
   const hiddenCount = collapsibleFields.length;
   const toggleLabel = metaCollapsed ? `▸ details (${hiddenCount})` : `▾ details`;
   const toggleRow = `<tr><td colspan="2"><button type="button" id="panel-meta-toggle" class="meta-toggle-btn" aria-expanded="${!metaCollapsed}" onclick="toggleMetaCollapsed()">${_escHtml(toggleLabel)}</button></td></tr>`;
-  metaEl.innerHTML = statusRow + modelRows + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
+  metaEl.innerHTML = statusRow + modelRows + runStateRow + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
 
   // SPEC-294-001: render (or hide) the deployment-authorization approve/
   // reject control in the same panel the run_state row already renders.
@@ -5164,6 +6356,470 @@ function toggleMetaCollapsed() {
     renderPanelMeta(openPanelId, currentPanelFm);
   }
 }
+
+// ── SPEC-360: "Why this state?" and artifact navigation ─────────────────────────────────────────
+// Everything below RENDERS what the API returned (SPEC-359's explanation, the artifact index and the
+// bounded artifact preview). Artifact content is untrusted display data: it is only ever written with
+// textContent / element properties, never innerHTML, never marked.
+
+function touchRecent(specId, title, status) {
+  // The one deduplicated, newest-first, capped recent list (also used when an artifact is opened).
+  recentSpecs = [{id: specId, title: title || specId, status: status || 'draft'},
+    ...recentSpecs.filter(s => s.id !== specId)].slice(0, 20);
+  renderRecentBar();
+  saveSettings();
+}
+
+function sameProject(name) {
+  return String(name || '').toLowerCase() === String(CURRENT_PROJECT || '').toLowerCase();
+}
+
+// Existing registry/board project route (the same one renderSpecChip uses for external specs).
+function projectRoute(name, specId) {
+  const list = (projectsRegistry && Array.isArray(projectsRegistry.projects)) ? projectsRegistry.projects : [];
+  const p = list.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
+  if (!p || !p.port) return null;
+  return { name: p.name, href: `http://127.0.0.1:${p.port}/?spec=${encodeURIComponent(specId)}` };
+}
+
+function copyButtonHtml(text) {
+  return `<button type="button" class="artifact-copy-btn" data-copy="${_escHtml(text)}" aria-label="${_escHtml('Copy ' + text)}">copy</button>`;
+}
+
+// One typed SPEC-357 evidence locator. A locator is never an instruction to fetch: it becomes a
+// navigation control only when the board can honour it, otherwise it is shown with an explanation.
+function locatorHtml(loc, ownerId) {
+  if (!loc || typeof loc !== 'object') return '';
+  const anchor = loc.anchor ? '#' + loc.anchor : '';
+  const unavailable = (why) => ` <span class="why-missing">(${_escHtml(why)})</span>`;
+  if (loc.kind === 'spec' || loc.kind === 'artifact') {
+    const id = String(loc.kind === 'spec' ? (loc.id || '') : (loc.spec || ownerId || ''));
+    const path = String(loc.path || '');
+    // A spec this board holds is navigated locally even if the locator names a project; only a spec
+    // this board does not hold, in another project, goes through the registry route.
+    const foreign = !!loc.project && !sameProject(loc.project) && !specs.some(s => s.id === id);
+    const tail = loc.kind === 'artifact' ? ` <code>${_escHtml(path)}</code>` : (anchor ? _escHtml(anchor) : '');
+    if (foreign) {
+      const route = projectRoute(loc.project, id);
+      if (route) {
+        return `<a class="chip" href="${_escHtml(route.href)}" target="_blank" rel="noopener" title="Opens the ${_escHtml(route.name)} board">`
+          + `↗ ${_escHtml(route.name)} · ${_escHtml(id)}</a>${tail}`
+          + (loc.kind === 'artifact' ? unavailable("this artifact belongs to another project's spec; open it on that board") : '');
+      }
+      return `<code>${_escHtml(loc.project)} · ${_escHtml(id)}</code>${tail}`
+        + unavailable(`project ${loc.project} is not in this board's registry, so there is no link to follow`);
+    }
+    if (loc.kind === 'spec') return `spec ${renderSpecChip(id)}${tail}`;
+    const local = id === ownerId;
+    const indexed = local ? panelArtifacts.entries.some(a => a.path === path) : true;
+    if (!indexed) return `<code>${_escHtml(path)}</code>` + unavailable("not in this spec's artifact index");
+    if (!panelArtifacts.previewAvailable) return `<code>${_escHtml(path)}</code>` + unavailable('preview unavailable in a static export');
+    return `<button type="button" class="why-focus-btn" data-artifact-spec="${_escHtml(id)}" data-artifact-path="${_escHtml(path)}">`
+      + `Open ${local ? '' : _escHtml(id) + ' '}${_escHtml(path)}</button>`;
+  }
+  if (loc.kind === 'file') {
+    return `<code>${_escHtml(String(loc.path || '') + anchor)}</code> ${copyButtonHtml(String(loc.path || ''))}`
+      + unavailable('project file: open it in your editor; the board does not fetch it');
+  }
+  if (loc.kind === 'git') {
+    const commit = String(loc.commit || '');
+    return `<code>${_escHtml(commit.slice(0, 12) + ' ' + String(loc.path || ''))}</code> ${copyButtonHtml(commit + ':' + String(loc.path || ''))}`
+      + unavailable('git object: inspect it with git; the board does not fetch it');
+  }
+  if (loc.kind === 'url') {
+    const url = String(loc.url || '');
+    const label = String(loc.label || url);
+    if (url.toLowerCase().startsWith('https://')) {
+      return `<a href="${_escHtml(url)}" target="_blank" rel="noopener noreferrer">${_escHtml(label)}</a> <code>${_escHtml(url)}</code>`;
+    }
+    return `<code>${_escHtml(url)}</code>` + unavailable('not an https link, so it is shown as text only');
+  }
+  return `<code>${_escHtml(JSON.stringify(loc))}</code>`;
+}
+
+function evidenceListHtml(list, ownerId) {
+  const items = (Array.isArray(list) ? list : []).map(loc => locatorHtml(loc, ownerId)).filter(Boolean);
+  return items.length ? `<ul class="why-evidence">${items.map(i => `<li>${i}</li>`).join('')}</ul>` : '';
+}
+
+const _QUALITY_HELP = {
+  recorded: "the spec's State rationale section names this exact record and they agree (not proof the reasoning is right)",
+  reconstructed: 'written after the fact; it does not record the original decision',
+  legacy_missing: 'no State rationale section; earlier history is listed below and is not asserted as current',
+  stale: "the section no longer matches the spec's current status",
+  malformed: 'the State rationale section could not be read',
+  unavailable: 'the named record or the artifact index could not be found or read',
+};
+
+function renderWhySection(specId, fm, ex) {
+  const el = document.getElementById('panel-why');
+  if (!el) return;
+  // SPEC-369 R1: presentation only. The section renders collapsed unless the operator expanded THIS
+  // spec; its summary line (state + headline) is always visible and the toggle carries aria-expanded.
+  const expanded = whyExpandedSpec === specId;
+  const open = (inner, summaryHtml) => `<section id="panel-why-section" class="why-section${expanded ? ' why-open' : ''}" data-spec-id="${_escHtml(specId)}" tabindex="-1" aria-labelledby="panel-why-heading">`
+    + `<h3 class="why-heading" id="panel-why-heading"><button type="button" id="panel-why-toggle" class="why-toggle" aria-expanded="${expanded}" aria-controls="panel-why-body" onclick="toggleWhyThisState()">`
+    + `<span class="why-marker" aria-hidden="true">${expanded ? '▾' : '▸'}</span><span class="why-title">Why this state?</span>`
+    + `<span class="why-summary" id="panel-why-summary">${summaryHtml}</span><span class="why-hint" id="panel-why-hint">${expanded ? 'hide' : 'show'}</span></button></h3>`
+    + `<div id="panel-why-body" class="why-body"${expanded ? '' : ' hidden'}>${inner}</div></section>`;
+  if (!ex || typeof ex !== 'object') {
+    // Nothing to expand: the message itself is the always-visible line, so there is no toggle.
+    el.innerHTML = `<section id="panel-why-section" class="why-section why-open" tabindex="-1" aria-labelledby="panel-why-heading">`
+      + `<h3 class="why-heading" id="panel-why-heading">Why this state?</h3>`
+      + '<div class="why-missing" data-why-state="missing">No explanation was returned for this spec, so its state cannot be explained here. The spec body below is unaffected.</div></section>';
+    return;
+  }
+  const lc = ex.lifecycle || {};
+  const rat = ex.rationale;
+  const persistence = ex.persistence || {};
+  let authored = `<div class="why-label">Lifecycle choice (authored decision)</div>`;
+  authored += `<div class="why-kv">Stored status <b>${_escHtml(lc.declared || '?')}</b>`
+    + (lc.effective && lc.effective !== lc.declared ? `, effective <b>${_escHtml(lc.effective)}</b>` : '')
+    + (lc.committed ? `, last commit records <b>${_escHtml(lc.committed)}</b>` : '') + '</div>';
+  if (lc.committed && lc.declared && lc.committed !== lc.declared) {
+    authored += `<div class="why-kv why-uncommitted" data-why-state="uncommitted">Working copy shows <b>${_escHtml(lc.declared)}</b> but the last commit records <b>${_escHtml(lc.committed)}</b>: this change is not committed.</div>`;
+  }
+  if (lc.sync && lc.sync.in_sync === false) {
+    authored += `<div class="why-kv why-uncommitted">The durable status checkpoint disagrees with the spec file${lc.sync.reason ? ': ' + _escHtml(lc.sync.reason) : ''}.</div>`;
+  }
+  if (!rat) {
+    authored += `<div class="why-kv why-missing">This kind of spec carries no state rationale.</div>`;
+  } else {
+    authored += `<div class="why-kv">Decision record: <b>${_escHtml(rat.quality || 'unknown')}</b> — ${_escHtml(_QUALITY_HELP[rat.quality] || '')}`
+      + (rat.provenance ? ` (provenance: ${_escHtml(rat.provenance)})` : '') + '</div>';
+    authored += rat.reason
+      ? `<div class="why-kv">Reason: ${_escHtml(rat.reason)}</div>`
+      : `<div class="why-kv why-missing">No reason is recorded for the current status.</div>`;
+    if (rat.reconsider_when) authored += `<div class="why-kv">Reconsider when: ${_escHtml(rat.reconsider_when)}</div>`;
+    if (rat.record) {
+      authored += `<div class="why-kv">Record: ${locatorHtml({kind: 'artifact', spec: specId, path: rat.record}, specId)}</div>`;
+    }
+    const ratEvidence = evidenceListHtml(rat.evidence, specId);
+    if (ratEvidence) authored += `<div class="why-kv"><span ${helpTargetAttrs(fm, 'evidence', 'Evidence')}>Evidence</span>:</div>${ratEvidence}`;
+  }
+
+  const primary = ex.primary || {};
+  let computed = `<div class="why-label">Current gate (computed from live inputs, not a decision)</div>`;
+  computed += ex.applicability === 'not_applicable' || !ex.run_state
+    ? `<div class="why-kv"><b>Run state does not apply</b> to this spec's status.</div>`
+    : `<div class="why-kv">Run state <b>${_escHtml(String(ex.run_state).replaceAll('_', ' '))}</b></div>`;
+  if (ex.meaning) computed += `<div class="why-kv">${_escHtml(ex.meaning)}</div>`;
+  if (primary.reason) computed += `<div class="why-kv">Reason: ${_escHtml(primary.reason)}${primary.source ? ` <span class="why-missing">[${_escHtml(primary.source)}]</span>` : ''}</div>`;
+  if (ex.next_condition) computed += `<div class="why-kv">What would change it: ${_escHtml(ex.next_condition)}</div>`;
+  const gates = Array.isArray(ex.gates) ? ex.gates : [];
+  if (gates.length) {
+    computed += `<ul class="why-gates">${gates.map(g => `<li><code>${_escHtml(g.code || '')}</code> <b>${_escHtml(g.result || '')}</b>`
+      + (g.reason ? ': ' + _escHtml(g.reason) : '') + evidenceListHtml(g.evidence, specId) + '</li>').join('')}</ul>`;
+  }
+
+  const persistChips = ['spec', 'record', 'index'].map(k => {
+    const v = persistence[k] || 'unknown';
+    const bad = v === 'staged' || v === 'working_tree_only';
+    return `<span class="why-persist${bad ? ' why-uncommitted' : ''}" data-persist="${_escHtml(k)}:${_escHtml(v)}">${_escHtml(k)}: ${_escHtml(_PERSIST_LABEL[v] || v)}</span>`;
+  }).join('');
+  let history = `<div class="why-label">Provenance and history</div><div class="why-kv">${persistChips}</div>`;
+  const diags = Array.isArray(ex.diagnostics) ? ex.diagnostics : [];
+  if (diags.length) {
+    history += `<ul class="why-gates">${diags.map(d => `<li><code>${_escHtml(d.code || '')}</code>: ${_escHtml(d.reason || '')}${evidenceListHtml(d.evidence, specId)}</li>`).join('')}</ul>`;
+  }
+  const summaryState = ex.applicability === 'not_applicable' || !ex.run_state
+    ? 'not applicable' : String(ex.run_state).replaceAll('_', ' ');
+  const headline = primary.reason || ex.meaning || '';
+  el.innerHTML = open(
+    `<div class="why-block why-authored" data-why-kind="authored">${authored}</div>`
+    + `<div class="why-block why-computed" data-why-kind="computed">${computed}</div>`
+    + `<div class="why-block why-history" data-why-kind="history">${history}</div>`,
+    `<b>${_escHtml(summaryState)}</b>${headline ? ' — ' + _escHtml(headline) : ''}`);
+  attachSpecRefPreview(el);
+}
+
+// SPEC-369 R2/R4: the one writer of the expanded state. It is remembered per spec id, so a poll or
+// re-render of the same spec (renderWhySection reads it back) keeps the operator's choice, while
+// opening another spec (openPanel clears it) starts collapsed again.
+function setWhyExpanded(expanded) {
+  const section = document.getElementById('panel-why-section');
+  const toggle = document.getElementById('panel-why-toggle');
+  const body = document.getElementById('panel-why-body');
+  if (!section || !toggle || !body) return;
+  whyExpandedSpec = expanded ? (section.dataset.specId || null) : null;
+  body.hidden = !expanded;
+  toggle.setAttribute('aria-expanded', String(expanded));
+  section.classList.toggle('why-open', expanded);
+  document.getElementById('panel-why-hint').textContent = expanded ? 'hide' : 'show';
+  toggle.querySelector('.why-marker').textContent = expanded ? '▾' : '▸';
+}
+
+function toggleWhyThisState() {
+  const toggle = document.getElementById('panel-why-toggle');
+  if (toggle) setWhyExpanded(toggle.getAttribute('aria-expanded') !== 'true');
+}
+
+function focusWhyThisState() {
+  const section = document.getElementById('panel-why-section');
+  if (!section) return;
+  if (document.getElementById('panel-why-toggle')) setWhyExpanded(true);
+  section.scrollIntoView({ block: 'start' });
+  section.focus({ preventScroll: true });
+}
+
+const _ARTIFACT_STATE_NOTE = {
+  available: '',
+  empty: 'the artifact index is valid but empty: nothing has been recorded',
+  missing: 'no artifact index exists for this spec',
+  invalid: 'the artifact index is not valid and cannot be listed',
+  unavailable: 'the artifact index could not be read (I/O error)',
+};
+
+function artifactRowsHtml(entries) {
+  return entries.map(a => {
+    const date = (a.created || '').slice(0, 10);
+    const label = `Open ${a.type || 'artifact'} artifact from ${date || 'an unknown date'} by ${a.actor || 'an unknown actor'}: ${a.summary || ''}`;
+    return `<button type="button" class="artifact-row" data-artifact-path="${_escHtml(a.path || '')}" aria-label="${_escHtml(label)}">`
+      + `<span class="artifact-type">${_escHtml(a.type || '')}</span>`
+      + `<span class="artifact-date">${_escHtml(date)}</span>`
+      + `<span class="artifact-actor">${_escHtml(a.actor || '')}</span>`
+      + `<span class="artifact-summary" title="${_escHtml(a.summary || '')}">${_escHtml(a.summary || '')}</span>`
+      + `<span class="artifact-open-label">Open</span></button>`;
+  }).join('');
+}
+
+function artifactStateNote(a) {
+  const note = _ARTIFACT_STATE_NOTE[a.state];
+  const parts = [];
+  if (note) parts.push(note);
+  if (!a.previewAvailable) parts.push('previews are not available in this static export');
+  return parts.join(' · ');
+}
+
+function renderArtifactsArea() {
+  const a = panelArtifacts;
+  const el = document.getElementById('panel-artifacts');
+  const n = a.entries.length;
+  const note = artifactStateNote(a);
+  const problem = a.state === 'invalid' || a.state === 'unavailable';
+  const help = registryHelp(currentPanelFm, 'artifacts');
+  let html = `<div class="artifacts-bar"><button type="button" id="panel-artifacts-btn" class="artifacts-open-btn" onclick="openArtifactList()"`
+    + ` data-help-field="artifacts" data-help-label="Artifacts" data-help-spec="${_escHtml(a.specId || '')}" title="${_escHtml(help)}"`
+    + ` aria-label="${_escHtml('Artifacts (' + n + '): open the artifact list' + (help ? '. ' + help : ''))}">Artifacts (${n})</button>`
+    + (note ? `<span class="artifact-state-note${problem ? ' artifact-state-problem' : ''}" data-artifact-state="${_escHtml(a.state)}">${_escHtml(note)}</span>` : '')
+    + '</div>';
+  if (n) html += `<div class="artifacts-label">artifacts:</div>${artifactRowsHtml(a.entries)}`;
+  el.innerHTML = html;
+}
+
+function renderArtifactList() {
+  const a = panelArtifacts;
+  const el = document.getElementById('panel-artifacts-list');
+  const n = a.entries.length;
+  let html = `<div class="artifact-list-heading">Artifacts (${n}) · ${_escHtml(a.specId || '')}</div>`;
+  if (n) {
+    html += artifactRowsHtml(a.entries);
+  } else {
+    const note = _ARTIFACT_STATE_NOTE[a.state] || 'no artifacts are listed';
+    html += `<div class="artifact-note" data-artifact-state="${_escHtml(a.state)}">${_escHtml(note.charAt(0).toUpperCase() + note.slice(1))}.`
+      + (a.detail && (a.state === 'invalid' || a.state === 'unavailable') ? ' ' + _escHtml(a.detail) : '') + '</div>';
+  }
+  if (!a.previewAvailable) html += `<div class="artifact-note">Previews are not available in this static export; the list shows recorded metadata only.</div>`;
+  html += `<div class="artifact-note">Reports and attachments are separate surfaces (REPORTS in the spec view) and are not counted here.</div>`;
+  el.innerHTML = html;
+}
+
+function cancelArtifactFetch() {
+  if (artifactAbort) { artifactAbort.abort(); artifactAbort = null; }
+}
+
+function openArtifactList() {
+  if (!openPanelId) return;
+  const body = document.getElementById('panel-body');
+  if (panelView === 'spec') artifactViewOrigin = { specId: openPanelId, scrollTop: body.scrollTop };
+  cancelArtifactFetch();
+  currentArtifact = null;
+  renderArtifactList();
+  setPanelView('artifacts');
+  body.scrollTop = 0;
+}
+
+function _el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderArtifactHead(specId, path, entry) {
+  const head = document.getElementById('panel-artifact-head');
+  head.textContent = '';
+  const line = _el('div');
+  line.appendChild(_el('span', 'artifact-type', entry ? (entry.type || 'artifact') : 'artifact'));
+  if (entry && entry.created) line.appendChild(_el('span', 'artifact-date', entry.created.slice(0, 10) + ' '));
+  if (entry && entry.actor) line.appendChild(_el('span', 'artifact-actor', entry.actor));
+  head.appendChild(line);
+  if (entry && entry.summary) head.appendChild(_el('div', '', entry.summary));
+  // A project-relative locator only (owner + index key); never a resolved host path.
+  const locator = _el('div', 'artifact-locator');
+  locator.appendChild(_el('span', '', 'source:'));
+  locator.appendChild(_el('code', '', `${specId} · ${path}`));
+  const copy = _el('button', 'artifact-copy-btn', 'copy');
+  copy.type = 'button';
+  copy.dataset.copy = `${specId}: ${path}`;
+  copy.setAttribute('aria-label', `Copy ${specId} ${path}`);
+  locator.appendChild(copy);
+  head.appendChild(locator);
+}
+
+const _ARTIFACT_ERROR_TEXT = {
+  artifact_not_found: 'This artifact is not available: it is not in the index, or its file is missing.',
+  invalid_path: 'This artifact path was rejected.',
+  index_missing: 'This spec has no artifact index.',
+  index_invalid: "This spec's artifact index is not valid.",
+  artifact_too_large: 'Too large to preview (limit 1 MiB for text, 10 MiB for images). No partial content is shown.',
+  preview_unsupported: 'No safe preview exists for this artifact (HTML, SVG and executable content are never rendered).',
+  artifact_unavailable: 'The artifact could not be read (I/O error).',
+  spec_not_found: 'This spec is not on this board.',
+};
+
+function renderArtifactMessage(target, code, message) {
+  target.textContent = '';
+  const box = _el('div', 'artifact-error');
+  box.setAttribute('role', 'alert');
+  box.dataset.artifactError = code;
+  box.appendChild(_el('div', '', 'Preview unavailable'));
+  box.appendChild(_el('div', '', _ARTIFACT_ERROR_TEXT[code] || 'The artifact could not be shown.'));
+  if (message) box.appendChild(_el('div', 'artifact-note', `${code}: ${message}`));
+  target.appendChild(box);
+}
+
+const _RASTER_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+function renderArtifactContent(target, p) {
+  target.textContent = '';
+  target.appendChild(_el('div', 'artifact-note', `${p.media_type} · ${p.size_bytes} bytes`));
+  if (p.encoding === 'base64') {
+    const valid = _RASTER_TYPES.includes(p.media_type) && /^[A-Za-z0-9+/=]*$/.test(p.content || '');
+    if (!valid) { renderArtifactMessage(target, 'preview_unsupported', 'unexpected image payload'); return; }
+    const img = document.createElement('img');
+    img.className = 'artifact-img';
+    img.alt = `${p.type || 'artifact'} image: ${p.path}`;
+    img.src = `data:${p.media_type};base64,${p.content}`;
+    target.appendChild(img);
+    return;
+  }
+  const raw = String(p.content || '');
+  const pre = _el('pre', 'artifact-pre');
+  if (p.media_type === 'application/json') {
+    let pretty = null;
+    try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (err) {
+      target.appendChild(_el('div', 'artifact-note', `Not valid JSON (${err.message}); showing the raw text.`));
+    }
+    if (pretty !== null) {
+      pre.textContent = pretty;
+      target.appendChild(pre);
+      const details = _el('details');
+      details.appendChild(_el('summary', '', 'Raw text'));
+      details.appendChild(_el('pre', 'artifact-pre', raw));
+      target.appendChild(details);
+      return;
+    }
+  } else if (p.media_type === 'text/markdown') {
+    target.appendChild(_el('div', 'artifact-note', 'Markdown is shown as escaped source text, not rendered.'));
+  } else if (p.media_type === 'application/x-ndjson') {
+    target.appendChild(_el('div', 'artifact-note', 'JSON Lines, shown as text.'));
+  }
+  pre.textContent = raw;
+  target.appendChild(pre);
+}
+
+function isCurrentArtifact(version, specId, path) {
+  return version === panelRequestVersion && panelView === 'artifact-content'
+    && currentArtifact && currentArtifact.specId === specId && currentArtifact.path === path;
+}
+
+async function openArtifact(specId, path) {
+  if (!specId || !path) return;
+  const body = document.getElementById('panel-body');
+  if (specId !== openPanelId) {
+    // Another spec's artifact: use the existing spec navigation first so Back lands on that owner and
+    // the spec-back stack still returns to where this started.
+    if (openPanelId) {
+      specNavStack.push({ specId: openPanelId, scrollTop: body.scrollTop });
+      if (specNavStack.length > 10) specNavStack.shift();
+    }
+    const ok = await openPanel(specId, { keepNavStack: true });
+    if (!ok) return;
+  }
+  if (panelView === 'spec') artifactViewOrigin = { specId, scrollTop: body.scrollTop };
+  else if (!artifactViewOrigin) artifactViewOrigin = { specId, scrollTop: 0 };
+  const entry = panelArtifacts.entries.find(a => a.path === path) || null;
+  const owner = specs.find(s => s.id === specId);
+  // The owning spec (never the artifact) becomes most recent; Back later adds no entry.
+  touchRecent(specId, (owner && (owner._title || owner.title)) || specId, (owner && owner.status) || 'draft');
+  cancelArtifactFetch();
+  const version = ++panelRequestVersion; // the same identity counter openPanel uses
+  currentArtifact = { specId, path };
+  renderArtifactHead(specId, path, entry);
+  setPanelView('artifact-content');
+  body.scrollTop = 0;
+  const target = document.getElementById('panel-artifact-body');
+  if (!panelArtifacts.previewAvailable) {
+    target.textContent = '';
+    const box = _el('div', 'artifact-error');
+    box.setAttribute('role', 'status');
+    box.dataset.artifactError = 'static_export';
+    box.appendChild(_el('div', '', 'Preview unavailable in this static export'));
+    box.appendChild(_el('div', 'artifact-note', 'The artifact content is not bundled with the snapshot. The source locator above identifies it in the live project.'));
+    target.appendChild(box);
+    return;
+  }
+  target.textContent = 'Loading artifact…';
+  const controller = new AbortController();
+  artifactAbort = controller;
+  let response = null;
+  let payload = null;
+  try {
+    response = await fetch(`/api/spec/${encodeURIComponent(specId)}/artifact?path=${encodeURIComponent(path)}`, { signal: controller.signal });
+    payload = await response.json();
+  } catch (err) {
+    if (controller.signal.aborted || !isCurrentArtifact(version, specId, path)) return;
+    renderArtifactMessage(target, 'artifact_unavailable', response ? 'the response could not be read' : 'the request failed');
+    return;
+  }
+  if (!isCurrentArtifact(version, specId, path)) return; // a newer spec/artifact owns the panel now
+  if (!response.ok) {
+    const error = (payload && payload.error) || {};
+    renderArtifactMessage(target, error.code || 'artifact_unavailable', error.message);
+    return;
+  }
+  renderArtifactContent(target, payload);
+}
+
+async function returnToSpecFromArtifact() {
+  const origin = artifactViewOrigin;
+  const specId = openPanelId;
+  const body = document.getElementById('panel-body');
+  cancelArtifactFetch();
+  currentArtifact = null;
+  if (artifactSpecStale && specId) {
+    artifactSpecStale = false;
+    await openPanel(specId, { keepNavStack: true });
+  } else {
+    setPanelView('spec'); // the spec DOM was only hidden: groups, chips and body are as left
+  }
+  artifactViewOrigin = null;
+  body.scrollTop = origin ? origin.scrollTop : 0;
+  const btn = document.getElementById('panel-artifacts-btn');
+  if (btn) btn.focus({ preventScroll: true });
+}
+
+document.getElementById('panel-body').addEventListener('click', function(e) {
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t) return;
+  const copy = t.closest('[data-copy]');
+  if (copy) {
+    copyText(copy.dataset.copy).then(ok => showToast(ok ? 'copied' : 'copy failed'));
+    return;
+  }
+  const open = t.closest('[data-artifact-path]');
+  if (open) openArtifact(open.dataset.artifactSpec || openPanelId, open.dataset.artifactPath);
+});
 
 async function openPanel(specId, { keepNavStack = false } = {}) {
   const performanceStart = performanceClock();
@@ -5199,6 +6855,12 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   }
 
   const domMutationStart = performanceClock();
+  // SPEC-360 R3: selecting any spec (recent chip, card, link, Back) leaves an artifact view cleanly and
+  // cancels its in-flight request; a stale-on-disk flag is spent by this very reload.
+  cancelArtifactFetch();
+  artifactViewOrigin = null;
+  currentArtifact = null;
+  artifactSpecStale = false;
   // Reset to spec view
   setPanelView('spec');
 
@@ -5218,7 +6880,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
 
   let chipsHtml = '';
   if (after.length) {
-    chipsHtml += `<div class="chips-row"><span class="chips-label">after:</span>`;
+    chipsHtml += `<div class="chips-row"><span ${helpTargetAttrs(fm, 'after', 'after', 'chips-label')}>after:</span>`;
     for (const dep of after) {
       chipsHtml += renderSpecChip(dep);
     }
@@ -5234,20 +6896,23 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   document.getElementById('panel-chips').innerHTML = chipsHtml;
   attachSpecRefPreview(document.getElementById('panel-chips'));
 
-  // SPEC-291: list the spec's typed artifact index (status-transition,
-  // decision, validation-evidence, ... entries) — type, date, summary.
-  const artifacts = data.artifacts || [];
-  const artifactsEl = document.getElementById('panel-artifacts');
-  if (artifacts.length) {
-    const rows = artifacts.map(a =>
-      `<div class="artifact-row"><span class="artifact-type">${_escHtml(a.type || '')}</span>` +
-      `<span class="artifact-date">${_escHtml((a.created || '').slice(0, 10))}</span>` +
-      `<span class="artifact-summary" title="${_escHtml(a.summary || '')}">${_escHtml(a.summary || '')}</span></div>`
-    ).join('');
-    artifactsEl.innerHTML = `<div class="artifacts-label">artifacts:</div>${rows}`;
-  } else {
-    artifactsEl.innerHTML = '';
-  }
+  // SPEC-291 + SPEC-360 R2: the artifact index as an `Artifacts (N)` control plus keyboard-operable
+  // "Open" rows. Only metadata is listed here; content is fetched on Open.
+  panelArtifacts = {
+    specId,
+    entries: Array.isArray(data.artifacts) ? data.artifacts : [],
+    state: data.artifact_index_state || ((data.artifacts || []).length ? 'available' : 'missing'),
+    detail: data.artifact_index_detail || '',
+    previewAvailable: data.artifact_preview_available !== false,
+  };
+  renderArtifactsArea();
+
+  // SPEC-359/360 R1: render the shared explanation as-is (never recomputed here). After the artifact
+  // state is set, because evidence locators decide from it whether an artifact can be opened.
+  panelExplanation = data.run_state_explanation || null;
+  currentPanelFm = fm;
+  if (openPanelId !== specId) whyExpandedSpec = null;  // SPEC-369 R4: another spec's view starts collapsed
+  renderWhySection(specId, fm, panelExplanation);
   // SPEC-064: fill in external dep statuses from peer boards (async, best-effort)
   fillExternalChipStatuses(document.getElementById('panel-chips'));
 
@@ -5290,10 +6955,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   }).catch(() => {});
 
   // Push to recent (dedup + cap at 20)
-  recentSpecs = [{id: specId, title: data.title || specId, status: (data.frontmatter||{}).status||'draft'},
-    ...recentSpecs.filter(s => s.id !== specId)].slice(0, 20);
-  renderRecentBar();
-  saveSettings();
+  touchRecent(specId, data.title || specId, (data.frontmatter||{}).status||'draft');
   requestAnimationFrame(() => {
     reportPerformance('panel_body_paint', performanceStart);
     reportPerformance('spec_panel_ready', performanceStart);
@@ -5308,6 +6970,7 @@ function applyActiveCard(specId) {
 
 function closePanel() {
   document.getElementById('panel').classList.remove('open');
+  whyExpandedSpec = null;  // SPEC-369 R4: closing the panel ends the spec view; the next open starts collapsed
   // openPanelId intentionally kept — card stays highlighted as "last selected"
 }
 
@@ -5315,6 +6978,10 @@ function clearSelection() {
   openPanelId = null;
   openPanelMtime = null;
   panelView = 'spec';
+  cancelArtifactFetch();
+  artifactViewOrigin = null;
+  currentArtifact = null;
+  artifactSpecStale = false;
   document.querySelectorAll('.card--active').forEach(c => c.classList.remove('card--active'));
   closePanel();
   renderRecentBar();
@@ -6138,6 +7805,14 @@ async function doSearch(q) {
   el.classList.add('visible');
 }
 
+// True when the currently focused element is a text-entry control (input or
+// textarea) — used to scope the snippets-view '/' shortcut (R6) so it never
+// steals a literal '/' keystroke from a field the user is already typing in.
+function isTextInputFocused() {
+  const t = document.activeElement;
+  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+}
+
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   if (e.key === '/') {
@@ -6145,9 +7820,16 @@ document.addEventListener('keydown', (e) => {
     if (!panel.classList.contains('open')) {
       e.preventDefault();
       searchInput.focus();
+    } else if (panelView === 'snippets' && !isTextInputFocused()) {
+      // R6: '/' focuses the snippets search input while the Snippets view is
+      // open and no text input already has focus (scoped to this view only).
+      e.preventDefault();
+      document.getElementById('snippets-filter').focus();
     }
   }
   if (e.key === 'Escape') {
+    // SPEC-360 R6: the first Escape dismisses a visible help/spec tooltip (opened by focus, tap or hover).
+    if (tooltipIsVisible()) { hideSpecTooltip(); return; }
     const dd = document.getElementById('col-vis-dropdown');
     if (dd.classList.contains('open')) { dd.classList.remove('open'); return; }
     if (searchInput.value) { clearSearch(); return; }
@@ -6363,6 +8045,10 @@ function setPanelView(view) {
   document.getElementById('panel-view-spec').style.display            = view === 'spec'           ? '' : 'none';
   document.getElementById('panel-view-reports').style.display         = view === 'reports'        ? '' : 'none';
   document.getElementById('panel-view-report-content').style.display  = view === 'report-content' ? '' : 'none';
+  document.getElementById('panel-view-artifacts').style.display        = view === 'artifacts'       ? '' : 'none';
+  document.getElementById('panel-view-artifact-content').style.display = view === 'artifact-content' ? '' : 'none';
+  document.getElementById('panel-view-snippets').style.display         = view === 'snippets'        ? '' : 'none';
+  hideSpecTooltip(); // a tooltip anchored in a view that just hid must not linger
   const backBtn = document.getElementById('panel-back-btn');
   const copyIdBtn = document.getElementById('btn-copy-id');
   const copyIdTitleBtn = document.getElementById('btn-copy-id-title');
@@ -6382,6 +8068,19 @@ function setPanelView(view) {
     // REPORTS button there's no spec to go back to, so hide.
     backBtn.style.display = openPanelId ? '' : 'none';
     backBtn.textContent = '← SPEC';
+  } else if (view === 'snippets') {
+    // Same back-to-spec convention as 'reports': from the header SNIPPETS
+    // button there's no spec to go back to, so hide.
+    copyIdBtn.style.display = 'none';
+    copyIdTitleBtn.style.display = 'none';
+    backBtn.style.display = openPanelId ? '' : 'none';
+    backBtn.textContent = '← SPEC';
+  } else if (view === 'artifacts' || view === 'artifact-content') {
+    // SPEC-360 R3: a persistent Back that always names the owning spec and returns straight to it.
+    copyIdBtn.style.display = 'none';
+    copyIdTitleBtn.style.display = 'none';
+    backBtn.style.display = '';
+    backBtn.textContent = '← Back to ' + (openPanelId || 'spec');
   } else { // 'report-content'
     copyIdBtn.style.display = 'none';
     copyIdTitleBtn.style.display = 'none';
@@ -6395,8 +8094,14 @@ function setPanelView(view) {
       headerLabel.textContent = openPanelId;
     } else if (view === 'reports') {
       headerLabel.textContent = openPanelId ? openPanelId + ' · REPORTS' : 'ALL REPORTS';
+    } else if (view === 'snippets') {
+      headerLabel.textContent = openPanelId ? openPanelId + ' · SNIPPETS' : 'ALL SNIPPETS';
     } else if (view === 'report-content') {
       headerLabel.textContent = openPanelId ? openPanelId + ' · REPORT' : 'REPORT';
+    } else if (view === 'artifacts') {
+      headerLabel.textContent = (openPanelId || '') + ' · ARTIFACTS';
+    } else if (view === 'artifact-content') {
+      headerLabel.textContent = (openPanelId || '') + ' · ARTIFACT';
     }
   }
 }
@@ -6634,6 +8339,8 @@ async function panelGoBack() {
   } else if (panelView === 'report-content') {
     setPanelView('reports');
     document.getElementById('panel-body').scrollTop = reportsListScrollTop;
+  } else if (panelView === 'artifacts' || panelView === 'artifact-content') {
+    await returnToSpecFromArtifact();
   }
 }
 
@@ -6666,6 +8373,503 @@ async function openReportsViewFromHeader() {
   document.getElementById('panel').classList.add('open');
 }
 
+// ── Prompt snippets view (SPEC-371-005) ──────────────────────────────────
+// Called from the header "⧉ SNIPPETS" button. Mirrors openReportsViewFromHeader()
+// exactly: no spec context, no pre-filter, detach any open spec card.
+async function openSnippetsViewFromHeader() {
+  openPanelId = null;
+  openPanelMtime = null;
+  document.querySelectorAll('.card--active').forEach(c => c.classList.remove('card--active'));
+  renderRecentBar();
+  const r = await fetch('/api/prompts');
+  promptsCache = r.ok ? await r.json() : [];
+  snippetsFilter = '';
+  expandedSnippetId = null; // SPEC-371-006: never reopen the panel with a stale expansion
+  snippetEditor = null;     // SPEC-371-007: never reopen the panel with a stale editor
+  document.getElementById('snippets-filter').value = '';
+  renderSnippetsList();
+  setPanelView('snippets');
+  document.getElementById('panel').classList.add('open');
+}
+
+function clearSnippetsFilter() {
+  snippetsFilter = '';
+  document.getElementById('snippets-filter').value = '';
+  renderSnippetsList();
+  document.getElementById('snippets-filter').focus();
+}
+
+// R5: substring match against title, body, tags — case-insensitive. Pure
+// function so it can be exercised directly by tests without a DOM.
+function filterSnippets(snippets, query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return snippets;
+  return snippets.filter(s => {
+    const tags = Array.isArray(s.tags) ? s.tags.join(' ') : '';
+    const haystack = `${s.title || ''} ${s.body || ''} ${tags}`.toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+// R4: scope badge — left-border color chip plus visible text, gray/blue/green
+// for prebuilt/repo/project. Badge text is always rendered, never color-only.
+function scopeBadgeLabel(scope) {
+  if (scope === 'prebuilt') return 'PREBUILT';
+  if (scope === 'repo') return 'REPO';
+  if (scope === 'project') return 'PROJECT';
+  return (scope || '').toUpperCase();
+}
+
+function scopeBadgeHtml(scope) {
+  return `<span class="snippet-badge" data-scope="${_escHtml(scope)}">${_escHtml(scopeBadgeLabel(scope))}</span>`;
+}
+
+// R3: first line of body only — the container's CSS ellipsis handles
+// truncation past the row width (same convention as .report-name).
+function firstBodyLine(body) {
+  return (body || '').split('\\n')[0];
+}
+
+// SPEC-371-007 R3/R6: Edit/Delete for repo/project rows; DUPLICATE AS CUSTOM
+// for prebuilt rows instead — never both on the same row.
+// Uses `data-row-scope` (not `data-scope`) so these buttons' markup never
+// collides with the SPEC-371-005 scope-badge's own `data-scope` attribute —
+// that existing test suite counts `data-scope="<scope>"` occurrences per
+// row and expects exactly one (the badge).
+function snippetRowActionsHtml(snippet) {
+  const safeId = _escHtml(snippet.id || '');
+  const safeScope = _escHtml(snippet.scope || '');
+  if (snippet.scope === 'prebuilt') {
+    return `<div class="snippet-row-actions">
+      <button class="btn snippet-duplicate-btn" data-id="${safeId}" data-row-scope="${safeScope}" title="Create an editable project-scope copy of this prompt">⎘ DUPLICATE AS CUSTOM</button>
+    </div>`;
+  }
+  return `<div class="snippet-row-actions">
+    <button class="btn snippet-edit-btn" data-id="${safeId}" data-row-scope="${safeScope}" title="Edit this prompt">EDIT</button>
+    <button class="btn snippet-delete-btn" data-id="${safeId}" data-row-scope="${safeScope}" title="Delete this prompt">DELETE</button>
+  </div>`;
+}
+
+function snippetRowHtml(snippet) {
+  const safeTitle = _escHtml(snippet.title || snippet.id || '');
+  const preview = _escHtml(firstBodyLine(snippet.body));
+  // SPEC-371-007: an open editor for this row's id owns the expand slot;
+  // the view-detail (COPY) expansion and the editor are mutually exclusive
+  // per row, and only one editor exists at a time (single `snippetEditor`).
+  const editingHere = snippetEditor != null && snippetEditor.anchor === snippet.id;
+  const expanded = !editingHere && expandedSnippetId != null && snippet.id === expandedSnippetId;
+  // Edit/Delete/Duplicate live as a sibling row *below* .snippet-item, not
+  // inside it — same "siblings below .snippet-item" convention SPEC-371-006
+  // already established for the COPY detail below, so a real-browser click
+  // on `.snippet-item` (SPEC-371-005/006's existing Playwright tests target
+  // its bounding-box center) can never land on an action button instead of
+  // toggling the expand/collapse behavior those tests assert.
+  return `
+    <div class="snippet-row-wrap">
+      <div class="snippet-item" data-id="${_escHtml(snippet.id || '')}">
+        ${scopeBadgeHtml(snippet.scope)}
+        <div class="snippet-info">
+          <div class="snippet-title">${safeTitle}</div>
+          <div class="snippet-preview">${preview}</div>
+        </div>
+      </div>
+      ${snippetRowActionsHtml(snippet)}
+      ${editingHere ? snippetEditorHtml(snippetEditor) : (expanded ? snippetDetailHtml(snippet) : '')}
+    </div>`;
+}
+
+// ── SPEC-371-006: snippet detail expand, variable fill-in, and copy ────────
+
+// R3: every declared variable except board_url (always server-filled, SPEC-371-003 R4).
+function variablesRequiringInput(variables) {
+  return (variables || []).filter((v) => v !== 'board_url');
+}
+
+// R2/AC2: highlight every {{name}} occurrence. Body must already be HTML-escaped
+// (via _escHtml) before this runs — {{ }} braces survive escaping untouched, so
+// escape-then-highlight never lets a placeholder's own text reopen a tag.
+function highlightVariables(escapedBody) {
+  return escapedBody.replace(
+    /\\{\\{(\\w+)\\}\\}/g,
+    '<span class="snippet-var-placeholder">{{$1}}</span>'
+  );
+}
+
+// R6: "stale_command:foo" / "missing_variable:bar" -> "⚠ stale_command: foo".
+function formatSnippetWarning(warning) {
+  const idx = (warning || '').indexOf(':');
+  if (idx === -1) return `⚠ ${warning || ''}`;
+  return `⚠ ${warning.slice(0, idx)}: ${warning.slice(idx + 1)}`;
+}
+
+// R1-R4: the expanded body preview, variable-fill form (R3), warnings slot (R6)
+// and COPY button (R4/R5), rendered directly below the clicked row.
+function snippetDetailHtml(snippet) {
+  const vars = variablesRequiringInput(snippet.variables);
+  const bodyHtml = highlightVariables(_escHtml(snippet.body || ''));
+  const safeId = _escHtml(snippet.id || '');
+  const inputsHtml = vars
+    .map((v) => {
+      const safeVar = _escHtml(v);
+      const inputId = `snippet-var-${safeId}-${safeVar}`;
+      return `
+      <div class="snippet-var-field">
+        <label for="${inputId}">${safeVar}</label>
+        <input type="text" class="snippet-var-input" id="${inputId}" data-var="${safeVar}">
+      </div>`;
+    })
+    .join('');
+  return `
+    <div class="snippet-detail" data-id="${safeId}" data-scope="${_escHtml(snippet.scope || '')}">
+      <div class="snippet-detail-body">${bodyHtml}</div>
+      ${inputsHtml ? `<div class="snippet-detail-vars">${inputsHtml}</div>` : ''}
+      <div class="snippet-detail-warnings"></div>
+      <button class="btn snippet-copy-btn" data-id="${safeId}" title="Render this snippet and copy the result to the clipboard">⧉ COPY</button>
+    </div>`;
+}
+
+// R1/AC4: toggle expansion — clicking the open row (or a different row) always
+// leaves at most one row expanded, because expandedSnippetId is single-valued
+// and renderSnippetsList() re-derives every row's expanded state from it.
+function toggleSnippetExpand(id) {
+  expandedSnippetId = expandedSnippetId === id ? null : id;
+  renderSnippetsList();
+}
+
+// R4: gather the current form's variable values and call the render endpoint;
+// R5: copy the result and show the existing toast pattern; R6: show warnings
+// (still copying — warnings are advisory per SPEC-371-003 R5).
+async function copySnippetById(id) {
+  const detailEl = document.querySelector('#panel-snippets-list .snippet-detail');
+  if (!detailEl || detailEl.dataset.id !== id) return;
+  const scope = detailEl.dataset.scope;
+  const variables = {};
+  detailEl.querySelectorAll('.snippet-var-input').forEach((input) => {
+    variables[input.dataset.var] = input.value;
+  });
+  const warningsEl = detailEl.querySelector('.snippet-detail-warnings');
+  try {
+    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variables, harness: 'other' }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const result = await r.json();
+    if (warningsEl) {
+      warningsEl.innerHTML = (result.warnings || [])
+        .map((w) => `<div class="snippet-warning">${_escHtml(formatSnippetWarning(w))}</div>`)
+        .join('');
+    }
+    const copied = await copyText(result.text || '');
+    showToast(copied ? '⧉ snippet copied' : '⚠ clipboard write failed');
+  } catch (e) {
+    showToast('⚠ snippet render failed');
+  }
+}
+
+// ── SPEC-371-007: add, edit, delete, duplicate-as-custom ───────────────────
+// Reuses the SPEC-371-006 inline-expand mechanism (snippet-row-wrap sibling
+// slot) for the editor form instead of introducing a second UI pattern
+// (e.g. a modal). At most one editor is open at a time (`snippetEditor`).
+
+// R1/R4/R6: same form for add ('top' anchor, no fixed scope), edit (anchored
+// to the row being edited, scope fixed/shown), and duplicate-as-custom
+// (anchored to the prebuilt row, scope defaulted to project but changeable).
+function snippetEditorHtml(state) {
+  const safeTitle = _escHtml(state.title || '');
+  const safeBody = _escHtml(state.body || '');
+  const safeTags = _escHtml(state.tagsText || '');
+  const scopeFixed = state.mode === 'edit';
+  const scopeField = scopeFixed
+    ? `<div class="snippet-editor-scope-fixed">${scopeBadgeHtml(state.scope)}</div>`
+    : `<select id="snippet-editor-scope" class="snippet-editor-select">
+        <option value="repo" ${state.scope === 'repo' ? 'selected' : ''}>${scopeBadgeLabel('repo')}</option>
+        <option value="project" ${state.scope === 'project' ? 'selected' : ''}>${scopeBadgeLabel('project')}</option>
+      </select>`;
+  const errorHtml = state.error
+    ? `<div class="snippet-editor-error">⚠ ${_escHtml(state.error)}</div>`
+    : '';
+  const submitLabel = state.mode === 'edit' ? 'SAVE' : 'CREATE';
+  return `
+    <div class="snippet-editor" data-mode="${_escHtml(state.mode)}">
+      <div class="snippet-editor-field">
+        <label for="snippet-editor-title">title</label>
+        <input type="text" id="snippet-editor-title" value="${safeTitle}">
+      </div>
+      <div class="snippet-editor-field">
+        <label for="snippet-editor-body">body</label>
+        <textarea id="snippet-editor-body" class="snippet-editor-textarea" rows="6">${safeBody}</textarea>
+      </div>
+      <div class="snippet-editor-field">
+        <label for="snippet-editor-tags">tags (comma-separated)</label>
+        <input type="text" id="snippet-editor-tags" value="${safeTags}">
+      </div>
+      <div class="snippet-editor-field">
+        <label>scope</label>
+        ${scopeField}
+      </div>
+      ${errorHtml}
+      <div class="snippet-editor-actions">
+        <button class="btn snippet-editor-submit-btn">${submitLabel}</button>
+        <button class="btn snippet-editor-cancel-btn">CANCEL</button>
+      </div>
+    </div>`;
+}
+
+// R1/AC7: top-level "+ ADD PROMPT" — from the header button or the
+// empty-state message. Idempotent while already open in add mode so a
+// stray extra click never wipes what the user has already typed.
+function openAddPromptEditor() {
+  if (snippetEditor && snippetEditor.anchor === 'top' && snippetEditor.mode === 'add') return;
+  expandedSnippetId = null;
+  snippetEditor = { anchor: 'top', mode: 'add', scope: 'project', id: null, title: '', body: '', tagsText: '', error: null };
+  renderSnippetsList();
+}
+
+// R4: "Edit" — same form, pre-filled, scope fixed; anchored under the row.
+function openEditPromptEditor(scope, id) {
+  const snippet = promptsCache.find((s) => s.id === id && s.scope === scope);
+  if (!snippet) return;
+  expandedSnippetId = null;
+  snippetEditor = {
+    anchor: id, mode: 'edit', scope, id,
+    title: snippet.title || '', body: snippet.body || '',
+    tagsText: (snippet.tags || []).join(', '), error: null,
+  };
+  renderSnippetsList();
+}
+
+// R6: "⎘ DUPLICATE AS CUSTOM" — pre-filled from the prebuilt row, title
+// suffixed " (copy)", scope defaulted to project (changeable), never an
+// edit of the original (mode 'duplicate' always POSTs a new snippet).
+function openDuplicatePromptEditor(scope, id) {
+  const snippet = promptsCache.find((s) => s.id === id && s.scope === scope);
+  if (!snippet) return;
+  expandedSnippetId = null;
+  snippetEditor = {
+    anchor: id, mode: 'duplicate', scope: 'project', id: null,
+    title: (snippet.title || '') + ' (copy)', body: snippet.body || '',
+    tagsText: (snippet.tags || []).join(', '), error: null,
+  };
+  renderSnippetsList();
+}
+
+function cancelSnippetEditor() {
+  snippetEditor = null;
+  renderSnippetsList();
+}
+
+// R2/R4/AC2/AC4/AC5/LE3: submit add/edit/duplicate. On a 409 collision
+// (add/duplicate only — edit never changes id/scope) the error is shown
+// inline and the form stays open with exactly what the user typed, because
+// the typed values are copied into `snippetEditor` *before* the fetch, so
+// the error re-render reads them back rather than reverting to stale state.
+async function submitSnippetEditor() {
+  if (!snippetEditor) return;
+  const titleEl = document.getElementById('snippet-editor-title');
+  const bodyEl = document.getElementById('snippet-editor-body');
+  const tagsEl = document.getElementById('snippet-editor-tags');
+  const scopeEl = document.getElementById('snippet-editor-scope');
+  if (!titleEl || !bodyEl || !tagsEl) return;
+  const title = titleEl.value;
+  const body = bodyEl.value;
+  const tagsText = tagsEl.value;
+  const scope = snippetEditor.mode === 'edit' ? snippetEditor.scope : (scopeEl ? scopeEl.value : snippetEditor.scope);
+  snippetEditor.title = title;
+  snippetEditor.body = body;
+  snippetEditor.tagsText = tagsText;
+  snippetEditor.scope = scope;
+  snippetEditor.error = null;
+  const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
+  const payload = { title, body, tags };
+  try {
+    let r;
+    if (snippetEditor.mode === 'edit') {
+      r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(snippetEditor.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      r = await fetch(`/api/prompts/${encodeURIComponent(scope)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+    if (r.status === 409) {
+      const err = await r.json().catch(() => ({}));
+      snippetEditor.error = `id already exists in ${err.existing_scope || 'another'} scope — rename and resubmit`;
+      renderSnippetsList();
+      return;
+    }
+    if (!r.ok) {
+      snippetEditor.error = 'save failed';
+      renderSnippetsList();
+      return;
+    }
+    const saved = await r.json();
+    if (snippetEditor.mode === 'edit') {
+      const idx = promptsCache.findIndex((s) => s.id === saved.id && s.scope === saved.scope);
+      if (idx !== -1) promptsCache[idx] = saved;
+    } else {
+      promptsCache.push(saved);
+    }
+    snippetEditor = null;
+    renderSnippetsList();
+  } catch (e) {
+    snippetEditor.error = 'save failed';
+    renderSnippetsList();
+  }
+}
+
+// R5/AC6: delete after a single native-confirm step; removes the row
+// immediately from promptsCache and clears any editor/expansion anchored
+// on it so a stale slot never lingers.
+async function deleteSnippetById(scope, id) {
+  if (!confirm('Delete this prompt snippet? This cannot be undone.')) return;
+  try {
+    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) {
+      showToast('⚠ delete failed');
+      return;
+    }
+    promptsCache = promptsCache.filter((s) => !(s.id === id && s.scope === scope));
+    if (expandedSnippetId === id) expandedSnippetId = null;
+    if (snippetEditor && snippetEditor.anchor === id) snippetEditor = null;
+    renderSnippetsList();
+  } catch (e) {
+    showToast('⚠ delete failed');
+  }
+}
+
+// R1: click a row to expand/collapse/switch. R4: click COPY to render+copy.
+// The COPY button and inputs live as siblings *below* .snippet-item (not
+// inside it), so closest('.snippet-item') never matches a click there.
+// SPEC-371-007's edit/delete/duplicate/editor-submit/editor-cancel buttons
+// live *inside* .snippet-item (row actions) or in the editor's sibling slot;
+// all are checked before the generic '.snippet-item' fallback below.
+document.getElementById('panel-snippets-list').addEventListener('click', function(e) {
+  // R7/AC7: clicking the true-empty-state message ("No prompts yet — click
+  // + ADD PROMPT to create one.", rendered only when there are zero
+  // snippets in every scope) opens the same editor as the header button.
+  // Matched by its fixed leading text (not a nested element — the message
+  // is still plain textContent, unchanged since SPEC-371-005) so the
+  // filtered "no snippets match ..." message is never mistaken for it.
+  const emptyMsg = e.target.closest('.reports-empty');
+  if (emptyMsg && (emptyMsg.textContent || '').startsWith('No prompts yet')) {
+    openAddPromptEditor();
+    return;
+  }
+  const submitBtn = e.target.closest('.snippet-editor-submit-btn');
+  if (submitBtn) {
+    submitSnippetEditor();
+    return;
+  }
+  const cancelBtn = e.target.closest('.snippet-editor-cancel-btn');
+  if (cancelBtn) {
+    cancelSnippetEditor();
+    return;
+  }
+  const editBtn = e.target.closest('.snippet-edit-btn');
+  if (editBtn) {
+    openEditPromptEditor(editBtn.dataset.rowScope, editBtn.dataset.id);
+    return;
+  }
+  const deleteBtn = e.target.closest('.snippet-delete-btn');
+  if (deleteBtn) {
+    deleteSnippetById(deleteBtn.dataset.rowScope, deleteBtn.dataset.id);
+    return;
+  }
+  const dupBtn = e.target.closest('.snippet-duplicate-btn');
+  if (dupBtn) {
+    openDuplicatePromptEditor(dupBtn.dataset.rowScope, dupBtn.dataset.id);
+    return;
+  }
+  const copyBtn = e.target.closest('.snippet-copy-btn');
+  if (copyBtn) {
+    copySnippetById(copyBtn.dataset.id);
+    return;
+  }
+  const item = e.target.closest('.snippet-item');
+  if (item) toggleSnippetExpand(item.dataset.id);
+});
+
+// R7 (input focused): Enter inside a variable-fill input triggers COPY.
+document.getElementById('panel-snippets-list').addEventListener('keydown', function(e) {
+  if (e.key !== 'Enter') return;
+  if (!e.target.closest('.snippet-var-input')) return;
+  const detail = e.target.closest('.snippet-detail');
+  if (detail) copySnippetById(detail.dataset.id);
+});
+
+// R7 (no input focused): Enter anywhere else while a row is expanded still
+// triggers COPY, as long as it didn't already bubble from inside the detail
+// (the listener above owns that case, and the COPY button's own native
+// Enter-triggers-click already handles focus on the button itself) and no
+// OTHER text input — e.g. the snippets search filter — is focused. Without
+// the isTextInputFocused() guard, typing a search query and pressing Enter
+// would silently re-render and overwrite the clipboard.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Enter') return;
+  if (panelView !== 'snippets' || !expandedSnippetId) return;
+  if (isTextInputFocused()) return;
+  if (e.target && e.target.closest && e.target.closest('.snippet-detail')) return;
+  copySnippetById(expandedSnippetId);
+});
+
+// R8/AC6: an empty result set (no snippets at all) renders one explanatory
+// line instead of a blank list; must not error before SPEC-371-007 adds the
+// "+ ADD PROMPT" button the line refers to.
+// Optional params default to the module-level state (openSnippetsViewFromHeader
+// and the search-input listener both call this with no arguments); explicit
+// arguments exist so tests can drive rendering without depending on the
+// caller having already populated promptsCache/snippetsFilter.
+function renderSnippetsList(prompts = promptsCache, filterValue = snippetsFilter) {
+  const el = document.getElementById('panel-snippets-list');
+  el.innerHTML = '';
+  // SPEC-371-007 R1/AC7: the top-anchored add editor renders above the list
+  // (and above the empty-state message) regardless of whether any snippets
+  // exist yet — the empty state's own "+ ADD PROMPT" link opens this same
+  // editor, so it must not be short-circuited by the early-return below.
+  if (snippetEditor && snippetEditor.anchor === 'top') {
+    const editorWrap = document.createElement('div');
+    editorWrap.innerHTML = snippetEditorHtml(snippetEditor);
+    el.appendChild(editorWrap);
+  }
+  if (!prompts.length) {
+    // R7/AC7: unchanged since SPEC-371-005 — textContent (not innerHTML), so
+    // the exact string stays intact. R7 wires this same message to the "+
+    // ADD PROMPT" editor via the delegated click handler below (matched by
+    // its unique leading text, not a nested button), rather than rewriting
+    // it into markup.
+    const empty = document.createElement('div');
+    empty.className = 'reports-empty';
+    empty.textContent = 'No prompts yet — click + ADD PROMPT to create one.';
+    el.appendChild(empty);
+    return;
+  }
+  const filter = (filterValue || '').trim();
+  const visible = filterSnippets(prompts, filter);
+  if (!visible.length) {
+    const empty = document.createElement('div');
+    empty.className = 'reports-empty';
+    empty.textContent = `no snippets match "${filter}"`;
+    el.appendChild(empty);
+    return;
+  }
+  const heading = document.createElement('div');
+  heading.className = 'reports-heading';
+  heading.textContent = filter
+    ? `${visible.length} of ${prompts.length}`
+    : `${prompts.length} snippet${prompts.length !== 1 ? 's' : ''}`;
+  el.appendChild(heading);
+  const listEl = document.createElement('div');
+  listEl.innerHTML = visible.map(snippetRowHtml).join('');
+  el.appendChild(listEl);
+}
+
 function clearReportsFilter() {
   reportsFilter = '';
   document.getElementById('reports-filter').value = '';
@@ -6678,6 +8882,10 @@ document.addEventListener('input', (e) => {
   if (e.target && e.target.id === 'reports-filter') {
     reportsFilter = e.target.value;
     renderReportsList();
+  }
+  if (e.target && e.target.id === 'snippets-filter') {
+    snippetsFilter = e.target.value;
+    renderSnippetsList();
   }
 });
 
@@ -7098,6 +9306,9 @@ async function pollSpecs() {
         const openSpec = fresh.find(s => s.id === openPanelId);
         if (!openSpec) {
           clearSelection();
+        } else if (openSpec._mtime !== prevOpenMtime && (panelView === 'artifacts' || panelView === 'artifact-content')) {
+          // SPEC-360 R3: do not yank the reader out of an artifact view; reload the spec on Back.
+          artifactSpecStale = true;
         } else if (openSpec._mtime !== prevOpenMtime) {
           // Open spec itself changed → reload full panel
           const panelBody = document.getElementById('panel-body');
@@ -7144,6 +9355,7 @@ window.addEventListener('resize', () => { syncHeaderHeight(); syncRecentBarHeigh
 // the right state on the first paint. Don't block on it — failures degrade
 // gracefully (chips render as internal "missing spec" placeholders).
 loadProjectsRegistry();
+loadRegistryHelp();
 loadSpecs().then(async () => {
   // BUG-014: wait for the first spec payload, then resolve the requested ID
   // exactly once. This shares the loopback route used by external chips and
@@ -7375,6 +9587,11 @@ def export_board_html(
 
     if _rdir is not None and _rdir.is_dir():
         for rpath in sorted(_rdir.rglob("*.md")):
+            # SPEC-367: reports/_wip/ is gitignored, machine-local working state
+            # (heartbeats, parent notes), not board content. Skipping it narrows what
+            # is exported; the leak scan below still runs on everything that is.
+            if "_wip" in rpath.relative_to(_rdir).parts:
+                continue
             try:
                 rel = str(rpath.relative_to(_rdir.parent))
                 content = rpath.read_text(encoding="utf-8")
@@ -7445,10 +9662,43 @@ def export_board_html(
         registry_data = dict(registry_data)
         registry_data["projects"] = stripped_projects
 
+    # ── 4b. SPEC-360: artifact index metadata, explanations and registry help ────
+    # Metadata and state only — no artifact content is ever bundled, so the exported detail view
+    # explains the limitation instead of trying the (nonexistent) content route.
+    artifacts_meta: dict[str, dict] = {}
+    explanations: dict[str, dict] = {}
+    for fm in all_fm:
+        sid = fm.get("id")
+        if not sid:
+            continue
+        try:
+            a_state, a_entries, a_detail = _cache.get_artifact_index(sid)
+        except KeyError:
+            a_state, a_entries, a_detail = "missing", [], ""
+        if a_state != "missing":
+            artifacts_meta[sid] = {"entries": a_entries, "state": a_state, "detail": a_detail}
+        explanation = _cache.get_explanation(sid)
+        if explanation is not None:
+            explanations[sid] = explanation
+    try:
+        from vocabulary import load_registry as _load_registry
+        vocabulary_blob = {
+            "registry_version": _load_registry()["version"],
+            "concepts": [
+                {"key": c["key"], "short_help": c.get("short_help") or c.get("definition") or ""}
+                for c in _load_registry()["concepts"] if isinstance(c, dict) and c.get("key")
+            ],
+        }
+    except Exception:
+        vocabulary_blob = {"registry_version": 0, "concepts": []}
+
     # ── 5. Build STATIC blob ────────────────────────────────────────────
     static_blob = {
         "specs": all_fm,
         "bodies": bodies,
+        "artifacts": artifacts_meta,
+        "explanations": explanations,
+        "vocabulary": vocabulary_blob,
         "graph": graph_data,
         "loopObservability": compute_loop_observability(None) if compute_loop_observability else {},
         "reports": report_list,
@@ -7484,6 +9734,8 @@ def export_board_html(
     _struct_json = json.dumps(
         {
             "specs": all_fm,
+            "artifacts": artifacts_meta,
+            "explanations": explanations,
             "graph": graph_data,
             "reports": report_list,
             "registry": registry_data,
@@ -7636,8 +9888,23 @@ window.Sortable.prototype = {{ destroy: function() {{}} }};
       var sid = decodeURIComponent(specMatch[1]);
       var fm = (S.specs || []).find(function(s) {{ return s.id === sid; }});
       if (!fm) return Promise.resolve({{ ok: false, status: 404, json: function() {{ return Promise.resolve({{}}); }}, text: function() {{ return Promise.resolve('not found'); }} }});
-      return _json({{ frontmatter: fm, body_md: (S.bodies || {{}})[sid] || '', title: fm._title || sid }});
+      var art = (S.artifacts || {{}})[sid];
+      /* SPEC-360: index metadata and state are preserved; content is never bundled, so previews are off. */
+      return _json({{
+        frontmatter: fm, body_md: (S.bodies || {{}})[sid] || '', title: fm._title || sid,
+        artifacts: art ? art.entries : [], artifact_index_state: art ? art.state : 'missing',
+        artifact_index_detail: art ? art.detail : '', artifact_preview_available: false,
+        run_state_explanation: (S.explanations || {{}})[sid] || null
+      }});
     }}
+
+    /* /api/spec/<id>/artifact — content is not bundled in a static export; never answered as data. */
+    if (/^\\/api\\/spec\\/[^\\/]+\\/artifact/.test(u)) {{
+      return Promise.resolve({{ ok: false, status: 404, json: function() {{ return Promise.resolve({{ error: {{ code: 'artifact_not_found', message: 'artifact content is not available in a static export' }} }}); }}, text: function() {{ return Promise.resolve('not available'); }} }});
+    }}
+
+    /* /api/vocabulary — registry help bundled at export time */
+    if (u === '/api/vocabulary') return _json(S.vocabulary || {{registry_version: 0, concepts: []}});
 
     /* /api/report/<filename> */
     var reportMatch = u.match(/^\\/api\\/report\\/(.+)$/);
@@ -7726,6 +9993,7 @@ if __name__ == "__main__":
 
     # Hash-based port: deterministic per project, range 7800-7999
     port = args.port if args.port is not None else (7800 + sum(ord(c) for c in project_name) % 200)
+    board_port = port  # SPEC-371-003 R4: module global for board_url auto-fill
 
     _bootstrap_start = time.monotonic()
     status_store = performance_registry.measure(

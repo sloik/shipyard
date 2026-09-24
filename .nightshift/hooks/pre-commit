@@ -8,12 +8,106 @@
 #
 # Install: cp .nightshift/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 # See: BOOTSTRAP.md § "Install Pre-Commit Hook"
+#
+# BUG-338: git always invokes this hook with cwd at the repository's top-level
+# working tree, never at the directory of the ".nightshift/" install the
+# commit is actually touching. A repository can hold more than one nested
+# ".nightshift/" install (e.g. Cortex: core/.nightshift, api/.nightshift,
+# mcp/.nightshift, tools/.nightshift, none at the repo root) with none at
+# root. Instead of a single hardcoded ".nightshift/config.yaml", this hook
+# derives the install(s) actually being touched from the staged paths: for
+# each staged path, it walks up that path's ancestor directories looking for
+# the nearest one containing a readable ".nightshift/config.yaml" (falling
+# back further up the tree if a closer ".nightshift/" exists without a
+# config.yaml of its own). A single-install-at-root repository resolves to
+# "." for every staged path, which reduces every derived path below back to
+# the exact literal strings this hook always used
+# (".nightshift/config.yaml", etc.) — R1's "single-install-at-root behavior
+# must be unchanged".
+#
+# R2 (multiple installs touched by one commit): run each touched install's
+# checks (scanner/spec-validation/write-scope-guard/lint/type_check), against
+# that install's own config.yaml. This is Approach A from the spec, chosen
+# over refusing the commit outright: a hard refusal would turn today's silent
+# no-op into a new hard failure for every legitimate multi-install commit in
+# a repo like Cortex, which is a worse regression than the bug being fixed.
 
 set -euo pipefail
 
-CONFIG=".nightshift/config.yaml"
+# Resolve the ".nightshift/" install directory that owns a staged path: the
+# nearest ancestor directory (starting at the path's own directory and
+# walking up to the repository root) that contains a readable
+# ".nightshift/config.yaml". Prints the resolved install root (e.g. "." or
+# "api") on stdout and returns 0, or returns 1 if no ancestor has one.
+indexed_config() {
+    git cat-file -e ":$1/config.yaml" 2>/dev/null ||
+        git cat-file -e "HEAD:$1/config.yaml" 2>/dev/null ||
+        [ -f "$1/config.yaml" ]
+}
 
-if [ ! -f "$CONFIG" ]; then
+resolve_install_root() {
+    local path="$1" dir candidate
+    # Explicit canonical ownership wins for canonical payload/spec paths.
+    case "$path" in
+        .nightshift/*)
+            if indexed_config .nightshift; then printf '%s' .nightshift; return 0; fi ;;
+        canonical/*)
+            if indexed_config canonical; then printf '%s' canonical; return 0; fi ;;
+    esac
+    dir=${path%/*}
+    if [ "$dir" = "$path" ]; then dir="."; fi
+    while :; do
+        if [ "$dir" = "." ]; then candidate=".nightshift"; else candidate="$dir/.nightshift"; fi
+        if indexed_config "$candidate"; then
+            if [ "$dir" = "." ] && indexed_config canonical; then
+                echo "[nightshift pre-commit] Ambiguous root ownership; use an explicit canonical or .nightshift path" >&2
+                return 2
+            fi
+            printf '%s' "$candidate"
+            return 0
+        fi
+        if [ "$dir" = "." ]; then return 1; fi
+        if [ "${dir%/*}" = "$dir" ]; then dir="."; else dir=${dir%/*}; fi
+    done
+}
+
+install_path() {
+    printf '%s/%s' "$1" "${2#.nightshift/}"
+}
+
+STAGED_ALL=()
+# --no-renames reports both old and new sides, including artifact deletions.
+while IFS= read -r -d '' staged_path; do
+    STAGED_ALL+=("$staged_path")
+done < <(git diff --cached --name-only -z --no-renames --diff-filter=ACDMRT)
+
+INSTALL_ROOTS=()
+for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
+    if resolved=$(resolve_install_root "$staged_path"); then
+        if [ "${1:-}" = "--resolve-owners" ]; then
+            printf '%s\0%s\0%s\0%s\0' "$staged_path" "$resolved" "$resolved/config.yaml" "$resolved/specs"
+        fi
+        already=0
+        for existing in "${INSTALL_ROOTS[@]+"${INSTALL_ROOTS[@]}"}"; do
+            if [ "$existing" = "$resolved" ]; then already=1; break; fi
+        done
+        if [ "$already" -eq 0 ]; then INSTALL_ROOTS+=("$resolved"); fi
+    else
+        result=$?
+        if [ "$result" -eq 2 ]; then exit 1; fi
+        case "/$staged_path" in
+            */.nightshift/specs/*|*/.nightshift/reports/*|/canonical/specs/*|/canonical/reports/*)
+                echo "[nightshift pre-commit] Cannot resolve owning install for $staged_path; restore config and sync the validator" >&2
+                exit 1 ;;
+        esac
+    fi
+done
+if [ "${1:-}" = "--resolve-owners" ]; then exit 0; fi
+
+if [ ${#INSTALL_ROOTS[@]} -eq 0 ] && [ ${#STAGED_ALL[@]} -eq 0 ] && [ -f ".nightshift/config.yaml" ]; then
+    INSTALL_ROOTS+=(".nightshift")
+fi
+if [ ${#INSTALL_ROOTS[@]} -eq 0 ]; then
     echo "[nightshift pre-commit] No config.yaml found — skipping checks"
     exit 0
 fi
@@ -22,9 +116,10 @@ fi
 # shell parsing or a platform-specific text extractor reinterpret config text
 # before it reaches the intentionally configured eval below.
 extract_cmd() {
-    local key="$1"
+    local config="$1"
+    local key="$2"
     local val
-    if ! val=$(python3 - "$CONFIG" "$key" <<'PY'
+    if ! val=$(python3 - "$config" "$key" <<'PY'
 import sys
 
 try:
@@ -69,46 +164,7 @@ PY
     printf '%s' "$val"
 }
 
-if ! LINT_CMD=$(extract_cmd "lint"); then
-    exit 1
-fi
-if ! TYPE_CHECK_CMD=$(extract_cmd "type_check"); then
-    exit 1
-fi
-
 FAILED=0
-
-SCANNER=".nightshift/scanner.py"
-if [ -f "$SCANNER" ]; then
-    echo "[nightshift pre-commit] Scanning staged diff for secrets/PII and escalation thresholds..."
-    if ! python3 "$SCANNER" --staged --config "$CONFIG"; then
-        echo "[nightshift pre-commit] SECRET/PII OR ESCALATION GATE FAILED — commit rejected"
-        FAILED=1
-    fi
-fi
-
-# Spec validation — check any staged .nightshift/specs/*.md files
-VALIDATE_SPECS=".nightshift/validate_specs.py"
-if [ -f "$VALIDATE_SPECS" ]; then
-    STAGED_SPECS=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "^\.nightshift/specs/.*\.md$" | grep -Ev '/_TEMPLATE(-[^/]*)?\.md$' || true)
-    if [ -n "$STAGED_SPECS" ]; then
-        echo "[nightshift pre-commit] Validating staged specs..."
-        if ! echo "$STAGED_SPECS" | tr '\n' '\0' | xargs -0 python3 "$VALIDATE_SPECS"; then
-            echo "[nightshift pre-commit] SPEC VALIDATION FAILED — commit rejected"
-            FAILED=1
-        fi
-    fi
-fi
-
-# Write-scope guard — rejects a commit that stages a path outside the active
-# spec's declared scope.write (SPEC-300-003). Runs before lint/type-check so a
-# scope rejection is reported before slower gates run.
-WRITE_SCOPE_GUARD=".nightshift/hooks/protect-write-scope.sh"
-if [ -x "$WRITE_SCOPE_GUARD" ]; then
-    if ! "$WRITE_SCOPE_GUARD"; then
-        FAILED=1
-    fi
-fi
 
 # BUG-329: lint/type-check gate PROJECT code. A commit that stages only kit
 # paths (every staged path has a `.nightshift` component -- a whole-kit
@@ -116,41 +172,111 @@ fi
 # them to check, and the project's linter may not even exist on the machine
 # performing a release. Structural decision only; no environment variable can
 # trigger the skip. The scanner, spec validation and the write-scope guard
-# above have already run unchanged.
+# below still run unchanged for every touched install. This classification is
+# whole-commit, not per-install: it looks at every staged path regardless of
+# which install (if any) it resolved to above.
 KIT_ONLY=1
 STAGED_COUNT=0
-while IFS= read -r -d '' staged_path; do
+for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
     STAGED_COUNT=$((STAGED_COUNT + 1))
     case "/$staged_path" in
         */.nightshift/*) ;;
         *) KIT_ONLY=0 ;;
     esac
-done < <(git diff --cached --name-only -z --diff-filter=ACDMR)
+done
 if [ "$STAGED_COUNT" -eq 0 ]; then
     KIT_ONLY=0
 fi
 
-if [ "$KIT_ONLY" -eq 1 ] && { [ -n "$LINT_CMD" ] || [ -n "$TYPE_CHECK_CMD" ]; }; then
-    echo "[nightshift pre-commit] Kit-only commit ($STAGED_COUNT staged path(s) under .nightshift/): project lint/type-check skipped"
-    LINT_CMD=""
-    TYPE_CHECK_CMD=""
-fi
+# R2: a commit whose staged files span more than one install runs each
+# touched install's checks against that install's own config.yaml (Approach A
+# — see the BUG-338 comment block at the top of this file).
+for INSTALL_ROOT in "${INSTALL_ROOTS[@]}"; do
+    PROJECT_ROOT=${INSTALL_ROOT%/*}
+    if [ "$PROJECT_ROOT" = "$INSTALL_ROOT" ]; then PROJECT_ROOT="."; fi
+    CONFIG=$(install_path "$INSTALL_ROOT" ".nightshift/config.yaml")
 
-if [ -n "$LINT_CMD" ]; then
-    echo "[nightshift pre-commit] Running lint: $LINT_CMD"
-    if ! eval "$LINT_CMD"; then
-        echo "[nightshift pre-commit] LINT FAILED — commit rejected"
-        FAILED=1
+    if ! LINT_CMD=$(extract_cmd "$CONFIG" "lint"); then
+        exit 1
     fi
-fi
+    if ! TYPE_CHECK_CMD=$(extract_cmd "$CONFIG" "type_check"); then
+        exit 1
+    fi
 
-if [ -n "$TYPE_CHECK_CMD" ]; then
-    echo "[nightshift pre-commit] Running type check: $TYPE_CHECK_CMD"
-    if ! eval "$TYPE_CHECK_CMD"; then
-        echo "[nightshift pre-commit] TYPE CHECK FAILED — commit rejected"
-        FAILED=1
+    SCANNER=$(install_path "$INSTALL_ROOT" ".nightshift/scanner.py")
+    if [ -f "$SCANNER" ]; then
+        echo "[nightshift pre-commit] Scanning staged diff for secrets/PII and escalation thresholds..."
+        if ! python3 "$SCANNER" --staged --config "$CONFIG"; then
+            echo "[nightshift pre-commit] SECRET/PII OR ESCALATION GATE FAILED — commit rejected"
+            FAILED=1
+        fi
     fi
-fi
+
+    # SPEC-378: only a staged path under THIS install's own specs/ or
+    # reports/ subdirectory is spec/artifact-shaped and warrants full
+    # spec-corpus validation. Any other staged path under the install root
+    # (kit-payload code, config.yaml, etc.) must not trip validate_specs.py —
+    # that install's pre-existing spec-corpus health is not this commit's
+    # concern unless this commit actually touches specs/ or reports/.
+    SPEC_TRIGGER=0
+    for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
+        case "$staged_path" in
+            "$INSTALL_ROOT/specs/"*|"$INSTALL_ROOT/reports/"*)
+                case "${staged_path##*/}" in _*) continue ;; esac
+                SPEC_TRIGGER=1 ;;
+        esac
+    done
+    VALIDATE_SPECS=$(install_path "$INSTALL_ROOT" ".nightshift/validate_specs.py")
+    if [ "$SPEC_TRIGGER" -eq 1 ]; then
+        LIVE_SPECS=0
+        while IFS= read -r -d '' spec_path; do
+            case "${spec_path##*/}" in _*) continue ;; esac
+            case "$spec_path" in *.md) LIVE_SPECS=1 ;; esac
+        done < <(git ls-files -z -- "$INSTALL_ROOT/specs")
+        if [ "$LIVE_SPECS" -eq 1 ]; then
+            if [ ! -f "$VALIDATE_SPECS" ]; then
+                echo "[nightshift pre-commit] Missing validator for $INSTALL_ROOT; sync the managed kit and retry"
+                FAILED=1
+            elif ! python3 "$VALIDATE_SPECS" --staged . "$INSTALL_ROOT/specs"; then
+                echo "[nightshift pre-commit] SPEC VALIDATION FAILED for $INSTALL_ROOT — commit rejected"
+                FAILED=1
+            fi
+        fi
+    fi
+
+    # Write-scope guard — rejects a commit that stages a path outside the
+    # active spec's declared scope.write (SPEC-300-003). Runs before
+    # lint/type-check so a scope rejection is reported before slower gates
+    # run.
+    WRITE_SCOPE_GUARD=$(install_path "$INSTALL_ROOT" ".nightshift/hooks/protect-write-scope.sh")
+    if [ -x "$WRITE_SCOPE_GUARD" ]; then
+        if ! "$WRITE_SCOPE_GUARD"; then
+            FAILED=1
+        fi
+    fi
+
+    if [ "$KIT_ONLY" -eq 1 ] && { [ -n "$LINT_CMD" ] || [ -n "$TYPE_CHECK_CMD" ]; }; then
+        echo "[nightshift pre-commit] Kit-only commit ($STAGED_COUNT staged path(s) under .nightshift/): project lint/type-check skipped"
+        LINT_CMD=""
+        TYPE_CHECK_CMD=""
+    fi
+
+    if [ -n "$LINT_CMD" ]; then
+        echo "[nightshift pre-commit] Running lint: $LINT_CMD"
+        if ! (cd -- "$PROJECT_ROOT" && eval "$LINT_CMD"); then
+            echo "[nightshift pre-commit] LINT FAILED — commit rejected"
+            FAILED=1
+        fi
+    fi
+
+    if [ -n "$TYPE_CHECK_CMD" ]; then
+        echo "[nightshift pre-commit] Running type check: $TYPE_CHECK_CMD"
+        if ! (cd -- "$PROJECT_ROOT" && eval "$TYPE_CHECK_CMD"); then
+            echo "[nightshift pre-commit] TYPE CHECK FAILED — commit rejected"
+            FAILED=1
+        fi
+    fi
+done
 
 if [ "$FAILED" -ne 0 ]; then
     echo "[nightshift pre-commit] Fix the above errors and try again."

@@ -128,20 +128,42 @@ try:
         if token != b""
     ]
 
-    paths: list[str] = []
+    # SPEC-375: each collected path carries whether it must skip the
+    # universal spec_wrong_home check. A rename's OLD (source) path and a
+    # plain deletion's path are the vanishing/departing side of the change —
+    # spec_wrong_home denying them would trap a misplaced spec file forever
+    # (it could never be deleted or renamed away). A rename's NEW
+    # (destination) path and every added/modified path are classified
+    # exactly as before (R1/R2).
+    entries: list[tuple[str, bool]] = []  # (path, skip_spec_home)
     i = 0
     while i < len(tokens):
         status = tokens[i]
         i += 1
         if status[:1] in ("R", "C") and i + 1 < len(tokens):
-            paths.append(tokens[i])
-            paths.append(tokens[i + 1])
+            entries.append((tokens[i], True))       # rename source
+            entries.append((tokens[i + 1], False))  # rename destination
             i += 2
-        elif i < len(tokens):
-            paths.append(tokens[i])
+        elif status[:1] == "D" and i < len(tokens):
+            entries.append((tokens[i], True))        # plain deletion
             i += 1
-    seen: set[str] = set()
-    unique_paths = [p for p in paths if not (p in seen or seen.add(p))]
+        elif i < len(tokens):
+            entries.append((tokens[i], False))       # added/modified
+            i += 1
+
+    # Dedupe while unioning per-path flags: if the same path appears both as
+    # a skip-worthy occurrence (rename source / deletion) and as an
+    # added/modified or rename-destination occurrence, the latter always
+    # wins — a path must never escape spec_wrong_home just because one of
+    # several diff entries naming it happened to be a departing side.
+    skip_spec_home: dict[str, bool] = {}
+    unique_paths: list[str] = []
+    for p, skip in entries:
+        if p not in skip_spec_home:
+            unique_paths.append(p)
+            skip_spec_home[p] = skip
+        else:
+            skip_spec_home[p] = skip_spec_home[p] and skip
 
     if not unique_paths:
         raise SystemExit(0)
@@ -170,8 +192,25 @@ try:
         kit_dir = project_root / "canonical" if (project_root / "canonical").is_dir() else project_root / ".nightshift"
         scope = None
 
+    # SPEC-375: for a path whose only diff occurrences skip spec_wrong_home
+    # (a rename source or a plain deletion), override classify_write's
+    # specs-directory discovery with the path's own parent directory. Every
+    # OTHER rule (malformed_target, denied_glob, outside_root, ...) still
+    # runs unmodified on the same call — only the spec-home violation is
+    # forced to `False` for this one path, because its own parent trivially
+    # satisfies "parent_dir in specs_dirs" for _is_spec_home_violation.
+    def _spec_375_home_override(path_str: str) -> set:
+        normalized = path_str.replace("\\", "/")
+        parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+        return {project_root / parent} if parent else {project_root}
+
     decisions = [
-        module.classify_write(p, scope, project_root, kit_dir, spec_relpath)
+        module.classify_write(
+            p, scope, project_root, kit_dir, spec_relpath,
+            known_specs_dirs=_spec_375_home_override(p),
+        )
+        if skip_spec_home[p]
+        else module.classify_write(p, scope, project_root, kit_dir, spec_relpath)
         for p in unique_paths
     ]
     denies = [d for d in decisions if not d.allowed]

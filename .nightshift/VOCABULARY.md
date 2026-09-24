@@ -34,6 +34,9 @@ This generated entry point is checked by `vocabulary.py audit`; consumer-specifi
 | `transfer_refusal` | Transfer refusal | Most recent reason a status-column move was refused. | — |
 | `prior_attempts` | Prior attempts | Durable record of earlier attempts. | — |
 | `overrides` | Overrides | Explicit | — |
+| `execution` | Execution models | Optional worker and verifier model overrides for this spec. | — |
+| `scope` | Scope | Files this spec may change (write) and may read. | — |
+| `artifacts` | Artifacts | Typed decision and evidence files indexed for this spec. | — |
 | `roles` | Roles | Run | run, worker, orchestrator, parent |
 
 ## Registry-derived definitions
@@ -149,6 +152,18 @@ Historical attempts consulted before retrying work.
 ### Overrides
 
 Recorded exceptions to configured behavior.
+
+### Execution models
+
+An execution mapping that names the worker_model and verifier_model a run should use instead of the project default; it is read-only on the board.
+
+### Scope
+
+A declared scope mapping with write paths and a read policy; the scope guard enforces it and the board shows it read-only.
+
+### Artifacts
+
+The entries in the spec's artifact index (transitions
 
 ### Roles
 

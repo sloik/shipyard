@@ -49,6 +49,13 @@ try:
 except ImportError:  # pragma: no cover
     worktree_paths = None  # type: ignore[assignment]
 
+try:
+    import lifecycle
+    import validate_specs
+except ImportError:  # pragma: no cover
+    lifecycle = None  # type: ignore[assignment]
+    validate_specs = None  # type: ignore[assignment]
+
 
 RUNNABLE_STATUSES = frozenset({"ready", "in_progress", "active"})
 BLOCKING_COMMANDS = frozenset({"build", "test"})
@@ -517,6 +524,27 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
                 f"{item['id']} ({item['status'] or 'missing'})" for item in deps["unresolved"]
             )
             result["blocking_failures"].append(f"Unresolved after: dependencies: {unresolved}.")
+
+        # SPEC-358 R6: route planned/ready/in_progress preflight through the
+        # same '## State rationale' static rules as the CLI validator and the
+        # pre-commit hook, instead of a second independent check. An unavailable
+        # validator refuses admission with a repair instruction.
+        if validate_specs is not None:
+            try:
+                spec_path = Path(entry["path"])
+                body = spec_path.read_text(encoding="utf-8").split("\n---\n", 1)[-1]
+                state_findings = validate_specs.validate_state_rationale_admission(
+                    frontmatter, body, spec_path,
+                )
+            except Exception as exc:
+                state_findings = [f"state_rationale_validation_unavailable: {exc}; repair the managed validator"]
+            fatal = [f for f in state_findings if not f.startswith("WARNING: ")]
+            result["checks"]["state_rationale"] = {"findings": state_findings}
+            if fatal:
+                result["blocking_failures"].extend(fatal)
+            result["warnings"].extend(f for f in state_findings if f.startswith("WARNING: "))
+        else:
+            result["blocking_failures"].append("state_rationale_validation_unavailable: sync the managed validator")
 
     commands = load_commands(config_path)
     command_results = _command_state(commands, repo)

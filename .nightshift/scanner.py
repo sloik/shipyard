@@ -67,6 +67,10 @@ PROJECT_OWNED_NIGHTSHIFT_PREFIXES = (
 )
 
 PROTOCOL_ARCHIVE_PREFIX = ".argo/protocol-archive/"
+# SPEC-373: the context folder is being renamed `.argo/` -> `.agent-context/`
+# installation by installation, so both root-anchored archive prefixes are
+# recognized. Verification below is identical for both.
+PROTOCOL_ARCHIVE_PREFIXES = (".agent-context/protocol-archive/", PROTOCOL_ARCHIVE_PREFIX)
 
 
 INSTALL_MARKER = ".nightshift/"
@@ -121,7 +125,7 @@ def verified_archive_snapshot_paths(staged_paths: Iterable[str]) -> frozenset[st
     This intentionally runs only for staged Git input, not ``--diff-file`` where
     no index blob is available to prove the complete snapshot body.
     """
-    candidates = sorted(path for path in staged_paths if path.startswith(PROTOCOL_ARCHIVE_PREFIX))
+    candidates = sorted(path for path in staged_paths if path.startswith(PROTOCOL_ARCHIVE_PREFIXES))
     if not candidates:
         return frozenset()
 
@@ -740,6 +744,7 @@ def main(argv: list[str] | None = None) -> int:
             guard_staged_install,
             managed_payload_paths,
             retained_manifest,
+            sync_receipt_index,
         )
 
         exempt: set[str] = set()
@@ -762,10 +767,21 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             # Preserve the repository-relative spelling emitted by git
             # diff. The provenance module owns the release-relative list.
-            manifest = retained_manifest(install)
-            exempt.update(
-                f"{prefix}{path}" for path in managed_payload_paths(manifest)
-            )
+            # BUG-339-001: ``guard_staged_install`` admits a ``nightshift-sync.py``
+            # delivery vouched for by ``sync-manifest.json`` even when the install
+            # has no ``release-marker.json``. Build the exemption set from the same
+            # two sources the guard used: the marker's retained manifest plus the
+            # receipt. A missing/unreadable marker is tolerated at this call only,
+            # and only when a receipt vouches for something; otherwise it stays a
+            # ``MetadataError`` exactly as before.
+            synced_paths = frozenset(sync_receipt_index(install))
+            try:
+                released_paths = managed_payload_paths(retained_manifest(install))
+            except MetadataError:
+                if not synced_paths:
+                    raise
+                released_paths = frozenset()
+            exempt.update(f"{prefix}{path}" for path in released_paths | synced_paths)
         managed_paths = frozenset(exempt)
 
     diff_text = _staged_diff() if args.staged else args.diff_file.read_text(encoding="utf-8")

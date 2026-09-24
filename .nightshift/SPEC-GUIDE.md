@@ -1,5 +1,14 @@
 # Interactive Spec Creation Guide
 
+Canonical-source implementation specs must declare explicit `scope.write` on
+main and follow GIT.md's receipt-bound authoring contract (SPEC-365). A spec or
+worker cannot grant its own exception: the parent retains authorization, original
+receipt, admitted baseline, approved scope and exact candidate/main bindings and
+injects `authoring_provider` through the official acceptance seam. Bootstrap
+requires independent verification and external authorization; missing proof stops
+acceptance/lifecycle/merge/cleanup. Installed copies remain strict and release
+handoffs stay pending until an independently authorized whole-kit rollout.
+
 **Purpose:** Use this document to walk a user (or agent) through creating a Nightshift spec step by step. Any LLM that can read files and have a conversation can follow this guide to help the user write a complete, well-formed spec.
 
 **How to use:** An agent reads this guide, then asks the user a series of questions—one section at a time. After each answer, the agent fills in that section of the spec. At the end, the agent presents the complete spec for review and saves it to `specs/SPEC-XXX-short-title.md`.
@@ -655,7 +664,10 @@ Every index entry carries:
 - `created` — an ISO-8601 UTC timestamp
 - `actor` — the agent, human, or tool identifier that wrote the artifact
 - `summary` — a one-line human-readable summary
-- `path` — the artifact file's path relative to the spec's `artifacts/` directory
+- `path` — the artifact file's path, e.g. `artifacts/<file>` -- relative to the
+  spec's **report directory** (`reports/<SPEC-ID>/`), not relative to the
+  `artifacts/` directory itself (SPEC-357 R2 correction: an entry's `path`
+  always includes the leading `artifacts/` segment)
 
 The artifact-type vocabulary (`lifecycle.ARTIFACT_TYPES`) is closed and
 registered in one place; adding a type is a registry edit plus this
@@ -708,6 +720,310 @@ reach that spec's verifier surface.
 retroactively (R7). `validate_specs.py` validates an existing
 `artifacts/index.json` (schema, on-registry types, listed-file
 existence/tracking, orphan files) but never requires one to exist.
+
+### State rationale: why a spec has its current status (SPEC-357)
+
+`lifecycle.derive_admission()` maps a stored `status` to a generic reason
+("explicitly planned for later" for every `planned` spec, for example). That
+explains the enum, not the author's actual decision. Every lifecycle-status
+spec — everything except `type: main`/`questions`/`nfr` and any `NFR-*` ID —
+carries a `## State rationale` body section: one fenced YAML mapping with
+exactly these keys (`lifecycle.STATE_RATIONALE_FIELDS`):
+
+```yaml
+schema_version: 1
+status: planned
+reason: The first specialist needs a selected real task before implementation is useful.
+reconsider_when: A named narrow task and its operator are selected in the existing QUESTIONS flow.
+evidence:
+  - kind: file
+    path: specs/SPEC-QUESTIONS-001.md
+    anchor: q1-first-specialist
+  - kind: spec
+    project: EXAMPLE
+    id: SPEC-001
+provenance: authored
+record: artifacts/decision-first-task.json
+```
+
+- `status` binds the explanation to the stored lifecycle value, never to a
+  derived `run_state` — those answer different questions (SPEC-359 owns the
+  live "why can't this run right now" explanation).
+- `reason` explains the actual choice, not the enum's generic meaning.
+- `reconsider_when` is non-empty for `draft`/`planned`/`blocked` (a concrete
+  completion condition, decision, date, or review trigger); it may be `null`
+  otherwise.
+- `evidence` is a list of typed, resolvable locators — never an arbitrary
+  filesystem/network dereference or a copy of private cross-project content:
+
+  | kind | required keys besides `kind` | optional keys | meaning |
+  | --- | --- | --- | --- |
+  | `file` | `path` | `anchor` | same-install file (current root, contains `specs/`/`reports/`) |
+  | `spec` | `id` | `project`, `anchor` | exact spec ID in the named registry project (current project if omitted) |
+  | `artifact` | `spec`, `path` | `project` | exact indexed `artifacts/<file>` for the named owner |
+  | `git` | `commit`, `path` | `project` | full 40-/64-hex object ID; repository-relative file at that revision |
+  | `url` | `url`, `label` | — | HTTPS URL, no embedded credentials; external availability is never statically proven |
+
+  `evidence: []` is valid — a fresh authored decision needs no external
+  citation; it does not mean a measured claim was made without support.
+- `provenance` is `authored` (a live decision) or `reconstructed` (an honest
+  after-the-fact reading of what evidence remains); `legacy_missing` /
+  `stale` / `malformed` / `unavailable` are **derived evidence-quality
+  labels** (`lifecycle.evidence_quality_label`) computed by a reader, never
+  additional stored `provenance` values.
+- `record` is `null` (a fresh draft with no artifact yet) or the exact
+  `artifacts/<file>` this declaration snapshot is stored under — the
+  *current* declaration, selecting one immutable snapshot, never "latest by
+  timestamp".
+
+**No second ledger.** A status change reuses the existing `status-transition`
+artifact (`from`/`to`/`reason`/`evidence`/`run_id`), with an additive,
+versioned `state_rationale` key holding the same six-field snapshot
+(everything above except `record`, which is the artifact's own
+self-reference). Initial authoring of a spec, or any later reason-only
+revision with no accompanying status change, reuses the existing `decision`
+artifact type/shape the same way. Snapshot equality (used for idempotent
+capture) compares the exact decoded six-field mapping — mapping-key order is
+irrelevant, list order and scalar types/content are significant — and is
+never "latest by timestamp".
+
+**Capture is automatic, through one shared routine
+(`spec_artifacts.capture_state_rationale`).** Every canonical mutation
+boundary calls it, so no author hand-writes `record`:
+
+- **Authoring / reason-only revision** — `spec_artifacts.py author-decision
+  <spec-file> --status <status> --reason "<why>" [--reconsider-when "<...>"]
+  [--state-evidence '<json-locator>']*`. Reuses the `decision` artifact
+  shape; never invents a synthetic status transition for a spec that has not
+  actually changed status.
+- **Promotion** (`spec_promotion.promote_to_ready`), **manual board move**,
+  and **unblock** (`unblock_spec.finalize`) all route through
+  `status_store.StatusStore.transition_commit_backed`, which now upserts the
+  section as part of the same durable transition, pinned to the
+  pre-mutation status so a competing revision landing mid-flight is refused
+  rather than silently overwritten.
+- **Commit-backed and private-local kickoff/terminal** (SKILL.md Step 2/6)
+  mutate frontmatter directly, so their existing `record-transition` call
+  now also carries the section:
+  ```bash
+  python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
+    --from <status> --to <status> --run-id <run-id> \
+    [--reason "<why>"] [--reconsider-when "<...>"] \
+    [--state-evidence '{"kind": "file", "path": "..."}']
+  ```
+  `--reconsider-when` is required whenever `--to` is `draft`/`planned`/`blocked`.
+
+**Idempotent, never silently duplicated (R3).** Repeating an
+already-applied capture (identical six-field snapshot, section's `record`
+already resolvable) is a no-op returning the existing record. A caller that
+names `expected_status`/`expected_record` and finds a mismatch gets an
+explicit refusal — the write never partially applies (artifact written but
+section not updated, or vice versa); a mid-flight failure raises rather than
+returning success with mismatched state.
+
+**Honest legacy adoption (R5).** `_TEMPLATE.md` v12 (and the bugfix/analysis/
+research templates' next version) opt into the section for new specs. An
+old, unchanged spec with no section is not retroactively required to have
+one — `evidence_quality_label` reads `legacy_missing`, an honest fact, never
+a promotion block. On the next edit of an old nonterminal executable spec,
+backfill under SPEC-358; a `reconstructed` explanation must name the
+inspecting actor/time and cite only evidence that genuinely still exists —
+never claim a historical actor, date, or approval that was not actually
+recovered. If the old reason is unknown, that unknown is itself retained in
+`evidence`, and a fresh explicit decision is recorded before any `planned`/
+`ready` admission. Untouched `done`/`superseded` history is never
+retroactively re-gated. SPEC-358 adds the explicit validation threshold of
+template version 12; a shaped section also opts in at any lower version.
+A spec absent from the Git baseline is new regardless of its claimed version.
+Template families keep their own authoring version sequences, but cannot use
+that distinction to bypass a new or already-adopted validation contract.
+The single severity/adoption matrix is in GIT.md, including non-Git audits,
+terminal metadata edits and strict promotion's required current record.
+
+**Scope.** This spec (SPEC-357) owns capture only. Static enforcement
+(rejecting a missing/malformed section) is SPEC-358's: `validate_specs.py`
+runs the same `validate_state_rationale_static`/adoption-matrix checks in
+file, directory and `--staged` (Git index snapshot) modes, and
+`hooks/pre-commit` gates on it — see GIT.md's "Staged spec validation
+(SPEC-358)" for the severity matrix, repair steps and the CI invocation that
+covers a bypassed hook. The live "why can't this run right now" explanation
+surfaced to a reader is SPEC-359's — never conflate the stored `status`
+rationale with a derived `run_state`.
+
+### Current run-state explanation (SPEC-359)
+
+`run_state_explanation` is the one versioned (`schema_version: 1`), read-only
+answer to "why does this spec have this run state right now, and what would
+change it?". The board's `GET /api/spec/{id}` returns it as a top-level field;
+`GET /api/specs` carries only the bounded `run_state_summary` derived from it
+(strings capped at 240 characters, clipped names listed in `truncated_fields`,
+so a tooltip needs no per-hover request). `python3 nightshift-dag.py admission
+--explain-spec <ID> --json` (with the usual `--specs-dir`, `--config`,
+`--worker-limit` and `--missing-touches-policy`) prints the same object; an
+unknown ID exits non-zero with `spec_not_found`. Both call the same
+`lifecycle.run_state_explanation` through `spec_artifacts.
+compose_run_state_explanation`; the CLI mode writes no plan, artifact or
+store. Existing `run_state` / `run_state_reason` fields are unchanged.
+
+**It describes; it never decides.** Every input is a result a producer already
+computed for the same snapshot, so the projection cannot be an optimistic
+second opinion. Producers and the state each one decides:
+
+| Producer | States | `primary.source` |
+| --- | --- | --- |
+| `lifecycle.derive_admission`, status short-circuit | `specification_incomplete` (draft), `intentionally_future` (planned) | `lifecycle` |
+| `derive_admission`, intrinsic readiness | `validation_failed`, `review_required` | `intrinsic_readiness` |
+| `derive_admission`, declared holds and prerequisites | `waiting_external_input`, `time_gated`, `resource_gated`, `overlap_conflict`, `waiting_gap_spec`, `validation_failed` (unresolved `after`), `waiting_dependencies`, `runnable` | `admission` |
+| board overlay (`deployment_tiers` queue evidence, `in_progress` only) | `awaiting_authorization` | `deployment_authorization` |
+| `plan_dynamic_admission` decision reasons | `dependency_cycle`, and surface overlap / capacity / `requires_specs` as separate gates | `parallel_admission` |
+
+`dependency_cycle` has no run-state producer on today's board path: only
+parallel admission reports it, so it appears as a `parallel_admission` gate
+(with the cycle members) beside the displayed state and never replaces it.
+Capacity deferral (`concurrency_limit`) is a gate, never `resource_gated`,
+which comes only from the spec's own `resource_gate`.
+
+**Object.** `lifecycle {declared, effective, committed, source, sync}`,
+`applicability` (`admission` or `not_applicable`), `run_state` (null when not
+applicable), `meaning`, `primary {code, reason, source}`, ordered `gates`
+`{code, result, reason, evidence}`, `next_condition`, `rationale {quality,
+provenance, reason, reconsider_when, record, evidence}`, `persistence {spec,
+record, index}` and `diagnostics`. All `evidence` values are SPEC-357 typed
+locators. The registry (`RUN_STATE_ADAPTERS`, `RUN_STATE_MEANINGS`,
+`RUN_STATE_SOURCES`) is compared to `RUN_STATES` by a test, so a new run state
+without an adapter fails; producer-specific codes extend
+`EXPLANATION_REASON_CODES` rather than adding a state enum.
+
+**Precedence and absence.** Gates are listed in `derive_admission`'s own order
+(`DECLARED_HOLD_GATES` is the one shared literal). A gate after the decisive one
+is `not_evaluated`; so is a gate whose input was never supplied (for example no
+prerequisite snapshot). Absence of a check is never a `pass`. If a `not_before`
+time has elapsed the producer still gates on field presence: the state stays
+`time_gated` and a `time_gate_elapsed` diagnostic reports the discrepancy.
+`requires_specs` prerequisites are consulted only by parallel admission, and the
+gate says so.
+
+**Non-admission records.** `done`, `superseded`, blocked, NFR, QUESTIONS,
+main-container, unregistered-status and running (`in_progress`, unless held for
+authorization) specs are `not_applicable` with `run_state: null`. Blocked
+reads its blocker fields (`blocker_fields` gate, `next_condition` =
+`unblock_condition`) and is never shown as a fresh runnable admission; the
+legacy `run_state` field for such a spec is reported in a
+`legacy_run_state_not_admission` diagnostic. An `in_progress` spec's
+`execution_context` gate quotes the durable checkpoint and any heartbeat result a
+caller supplied verbatim, and is `unknown` when there is no such evidence; no
+liveness is inferred from file age or commits.
+
+**Rationale provenance.** `rationale.quality` resolves the *exact* record the
+spec's own `## State rationale` names, never the newest artifact, a commit
+subject or a matching title: `recorded` (section and record match), `reconstructed`
+(same, `provenance: reconstructed`), `legacy_missing` (no section; candidate
+artifacts, `promotion_gap` and blocker fields are listed in a diagnostic as
+history, not asserted current), `stale` (section status or snapshot no longer
+matches), `malformed`, and `unavailable` (no record named, index or record
+missing or unreadable). `recorded` means the section and record agree, not that
+the reasoning is true or committed. A generic enum reason
+(`explicitly planned for later`) is flagged and is never decision provenance.
+Excluded families with no optional section report `rationale: null`.
+
+**Persisted versus working state.** `persistence.spec|record|index` is one of
+`committed`, `staged`, `working_tree_only`, `private_local`, `unknown` (record and
+index may also be `not_applicable`). It is derived from one batched
+`git status` (plus one `cat-file --batch` for specs that differ from HEAD) per
+project per refresh, taken with `--no-optional-locks`, so reading never touches
+the index. `lifecycle.committed` is HEAD's status; `lifecycle.sync` reuses
+`classify_status_sync` for a durable checkpoint that disagrees with the
+frontmatter. A working `planned` spec over a HEAD `draft` with an untracked
+record reports exactly those facts in a `transition_not_committed` diagnostic;
+staging changes the labels to `staged`, and only a commit makes them
+`committed`. Non-Git and `private-local` projects report `unknown` /
+`private_local` without error.
+
+**Static versus live.** The explanation is a snapshot of the last refresh:
+the board recomputes it inside its normal poll and reuses it for detail
+requests, invalidating on spec files, dependency spec files, selected
+rationale record and artifact index stat stamps, authorization queue files,
+the durable status store and the Git index/HEAD/branch-ref stamp. It cannot see
+elapsed wall-clock time between refreshes, whether a worker process is alive, or
+whether an external input has arrived; those are reported as `unknown` /
+declared conditions, not inferred.
+
+### Board state evidence and artifact navigation (SPEC-360)
+
+The board renders SPEC-359's `run_state_explanation` and the SPEC-291 artifact
+index; it recomputes neither. Everything below is read-only.
+
+**Why this state?** Every detail panel has this section with three visibly
+distinct blocks: *Lifecycle choice (authored decision)* — stored/effective/
+committed status, the rationale quality (`recorded`, `reconstructed`,
+`legacy_missing`, `stale`, `malformed`, `unavailable`), reason, `reconsider_when`
+and typed evidence; *Current gate (computed, not a decision)* — the run state's
+meaning, primary reason, next condition and every gate; and *Provenance and
+history* — `committed` / `staged` / `working tree only` / `private local` /
+`unknown` labels for spec, record and index, plus diagnostics. A working copy
+that differs from the last commit (for example `planned` over a committed
+`draft`) is called out in red. A missing explanation is stated explicitly and the
+spec body still renders. The run-state row above the collapsed details group is a
+button that focuses this section. Evidence locators are never fetch
+instructions: a local spec is a chip, an indexed artifact of this spec is an
+Open control, a spec of a registered other project links through the existing
+registry route (`http://127.0.0.1:<port>/?spec=`), an unregistered project or an
+unindexed artifact is shown as text with the reason it cannot be opened, and
+project files / git objects are copyable locators (never a resolved host path).
+
+**Artifacts (N).** `GET /api/spec/{id}` keeps `artifacts` (the index entries) and
+adds `artifact_index_state` — `missing`, `invalid`, `empty`, `available` or
+`unavailable` (an I/O error, not absence) — with a path-free
+`artifact_index_detail`, and `artifact_preview_available` (`true` live). The
+`Artifacts (N)` control is always present, N counting index entries only; loose
+reports and attachments stay on REPORTS and are never counted. Each row is a
+keyboard-operable **Open** button showing type, date, actor and summary. No
+artifact content is prefetched.
+
+**Reading an artifact.** `GET /api/spec/{id}/artifact?path=artifacts/<member>`
+resolves only an exact key in *that spec's* index, then checks realpath
+containment under `reports/<id>/artifacts/` on the file it actually opens
+(traversal, absolute and cross-spec paths and symlink escapes are `400
+invalid_path`; an unindexed or missing member is `404 artifact_not_found`). It
+never reuses the report-file resolver. A `200` is `{spec_id, path, type, summary,
+media_type, encoding, content, size_bytes}`; errors are `{error: {code, message}}`
+with no content or host path: `404 spec_not_found|index_missing`, `409
+index_invalid`, `413 artifact_too_large`, `415 preview_unsupported`, `503
+artifact_unavailable`. Limits are decided from the file size before any content
+is read: 1 MiB for text (JSON, JSONL, Markdown, TXT, LOG, PY; UTF-8 only), 10 MiB
+for PNG/JPEG/WebP, verified by signature rather than extension. HTML, SVG and
+executable content are unsupported and never rendered. The client writes
+content only with `textContent`/element properties (Markdown is shown as escaped
+source, never through `marked`); invalid JSON is shown as raw text with a
+parse-error label.
+
+**Back navigation and recents.** The artifact list and content are two more
+`panelView` states in the same panel, with a persistent **← Back to <spec ID>**.
+Content Back goes straight to the owning spec (not the list); the spec's scroll,
+collapsed details group, dock/width/opacity, search and filters are as left.
+Opening an artifact marks its owning spec most recent in the one deduplicated
+recent list (artifacts never appear as recents, Back adds nothing): open A →
+`[A]`; artifact of A → `[A]`; Back → `[A]`; linked spec B → `[B, A]`; spec-back
+to A → `[A, B]`. Selecting any spec, including from a recent chip, leaves the
+artifact view and aborts its request; a late artifact response never replaces a
+newer spec or artifact (the request shares `panelRequestVersion` and is
+aborted). A spec that changes on disk while an artifact is open is reloaded on
+Back rather than yanking the reader out of the view.
+
+**Static export.** The export preserves the artifact index metadata and state,
+the explanations and the registry help, and sets `artifact_preview_available:
+false`; no artifact content is bundled and the exported viewer shows a labelled
+"Preview unavailable in this static export" without requesting the content route.
+
+**Help.** Field/value help is the existing registry text (`registryHelp`, from
+`vocabulary-registry.yaml`, including the `execution`, `scope` and `artifacts`
+concepts) shown through the existing tooltip: on hover (`title`), on keyboard
+focus, and on tap/click; Escape dismisses it before it closes the panel. Cards,
+recent chips and dependency chips add a labelled "This spec now" block from
+`run_state_summary` (meaning, current reason, next condition, decision-record
+quality and persistence); a truncated field is marked as shortened and points at
+Why this state?. Essential reasons are also in the always-visible section and in
+each control's accessible name.
 
 ### Record R/AC contract friction
 

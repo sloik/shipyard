@@ -83,8 +83,12 @@ SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 # 2100 was set against that 996.10s measurement; by kit 3.23.0 a green suite
 # measured 1065.135s, leaving only 1034.865s headroom -- just under the
 # required 2x margin -- so the guard tripped again for the same organic-growth
-# reason. Bumped once more with real margin.
-CANONICAL_SUITE_TIMEOUT_S = 2400
+# reason. Bumped once more with real margin. 2400 was set against that
+# 1065.135s measurement; by kit 3.24.0 a real fleet-release preflight
+# recorded a healthy suite run of 1701.715s -- 2400 - 1701.715 = 698.285,
+# far short of the required 2x margin -- tripping the same organic-growth
+# guard again (SPEC-377). Bumped to 4800 with real margin to spare.
+CANONICAL_SUITE_TIMEOUT_S = 4800
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
 # SPEC-336: durable per-run canonical-suite duration measurements are written
 # as sibling artifacts to write_metrics()'s own reports/_wip/release-*.json

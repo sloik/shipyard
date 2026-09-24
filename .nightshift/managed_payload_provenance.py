@@ -19,10 +19,10 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 try:
     from release import is_ignored_python_cache_path
@@ -36,11 +36,19 @@ except ImportError:
 
 EXACT_CURRENT = "exact-current"
 RETAINED_PRIOR_RELEASE = "retained-prior-release"
+SYNC_RECONCILED = "sync-reconciled"
 UNRESOLVED_DIVERGENCE = "unresolved-divergence"
 MARKER = "release-marker.json"
+# BUG-339: ``nightshift-sync.py canonical`` writes this receipt (path -> sha256 of the
+# canonical bytes it delivered) beside ``release-marker.json``. Unlike the marker it is
+# never sealed by a release, so a SPEC-356 ``sync_files``-narrowed install can commit a
+# sync without a whole-kit release. Deliberately not a managed payload path.
+SYNC_MANIFEST = "sync-manifest.json"
 INTEGRITY_SCHEMA_VERSION = "1.0.0"
 RECEIPT_DIR = Path("reports/_wip/managed-payload-integrity/receipts")
 ACCEPTANCE_DIR = Path("reports/_wip/managed-payload-integrity/acceptance")
+AUTHORING_RESULTS_DIR = Path("reports/_wip/managed-payload-integrity/authoring-results")
+AUTHORING_POLICY = "canonical-authoring-v1"
 MAX_RECEIPT_BYTES = 16 * 1024
 MAX_ACCEPTANCE_BYTES = 256 * 1024
 MAX_REPORTED_PATHS = 128
@@ -66,14 +74,14 @@ REASON_ARTIFACT_FAILURE = "NS-MPI-ARTIFACT-FAILURE"
 REASON_DUPLICATE_CONTRADICTION = "NS-MPI-DUPLICATE-CONTRADICTION"
 
 TERMINAL_ENTRYPOINT_INVENTORY: tuple[dict[str, str], ...] = (
-    {"path": "nightshift_coordinator.py", "marker": "_accept_managed_payload"},
-    {"path": "nightshift-instructions.py", "marker": "verify_terminal_integrity"},
-    {"path": "parallel_executor.py", "marker": "terminal_gate"},
-    {"path": "run_validation.py", "marker": "verify_terminal_integrity"},
-    {"path": "LOOP.md", "marker": "verify_terminal_integrity"},
-    {"path": "ORCHESTRATOR.md", "marker": "verify_terminal_integrity"},
-    {"path": "BOOTSTRAP.md", "marker": "verify_terminal_integrity"},
-    {"path": "Skills/nightshift/SKILL.md", "marker": "verify_terminal_integrity"},
+    {"path": "nightshift_coordinator.py", "marker": "_accept_managed_payload", "kind": "executable"},
+    {"path": "nightshift-instructions.py", "marker": "verify_terminal_integrity", "kind": "executable"},
+    {"path": "parallel_executor.py", "marker": "terminal_gate", "kind": "executable-callback"},
+    {"path": "run_validation.py", "marker": "verify_terminal_integrity", "kind": "executable"},
+    {"path": "LOOP.md", "marker": "verify_terminal_integrity", "kind": "instruction"},
+    {"path": "ORCHESTRATOR.md", "marker": "verify_terminal_integrity", "kind": "instruction"},
+    {"path": "BOOTSTRAP.md", "marker": "verify_terminal_integrity", "kind": "instruction"},
+    {"path": "Skills/nightshift/SKILL.md", "marker": "verify_terminal_integrity", "kind": "instruction"},
 )
 SUPPORTED_RESULT_ACCEPTANCE_ENTRYPOINTS: tuple[str, ...] = (
     "nightshift_coordinator.py",
@@ -113,6 +121,24 @@ class MetadataError(ValueError):
 
 
 @dataclass(frozen=True)
+class AuthoringAnchor:
+    """Parent-injected authority coordinates, never deserialized from worker output.
+
+    The parent retains the expected digest and authoritative main ref before
+    acceptance. An external pathname is containment, not authentication: the
+    callable supplying this anchor is the trust boundary. Hosts sharing a UID
+    must separately retain and validate the user authorization and verifier.
+    """
+
+    authority_path: Path
+    authority_sha256: str
+    main_ref: str = "refs/heads/main"
+
+
+AuthoringProvider = Callable[[Path, str], AuthoringAnchor]
+
+
+@dataclass(frozen=True)
 class PathProvenance:
     path: str
     classification: str
@@ -122,6 +148,7 @@ class PathProvenance:
     head_sha256: str | None
     differs_from_head: bool
     staged: bool
+    synced_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -547,6 +574,279 @@ def _quarantine_duplicate(root: Path, invocation_id: str, body: bytes) -> str | 
         return None
 
 
+def _authoring_path(value: Any) -> str:
+    if (not isinstance(value, str) or not value or value.startswith("/")
+            or "\\" in value or ":" in value
+            or any(ord(char) < 32 for char in value)
+            or any(part in {"", ".", "..", ".nightshift"} for part in value.split("/"))):
+        raise MetadataError("unsafe authoring path")
+    return value
+
+
+def _authoring_git(repo: Path, *args: str) -> str:
+    result = _run_git(repo, *args)
+    if result.returncode:
+        raise MetadataError("authoring Git binding unavailable")
+    return result.stdout.decode("utf-8", errors="strict").strip()
+
+
+def _authoring_record(install: Path, spec_id: str, provider: AuthoringProvider) -> tuple[dict, AuthoringAnchor]:
+    if not callable(provider):
+        raise MetadataError("authoring authority requires a parent provider")
+    anchor = provider(install, spec_id)
+    if not isinstance(anchor, AuthoringAnchor):
+        raise MetadataError("invalid parent authoring anchor")
+    path = Path(anchor.authority_path)
+    repo = _git_root(install)
+    if (not path.is_absolute() or path.is_symlink() or repo in path.resolve().parents
+            or not re.fullmatch(r"[0-9a-f]{64}", anchor.authority_sha256)
+            or not anchor.main_ref.startswith("refs/heads/")):
+        raise MetadataError("invalid external authoring anchor")
+    body = path.read_bytes()
+    if len(body) > MAX_ACCEPTANCE_BYTES or _sha256_bytes(body) != anchor.authority_sha256:
+        raise MetadataError("parent-held authority digest mismatch")
+    record = json.loads(body)
+    fields = {"schema_version", "authorization_id", "policy", "user_authorization_sha256",
+              "binding", "source_relative", "spec_id", "spec_path", "receipt_sha256",
+              "invocation_id", "receipt_run_id", "baseline_revision", "baseline_manifest_fingerprint",
+              "baseline_inventory_sha256", "scope_revision", "scope", "main_revision",
+              "candidate_commit", "candidate_tree", "candidate_manifest_fingerprint", "independent_verification"}
+    if not isinstance(record, dict) or set(record) != fields:
+        raise MetadataError("invalid authoring authority schema")
+    if (record["schema_version"] != "1.0.0" or record["policy"] != AUTHORING_POLICY
+            or not isinstance(record["authorization_id"], str)
+            or SAFE_ID.fullmatch(record["authorization_id"]) is None
+            or record["spec_id"] != spec_id):
+        raise MetadataError("invalid authoring policy or identity")
+    for key in ("user_authorization_sha256", "receipt_sha256", "baseline_manifest_fingerprint",
+                "baseline_inventory_sha256", "candidate_manifest_fingerprint"):
+        if not isinstance(record[key], str) or re.fullmatch(r"[0-9a-f]{64}", record[key]) is None:
+            raise MetadataError("invalid authoring digest")
+    for key in ("baseline_revision", "scope_revision", "main_revision", "candidate_commit", "candidate_tree"):
+        if not isinstance(record[key], str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record[key]) is None:
+            raise MetadataError("authoring requires full immutable Git identities")
+    return record, anchor
+
+
+def _authoring_candidate(install: Path, record: dict, anchor: AuthoringAnchor) -> Path:
+    repo = _git_root(install)
+    source = _authoring_path(record["source_relative"])
+    _authoring_path(record["spec_path"])
+    if (install != repo / source or record["binding"] != _git_binding(install)
+            or (install / MARKER).exists() or (install / MARKER).is_symlink()):
+        raise MetadataError("authoring authority does not own this source root")
+    if (_authoring_git(repo, "rev-parse", anchor.main_ref) != record["main_revision"]
+            or _authoring_git(repo, "rev-parse", "HEAD") != record["candidate_commit"]
+            or _authoring_git(repo, "rev-parse", "HEAD^{tree}") != record["candidate_tree"]
+            or _authoring_git(repo, "status", "--porcelain=v1", "--untracked-files=all")):
+        raise MetadataError("dirty candidate or moved Git identity")
+    for ancestor, descendant in ((record["main_revision"], record["candidate_commit"]),
+                                 (record["scope_revision"], record["main_revision"]),
+                                 (record["baseline_revision"], record["main_revision"])):
+        if _run_git(repo, "merge-base", "--is-ancestor", ancestor, descendant).returncode:
+            raise MetadataError("authoring Git lineage mismatch")
+    changed = _authoring_git(repo, "diff", "--name-only", "-z", record["main_revision"], record["candidate_commit"])
+    if any(".nightshift" in PurePosixPath(path).parts for path in changed.split("\0") if path):
+        raise MetadataError("source authoring cannot include dogfooded install edits")
+    return repo
+
+
+def _authoring_verdict(record: dict) -> None:
+    # This normalized binding is retained only AFTER the parent independently
+    # validates the original verdict's schema, identity, independence and clean
+    # footprint. A worker boolean or green suite cannot populate this authority.
+    verdict = record["independent_verification"]
+    expected = {"verifier_identity_sha256", "verdict_sha256", "candidate_commit", "candidate_tree", "policy"}
+    if not isinstance(verdict, dict) or set(verdict) != expected:
+        raise MetadataError("external independent verification is required")
+    for key in ("candidate_commit", "candidate_tree", "policy"):
+        if verdict[key] != record[key]:
+            raise MetadataError("independent verification candidate mismatch")
+    for key in ("verifier_identity_sha256", "verdict_sha256"):
+        if not isinstance(verdict[key], str) or re.fullmatch(r"[0-9a-f]{64}", verdict[key]) is None:
+            raise MetadataError("invalid independent verification binding")
+
+
+def _authoring_manifest_at(repo: Path, record: dict, revision: str) -> dict:
+    manifest = json.loads(_authoring_git(repo, "show", f"{revision}:{record['source_relative']}/release-manifest.json"))
+    _authoring_inventory(manifest)
+    return manifest
+
+
+def _authoring_inventory(manifest: dict) -> dict[str, dict]:
+    _manifest_index(manifest, label="authoring manifest")
+    for row in manifest["files"]:
+        _authoring_path(row["path"])
+        if type(row.get("executable")) is not bool or is_ignored_python_cache_path(row["path"]):
+            raise MetadataError("invalid authoring inventory mode or generated entry")
+    return {row["path"]: row for row in _manifest_inventory(manifest)}
+
+
+def _authoring_scope(repo: Path, install: Path, record: dict):
+    import scope_guard
+    import yaml
+
+    spec_text = _authoring_git(repo, "show", f"{record['scope_revision']}:{record['spec_path']}")
+    metadata = yaml.safe_load(spec_text.split("---", 2)[1])
+    if not isinstance(metadata, dict) or metadata.get("id") != record["spec_id"] or not metadata.get("scope"):
+        raise MetadataError("explicit approved main scope required")
+    scope = scope_guard.scope_from_main(repo, record["spec_path"], record["scope_revision"])
+    if asdict(scope) != record["scope"] or not scope.write:
+        raise MetadataError("parent scope does not match approved main")
+    return scope
+
+
+def _authoring_committed_inventory(repo: Path, source: str, revision: str, inventory: dict) -> None:
+    """Prove retained baseline/main manifests describe the actual Git objects."""
+    result = _run_git(repo, "ls-tree", "-rz", revision, "--", source)
+    if result.returncode:
+        raise MetadataError("retained Git tree unavailable")
+    tree = {}
+    for entry in result.stdout.split(b"\0"):
+        if entry:
+            info, path = entry.split(b"\t", 1)
+            tree[path.decode()] = info.decode().split()
+    objects = []
+    for path, row in inventory.items():
+        mode, kind, oid = tree.get(f"{source}/{path}", ("", "", ""))
+        if kind != "blob" or mode != ("100755" if row["executable"] else "100644"):
+            raise MetadataError("retained managed path missing or wrong mode")
+        objects.append((oid, row["sha256"]))
+    result = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
+                            input="".join(oid + "\n" for oid, _digest in objects).encode(),
+                            capture_output=True, check=False)
+    if result.returncode:
+        raise MetadataError("retained managed blobs unavailable")
+    offset = 0
+    for oid, digest in objects:
+        end = result.stdout.index(b"\n", offset)
+        observed_oid, kind, length = result.stdout[offset:end].decode().split()
+        start, size = end + 1, int(length)
+        content = result.stdout[start:start + size]
+        if observed_oid != oid or kind != "blob" or _sha256_bytes(content) != digest:
+            raise MetadataError("retained manifest does not describe committed bytes")
+        offset = start + size + 1
+    if offset != len(result.stdout):
+        raise MetadataError("unexpected retained blob response")
+
+
+def _compare_authoring_payload(install: Path, repo: Path, record: dict, receipt: dict) -> tuple[list[str], str]:
+    import scope_guard
+    import release
+    from validate_install import runtime_closure_gaps
+
+    baseline = _authoring_manifest_at(repo, record, record["baseline_revision"])
+    if (baseline["fingerprint"] != record["baseline_manifest_fingerprint"]
+            or baseline["fingerprint"] != receipt["release"]["manifest_fingerprint"]
+            or baseline["fingerprint"] != receipt["release"]["release_fingerprint"]
+            or _inventory_digest(baseline) != record["baseline_inventory_sha256"]
+            or _inventory_digest(baseline) != receipt["release"]["manifest_inventory_sha256"]):
+        raise MetadataError("retained baseline does not reconstruct original admission")
+    candidate = load_manifest(install / "release-manifest.json")
+    committed = _authoring_manifest_at(repo, record, record["candidate_commit"])
+    if candidate != committed or candidate["fingerprint"] != record["candidate_manifest_fingerprint"]:
+        raise MetadataError("candidate manifest binding mismatch")
+    old, new = _authoring_inventory(baseline), _authoring_inventory(candidate)
+    _authoring_committed_inventory(repo, record["source_relative"], record["baseline_revision"], old)
+    if not old.keys() <= new.keys():
+        raise MetadataError("baseline managed coverage cannot be removed")
+    scope = _authoring_scope(repo, install, record)
+    changed = sorted(path for path in new if old.get(path) != new[path])
+    main = _authoring_inventory(_authoring_manifest_at(repo, record, record["main_revision"]))
+    _authoring_committed_inventory(repo, record["source_relative"], record["main_revision"], main)
+    # Main can change an admitted file that the candidate restores unchanged,
+    # or add coverage that the candidate omits. Neither appears in `changed`.
+    for path in old.keys() | main.keys() | new.keys():
+        if old.get(path) != main.get(path) and main.get(path) != new.get(path):
+            raise MetadataError("conflicting integration-base managed change")
+    for path in changed:
+        relative = f"{record['source_relative']}/{path}"
+        if not scope_guard.classify_write(relative, scope, repo, install, record["spec_path"]).allowed:
+            raise MetadataError("managed change outside approved main scope")
+    observations, observed_sha = _observe_payload(install, candidate)
+    if any(row["observed_kind"] != "file" or row["observed_sha256"] != row["expected_sha256"]
+           or row["observed_executable"] != row["expected_executable"] for row in observations):
+        raise MetadataError("candidate payload differs from complete manifest")
+    # Ignored/untracked managed files and Git symlinks cannot hide behind a
+    # clean status. Verify every actual payload against the pinned Git tree.
+    tree_result = _run_git(repo, "ls-tree", "-rz", record["candidate_commit"], "--", record["source_relative"])
+    if tree_result.returncode:
+        raise MetadataError("candidate tree unavailable")
+    tree = {}
+    for entry in tree_result.stdout.split(b"\0"):
+        if entry:
+            info, path = entry.split(b"\t", 1)
+            tree[path.decode()] = info.decode().split()
+    object_format = _authoring_git(repo, "rev-parse", "--show-object-format")
+    for path, row in new.items():
+        content = (install / path).read_bytes()
+        blob = hashlib.new(object_format, f"blob {len(content)}\0".encode() + content).hexdigest()
+        expected = ["100755" if row["executable"] else "100644", "blob", blob]
+        if tree.get(f"{record['source_relative']}/{path}") != expected:
+            raise MetadataError("managed payload is not the pinned committed blob")
+    names = sorted(new)
+    if (_release_owned_aliases(install, candidate) or runtime_closure_gaps(install, names)
+            or release.managed_local_resource_gaps(install, names) or terminal_entrypoint_gaps(install)):
+        raise MetadataError("candidate runtime-resource closure is incomplete")
+    return changed, observed_sha
+
+
+def _verify_authoring_integrity(install: Path, *, spec_id: str, receipt_ref: str,
+                               receipt_sha256: str, run_id: str | None,
+                               authoring_provider: AuthoringProvider) -> AcceptanceResult:
+    record = None
+    anchor = None
+    changed: list[str] = []
+    observed = None
+    outcome, reason = INDETERMINATE, "NS-MPI-AUTHORING-INVALID"
+    try:
+        record, anchor = _authoring_record(install, spec_id, authoring_provider)
+        repo = _authoring_candidate(install, record, anchor)
+        _authoring_verdict(record)
+        receipt, _body = _load_receipt(install, receipt_ref, receipt_sha256)
+        if (receipt_sha256 != record["receipt_sha256"] or receipt["invocation_id"] != record["invocation_id"]
+                or receipt["binding"] != record["binding"]
+                or receipt["identity"] != {"project_sha256": record["binding"]["git_common_dir_sha256"],
+                                           "run_sha256": _digest_text(record["receipt_run_id"]),
+                                           "spec_sha256": _digest_text(spec_id)}
+                or (run_id is not None and run_id != record["receipt_run_id"])
+                or receipt["release"]["release_marker_sha256"] is not None):
+            raise MetadataError("authoring receipt identity mismatch")
+        changed, observed = _compare_authoring_payload(install, repo, record, receipt)
+        # Recheck the serialized main/candidate pin after reading all payloads.
+        _authoring_candidate(install, record, anchor)
+        outcome, reason = ALLOW, "NS-MPI-AUTHORING-CLEAN"
+    except Exception:
+        # Provider/storage/parser exceptions are private diagnostics, never
+        # public acceptance evidence or a reason to fall back to strict success.
+        pass
+    if record is None or anchor is None:
+        return AcceptanceResult(outcome, reason, None, None)
+    artifact = {"schema_version": "1.0.0", "authorization_id": record["authorization_id"],
+                "authority_sha256": anchor.authority_sha256, "outcome": outcome, "reason_code": reason,
+                "receipt_sha256": record["receipt_sha256"], "policy": AUTHORING_POLICY,
+                "baseline_revision": record["baseline_revision"], "scope_revision": record["scope_revision"],
+                "main_revision": record["main_revision"], "candidate_commit": record["candidate_commit"],
+                "candidate_tree": record["candidate_tree"], "baseline_reconstruction": "retained-git-manifest",
+                "observed_inventory_sha256": observed, "changed_paths": changed,
+                "privacy": {"relative_paths_only": True, "content_included": False}}
+    body = _canonical_json(artifact)
+    try:
+        root = _safe_artifact_root(install, AUTHORING_RESULTS_DIR)
+        dest = root / f"{record['authorization_id']}.json"
+        digest, _replayed = _atomic_write_new(dest, body, limit=MAX_ACCEPTANCE_BYTES)
+        return AcceptanceResult(outcome, reason, dest.relative_to(install).as_posix(), digest, tuple(changed[:MAX_REPORTED_PATHS]))
+    except FileExistsError:
+        try:
+            quarantine = _safe_artifact_root(install, AUTHORING_RESULTS_DIR / "quarantine")
+            _atomic_write_new(quarantine / f"{record['authorization_id']}-{_sha256_bytes(body)}.json", body, limit=MAX_ACCEPTANCE_BYTES)
+        except (OSError, MetadataError):
+            pass
+        return AcceptanceResult(INDETERMINATE, REASON_DUPLICATE_CONTRADICTION, None, None)
+    except (OSError, MetadataError, ValueError):
+        return AcceptanceResult(INDETERMINATE, REASON_ARTIFACT_FAILURE, None, None)
+
+
 def verify_terminal_integrity(
     install: Path,
     *,
@@ -554,9 +854,14 @@ def verify_terminal_integrity(
     receipt_ref: str,
     receipt_sha256: str,
     run_id: str | None = None,
+    authoring_provider: AuthoringProvider | None = None,
 ) -> AcceptanceResult:
     """Compare the admitted manifest payload before any result acceptance action."""
     install = install.resolve()
+    if authoring_provider is not None:
+        return _verify_authoring_integrity(install, spec_id=spec_id, receipt_ref=receipt_ref,
+                                          receipt_sha256=receipt_sha256, run_id=run_id,
+                                          authoring_provider=authoring_provider)
     invocation_id = "unknown"
     receipt_body = b""
     outcome = INDETERMINATE
@@ -694,6 +999,32 @@ def retained_manifest(install: Path) -> dict[str, Any]:
     ):
         raise MetadataError("release marker and retained manifest disagree")
     return manifest
+
+
+def sync_receipt_index(install: Path) -> dict[str, str]:
+    """Return the path -> sha256 index of the last ``nightshift-sync.py`` delivery (BUG-339).
+
+    Only ever *widens* what the hook-path guard accepts, so unlike ``retained_manifest`` it
+    is tolerant: a missing, unreadable or malformed receipt (or entry) yields no exemption.
+    """
+    try:
+        payload = json.loads((install / SYNC_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {
+        path: digest
+        for path, digest in files.items()
+        if isinstance(path, str)
+        and path
+        and not PurePosixPath(path).is_absolute()
+        and ".." not in PurePosixPath(path).parts
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    }
 
 
 def recover_historical_manifest(install: Path, canonical: Path) -> dict[str, Any]:
@@ -874,6 +1205,8 @@ def audit_git_install(
     dirty, staged = _status(repo)
 
     retained: Mapping[str, Any] | None = retained_override
+    hook_path = current_manifest is None
+    sync_index: dict[str, str] = {}
     if retained is not None:
         _manifest_index(retained, label="recovered historical release manifest")
     if current_manifest is not None:
@@ -881,10 +1214,25 @@ def audit_git_install(
         candidate_paths = set(current_index)
     else:
         # Installed hooks use the exact release manifest retained in the marker.
-        retained = retained_manifest(install)
+        # BUG-339: that marker is only ever written by a whole-kit release, so it cannot
+        # vouch for bytes ``nightshift-sync.py`` delivered later (SPEC-356 AC4 forbids a
+        # narrowed sync from touching it, and a never-released install has none). The
+        # sync receipt is the delivering process's own record of those bytes; it is read
+        # on this path only, where no live canonical manifest exists to compare against.
+        sync_index = sync_receipt_index(install)
+        try:
+            retained = retained_manifest(install)
+        except MetadataError:
+            if not sync_index:
+                raise
+            retained = None
         current_manifest = retained
-        current_index = _manifest_index(current_manifest, label="current manifest")
-        candidate_paths = set(current_index)
+        current_index = (
+            _manifest_index(current_manifest, label="current manifest")
+            if current_manifest is not None
+            else {}
+        )
+        candidate_paths = set(current_index) | set(sync_index)
 
     selected = staged if staged_only else dirty
     managed_dirty: list[tuple[str, str]] = []
@@ -895,17 +1243,22 @@ def audit_git_install(
     if not managed_dirty:
         return []
 
-    if retained is None:
+    if retained is None and not hook_path:
         retained = retained_manifest(install)
-    retained_index = _manifest_index(retained, label="retained release manifest")
+    retained_index = (
+        _manifest_index(retained, label="retained release manifest") if retained is not None else {}
+    )
 
     rows: list[PathProvenance] = []
     for managed_path, repo_path in managed_dirty:
         actual = _sha256_file(install / managed_path)
         current = current_index.get(managed_path)
         prior = retained_index.get(managed_path)
+        synced = sync_index.get(managed_path)
         if actual is not None and actual == current:
             classification = EXACT_CURRENT
+        elif actual is not None and actual == synced:
+            classification = SYNC_RECONCILED
         elif (
             actual is not None
             and actual == prior
@@ -925,17 +1278,94 @@ def audit_git_install(
                 head_sha256=head,
                 differs_from_head=actual != head,
                 staged=repo_path in staged,
+                synced_sha256=synced,
             )
         )
     return rows
 
 
+def _index_entry(repo: Path, repo_relative: str) -> tuple[str, bytes] | None:
+    """Return ``(mode, bytes)`` of a path's single stage-0 index entry, else ``None``."""
+    listed = _run_git(repo, "ls-files", "-s", "-z", "--", repo_relative)
+    if listed.returncode:
+        return None
+    records = [record for record in listed.stdout.split(b"\0") if record]
+    if len(records) != 1:  # absent, or an unresolved merge with stages 1-3
+        return None
+    meta, _, _name = records[0].partition(b"\t")
+    fields = meta.split()
+    if len(fields) != 3 or fields[2] != b"0":
+        return None
+    shown = _run_git(repo, "show", f":{repo_relative}")
+    return (fields[0].decode(), shown.stdout) if shown.returncode == 0 else None
+
+
+def _is_canonical_origin_update(install: Path, row: PathProvenance) -> bool:
+    """SPEC-364: is ``row`` the canonical source's own same-commit dogfood update?
+
+    The hook-path guard (no ``current_manifest``) treats the marker's retained
+    release as "current", so a dogfooded install can never accept bytes newer than
+    its last release -- even when they arrive together with the canonical source
+    they were copied from. That is only legitimate where the install *is* the
+    canonical origin, established structurally: ``install`` is a ``.nightshift/``
+    directly beneath a directory holding a ``release-manifest.json`` that registers
+    the path. Provenance is the commit itself: the path's stage-0 index bytes and
+    mode must equal those of ``<origin>/<path>``, which must also be changed by
+    this same commit. No environment variable or signoff is consulted, and any
+    other divergence (including an unchanged canonical source) is not admitted.
+    """
+    if row.classification != UNRESOLVED_DIVERGENCE or not row.staged or row.actual_sha256 is None:
+        return False
+    install = install.resolve()
+    origin = install.parent
+    if install.name != ".nightshift":
+        return False
+    try:
+        repo = _git_root(install)
+        origin_prefix = "" if origin == repo else origin.relative_to(repo).as_posix()
+        install_prefix = install.relative_to(repo).as_posix().rstrip("/")
+    except (MetadataError, ValueError):
+        return False
+
+    def repo_path(prefix: str, relative: str) -> str:
+        return f"{prefix}/{relative}" if prefix else relative
+
+    registry = _index_entry(repo, repo_path(origin_prefix, "release-manifest.json"))
+    installed = _index_entry(repo, repo_path(install_prefix, row.path))
+    source_path = repo_path(origin_prefix, row.path)
+    source = _index_entry(repo, source_path)
+    if registry is None or installed is None or source is None:
+        return False
+    try:
+        registered = _manifest_index(json.loads(registry[1].decode("utf-8")), label="origin manifest")
+    except (UnicodeDecodeError, json.JSONDecodeError, MetadataError):
+        return False
+    installed_sha = _sha256_bytes(installed[1])
+    source_sha = _sha256_bytes(source[1])
+    return (
+        row.path in registered
+        and installed_sha == row.actual_sha256  # the commit carries what is on disk
+        and installed_sha == source_sha
+        and installed[0] == source[0]
+        and source_sha != _head_hash(repo, source_path)  # authored by this same commit
+    )
+
+
 def guard_staged_install(install: Path) -> list[PathProvenance]:
-    """Return staged managed paths that are not exact release payload bytes."""
+    """Return staged managed paths that are not exact release payload bytes.
+
+    SPEC-364: a byte-identical same-commit canonical + dogfood update in the
+    canonical origin repository is not a divergence (see ``_is_canonical_origin_update``).
+
+    BUG-339: bytes that match the ``nightshift-sync.py`` delivery receipt
+    (``SYNC_RECONCILED``) are a sanctioned delivery, not a divergence; an edit that matches
+    neither a release nor the receipt still is.
+    """
     return [
         row
         for row in audit_git_install(install, staged_only=True)
-        if row.classification != EXACT_CURRENT
+        if row.classification not in (EXACT_CURRENT, SYNC_RECONCILED)
+        and not _is_canonical_origin_update(install, row)
     ]
 
 
@@ -993,9 +1423,11 @@ def _short(value: str | None) -> str:
 def format_rows(rows: Sequence[PathProvenance]) -> str:
     lines = []
     for row in rows:
+        synced = f"synced={_short(row.synced_sha256)}; " if row.synced_sha256 else ""
         lines.append(
             f"{row.path}: {row.classification}; actual={_short(row.actual_sha256)}; "
             f"current={_short(row.current_sha256)}; retained={_short(row.retained_sha256)}; "
+            f"{synced}"
             f"head={_short(row.head_sha256)}; differs_from_head={str(row.differs_from_head).lower()}; "
             f"staged={str(row.staged).lower()}"
         )
@@ -1062,7 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_guidance(), file=sys.stderr)
         return 2
     print(format_rows(rows))
-    if args.staged and any(row.classification != EXACT_CURRENT for row in rows):
+    if args.staged and any(row.classification not in (EXACT_CURRENT, SYNC_RECONCILED) for row in rows):
         print(format_guidance(rows), file=sys.stderr)
         return 1
     return 0

@@ -11,6 +11,15 @@ holds that result and transitive dependents while preserving its branch and
 worktree; a shared-install failure stops subsequent dispatch and all integration
 without misreporting already-running workers.
 
+Canonical-source authoring is the explicit parent-owned SPEC-365 path documented
+in GIT.md. Inject `authoring_provider` independently of worker packets/outcomes;
+retain original receipts, strict results, approved main scope, exact candidate and
+fresh-main bindings. Bootstrap requires external user authorization and an
+independently validated exact-candidate verdict; missing proof permits no
+acceptance, lifecycle, merge or cleanup. Shared and dogfooded installed copies
+remain strict. NFR-001 ownership, bounded dispatch, overlap containment, the sole
+serialized integration queue and distinct fresh-main suite remain unchanged.
+
 ## Orchestrator Capability Requirements
 
 The orchestrator role requires a model capable of:

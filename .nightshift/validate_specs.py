@@ -16,12 +16,17 @@ Usage:
 import json
 import re
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
+
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True
 
 from dependency_registry import DependencyRegistryResolver
 from deployment_tiers import deployment_block_findings, resolve_deployment_policy
 from lifecycle import migrate_legacy_planning, validate_blocked
+import lifecycle
 import spec_artifacts
 
 try:
@@ -697,6 +702,19 @@ def _load_directory_frontmatters(specs_dir: Path) -> list[dict]:
 # (e.g. ``f"{relative}: {ORPHANED_HANDOFF_ARTIFACT_ERROR}"``), never the whole
 # message, so matching is substring containment, not equality.
 _NAMED_FINDING_FAMILIES: tuple[str, ...] = (
+    "state_rationale_required_missing", "state_rationale_malformed",
+    "state_rationale_reason_invalid", "state_rationale_reconsider_required",
+    "state_rationale_schema", "state_rationale_placeholder_reason",
+    "state_rationale_placeholder_reconsider_when", "state_rationale_status_mismatch",
+    "state_rationale_unverified_external", "state_rationale_evidence_path_escape",
+    "state_rationale_broken_evidence_link", "state_rationale_broken_evidence_anchor",
+    "state_rationale_index_malformed", "state_rationale_record_not_indexed",
+    "state_rationale_record_wrong_type", "state_rationale_record_wrong_owner",
+    "state_rationale_record_path_escape", "state_rationale_record_unreadable",
+    "state_rationale_stale_snapshot", "state_rationale_transition_target_mismatch",
+    "state_rationale_legacy_missing", "state_rationale_record_required",
+    "state_rationale_record_pending", "state_rationale_adoption_regressed",
+    "state_rationale_adoption_required", "state_rationale_validation_unavailable",
     release_handoff.MISSING_RELEASE_HANDOFF_DECLARATION_ERROR,
     release_handoff.STRANDED_PENDING_HANDOFF_ERROR,
     release_handoff.ORPHANED_HANDOFF_ARTIFACT_ERROR,
@@ -1264,7 +1282,541 @@ def fleet_uniqueness_findings(specs_dir: Path, spec_files: list[Path]) -> dict[s
     return findings
 
 
-def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None) -> list:
+def parse_frontmatter_and_body(content: str) -> tuple[dict | None, str | None, list[str], int | None]:
+    """Split a spec file's raw text into (frontmatter, body, errors, end_idx).
+
+    Shared by ``validate_file`` (working-tree bytes) and SPEC-358's staged-index
+    mode (``validate_staged``, index-blob bytes) so both read frontmatter and
+    body identically instead of two independently drifting parsers.
+
+    On error, ``fm``/``body``/``end_idx`` are ``None`` and ``errors`` is a
+    single-item list matching ``validate_file``'s original early-return
+    strings, so existing callers keep the exact same messages.
+    """
+    lines = content.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None, None, ["missing opening frontmatter delimiter ('---')"], None
+
+    end_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end_idx = i
+            break
+
+    if end_idx is None:
+        return None, None, ["missing closing frontmatter delimiter ('---')"], None
+
+    fm_text = "\n".join(lines[1:end_idx])
+    try:
+        fm = yaml.safe_load(fm_text) or {}
+    except yaml.YAMLError as exc:
+        return None, None, [f"invalid YAML frontmatter: {exc}"], None
+
+    if not isinstance(fm, dict):
+        return None, None, ["frontmatter must be a YAML mapping"], None
+
+    body = "\n".join(lines[end_idx + 1:])
+    return fm, body, [], end_idx
+
+
+# ---------------------------------------------------------------------------
+# SPEC-358 R1/R2/R5: shared static state-rationale validation.
+#
+# Reuses SPEC-357's parser/schema in ``lifecycle.py`` (``parse_state_rationale``,
+# ``validate_state_rationale_mapping``, ``requires_state_rationale``,
+# ``state_rationale_snapshots_equal``, ``terminal_statuses``,
+# ``NONTERMINAL_LIFECYCLE_STATUSES_REQUIRING_TRIGGER``) rather than
+# reimplementing them -- this module only adds the layer SPEC-357 explicitly
+# deferred to SPEC-358: status/record cross-reference, snapshot equality
+# against the referenced artifact, placeholder rejection, evidence-target
+# resolution, path containment (R5), and the adoption severity matrix (R2).
+# ---------------------------------------------------------------------------
+
+# Literal strings copied verbatim from specs/_TEMPLATE.md's worked example.
+# A spec that ships these unchanged has not actually written a rationale.
+_STATE_RATIONALE_PLACEHOLDER_REASONS = {
+    "why this specific status was chosen, not the enum's generic meaning.",
+    # Documented generic enum-only reasons from lifecycle.derive_admission():
+    # explaining the *mapping*, not the author's actual decision (SPEC-357 Problem).
+    "explicitly planned for later",
+    "draft specification",
+    "all deterministic admission gates passed",
+}
+_STATE_RATIONALE_PLACEHOLDER_RECONSIDER = {
+    "the concrete condition, decision, date, or review trigger that would change this status.",
+}
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_ANCHOR_SLUG_STRIP_RE = re.compile(r"[^\w\- ]")
+_ANCHOR_SLUG_DASH_RE = re.compile(r"-+")
+
+
+def _heading_slug(heading_text: str) -> str:
+    """GitHub-style Markdown heading-to-anchor-slug (lowercase, dash-joined)."""
+    slug = _ANCHOR_SLUG_STRIP_RE.sub("", heading_text.strip().lower())
+    slug = slug.replace(" ", "-")
+    return _ANCHOR_SLUG_DASH_RE.sub("-", slug).strip("-")
+
+
+def resolve_markdown_anchor(text: str, anchor: str) -> bool:
+    """R1/AC1: True if some Markdown heading in ``text`` slugifies to ``anchor``."""
+    fenced = None
+    seen = {}
+    for line in text.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            marker = line.lstrip()[:3]
+            if fenced is None:
+                fenced = marker
+            elif fenced == marker:
+                fenced = None
+            continue
+        if fenced is not None:
+            continue
+        match = _HEADING_RE.match(line)
+        if match:
+            slug = _heading_slug(match.group(2))
+            number = seen.get(slug, 0)
+            seen[slug] = number + 1
+            if (slug if number == 0 else f"{slug}-{number}") == anchor:
+                return True
+    return False
+
+
+class PathEscapeError(ValueError):
+    """R5: a locator/record path resolves outside its permitted root."""
+
+
+def resolve_contained_path(root: Path, relative: str) -> Path:
+    """R5: resolve ``relative`` under ``root``, refusing traversal/symlink escape.
+
+    Normalizes and follows symlinks (``Path.resolve``) and then requires the
+    real resolved path to be ``root`` itself or a real descendant of it.
+    Raises :class:`PathEscapeError` otherwise -- never silently clamps.
+    """
+    root_real = Path(root).resolve()
+    if not lifecycle.is_safe_relative_posix_path(relative):
+        raise PathEscapeError(f"not a safe relative path: {relative!r}")
+    candidate = root_real / relative
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(root_real)
+    except ValueError:
+        raise PathEscapeError(
+            f"path escapes permitted root {root_real}: {relative!r} resolves to {resolved}"
+        ) from None
+    return resolved
+
+
+def _state_rationale_placeholder_findings(mapping: dict) -> list[str]:
+    findings = []
+    reason = str(mapping.get("reason") or "").strip().lower()
+    if reason in _STATE_RATIONALE_PLACEHOLDER_REASONS:
+        findings.append(
+            "state_rationale_placeholder_reason: reason is a template placeholder or a "
+            "documented generic enum-only reason, not the actual decision"
+        )
+    reconsider = mapping.get("reconsider_when")
+    if isinstance(reconsider, str) and reconsider.strip().lower() in _STATE_RATIONALE_PLACEHOLDER_RECONSIDER:
+        findings.append(
+            "state_rationale_placeholder_reconsider_when: reconsider_when is the template "
+            "placeholder, not a concrete condition"
+        )
+    return findings
+
+
+def validate_state_rationale_static(
+    fm: dict,
+    body: str,
+    spec_file: Path,
+    *,
+    reports_root: Path | None = None,
+    index_entries: list[dict] | None = None,
+    read_text=None,
+    report_legacy: bool = False,
+    git_root: Path | None = None,
+) -> list[str]:
+    """SPEC-358 R1/AC1: static validation of the ``## State rationale`` section.
+
+    ``read_text`` -- optional ``callable(Path) -> str``, used to resolve
+    evidence-locator ``kind: file`` targets and the referenced artifact's
+    JSON content. Defaults to a plain filesystem read. SPEC-358 R3's staged
+    mode passes a reader bound to the Git index snapshot so this exact same
+    function runs, unmodified, against staged bytes instead of working-tree
+    bytes (single shared validation core, per R1).
+
+    ``index_entries`` -- optional pre-fetched ``artifacts/index.json``
+    ``entries`` list (also for staged mode, where the index itself may be an
+    unmodified-but-tracked file). Defaults to ``spec_artifacts.read_index``
+    (filesystem).
+
+    Explicitly does **not** claim structural validity proves the reasoning is
+    true (R1's own limit) -- a specific-but-false ``reason`` string still
+    passes this function and remains a human/REVIEW concern.
+    """
+    if spec_file.name.startswith("_"):
+        return []
+    reader = read_text or (lambda path: Path(path).read_text(encoding="utf-8"))
+
+    try:
+        section = lifecycle.parse_state_rationale(body)
+    except lifecycle.StateRationaleError as exc:
+        return [f"state_rationale_malformed: {exc}"]
+
+    if section is None:
+        if not lifecycle.requires_state_rationale(fm):
+            return []
+        if isinstance(fm.get("template_version"), int) and fm["template_version"] >= 12:
+            return ["state_rationale_required_missing: template version 12 requires a State rationale section"]
+        # R2/Adoption modes: "only version/section opt-in is enforceable" for
+        # a spec that has not opted in at all -- an absent section on a spec
+        # that never adopted the contract is not itself a finding here; it is
+        # a corpus-audit signal (LE2/R6 adoption counts, opt-in callers only).
+        if report_legacy:
+            return [
+                "WARNING: state_rationale_legacy_missing: no '## State rationale' section "
+                "(legacy; backfill required on next edit per SPEC-358 R2)"
+            ]
+        return []
+
+    findings: list[str] = []
+    try:
+        mapping_errors = lifecycle.validate_state_rationale_mapping(section)
+    except (TypeError, ValueError) as exc:
+        mapping_errors = [f"invalid field types: {exc}"]
+    for field in ("schema_version",):
+        if type(section.get(field)) is not int:
+            mapping_errors.append(f"{field} must be an integer")
+    for locator in section.get("evidence", []) if isinstance(section.get("evidence"), list) else []:
+        if isinstance(locator, dict):
+            if any(not isinstance(value, str) or not value.strip() for value in locator.values()):
+                mapping_errors.append("evidence locator fields must be nonblank strings")
+    for error in mapping_errors:
+        family = "state_rationale_schema"
+        if error.startswith("reason "):
+            family = "state_rationale_reason_invalid"
+        elif error.startswith("reconsider_when "):
+            family = "state_rationale_reconsider_required"
+        findings.append(f"{family}: state_rationale_schema: {error}")
+    if mapping_errors:
+        # Missing/malformed fields make status/record cross-checks below
+        # meaningless (e.g. no 'status' key at all) -- report the schema
+        # findings alone rather than cascading confusing secondary errors.
+        findings.extend(_state_rationale_placeholder_findings(section))
+        return findings
+    findings.extend(_state_rationale_placeholder_findings(section))
+
+    fm_status = fm.get("status")
+    section_status = section.get("status")
+    if section_status != fm_status:
+        findings.append(
+            f"state_rationale_status_mismatch: section status {section_status!r} does not "
+            f"match frontmatter status {fm_status!r} (R1: status binds to stored lifecycle "
+            "value, never derived run_state)"
+        )
+
+    project_root = spec_file.parent.parent if spec_file.parent.name == "specs" else spec_file.parent
+    evidence = section.get("evidence")
+    if isinstance(evidence, list):
+        for index, entry in enumerate(evidence):
+            if entry.get("project") or entry.get("kind") == "url":
+                findings.append(f"WARNING: state_rationale_unverified_external: evidence[{index}] availability was not checked")
+                continue
+            kind = entry.get("kind")
+            raw_path = str(entry.get("path", ""))
+            permitted_root = project_root
+            if kind == "spec":
+                candidates = []
+                for candidate in sorted(spec_file.parent.glob("*.md")):
+                    try:
+                        candidate_fm, _, _, _ = parse_frontmatter_and_body(reader(candidate))
+                        if candidate_fm and candidate_fm.get("id") == entry["id"]:
+                            candidates.append(candidate)
+                    except (OSError, KeyError):
+                        pass
+                if len(candidates) != 1:
+                    findings.append(f"state_rationale_broken_evidence_link: evidence[{index}] spec {entry['id']!r} must resolve uniquely")
+                    continue
+                raw_path = candidates[0].relative_to(project_root).as_posix()
+            elif kind == "artifact":
+                if not lifecycle.is_safe_relative_posix_path(str(entry["spec"])) or "/" in str(entry["spec"]):
+                    findings.append(f"state_rationale_evidence_path_escape: evidence[{index}] invalid artifact owner")
+                    continue
+                try:
+                    local_reports = reports_root or resolve_contained_path(project_root, "reports")
+                    permitted_root = resolve_contained_path(local_reports, str(entry["spec"]))
+                    source_index = json.loads(reader(resolve_contained_path(permitted_root, "artifacts/index.json")))
+                    indexed = source_index.get("entries", []) if isinstance(source_index, dict) else []
+                    if not any(isinstance(item, dict) and item.get("path") == raw_path for item in indexed):
+                        raise ValueError("target artifact is not indexed")
+                except (OSError, KeyError, ValueError, TypeError):
+                    findings.append(f"state_rationale_broken_evidence_link: evidence[{index}] artifact is not indexed in this snapshot")
+                    continue
+            elif kind == "git":
+                repository = git_root or project_root
+                if _run_git(repository, ["rev-parse", "--git-dir"]).returncode:
+                    findings.append(f"WARNING: state_rationale_unverified_external: evidence[{index}] Git repository is unavailable")
+                elif (_run_git(repository, ["cat-file", "-e", entry["commit"] + "^{commit}"]).returncode
+                      or _run_git(repository, ["cat-file", "-t", entry["commit"] + ":" + raw_path]).stdout.strip() != "blob"):
+                    findings.append(f"state_rationale_broken_evidence_link: evidence[{index}] Git commit/file does not exist locally")
+                continue
+            try:
+                target = resolve_contained_path(permitted_root, raw_path)
+            except PathEscapeError as exc:
+                findings.append(f"state_rationale_evidence_path_escape: evidence[{index}]: {exc}")
+                continue
+            try:
+                text = reader(target)
+            except UnicodeDecodeError:
+                # Binary local evidence is valid; only heading locators need text.
+                text = ""
+            except (OSError, KeyError):
+                findings.append(
+                    f"state_rationale_broken_evidence_link: evidence[{index}] file not found "
+                    f"in this snapshot: {raw_path}"
+                )
+                continue
+            anchor = entry.get("anchor")
+            if anchor and not resolve_markdown_anchor(text, str(anchor)):
+                findings.append(
+                    f"state_rationale_broken_evidence_anchor: evidence[{index}] anchor "
+                    f"{anchor!r} not found in {raw_path}"
+                )
+
+    record = section.get("record")
+    if isinstance(record, str) and record.startswith("artifacts/"):
+        spec_id = str(fm.get("id") or "")
+        try:
+            root = reports_root if reports_root is not None else resolve_contained_path(project_root, "reports")
+            owner_root = resolve_contained_path(root, spec_id)
+            artifact_root = resolve_contained_path(owner_root, "artifacts")
+        except PathEscapeError as exc:
+            return findings + [f"state_rationale_record_path_escape: {exc}"]
+        try:
+            index_file = resolve_contained_path(root, f"{spec_id}/artifacts/index.json")
+            if index_entries is not None:
+                entries = index_entries
+            else:
+                data = json.loads(reader(index_file))
+                if (not isinstance(data, dict) or type(data.get("schema_version")) is not int or data.get("schema_version") != 1
+                        or data.get("spec_id") != spec_id or not isinstance(data.get("entries"), list)
+                        or any(not isinstance(item, dict) for item in data["entries"])):
+                    raise ValueError("invalid index schema, owner or entries")
+                entries = data["entries"]
+        except (OSError, KeyError):
+            entries = []
+        except (ValueError, TypeError) as exc:
+            return findings + [f"state_rationale_index_malformed: {exc}"]
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            return findings + ["state_rationale_index_malformed: entries must be a list of mappings"]
+        matching = [entry for entry in entries if entry.get("path") == record]
+        if len(matching) > 1:
+            findings.append("state_rationale_index_malformed: selected record has duplicate index entries")
+        if not matching:
+            findings.append(
+                f"state_rationale_record_not_indexed: record {record!r} is not listed in "
+                f"{spec_id}'s artifacts/index.json"
+            )
+        else:
+            entry = matching[0]
+            if entry.get("type") not in {"decision", "status-transition"}:
+                findings.append(
+                    f"state_rationale_record_wrong_type: indexed type {entry.get('type')!r} "
+                    "is not a decision or status-transition record"
+                )
+            try:
+                artifact_path = resolve_contained_path(
+                    artifact_root, record.split("/", 1)[1]
+                )
+            except PathEscapeError as exc:
+                findings.append(f"state_rationale_record_path_escape: {exc}")
+                artifact_path = None
+            if artifact_path is not None:
+                try:
+                    raw_content = reader(artifact_path)
+                    content = json.loads(raw_content)
+                except (OSError, KeyError, ValueError):
+                    findings.append(f"state_rationale_record_unreadable: cannot read/parse {record}")
+                else:
+                    if not isinstance(content, dict) or content.get("spec_id") != spec_id or content.get("kind") != "spec_artifact":
+                        findings.append("state_rationale_record_wrong_owner: selected record identity does not match this spec")
+                    if not isinstance(content, dict) or content.get("type") != entry.get("type"):
+                        findings.append("state_rationale_record_wrong_type: record type disagrees with index")
+                    stored_snapshot = content.get("state_rationale") if isinstance(content, dict) else None
+                    if not isinstance(stored_snapshot, dict):
+                        findings.append("state_rationale_stale_snapshot: selected record has no rationale snapshot")
+                    if isinstance(stored_snapshot, dict):
+                        if not lifecycle.state_rationale_snapshots_equal(section, stored_snapshot):
+                            findings.append(
+                                f"state_rationale_stale_snapshot: {record}'s state_rationale "
+                                "content does not match the current '## State rationale' section"
+                            )
+                        to_status = content.get("to") if isinstance(content, dict) else None
+                        if content.get("type") == "status-transition" and to_status != section_status:
+                            findings.append(
+                                f"state_rationale_transition_target_mismatch: {record}'s "
+                                f"transition target {to_status!r} does not equal section "
+                                f"status {section_status!r}"
+                            )
+
+    return findings
+
+
+def state_rationale_adoption_findings(
+    fm: dict,
+    body: str,
+    *,
+    baseline_fm: dict | None = None,
+    baseline_body: str | None = None,
+    is_new: bool | None = None,
+    baseline_available: bool = True,
+    bytes_changed: bool | None = None,
+    strict: bool = False,
+) -> list[str]:
+    """SPEC-358 R2/AC2: the single documented severity/adoption matrix.
+
+    ``baseline_fm``/``baseline_body`` are HEAD's frontmatter/body, or ``None``
+    when the spec is absent from HEAD (new) or no baseline is available at
+    all (``is_new`` disambiguates the two: pass it explicitly when the caller
+    knows there is simply no Git baseline available, e.g. file/directory mode
+    without Git, so an existing spec is not misreported as "new").
+
+    ``baseline_available=False`` -- no Git repository or explicit baseline
+    snapshot at all (e.g. plain ``validate_file``/``validate_directory``
+    callers with no ``--baseline``). Per R2/the Adoption modes section: only
+    version/section opt-in is enforceable in that mode; next-edit adoption
+    ("this changed legacy spec needs backfill") is never claimed, since
+    "changed relative to what?" has no answer without Git. A present,
+    opted-in section still has its record requirement enforced -- that is
+    the currently declared contract, not a legacy-adoption judgment.
+    """
+    if not fm.get("id") or not lifecycle.requires_state_rationale(fm):
+        return []
+
+    if not baseline_available:
+        # R3/Adoption modes: "only version/section opt-in is enforceable...
+        # report baseline_unavailable, never pretend to have checked 'next
+        # edit' adoption." The baseline_unavailable marker itself belongs in
+        # the caller's JSON envelope (R3), not as a per-spec finding emitted
+        # on every validate_file() call -- so a spec that never opted in
+        # (no template_version >= 12, no section) produces no finding at all
+        # here. A spec that *did* opt in still gets its record requirement
+        # enforced, since that is the currently declared contract, not a
+        # legacy-adoption judgment.
+        try:
+            section = lifecycle.parse_state_rationale(body)
+        except lifecycle.StateRationaleError:
+            section = None
+        if section is None:
+            if strict or (isinstance(fm.get("template_version"), int) and fm["template_version"] >= 12):
+                return ["state_rationale_required_missing: current state requires a shaped rationale"]
+            return ["WARNING: state_rationale_legacy_missing: baseline_unavailable; next-edit adoption was not checked"]
+        findings = []
+        if section.get("record") is None and (strict or fm.get("status") != "draft"):
+            findings.append(
+                f"state_rationale_record_required: status {fm.get('status')!r} requires an "
+                "indexed record, not record: null (R2)"
+            )
+        elif section.get("record") is None:
+            findings.append("WARNING: state_rationale_record_pending: draft record may be authored before promotion")
+        return findings
+
+    def _try_parse(text: str | None) -> dict | None:
+        if text is None:
+            return None
+        try:
+            return lifecycle.parse_state_rationale(text)
+        except lifecycle.StateRationaleError:
+            return None  # already reported by validate_state_rationale_static
+
+    section = _try_parse(body)
+    baseline_section = _try_parse(baseline_body)
+
+    def _opted_in(frontmatter: dict, parsed_section: dict | None) -> bool:
+        template_version = frontmatter.get("template_version")
+        return (isinstance(template_version, int) and template_version >= 12) or parsed_section is not None
+
+    opted_in = _opted_in(fm, section)
+    if is_new is None:
+        is_new = baseline_fm is None
+
+    findings: list[str] = []
+
+    if baseline_fm is not None and not is_new:
+        baseline_opted_in = _opted_in(baseline_fm, baseline_section)
+        if baseline_opted_in and not opted_in:
+            findings.append(
+                "state_rationale_adoption_regressed: HEAD already has template_version >= 12 "
+                "or a '## State rationale' section; removing/lowering it is not permitted"
+            )
+        base_tv, cur_tv = baseline_fm.get("template_version"), fm.get("template_version")
+        if baseline_opted_in and isinstance(base_tv, int) and isinstance(cur_tv, int) and cur_tv < base_tv:
+            findings.append(
+                f"state_rationale_adoption_regressed: template_version lowered from "
+                f"{base_tv} to {cur_tv} cannot bypass an already-adopted contract"
+            )
+
+    status = fm.get("status")
+
+    if is_new:
+        # A spec absent from HEAD is new regardless of its claimed template_version.
+        if section is None:
+            findings.append(
+                "state_rationale_required_missing: new spec has no '## State rationale' section"
+            )
+        elif section.get("record") is None:
+            if status == "draft":
+                findings.append(
+                    "WARNING: state_rationale_record_pending: new draft spec has a shaped "
+                    "rationale but record is still null; a record is required before "
+                    "admission to planned/ready (R2)"
+                )
+            else:
+                findings.append(
+                    f"state_rationale_record_required: new spec with status {status!r} "
+                    "requires an indexed record, not record: null (R2: new planned/ready/"
+                    "in_progress/blocked/terminal states all require a matching record)"
+                )
+        return findings
+
+    changed = bytes_changed if bytes_changed is not None else baseline_fm != fm or baseline_body != body
+    baseline_status = baseline_fm.get("status") if baseline_fm else None
+    was_terminal = baseline_status in lifecycle.terminal_statuses() if baseline_fm else False
+
+    if not opted_in:
+        if not changed:
+            return [
+                "WARNING: state_rationale_legacy_missing: unchanged pre-adoption spec, no "
+                "section (legacy; backfill on next edit per R2)"
+            ]
+        if was_terminal and status == baseline_status and baseline_body == body:
+            # Metadata-only edit to an already-terminal legacy spec: R2 says
+            # this must not fabricate a past decision -- stays exempt/warning.
+            return [
+                "WARNING: state_rationale_legacy_missing: metadata-only edit to an "
+                "already-terminal legacy spec (no fabricated history required, R2)"
+            ]
+        findings.append(
+            "state_rationale_adoption_required: this changed legacy spec has no "
+            "'## State rationale' section; R2 requires backfill on the next edit of any "
+            "changed nonterminal-or-newly-terminal legacy spec (a new terminal transition "
+            "is not a grandfathering escape)"
+        )
+        return findings
+
+    if section is None:
+        findings.append(
+            "state_rationale_required_missing: changed spec has no '## State rationale' section"
+        )
+        return findings
+    if section.get("record") is None and status != "draft":
+        findings.append(
+            f"state_rationale_record_required: status {status!r} requires an indexed record, "
+            "not record: null (R2)"
+        )
+    return findings
+
+
+def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None, *, check_adoption: bool = True, base_revision: str = "HEAD", git_root: Path | None = None) -> list:
     """Return a list of error/warning strings for spec_file, or [] if valid.
 
     Items prefixed 'WARNING: ' are non-fatal — they appear in output but do not
@@ -1283,35 +1835,15 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
         config_path = spec_file.parent.parent / "config.yaml"
 
     try:
-        content = spec_file.read_text(encoding="utf-8")
-    except OSError as exc:
+        content = spec_file.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
         return [f"cannot read file: {exc}"]
 
-    # Parse frontmatter manually so this validator works even when
-    # spec_frontmatter is not importable (project .nightshift/ copies).
+    fm, body, parse_errors, end_idx = parse_frontmatter_and_body(content)
+    if parse_errors:
+        return parse_errors
     lines = content.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return ["missing opening frontmatter delimiter ('---')"]
-
-    end_idx = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end_idx = i
-            break
-
-    if end_idx is None:
-        return ["missing closing frontmatter delimiter ('---')"]
-
     fm_text = "\n".join(lines[1:end_idx])
-    try:
-        fm = yaml.safe_load(fm_text) or {}
-    except yaml.YAMLError as exc:
-        return [f"invalid YAML frontmatter: {exc}"]
-
-    if not isinstance(fm, dict):
-        return ["frontmatter must be a YAML mapping"]
-
-    body = "\n".join(lines[end_idx + 1:])
     first_h1 = None
     for line in body.split("\n"):
         if line.startswith("# "):
@@ -1419,6 +1951,34 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                     f"checkbox in {_finding['section']}: {_finding['text']}"
                 )
     errors.extend(validate_real_use_evidence(fm, lines[end_idx + 1:], spec_file, all_specs))
+
+    # SPEC-358 R1: static state-rationale validation runs in file mode too
+    # (previously only reachable indirectly through directory mode).
+    errors.extend(validate_state_rationale_static(fm, body, spec_file, git_root=git_root))
+    if check_adoption and not spec_file.name.startswith("_"):
+        baseline = _working_baseline(spec_file, base_revision)
+        base_text, available = baseline
+        base_fm, base_body, _, _ = parse_frontmatter_and_body(base_text) if base_text is not None else (None, None, [], None)
+        errors.extend(state_rationale_adoption_findings(
+            fm, body, baseline_fm=base_fm, baseline_body=base_body,
+            baseline_available=available, is_new=available and base_text is None,
+            bytes_changed=base_text != content,
+        ))
+
+    # SPEC-358 R1: single-file validation now also executes the artifact
+    # directory sweep (SPEC-291 R6) that previously only ran in
+    # validate_directory(). A spec with no artifacts/ directory still
+    # produces no findings (SPEC-291 R7: absence is never a finding).
+    if fm.get("id"):
+        try:
+            install_root = spec_file.parent.parent if spec_file.parent.name == "specs" else spec_file.parent
+            checked_reports = resolve_contained_path(install_root, "reports")
+            resolve_contained_path(checked_reports, str(fm["id"]) + "/artifacts")
+        except PathEscapeError as exc:
+            errors.append(f"state_rationale_record_path_escape: {exc}")
+        else:
+            errors.extend(spec_artifacts.validate_artifact_index(checked_reports, str(fm["id"])))
+
     attachments = fm.get("attachments")
     if attachments is not None:
         if not isinstance(attachments, list):
@@ -1776,7 +2336,7 @@ def status_sync_findings(specs_dir: Path, status_store_path: Path) -> dict[str, 
     return findings
 
 
-def validate_directory(specs_dir: Path, status_store_path: Path | None = None) -> dict:
+def validate_directory(specs_dir: Path, status_store_path: Path | None = None, *, base_revision: str = "HEAD") -> dict:
     """Validate all .md files in specs_dir. Returns {filename: [errors]}."""
     if not specs_dir.is_dir():
         raise ValueError(f"not a directory: {specs_dir}")
@@ -1786,7 +2346,7 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None) -
     for spec_file in sorted(specs_dir.glob("*.md")):
         if spec_file.name.startswith("_"):
             continue  # skip template files
-        results[spec_file.name] = validate_file(spec_file, all_specs=all_specs)
+        results[spec_file.name] = validate_file(spec_file, all_specs=all_specs, base_revision=base_revision)
 
     # SPEC-332 R4 / R3.
     for name, findings in delivered_but_not_closed_findings(specs_dir).items():
@@ -1864,6 +2424,8 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None) -
             continue
         spec_id = str(fm.get("id") or "") if isinstance(fm, dict) else ""
         if not spec_id:
+            continue
+        if any("state_rationale_record_path_escape" in finding for finding in results.get(spec_file.name, [])):
             continue
         artifact_findings = spec_artifacts.validate_artifact_index(
             reports_root, spec_id, tracked_paths=tracked,
@@ -1980,12 +2542,232 @@ def _collect_frontmatters_for_paths(positional: list[str]) -> list[dict]:
     return frontmatters
 
 
+class StagedValidationError(RuntimeError):
+    """SPEC-358 R3: the staged-index snapshot cannot be validated as-is."""
+
+
+def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
+    """Read-only Git plumbing only -- never checkout/stash/read-tree (R3)."""
+    return subprocess.run(
+        ["git", "-C", str(repo_root)] + list(args),
+        capture_output=True, text=True,
+    )
+
+
+def git_has_head(repo_root: Path) -> bool:
+    """R3: a brand-new repo with no HEAD gets an empty baseline, not an error."""
+    return _run_git(repo_root, ["rev-parse", "--verify", "-q", "HEAD"]).returncode == 0
+
+
+def staged_index_entries(repo_root: Path) -> dict[str, dict[str, str]]:
+    """R3: the full tracked-index snapshot -- path -> {mode, sha}.
+
+    This is the *whole* index (``git ls-files --stage``), not only this
+    commit's changed paths: an unmodified-but-tracked file (e.g. an
+    untouched ``artifacts/index.json``) must still be read from its current
+    index entry, not from the working tree, so index/worktree hashes stay
+    identical before and after validation (AC3). NUL-safe (``-z``) so paths
+    with spaces/newlines round-trip correctly (R4). Raises
+    :class:`StagedValidationError` on any unresolved (unmerged) entry.
+    """
+    result = _run_git(repo_root, ["ls-files", "--stage", "-z"])
+    if result.returncode != 0:
+        raise StagedValidationError(f"git ls-files --stage failed: {result.stderr.strip()}")
+    entries: dict[str, dict[str, str]] = {}
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        meta, path = record.split("\t", 1)
+        mode, sha, stage = meta.split(" ")
+        if stage != "0":
+            raise StagedValidationError(
+                f"unresolved (unmerged) index entry, refusing validation: {path}"
+            )
+        entries[path] = {"mode": mode, "sha": sha}
+    return entries
+
+
+def read_staged_blob(repo_root: Path, sha: str) -> str:
+    """R3: read one cached blob by object id -- no checkout, no index mutation."""
+    result = _run_git(repo_root, ["cat-file", "-p", sha])
+    if result.returncode != 0:
+        raise StagedValidationError(f"git cat-file -p {sha} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def read_head_blob(repo_root: Path, path: str) -> str | None:
+    """R3: HEAD's content of ``path``, or ``None`` if absent from HEAD / no HEAD."""
+    if not git_has_head(repo_root):
+        return None
+    result = _run_git(repo_root, ["show", f"HEAD:{path}"])
+    return result.stdout if result.returncode == 0 else None
+
+
+def _working_baseline(spec_file: Path, revision: str = "HEAD") -> tuple[str | None, bool]:
+    result = _run_git(spec_file.parent, ["rev-parse", "--show-toplevel"])
+    if result.returncode:
+        return None, False
+    root = Path(result.stdout.strip())
+    relative = spec_file.resolve().relative_to(root.resolve()).as_posix()
+    if not git_has_head(root):
+        return None, True
+    if _run_git(root, ["rev-parse", "--verify", revision + "^{commit}"]).returncode:
+        raise StagedValidationError(f"invalid baseline revision: {revision}")
+    result = subprocess.run(["git", "-C", str(root), "show", f"{revision}:{relative}"], capture_output=True)
+    return (result.stdout.decode("utf-8") if result.returncode == 0 else None), True
+
+
+def validate_state_rationale_admission(fm: dict, body: str, spec_file: Path) -> list[str]:
+    """Strict promotion/runtime gate; private-local records stay in their own root."""
+    return list(dict.fromkeys(validate_state_rationale_static(fm, body, spec_file) +
+        state_rationale_adoption_findings(fm, body, baseline_available=False, strict=True)))
+
+
+def rationale_counts(results: dict) -> dict:
+    groups = {
+        "legacy": ("legacy_missing",),
+        "missing": ("required_missing", "adoption_required", "record_required"),
+        "stale": ("stale_snapshot", "transition_target_mismatch"),
+        "unresolvable_provenance": ("record_not_indexed", "record_wrong_type",
+            "record_wrong_owner", "record_unreadable", "record_path_escape", "index_malformed"),
+        "unverified_external": ("unverified_external",),
+    }
+    return {name: sum(any("state_rationale_" + marker in finding for marker in markers)
+                     for findings in results.values() for finding in findings)
+            for name, markers in groups.items()}
+
+
+def _snapshot_blobs(repo_root: Path, entries: dict) -> dict[str, bytes]:
+    """Read captured object IDs in one binary batch, preserving exact bytes."""
+    shas = list(dict.fromkeys(entry["sha"] for entry in entries.values() if entry["mode"] != "160000"))
+    result = subprocess.run(["git", "-C", str(repo_root), "cat-file", "--batch"],
+                            input=("\n".join(shas) + "\n").encode(), capture_output=True)
+    if result.returncode:
+        raise StagedValidationError("cannot read captured index blobs")
+    blobs = {}
+    cursor = 0
+    for sha in shas:
+        end = result.stdout.index(b"\n", cursor)
+        header = result.stdout[cursor:end].split()
+        if len(header) != 3 or header[0].decode() != sha or header[1] != b"blob":
+            raise StagedValidationError(f"captured object is not a readable blob: {sha}")
+        size = int(header[2])
+        blobs[sha] = result.stdout[end + 1:end + 1 + size]
+        cursor = end + size + 2
+    return blobs
+
+
+def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
+    """Validate inert files from one captured index, running only this trusted module.
+
+    The scratch tree is not a checkout: no Git operations write it, no copied
+    executable is imported/run, and neither the real index nor worktree changes.
+    Symlinks are recreated only when their normalized destination stays inside
+    the owning kit; invalid links remain findings rather than filesystem reads.
+    """
+    repo_root = Path(repo_root).resolve()
+    if not lifecycle.is_safe_relative_posix_path(specs_relative_dir):
+        raise StagedValidationError("spec root must be a safe repository-relative path")
+    entries = staged_index_entries(repo_root)
+    has_head = git_has_head(repo_root)
+    baseline_revision = _run_git(repo_root, ["rev-parse", "HEAD"]).stdout.strip() if has_head else None
+    kit = Path(specs_relative_dir).parent.as_posix()
+    prefix = specs_relative_dir.rstrip("/") + "/"
+    results = {}
+    blobs = _snapshot_blobs(repo_root, {path: entry for path, entry in entries.items() if path.startswith(kit + "/")})
+    with tempfile.TemporaryDirectory(prefix="nightshift-index-") as scratch:
+        snapshot = Path(scratch).resolve()
+        links = []
+        for path, entry in entries.items():
+            if not path.startswith(kit + "/"):
+                continue
+            if not lifecycle.is_safe_relative_posix_path(path):
+                raise StagedValidationError(f"unsafe index path: {path!r}")
+            target = snapshot / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if entry["mode"] == "120000":
+                links.append((target, blobs[entry["sha"]].decode("utf-8")))
+            elif entry["mode"] in {"100644", "100755"}:
+                target.write_bytes(blobs[entry["sha"]])
+        for target, destination in links:
+            resolved = (target.parent / destination).resolve()
+            if Path(destination).is_absolute() or not resolved.is_relative_to(snapshot / kit):
+                results[target.relative_to(snapshot).as_posix()] = [
+                    "state_rationale_evidence_path_escape: staged symlink escapes owning kit"]
+            else:
+                target.symlink_to(destination)
+        config = snapshot / kit / "config.yaml"
+        try:
+            documents = list(yaml.safe_load_all(config.read_text()))
+            if not documents or any(not isinstance(item, dict) for item in documents if item is not None):
+                raise ValueError("configuration must contain YAML mappings")
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            results[f"{kit}/config.yaml"] = [f"staged_configuration_invalid: {exc}"]
+        corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
+        for path in sorted(entries):
+            if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
+                continue
+            if entries[path]["mode"] == "120000":
+                results.setdefault(path, []).append("state_rationale_evidence_path_escape: spec must be a regular index file")
+                continue
+            spec_path = snapshot / path
+            text = spec_path.read_bytes().decode("utf-8")
+            fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
+            if parse_errors:
+                results[path] = parse_errors
+                continue
+            findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
+            base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
+            baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
+            base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
+            findings.extend(state_rationale_adoption_findings(
+                fm, body, baseline_fm=base_fm, baseline_body=base_body,
+                is_new=baseline_text is None, bytes_changed=text != baseline_text))
+            results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
+    return {"baseline": "head" if has_head else "none", "results": results,
+            "counts": rationale_counts(results), "finding_families": finding_family_summary(results, [])}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if any(arg == "--staged" for arg in argv):
+        rest = [arg for arg in argv if arg != "--staged"]
+        repo_root = Path(rest[0]) if rest else Path(".")
+        if len(rest) > 1:
+            specs_relative_dir = rest[1]
+        else:
+            # Explicit hook calls use BUG-338's per-path resolver. A standalone
+            # invocation without a spec root retains preflight's single-root
+            # default and refuses ambiguous roots rather than guessing.
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            try:
+                import preflight as _preflight
+            except ImportError:
+                specs_relative_dir = ".nightshift/specs"  # portable older project kit
+            else:
+                try:
+                    kit_root = _preflight.resolve_kit_root(repo_root)
+                except _preflight.KitRootError as exc:
+                    # R4: ambiguity/no-root refuses rather than choosing silently.
+                    print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
+                    return 1
+                specs_relative_dir = f"{kit_root.relative_to(Path(repo_root).resolve()).as_posix()}/specs"
+        try:
+            report = validate_staged(repo_root, specs_relative_dir)
+        except StagedValidationError as exc:
+            print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
+            return 1
+        has_errors = any(
+            any(not _is_warning(finding) for finding in findings)
+            for findings in report["results"].values()
+        )
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 1 if has_errors else 0
     if any(arg in {"--help", "-h"} for arg in argv):
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
-            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH]\n"
+            "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH] [--base-revision REV]\n"
+            "       python3 validate_specs.py --staged <repo-root> [<kit>/specs]\n"
             "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]"
         )
         print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
@@ -2037,6 +2819,7 @@ def main(argv: list[str] | None = None) -> int:
     show_promotion_gap_summary = False
     show_ownership_summary = False
     baseline_path: str | None = None
+    base_revision = "HEAD"
     status_store_path: Path | None = None  # SPEC-332 R3
     positional = []
     i = 0
@@ -2050,6 +2833,9 @@ def main(argv: list[str] | None = None) -> int:
         elif argv[i] == "--ownership-summary":
             show_ownership_summary = True
             i += 1
+        elif argv[i] == "--base-revision" and i + 1 < len(argv):
+            base_revision = argv[i + 1]
+            i += 2
         elif argv[i] == "--baseline" and i + 1 < len(argv):
             baseline_path = argv[i + 1]
             i += 2
@@ -2071,11 +2857,14 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(raw_path)
         if path.is_dir():
             try:
-                path_results = validate_directory(path, status_store_path=status_store_path)
-            except ValueError as exc:
+                path_results = validate_directory(path, status_store_path=status_store_path, base_revision=base_revision)
+            except (ValueError, StagedValidationError) as exc:
                 path_results = {str(path): [str(exc)]}
         elif path.is_file() and path.suffix == ".md":
-            path_results = {path.name: validate_file(path)}
+            try:
+                path_results = {path.name: validate_file(path, base_revision=base_revision)}
+            except (ValueError, StagedValidationError) as exc:
+                path_results = {path.name: [str(exc)]}
             path_results[path.name].extend(
                 fleet_uniqueness_findings(path.parent, [path]).get(path.name, [])
             )
@@ -2113,7 +2902,16 @@ def main(argv: list[str] | None = None) -> int:
             fam_diff = diff_finding_family_summaries(baseline_data, fam_summary)
 
     if fmt == "json":
+        baseline_labels = set()
+        for raw in positional:
+            location = Path(raw).parent if Path(raw).is_file() else Path(raw)
+            repository = _run_git(location, ["rev-parse", "--show-toplevel"])
+            baseline_labels.add("baseline_unavailable" if repository.returncode else
+                                base_revision if git_has_head(Path(repository.stdout.strip())) else "none")
         output = {
+            "baseline": next(iter(baseline_labels)) if len(baseline_labels) == 1 else "mixed",
+            "counts": rationale_counts(results),
+            "finding_families": finding_family_summary(results, []),
             "validated_files": len(results),
             "paths_examined": len(positional),
             "files_with_errors": sum(1 for e in results.values() if e),

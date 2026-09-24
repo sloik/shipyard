@@ -38,6 +38,13 @@ a substitute: doing so would bless changed bytes. Deny or indeterminate preserve
 the branch, worktree, index, and divergent installed payload for canonical repair
 and whole-kit release.
 
+For explicitly authorized canonical-source work, follow GIT.md's
+receipt-bound canonical-source authoring contract (SPEC-365). Only the parent
+injects `authoring_provider`; original receipts and strict results stay unchanged.
+Bootstrap requires external parent authorization and independent verification of
+the exact candidate before applying the new policy. Missing proof refuses all
+acceptance/lifecycle/merge/cleanup actions. Installed copies remain strict.
+
 ---
 
 ## Phase A: Auto-Discovery (Silent Agent Work)
@@ -517,6 +524,14 @@ sh .nightshift/hooks/install-branch-guard.sh
 Policy source: `GIT.md` § Hooks.
 
 **Pre-commit hook:** Reads `lint` and `type_check` commands from `config.yaml` and runs them before every `git commit`. If either fails, the commit is rejected.
+
+The installed hook also invokes `validate_specs.py --staged <repo-root> <kit>/specs`
+for affected specs, artifacts, configuration and evidence. Verify installation in
+a temporary repository with a partial spec/record commit (must refuse), then
+stage the consistent set (must pass). The trusted validator reads one index
+snapshot; it never executes programs from that snapshot. Configure independent
+CI to run `validate_specs.py <kit>/specs --base-revision <base> --format json`
+with a reviewed validator executable. See GIT.md for adoption and repair rules.
 
 It also enforces the manifest-owned install boundary. Staged edits to managed
 `.nightshift` payloads are rejected unless they are exact bytes from the release

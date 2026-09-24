@@ -37,6 +37,7 @@ from dependency_registry import (
 )
 from parallel_executor import (
     AdmissionSpec,
+    parallel_admission_decisions as plan_parallel_decisions,
     plan_dynamic_admission,
     plan_parallel_execution,
     write_admission_plan,
@@ -917,8 +918,121 @@ def resolve_model_command(args) -> int:
     return 0
 
 
+def _load_explanation_corpus(specs_dir: Path) -> Dict[str, dict]:
+    """Read every spec once, the way the board's cache does (frontmatter + body)."""
+    corpus: Dict[str, dict] = {}
+    for path in sorted(specs_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        try:
+            loaded = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            continue
+        frontmatter = loaded if isinstance(loaded, dict) else {}
+        if frontmatter.get("id"):
+            corpus[frontmatter["id"]] = {
+                "fm": frontmatter, "body": parts[2].lstrip("\n"), "path": path, "mtime": mtime,
+            }
+    return corpus
+
+
+def explain_spec_command(args) -> int:
+    """SPEC-359 R1: print one spec's run-state explanation. Read-only: no plan or artifact writes.
+
+    Builds the same inputs the board's corpus pass builds (effective status
+    from the durable checkpoint, dependency resolution, authorization hold,
+    parallel admission decision, Git/rationale provenance) and calls the same
+    ``spec_artifacts.compose_run_state_explanation`` the board calls.
+    """
+    import deployment_tiers
+    import lifecycle
+    import spec_artifacts
+    import status_store
+
+    specs_dir = Path(args.specs_dir) if args.specs_dir else CANONICAL_DIR / "specs"
+    spec_id = args.explain_spec
+    corpus = _load_explanation_corpus(specs_dir)
+    if spec_id not in corpus:
+        message = {"ok": False, "error": "spec_not_found", "spec_id": spec_id}
+        print(json.dumps(message) if getattr(args, "json", False) else f"spec_not_found: {spec_id}",
+              file=sys.stdout if getattr(args, "json", False) else sys.stderr)
+        return 1
+
+    configured: dict = {}
+    config_path = Path(args.config) if getattr(args, "config", None) else spec_artifacts.project_config_path(specs_dir)
+    try:
+        for document in yaml.safe_load_all(config_path.read_text(encoding="utf-8")):
+            if isinstance(document, dict):
+                configured.update(document.get("parallel_admission") or {})
+    except (OSError, yaml.YAMLError, AttributeError, TypeError):
+        if getattr(args, "config", None):
+            print(f"Error reading admission config: {config_path}", file=sys.stderr)
+            return 2
+        configured = {}
+    worker_limit = args.worker_limit if args.worker_limit is not None else configured.get("worker_limit", 1)
+    worker_limit = worker_limit if isinstance(worker_limit, int) and worker_limit >= 0 else 1
+    policy = args.missing_touches_policy if args.missing_touches_policy is not None \
+        else configured.get("missing_touches_policy", "exclusive")
+    policy = policy if policy in ("exclusive", "allow") else "exclusive"
+
+    states = status_store.read_durable_states_readonly(
+        status_store.default_db_path_for_specs_dir(specs_dir), list(corpus)
+    )
+    items: Dict[str, dict] = {}
+    for sid, record in corpus.items():
+        view = status_store.effective_status_view(
+            str(record["fm"].get("status", "draft")), states.get(sid), record["mtime"], record["path"])
+        items[sid] = {**record["fm"], "status": view["effective"]}
+
+    resolver = DependencyRegistryResolver(specs_dir)
+    dependency_ids = {str(dep) for item in items.values() for dep in (item.get("after") or []) if dep}
+    resolution = resolver.resolve(dependency_ids, local_specs=items)
+    admission_specs = resolution.combined_specs(items)
+
+    reports_root, specs_prefix = spec_artifacts.explanation_layout(specs_dir)
+    target, record = items[spec_id], corpus[spec_id]
+    admission = hold = None
+    if target.get("status") not in {"done", "superseded", "active", "retired"}:
+        admission = lifecycle.derive_admission(target, record["body"], admission_specs, resolution.errors)
+        target["run_state"], target["run_state_reason"] = admission.state, admission.reason
+        if target.get("status") == "in_progress":
+            hold = deployment_tiers.pending_authorization_hold_detail(reports_root / "_wip", spec_id)
+            admission = lifecycle.apply_authorization_overlay(admission, hold)
+            if hold["held"]:
+                target["run_state"], target["run_state_reason"] = admission.state, admission.reason
+
+    decisions, qualified = plan_parallel_decisions(
+        items, resolver, worker_limit=worker_limit, missing_touches_policy=policy)
+    explanation = spec_artifacts.compose_run_state_explanation(
+        target, file_frontmatter=record["fm"],
+        rationale_parsed=spec_artifacts.parse_rationale_section(record["body"]),
+        mtime=record["mtime"], path=record["path"], durable_state=states.get(spec_id),
+        admission=admission, hold=hold, admission_specs=admission_specs,
+        dependency_errors=resolution.errors, parallel_decision=decisions.get(spec_id),
+        qualified=qualified.get(spec_id),
+        snapshot=spec_artifacts.collect_persistence_snapshot(specs_dir),
+        reports_root=reports_root, specs_prefix=specs_prefix, now=datetime.now(timezone.utc),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "run_state_explanation": explanation}, indent=2, default=str))
+    else:
+        primary = explanation["primary"]
+        print(f"{spec_id}: {explanation['run_state'] or 'not_applicable'} -- {primary['reason']}")
+        print(f"  next: {explanation['next_condition'] or 'none'}")
+        print(f"  rationale: {(explanation['rationale'] or {}).get('quality', 'not_applicable')}")
+    return 0
+
+
 def admission(args) -> int:
     """Write a current-frontier admission plan from durable spec state."""
+    if getattr(args, "explain_spec", None):
+        return explain_spec_command(args)
     specs_dir = Path(args.specs_dir) if args.specs_dir else CANONICAL_DIR / "specs"
     builder = DAGBuilder(specs_dir)
     try:
@@ -2399,6 +2513,13 @@ def main():
         choices=("exclusive", "allow"),
         default=None,
         help="How missing or coarse touches declarations affect parallel admission",
+    )
+    admission_parser.add_argument(
+        "--explain-spec", default=None, metavar="ID",
+        help="SPEC-359: print this spec's run-state explanation (read-only; writes no plan or artifact)",
+    )
+    admission_parser.add_argument(
+        "--json", action="store_true", help="With --explain-spec, emit the explanation as JSON",
     )
 
     validate_parser = subparsers.add_parser(

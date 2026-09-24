@@ -84,6 +84,7 @@ def run_validation(
     repo: Path,
     *,
     terminal_integrity: dict | None = None,
+    authoring_provider: managed_payload_provenance.AuthoringProvider | None = None,
 ) -> dict:
     """Run each configured command; return the validation result mapping."""
     result: dict = {
@@ -101,6 +102,7 @@ def run_validation(
             receipt_ref=str(terminal_integrity["receipt_ref"]),
             receipt_sha256=str(terminal_integrity["receipt_sha256"]),
             run_id=terminal_integrity.get("run_id"),
+            **({"authoring_provider": authoring_provider} if authoring_provider is not None else {}),
         ).to_dict()
         result["managed_payload_acceptance"] = acceptance
         if not acceptance["ok"]:

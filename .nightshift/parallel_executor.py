@@ -3594,6 +3594,77 @@ def write_admission_plan(plan: AdmissionPlan, output_dir: Path) -> Tuple[Path, P
     return json_path, markdown_path
 
 
+def parallel_admission_decisions(
+    frontmatters: Mapping[str, Mapping[str, Any]],
+    resolver: Optional[DependencyRegistryResolver] = None,
+    *,
+    worker_limit: int = 1,
+    missing_touches_policy: str = "exclusive",
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Read-only per-spec view of one ``plan_dynamic_admission`` pass (SPEC-359 R2).
+
+    NFR-001: this only *reads* the planner's own decisions for explanation. It
+    adds no scheduling authority -- it never admits, defers, writes a plan or
+    touches a worktree, and ``plan_dynamic_admission`` itself is unchanged.
+    ``frontmatters`` maps spec id to frontmatter carrying the effective
+    ``status``; main/nfr records are excluded exactly as the ``admission``
+    command excludes them. Returns ``(decisions, qualified)`` keyed by spec id:
+    each decision is the planner's ``AdmissionDecision`` as a mapping plus its
+    ``worker_limit``/``missing_touches_policy`` context and the sorted
+    ``cycle_members`` when the spec is in a dependency cycle; ``qualified`` is
+    that consumer's ``requires_specs`` resolution (statuses/errors/details).
+    """
+    from dependency_registry import qualified_dependency_key
+
+    admission_specs: List[AdmissionSpec] = []
+    qualified: Dict[str, Dict[str, Any]] = {}
+    statuses: Dict[str, str] = {}
+    errors: Dict[str, str] = {}
+    details: Dict[str, str] = {}
+    for spec_id in sorted(frontmatters):
+        fm = frontmatters[spec_id]
+        if fm.get("type") in ("main", "nfr"):
+            continue
+        requirements, parse_error = parse_requires_specs(fm)
+        keys = tuple(qualified_dependency_key(spec_id, project, required) for project, required in requirements)
+        if parse_error:
+            keys += (qualified_dependency_key(spec_id, "MALFORMED", "requires_specs"),)
+        if resolver is not None and (requirements or parse_error):
+            resolution = resolver.resolve_qualified(spec_id, requirements, parse_error=parse_error)
+            statuses.update(resolution.statuses)
+            errors.update(resolution.errors)
+            details.update(resolution.details)
+            qualified[spec_id] = {
+                "statuses": dict(resolution.statuses), "errors": dict(resolution.errors),
+                "details": dict(resolution.details),
+            }
+        after = fm.get("after")
+        touches = fm.get("touches")
+        priority = fm.get("priority")
+        admission_specs.append(AdmissionSpec(
+            spec_id=spec_id,
+            status=str(fm.get("status", "")),
+            after=tuple(str(dep) for dep in after) + keys if isinstance(after, list) else keys,
+            touches=tuple(str(item) for item in touches) if isinstance(touches, list) else (),
+            priority=priority if isinstance(priority, int) else 1,
+        ))
+    plan = plan_dynamic_admission(
+        admission_specs, worker_limit, missing_touches_policy=missing_touches_policy,
+        dependency_statuses=statuses, dependency_errors=errors, dependency_details=details,
+    )
+    cycles = _find_cycles({spec.spec_id: set(spec.after) for spec in admission_specs})
+    decisions: Dict[str, Dict[str, Any]] = {}
+    for decision in plan.decisions:
+        item = asdict(decision)
+        item["worker_limit"] = worker_limit
+        item["missing_touches_policy"] = missing_touches_policy
+        members = sorted({member for cycle in cycles if decision.spec_id in cycle for member in cycle})
+        if members:
+            item["cycle_members"] = members
+        decisions[decision.spec_id] = item
+    return decisions, qualified
+
+
 def _find_cycles(graph: Dict[str, Set[str]]) -> List[Set[str]]:
     """Find cycle members without importing the CLI DAG module."""
     cycles: List[Set[str]] = []

@@ -7,6 +7,496 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.24.0 (2026-09-19)
+
+### Pre-commit `SPEC_TRIGGER` must not fire on the kit's own underscore-prefixed scaffold files (SPEC-379)
+
+SPEC-378 narrowed `hooks/pre-commit`'s `SPEC_TRIGGER` from "any staged path
+under the install root" to "a staged path under the install's own `specs/`
+or `reports/` subdirectory", but the very next real fleet-release `--apply`
+attempt (run after SPEC-378 merged and its hook refresh was confirmed
+installed) still failed at Cortex with `SPEC VALIDATION FAILED`. Root cause:
+`nightshift-sync.py`'s `CANONICAL_PROTOCOL_FILES` includes exactly one entry
+shaped like `specs/`/`reports/` — `specs/_TEMPLATE.md` — so every real
+kit-payload sync stages that path and still trips `SPEC_TRIGGER` under
+SPEC-378's narrowed pattern, defeating its purpose for any install whose
+corpus has a pre-existing hard `validate_specs.py` finding. `SPEC_TRIGGER`
+now applies the same underscore-prefix exclusion `LIVE_SPECS` already uses a
+few lines below in the same function: a staged `specs/`/`reports/` path
+whose basename starts with `_` no longer sets `SPEC_TRIGGER`. A staged real
+(non-underscore) spec or report path still triggers full validation exactly
+as SPEC-378 left it. No migration; the release handoff remains pending and
+`kit_version` is unchanged.
+
+### Pre-commit `SPEC_TRIGGER` scoped to staged `specs/`/`reports/` paths, not any staged path under the install (SPEC-378)
+
+`hooks/pre-commit`'s `SPEC_TRIGGER` (added by SPEC-358) fired full
+`validate_specs.py` corpus validation for an install whenever ANY staged path
+fell under that install's root — a kit-payload-only commit (e.g. `board.py`,
+`lifecycle.py`, `hooks/*`, `config.yaml`, zero `specs/`/`reports/` paths
+staged) tripped it exactly like a real spec/report edit. A real kit 3.24.0
+fleet-release `--apply` attempt hit this directly: Cortex and Forecasts,
+both single-purpose kit-payload-only commits, were rejected with `SPEC
+VALIDATION FAILED` citing hundreds of pre-existing findings in specs neither
+commit touched. `SPEC_TRIGGER` now fires only when a staged path falls under
+the resolved install's own `specs/` or `reports/` subdirectory — the same
+`*/.nightshift/specs/*|*/.nightshift/reports/*|/canonical/specs/*|/canonical/reports/*`-shaped
+pattern already used elsewhere in the same hook for spec/artifact path
+recognition. A commit that stages any `specs/`/`reports/` path still triggers
+full validation exactly as before; only the trigger's path scope narrows, not
+its validation behavior once triggered. No migration; the release handoff
+remains pending and `kit_version` is unchanged.
+
+### `CANONICAL_SUITE_TIMEOUT_S` raised to 4800s to restore real headroom margin (SPEC-377)
+
+`release_coordinator.py`'s `check_canonical_suite_headroom` (SPEC-336) requires
+`CANONICAL_SUITE_TIMEOUT_S` to clear the last recorded healthy canonical-suite
+runtime with roughly as much room again to spare. A real kit 3.24.0 fleet-release
+preflight recorded a healthy measurement of 1701.715s, which the then-current
+`CANONICAL_SUITE_TIMEOUT_S = 2400` no longer cleared with the required margin
+(`2400 - 1701.715 = 698.285 < 1701.715`), aborting the release cleanly at
+preflight. `CANONICAL_SUITE_TIMEOUT_S` is raised to `4800` (80 min), which
+clears that measurement with real margin to spare
+(`4800 - 1701.715 = 3098.285 >= 1701.715`) and leaves headroom for ordinary
+suite growth over the next several specs. Only the constant moves; the
+`headroom >= measured` relation `check_canonical_suite_headroom` enforces is
+unchanged and still fires for a genuinely-too-slow suite. No migration; the
+release handoff remains pending and `kit_version` is unchanged.
+
+### Spec-detail context walker also finds `.agent-context/` directories (SPEC-374)
+
+`nightshift-instructions.py`'s `_walk_argo_files` (used by the spec-detail
+endpoint's "Argo context files" section) checks `<ancestor>/.agent-context/`
+first, falling back to `<ancestor>/.argo/` at the same ancestor when the new
+directory is absent. This dual-acceptance intent matches SPEC-373's for
+`scanner.py`/`nightshift_coordinator.py`, though the concrete ordering
+differs from both: `scanner.py`'s prefix check has no preference between
+the two names, and `nightshift_coordinator.py` unions files from both
+directories when both are present at an ancestor, rather than either
+picking one exclusively. Fixes a silent empty-context regression for every
+project renamed by the fleet-wide `.argo` -> `.agent-context` sweep
+(SPEC-ARGO-110). Unrenamed projects (`.argo/` only) are unaffected. The
+board process serves `nightshift-instructions.py` indirectly via the
+spec-detail endpoint and must be restarted to pick this up. No migration
+occurs here; the release handoff remains pending and `kit_version` is
+unchanged.
+
+### spec_wrong_home guard no longer denies deletions or rename-sources (SPEC-375)
+
+`canonical/hooks/protect-write-scope.sh`'s staged-path collection now
+distinguishes each path's git status before classifying it. For a rename
+(`R`/`C`), only the NEW (destination) path reaches `scope_guard.py`'s
+universal `spec_wrong_home` check; the OLD (source) path never does. For a
+plain deletion (`D`), the path never reaches that check either. Every other
+`classify_write` rule (`malformed_target`, `denied_glob`, `outside_root`,
+...) still runs on those paths unmodified — only the spec-home violation is
+suppressed, via a per-path override of `classify_write`'s specs-directory
+discovery (`known_specs_dirs`) rather than any change to `classify_write`'s
+or `_is_spec_home_violation`'s signature. Previously, once a `SPEC-*.md`
+/`NFR-*.md`/`*-QUESTIONS-*.md`-shaped path existed at the wrong location, it
+could never be deleted or renamed away — only ever re-added at exactly that
+same wrong path, which the rule then still denied. Added/modified paths,
+and the destination side of a rename, are still denied exactly as before
+for a genuinely new or newly-modified misplaced spec file. No migration or
+deployment occurs here; the release handoff remains pending and
+`kit_version` is unchanged.
+
+### Drop the render endpoint's bare-word stale-command heuristic (SPEC-372)
+
+The render endpoint's advisory `stale_command` scan (SPEC-371-003) drops its
+bare-word detection arm and the stopword list it depended on. Confirmed
+against the real, merged board: rendering the prebuilt `kickoff-single-spec`
+snippet's real body ("...per the nightshift worker brief.") false-positived
+`"stale_command:worker"`, even though "worker" is ordinary English, not a
+`/nightshift`/`$nightshift` action reference. Only the two unambiguous
+prefixed forms remain — `/nightshift <action>` and `$nightshift <action>` —
+because those are the only shapes the tool itself actually emits and can
+reliably validate; free-form prose is not under this tool's control and no
+fixed stopword list can ever fully cover it. No replacement heuristic was
+added (operator decision: this is a removal, not a smarter guess). The
+board process serves `board.py` and must be restarted to pick this up. No
+migration or deployment occurs here; the release handoff remains pending
+and `kit_version` is unchanged.
+
+### Add, edit, delete, and duplicate-as-custom (SPEC-371-007)
+
+The SNIPPETS view (SPEC-371-005/006) gains its last piece: a "+ ADD PROMPT"
+button at the top of the filter bar (and wired into the existing "No
+prompts yet" empty-state message) opens the same inline-expand editor form
+used elsewhere in this view — never a modal — with `title`/`body`
+(monospace `<textarea>`)/`tags` fields and a `scope` choice limited to
+`repo` or `project` (never `prebuilt`). Submitting calls `POST
+/api/prompts/{scope}` (SPEC-371-002); a 409 id-collision response shows the
+colliding scope inline without closing the form or losing typed content, so
+the user can rename and resubmit. Every `repo`/`project` row now shows
+"EDIT" and "DELETE" controls (never on `prebuilt` rows); "EDIT" reopens the
+same editor pre-filled with `scope` fixed/shown-not-changeable and calls
+`PUT /api/prompts/{scope}/{id}`; "DELETE" calls `DELETE
+/api/prompts/{scope}/{id}` after a native `confirm()` step. Every `prebuilt`
+row instead shows "⎘ DUPLICATE AS CUSTOM", which opens the same editor
+pre-filled from the prebuilt entry (`title` suffixed " (copy)", `scope`
+defaulted to `project` but changeable to `repo`) and creates a new snippet
+via `POST` — it never modifies `prebuilt.json`. The edit/delete/duplicate
+controls render as a sibling row below `.snippet-item` (the same "siblings
+below" convention SPEC-371-006 established for the COPY detail), never
+inside it, so real clicks on a row's expand/collapse target are unaffected.
+
+### Snippet detail expand, variable fill-in, and copy (SPEC-371-006)
+
+Clicking a row in the SNIPPETS view (SPEC-371-005) now expands it inline,
+directly below the row, pushing later rows down (not a modal/overlay);
+clicking the same row again, or a different row, collapses/switches the
+expansion so at most one row is expanded at a time. The expanded body shows
+the full `body` text with every `{{variable}}` occurrence highlighted via a
+`.snippet-var-placeholder` span (amber, matching the board's existing
+`--c-in-progress` vocabulary), a labeled text input for every declared
+variable other than `board_url` (never shown — it is always server-filled
+per SPEC-371-003 R4), and a "⧉ COPY" button styled like the existing "▶ COPY
+RUN PROMPT" button. COPY calls `POST /api/prompts/{scope}/{id}/render`
+(SPEC-371-003) with the form's variable values and `harness: "other"` (no
+harness-detection mechanism exists yet; a future spec may add a picker),
+writes the returned `text` to the clipboard via the same `navigator.clipboard
+.writeText`/`copyText()` helper every other board copy button already uses,
+and shows the existing `showToast()` confirmation. Any `warnings` in the
+response (e.g. `stale_command:foo`, `missing_variable:bar`) render inline
+above the button as "⚠ stale_command: foo" before/at the moment of copy —
+copy still proceeds, since SPEC-371-003 R5 warnings are advisory. Pressing
+`Enter` in a variable input, or anywhere else while a row is expanded and no
+other text input (e.g. the snippets search filter) is focused, triggers the
+same copy action as clicking the button. Does not add "+ ADD PROMPT"/"⎘
+DUPLICATE AS CUSTOM" (SPEC-371-007), a harness-selection UI, or persistence
+of variable values between visits.
+
+### SNIPPETS view scaffold: header button, live-search list, scope badges (SPEC-371-005)
+
+`board.py`'s embedded frontend gains the first visible surface for the
+Prompt Snippet Library (SPEC-371-001..004): a header toolbar button "⧉
+SNIPPETS" next to "📋 REPORTS" that opens a full-panel "ALL SNIPPETS" view,
+reusing the exact `setPanelView()`/`panel.classList.add('open')` show/hide
+mechanism the Reports view already uses (no second view mechanism
+introduced). Opening the view fetches `GET /api/prompts` once and renders
+one row per snippet: title, first line of `body`, and a scope badge
+(`PREBUILT`/`REPO`/`PROJECT`) with a gray/blue/green left-border color chip
+reusing the `#panel-status-select[data-status=...]` CSS pattern (badge text
+is always rendered, never color-only). A search input above the list
+filters rows live, on every keystroke, by case-insensitive substring match
+against `title`, `body`, and `tags` — client-side against the
+already-fetched list, no per-keystroke network request. Pressing `/` while
+the view is open (and no text input already has focus) moves focus to the
+search input, scoped to this view only; `Esc` returns to the board via the
+existing generic panel-close path the Reports view's `Esc` handling already
+shares. An empty `GET /api/prompts` result renders "No prompts yet — click +
+ADD PROMPT to create one." instead of a blank list. Does not add
+click-to-view/copy (SPEC-371-006) or add/edit (SPEC-371-007).
+
+### Prompt snippet render endpoint (SPEC-371-003)
+
+`board.py` gains the last Prompt Snippet Library endpoint: `POST
+/api/prompts/{scope}/{id}/render` turns a stored snippet into copy-ready
+text. Body is `{"variables": {...}, "harness": "claude"|"codex"|"other"}`
+(both optional; a bodyless request is accepted), response is `{"text":
+"<rendered>", "warnings": [...]}`. Text selection is `harness_overrides
+[harness]` if present, else `body` — the one branching rule. Every
+`{{name}}` in the selected text is replaced with the caller's value;
+an unmatched placeholder is left literal and adds
+`"missing_variable:<name>"` to `warnings`. `board_url` is always the
+board's own `http://localhost:<port>` (same form as the startup banner) —
+a caller-supplied `board_url` variable is always overwritten server-side,
+never used. An advisory (non-blocking) scan of the rendered text flags
+`/nightshift <action>`, `$nightshift <action>` and bare `nightshift
+<action>` references whose `<action>` is absent from
+`skill_tutorial.load_registry()`'s live registry as
+`"stale_command:<action>"`; the bare-word form skips a short English
+stopword list (`to`, `a`, `the`, …) so SKILL.md's own documented
+plain-language phrasing ("use Nightshift to validate this project") does
+not self-flag. Lookup and 400/404 error shapes mirror SPEC-371-002's
+`GET /api/prompts/{scope}/{id}` exactly. No frontend yet (SPEC-371-006).
+The board process serves `board.py` and must be restarted to pick this
+up. No migration or deployment occurs here; the release handoff remains
+pending and `kit_version` is unchanged.
+
+### Prompt snippet storage: schema, three scopes, repo-root resolution (SPEC-371-001)
+
+`board.py` gains the shared storage layer for the forthcoming Prompt Snippet
+Library, as plain functions with no HTTP surface yet. `SNIPPET_SCOPES =
+("prebuilt", "repo", "project")` and three path resolvers:
+`prebuilt_prompts_path()` (kit-relative `Skills/nightshift/prompts/prebuilt.json`),
+`repo_prompts_path(project_root)` (git repo root's `.nightshift-prompts.json`,
+`None` outside a repo — found via `git rev-parse --show-toplevel`, never
+raising on a missing binary or non-zero exit), and `project_prompts_path(specs_dir)`
+(sibling `prompts.json` next to `specs/`). `load_snippets(scope, path)` returns
+`[]` for a missing/`None` path (never auto-creating it) and for a malformed or
+schema-invalid file, logging a warning instead of raising; valid entries are
+filled with their declared defaults (`tags`, `harness_overrides`, `variables`,
+and `created_at`/`updated_at` default to `""`, never a read-time timestamp).
+`save_snippets(path, snippets)` writes atomically (temp file + `os.replace`)
+and creates parent directories for repo/project scopes only, never for
+prebuilt. `find_snippet(id, snippets)` is a linear lookup by id. No frontend,
+HTTP endpoint, or prebuilt content yet — those are later SPEC-371 children.
+No migration or deployment occurs here; the release handoff remains pending
+and `kit_version` is unchanged.
+
+### Prompt snippet CRUD API endpoints (SPEC-371-002)
+
+`board.py` gains the HTTP surface on SPEC-371-001's storage layer: `GET
+/api/prompts` (merged 3-scope list, repo omitted with no error outside a
+git repo), `GET/PUT/DELETE /api/prompts/{scope}/{id}` and `POST
+/api/prompts/{scope}` (create). `scope=prebuilt` is always `403
+{"error":"prebuilt_read_only"}` on write; a fresh repo/project id colliding
+with either of the other two scopes is `409
+{"error":"id_collision","existing_scope":"<scope>"}` with nothing written;
+`scope=repo` with no resolvable repo root is `400 {"error":"no_repo_root"}`;
+a missing id is `404 {"error":"not_found"}`. `id` defaults to a slug of
+`title` unless supplied. Resolves `repo`/`project` paths via the same
+specs_dir → project_root helper already used by `/api/worktree-status`.
+`updated_at`/`created_at` use a microsecond-precision timestamp so a
+same-request create-then-update always compares strictly later. No frontend
+yet. The board process serves `board.py` and must be restarted to pick this
+up. No migration or deployment occurs here; the release handoff remains
+pending and `kit_version` is unchanged.
+
+### Board state evidence and artifact navigation (SPEC-360)
+
+The board's detail panel now answers "why is this spec in this state?" and lets a
+reader inspect the evidence without leaving the panel. A visible **Why this
+state?** section renders SPEC-359's `run_state_explanation` as three distinct
+blocks (authored lifecycle choice, computed current gate, provenance/history),
+with committed/staged/working-tree/private-local/unknown labels, a red callout
+when the working copy differs from the last commit, and typed evidence locators
+that navigate only where the board can honour them (a registered project routes
+through the existing registry link; nothing is fetched from an arbitrary URL or
+path). An **Artifacts (N)** control (present even at zero, with distinct missing/
+invalid/empty/unavailable states) and keyboard-operable **Open** rows show type,
+date, actor and summary. New `GET /api/spec/{id}/artifact?path=artifacts/<member>`
+resolves only an exact key of that spec's own artifact index with realpath
+containment on the opened file (traversal, absolute, cross-spec and symlink
+escape rejected, no host path or content in any error), enforces 1 MiB (UTF-8
+JSON/JSONL/Markdown/TXT/LOG/PY) and 10 MiB (PNG/JPEG/WebP verified by signature)
+limits before reading, and refuses HTML/SVG/executables. Previews are written with
+`textContent` only, so hostile payloads render as inert text. Artifact list and
+content are extra `panelView` states with a persistent "Back to <spec ID>", exact
+deduplicated recents, and request-identity/abort guards against stale responses;
+a static export keeps index metadata and shows a labelled "Preview unavailable"
+without requesting the route. The detail API adds `artifact_index_state`,
+`artifact_index_detail` and `artifact_preview_available` (`artifacts` is
+unchanged). Field/value help now works on keyboard focus and tap, Escape
+dismisses it, and cards, recent chips and dependency chips show the spec's own
+run-state meaning and reason from `run_state_summary`; the registry gains
+`execution`, `scope` and `artifacts` help. No migration or deployment occurs
+here; the release handoff remains pending and `kit_version` is unchanged.
+
+### Current run-state explanation (SPEC-359)
+
+One versioned, read-only `run_state_explanation` now says why a spec has its
+current run state and what would change it. The board's `GET /api/spec/{id}`
+returns the full object and `GET /api/specs` a bounded `run_state_summary`;
+`nightshift-dag.py admission --explain-spec <ID> --json` prints the same object
+(unknown IDs exit non-zero with `spec_not_found`) and writes no plan or
+artifact. It describes the results the existing producers already computed
+(`derive_admission`, the authorization overlay, parallel admission's decision)
+with per-gate pass/fail/not_evaluated/unknown results in producer precedence,
+exact prerequisite and resolution-error evidence, elapsed-time discrepancies,
+blocked/in-progress/terminal/NFR/container explanations that are never a
+fresh runnable admission, the exact SPEC-357 rationale record (recorded,
+reconstructed, legacy_missing, stale, malformed, unavailable) and
+committed/staged/working-tree/private-local/unknown provenance from one batched
+Git snapshot per refresh. Scheduling, gate precedence, the time-gate behaviour
+and `run_state`/`run_state_reason` are unchanged; no new run state, LLM call or
+write is added. The board picks it up on restart. No migration or deployment
+occurs here; the release handoff remains pending and `kit_version` is unchanged.
+
+### State rationale and staged artifact validation (SPEC-358)
+
+Shared validation checks rationale shape, adoption, selected indexed records,
+snapshot identity and contained local evidence in file, directory and Git-index
+modes. The installed hook reuses owning-install discovery for canonical and
+nested layouts, validates exact staged bytes and refuses incomplete records.
+Legacy unchanged history remains warning-only; changing a legacy declaration
+requires backfill, including transitions out of a terminal state. Strict
+planned/ready admission uses the same rules. CI can compare an explicit base.
+No fleet backfill or deployment occurs; the release handoff remains pending.
+The SPEC-365 authoring boundary and 3.23.2 release history are retained.
+
+### Canonical-origin dogfood provenance (SPEC-364)
+
+The staged managed-payload guard no longer rejects the canonical source
+repository's own same-commit update of a dogfooded `.nightshift/` copy. The
+exemption is structural and per path: the install must be a `.nightshift/`
+directly beneath a directory whose staged `release-manifest.json` registers the
+path, and the staged canonical file must be changed by the same commit with
+identical bytes and mode. An unchanged canonical file, different bytes,
+unstaged edits, or an ordinary fleet install layout still hard-block with no
+signoff override. No migration or deployment occurs here; the release handoff
+remains pending and the `kit_version` is unchanged.
+
+### Sync-delivered bytes pass the staged provenance guard (BUG-339)
+
+`nightshift-sync.py canonical` now leaves a non-managed `sync-manifest.json`
+receipt in each install it delivers to (path to sha256 of the canonical bytes
+written; merged per path across syncs; never written for a pure `opt_out`
+install, a dry run, or an empty selection). On the hook path the staged guard
+classifies a staged file whose bytes match that receipt as `sync-reconciled`
+instead of `unresolved-divergence`, so a SPEC-356 `sync_files`-narrowed install
+can commit its sync without a whole-kit release and without a
+`release-marker.json` write. The receipt is read only on the hook path; a
+missing or malformed receipt grants nothing, an install with neither a marker nor
+a receipt still fails closed, and any edit that matches neither a release nor
+the receipt (including one made after the sync) still hard-blocks. Known
+residual: an install with a receipt but no marker at all is admitted by the guard, yet
+the scanner's exemption step still requires a marker (follow-up; `scanner.py` has a
+registered Cortex copy). No migration or
+deployment occurs here; the release handoff remains pending and the
+`kit_version` is unchanged.
+
+### Pre-commit scanner accepts a sync-only install with no release marker (BUG-339-001)
+
+Closes the residual named above. `scanner.main --staged` builds its
+managed-payload exemption set from the same two sources the staged guard uses:
+the `release-marker.json` retained manifest plus the `sync-manifest.json`
+receipt. A missing or unreadable marker is tolerated at that one call, and only
+when the receipt vouches for at least one path, so a never-released
+`sync_files`-narrowed install can commit its sync without a traceback. Every
+other missing-marker path is unchanged: with neither a marker nor a receipt the
+guard still reports a metadata error and blocks, and a hand edit beside a synced
+file, or an edit made after the sync, still hard-blocks. `scanner.py` has a
+byte-identical Cortex copy that the coordinator syncs after merge. No migration
+or deployment occurs here; the release handoff remains pending and the
+`kit_version` is unchanged.
+
+### Board "OPEN/EDIT" opens the file under a supervisor PATH (BUG-340)
+
+The board's spec and report "OPEN/EDIT" buttons launched VS Code without the
+file when the board was started by a supervisor whose `PATH` is
+`/usr/bin:/bin:/usr/sbin:/sbin`. `code` was then not resolvable, and the macOS
+fallback `open -n -a "Visual Studio Code" <file>` starts a second app instance
+that hands off to the running one and drops the file. `_open_in_vscode` now
+resolves the `code` launcher from `PATH` and then from its known install
+locations (the app bundle, `~/Applications`, `/usr/local/bin`,
+`/opt/homebrew/bin`), and the last-resort macOS fallback is `open -a` without
+`-n`, which shows the file. The launcher's exit status is now observed for a few
+seconds: a non-zero exit returns HTTP 500 with the launcher's name, status and
+stderr tail, so the panel no longer shows the success toast for a launch that
+failed. The unknown-spec 404, the unresolved-token 400 and the Finder and
+Terminal endpoints are unchanged. The board process executes `board.py`
+directly and must be restarted to pick this up. No migration or deployment
+occurs here; the release handoff remains pending and the `kit_version` is
+unchanged.
+
+### Artifact reader refuses non-regular entries and symlinked trust roots (SPEC-368)
+
+SPEC-360's `GET /api/spec/{id}/artifact` answered `503` and leaked one file
+descriptor per request when an index entry named a directory, blocked the
+request thread indefinitely on a FIFO, answered `503` for a socket, and served a
+spec's files from wherever a symlinked `artifacts` directory pointed.
+`spec_artifacts.read_indexed_artifact` now walks
+`<reports root>/<spec id>/artifacts/<member>` one component at a time with
+`O_NOFOLLOW` descriptors: a symlink at any component below the reports root is
+refused as `400 invalid_path` (before the index is read, so a linked target's
+index is not probed), and an entry that is not a regular file is refused as
+`404 artifact_not_found` without being opened, with every opened descriptor
+closed on every path. Valid indexed files, size limits, supported types,
+existing rejection codes and the client are unchanged. A symlinked artifacts
+directory is not a supported layout; a relocated evidence store would need its
+own spec. The board process executes `spec_artifacts.py` directly and must be
+restarted to pick this up. No migration or deployment occurs here; the release
+handoff remains pending and the `kit_version` is unchanged.
+
+### The artifact listing and writer refuse a symlinked artifacts directory too (SPEC-370)
+
+SPEC-368 made the artifact content reader refuse a symlinked `artifacts` directory or spec
+directory, but the board's `Artifacts (N)` listing (`spec_artifacts.read_index_state` /
+`_read_index_strict`) and `write_artifact` did not share that guard: a hand-made symlink could
+still be listed (index metadata only -- type, date, actor, summary, never content) and could
+still be written or appended through. Both now refuse the same layout the reader refuses: a
+symlink at the spec directory, its `artifacts` directory, or the index file itself is reported
+as a distinct `unavailable` index state with a typed, host-path-free detail (not silently
+folded into `missing`), and `write_artifact` raises before creating any directory or writing any
+byte. A regular, non-symlinked layout is unaffected; no symlinked layout is known to exist
+today. The board process executes `spec_artifacts.py` directly and must be restarted to pick
+this up. No migration or deployment occurs here; the release handoff remains pending and the
+`kit_version` is unchanged.
+
+### "Why this state?" is a collapsed-by-default disclosure (SPEC-369)
+
+SPEC-360's **Why this state?** section was always open and took a lot of vertical
+space in the spec panel. It now renders collapsed in every lifecycle state as a
+disclosure: a real `<button aria-expanded aria-controls>` whose always-visible
+summary line shows the current run state, the explanation headline (the primary
+reason, else the state's meaning) and a `show`/`hide` marker, so it stays easy to
+find. The existing `run_state · why?` control expands the section and moves focus
+to it; the toggle is keyboard operable (Enter and Space). The choice is kept per
+spec view: a periodic board refresh or re-render of the same spec never
+collapses an open section or re-opens a closed one, while opening another spec
+or closing the panel starts collapsed again. When no explanation was returned
+there is nothing to expand, so that one-line message stays visible with no
+toggle. Presentation only: the section content, the explanation API and the
+static-export metadata are unchanged. The board process serves `board.py` and
+must be restarted to pick this up. No migration or deployment occurs here; the
+release handoff remains pending and the `kit_version` is unchanged.
+
+### The detail explanation of an in-progress spec quotes its heartbeat's liveness result (SPEC-366)
+
+SPEC-359's `run_state_explanation` could quote a heartbeat result but the board
+never supplied one, so an in-progress spec's execution-context gate always said
+liveness was unknown. When the detail of an `in_progress` spec is requested, the
+board now reads that spec's own `<reports root>/_wip/orchestrator-progress-<ID>.md`
+(one file, at most 8 KiB, opened without following symlinks; the list view,
+`run_state_summary` and the SPEC-303 latency contracts are untouched) and passes
+its declared `heartbeat_state`, `phase`, `expected_duration_min` and an age
+computed from its declared `time`/`timestamp_utc`/`timestamp` to the existing
+`liveness_classifier.classify_heartbeat`, unchanged. The gate quotes only the
+result, the declared state and the age, for example `stalled (worker-started, 41
+min since its declared timestamp)`; free-text phase, blocker and evidence fields
+are never copied, so nothing host-specific enters an explanation or a static
+export. An absent, unreadable, oversized, unparsable or timestamp-less file
+reports `unknown` with a typed `heartbeat_*` diagnostic and never falls back to
+file mtimes, commits or branch movement. The age is measured at each detail
+request, not at the last refresh. `liveness_classifier.py` (content unchanged) becomes
+part of the managed release set, because a managed module now imports it. The board process serves
+`board.py` and `spec_artifacts.py` and must be restarted to pick this up. No
+migration or deployment occurs here; the release handoff remains pending and the
+`kit_version` is unchanged.
+
+### A static board export of the real corpus no longer fails closed (SPEC-367)
+
+`export_board_html` now skips everything under a `_wip` directory of the reports
+tree: gitignored, machine-local working state (heartbeats, parent notes) is not
+board content, and it was the largest source of `ExportLeakError` on a real
+corpus. The leak scan itself is unchanged and still covers everything that is
+exported. The tooltip `_problem` snippet derived for each spec no longer strips a
+single backtick from a line-leading inline code span, and no longer ends inside an
+unclosed span, so a path quoted in a code span is no longer left bare (and
+therefore flagged) after derivation; a truncated snippet may end a few characters
+earlier. Nine committed specs and reports had residual absolute host paths
+replaced by `{{ANCHOR}}` tokens or code spans; the wording is otherwise unchanged.
+The board process serves `board.py` and must be restarted to pick this up. No
+migration or deployment occurs here; the release handoff remains pending and the
+`kit_version` is unchanged.
+
+## 3.23.2 (2026-09-19)
+
+### Receipt-bound canonical authoring (SPEC-365)
+
+Parents can accept explicitly authorized canonical-source changes using the
+original admission receipt, a retained Git baseline, approved main scope, and
+independently verified exact candidate/main bindings. The parent-injected provider
+and atomic authoring-results namespace preserve historical strict-gate results;
+installed and dogfooded payloads keep their existing strict drift protection.
+Missing proof, moved main, contradictory replay or artifact failure stops all
+downstream acceptance. First use requires external authorization and independent
+review of the frozen gate implementation. No migration or deployment occurs here;
+the versioned release handoff remains pending.
+
+## 3.23.1 (2026-09-18)
+
+### Nested-install pre-commit checks (BUG-338)
+
+Pre-commit locates each touched Nightshift install, runs its lint and type
+checks from that install's project root, and validates literal spec paths
+safely, including metacharacters and newlines. Multi-install commits check
+each touched install; root installs and true no-config skips retain their
+behavior. No configuration migration is required.
+
 ## 3.23.0 (2026-09-16)
 
 ### Per-install sync policy and opt-out enforcement (SPEC-356)

@@ -204,6 +204,20 @@ def find_authorization(
     re-engages the hold) for free -- callers just re-check with the fresh
     SHA on every loop iteration.
     """
+    entry = find_authorization_entry(reports_root, spec_id, candidate_sha)
+    if entry is not None:
+        return True, f"authorized by {entry.get('actor', '')} at {entry.get('created', '?')}"
+    return False, "no authorization artifact covers this candidate SHA"
+
+
+def find_authorization_entry(
+    reports_root: Path, spec_id: str, candidate_sha: str,
+) -> Mapping[str, Any] | None:
+    """The index entry of the non-agent authorization covering ``candidate_sha``, if any.
+
+    The lookup ``find_authorization`` has always done, exposed so a read-only
+    projection (SPEC-359) can cite the exact record instead of a sentence.
+    """
     entries = spec_artifacts.read_index(reports_root, spec_id)
     for entry in reversed(entries):
         if entry.get("type") != "decision":
@@ -225,8 +239,8 @@ def find_authorization(
         if is_agent_actor(index_actor) or is_agent_actor(payload_actor):
             continue
         if data.get("authorized_sha") == candidate_sha:
-            return True, f"authorized by {index_actor} at {entry.get('created', '?')}"
-    return False, "no authorization artifact covers this candidate SHA"
+            return entry
+    return None
 
 
 def pending_authorization_hold(
@@ -251,9 +265,22 @@ def pending_authorization_hold(
     from elsewhere. Empty string when not held or when older evidence
     predates R1's ``candidate_sha`` field.
     """
+    detail = pending_authorization_hold_detail(reports_wip_dir, spec_id)
+    return bool(detail["held"]), str(detail["reason"]), str(detail["candidate_sha"])
+
+
+def pending_authorization_hold_detail(reports_wip_dir: Path, spec_id: str) -> dict[str, Any]:
+    """``pending_authorization_hold`` with the queue evidence's own references (SPEC-359 R2).
+
+    The same read, the same decision: which queue file, run, candidate SHA and
+    environment the hold names (when the queue recorded them), and -- for a
+    held candidate -- the authorization record that now covers it, if one does.
+    ``checked`` distinguishes "no hold found" from "could not read the evidence".
+    """
     directory = Path(reports_wip_dir)
+    none = {"held": False, "reason": "", "candidate_sha": "", "checked": directory.is_dir()}
     if not directory.is_dir():
-        return False, "", ""
+        return none
     candidates = sorted(
         directory.glob("integration-queue-*.json"),
         key=lambda path: path.stat().st_mtime, reverse=True,
@@ -273,13 +300,26 @@ def pending_authorization_hold(
                 decision.get("outcome") == "held"
                 and decision.get("overlap_kind") == "authorization_required"
             ):
-                return (
-                    True,
-                    str(decision.get("reason") or "awaiting deployment authorization"),
-                    str(decision.get("candidate_sha") or ""),
-                )
-            return False, "", ""
-    return False, "", ""
+                sha = str(decision.get("candidate_sha") or "")
+                detail: dict[str, Any] = {
+                    "held": True,
+                    "reason": str(decision.get("reason") or "awaiting deployment authorization"),
+                    "candidate_sha": sha,
+                    "checked": True,
+                    "queue_file": f"reports/_wip/{path.name}",
+                }
+                environment = decision.get("deploy_environment") or decision.get("environment")
+                if environment:
+                    detail["environment"] = str(environment)
+                if isinstance(data.get("run_id"), str):
+                    detail["run_id"] = data["run_id"]
+                if sha:
+                    entry = find_authorization_entry(directory.parent, spec_id, sha)
+                    if entry is not None and isinstance(entry.get("path"), str):
+                        detail["authorization_record"] = entry["path"]
+                return detail
+            return none
+    return none
 
 
 def check_candidate_authorization(

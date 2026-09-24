@@ -5,8 +5,21 @@ Copy this template to create a new spec. Fill in all sections. Save as `specs/SP
 ---
 
 ```markdown
-# Spec Template v11
+# Spec Template v12
 # Changelog:
+#   v12 (2026-09-17): Added the required `## State rationale` section (SPEC-357):
+#                     a versioned YAML declaration (schema_version, status, reason,
+#                     reconsider_when, evidence, provenance, record) explaining the
+#                     actual reason for the spec's current lifecycle status, not
+#                     just the enum's generic meaning. Required for every
+#                     lifecycle-status spec except type: main/questions/nfr and
+#                     NFR-* IDs. Capture is automatic through
+#                     `spec_artifacts.py record-transition`/`author-decision` at
+#                     every canonical mutation boundary (see SPEC-GUIDE.md).
+#                     Migration: opt-in. A v11-and-earlier spec remains readable
+#                     without the section (an honest `legacy_missing` evidence
+#                     quality, never a promotion block); backfill on its next edit
+#                     per SPEC-358.
 #   v11 (2026-09-06): Live Execution Checklist items now require an inline
 #                     `(evidence: <path>)` reference on each checked LEn line
 #                     when real_use_evidence.policy is required_before_done
@@ -55,7 +68,7 @@ Copy this template to create a new spec. Fill in all sections. Save as `specs/SP
 #                     required_before_done, delegated_experiment, or not_applicable.
 ---
 id: SPEC-001
-template_version: 11
+template_version: 12
 priority: 1          # Within-layer priority (1 = highest, 10 = lowest)
 layer: 0             # 0=foundation, 1=infra, 2=feature, 3=polish
 type: feature        # See SPEC-GUIDE.md § Spec Types for all valid values
@@ -163,6 +176,26 @@ What problem does this solve? Why does it matter? Why now?
 
 Example:
 > Users can't search the document library. Currently, finding a specific document requires scrolling through hundreds of entries. This is slowing down daily workflows.
+
+## State rationale
+
+Required (SPEC-357) for every lifecycle-status spec except `type: main`/`questions`/`nfr`
+and any `NFR-*` ID. Explains *why this status*, not the enum's generic meaning.
+`reconsider_when` must be a concrete completion condition/decision/date/review
+trigger when `status` is `draft`/`planned`/`blocked`; it may be `null` otherwise.
+Leave `record: null` until the first canonical capture call fills it in — do not
+hand-write an `artifacts/...` path.
+
+```yaml
+schema_version: 1
+status: draft
+reason: Why this specific status was chosen, not the enum's generic meaning.
+reconsider_when: The concrete condition, decision, date, or review trigger that
+  would change this status.
+evidence: []
+provenance: authored
+record: null
+```
 
 ## Requirements
 
@@ -681,7 +714,7 @@ Users report that search is too strict. A typo ("recieve" instead of "receive") 
 
 ## Checklist Before Marking as "ready"
 
-- [ ] `template_version` is set to latest (11)
+- [ ] `template_version` is set to latest (12)
 - [ ] Documentation Impact section is present (list docs changed, or write "None — …")
 - [ ] Attachments are listed in `attachments:` when visual/log/data evidence is needed; each has `path` and `description`
 - [ ] Problem and context are clear
@@ -817,3 +850,14 @@ Add nothing; absent `scope:` means project root.
    frontmatter or section changes.
 4. `delegated_experiment`'s existing `lineage_record`/`lineage_hash` evidence
    is unaffected by this migration.
+
+## Migration from v11 → v12
+
+1. Update frontmatter: `template_version: 12` (opt-in; v11 and earlier specs
+   are honestly `legacy_missing`, never retroactively required — see SPEC-357 R5).
+2. Add the `## State rationale` section shown above, right after `## Problem`.
+   `record` starts `null`; the first canonical capture call
+   (`spec_artifacts.py record-transition`/`author-decision`) fills it in.
+3. Backfill an existing pre-v12 nonterminal spec on its **next edit**, per
+   SPEC-358 -- never as a standalone fleet-wide sweep, and never claiming a
+   historical actor/date/approval that was not actually recovered.

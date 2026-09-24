@@ -507,6 +507,10 @@ def validate_spec_readiness(spec_file: Path, spec_id: str) -> None:
               f"(found: {template_version}). Consider migrating to spec template v2.")
 
 
+# SPEC-373: directory-scoped context folder names, preferred name first.
+CONTEXT_FOLDER_NAMES = ('.agent-context', '.argo')
+
+
 class ContextPointerAssembler:
     """Builds context pointer list for implementation agent."""
 
@@ -562,22 +566,27 @@ class ContextPointerAssembler:
         return list(dict.fromkeys(pointers))  # Remove duplicates, preserve order
 
     def _argo_folder_pointers(self) -> List[str]:
-        """Suggest .argo/ folders to check (project root + spec target dirs)."""
+        """Suggest context folders to check (project root + spec target dirs).
+
+        SPEC-373: both `.agent-context/` and the legacy `.argo/` are recognized
+        while installations migrate; in one directory the new name comes first.
+        """
         pointers = []
 
-        # Always: project root .argo/
-        project_argo = self.project_root / '.argo'
-        if project_argo.exists():
-            pointers.append(str(project_argo.relative_to(self.project_root)))
+        def add_context_folders(directory: Path) -> None:
+            for name in CONTEXT_FOLDER_NAMES:
+                folder = directory / name
+                if folder.exists():
+                    pointers.append(str(folder.relative_to(self.project_root)))
+
+        # Always: project root context folders
+        add_context_folders(self.project_root)
 
         # Target directories from spec context
         target_files = self.spec.get('context', {}).get('target_files', [])
         for target in target_files:
             target_path = self.project_root / target
-            target_dir = target_path.parent
-            target_argo = target_dir / '.argo'
-            if target_argo.exists():
-                pointers.append(str(target_argo.relative_to(self.project_root)))
+            add_context_folders(target_path.parent)
 
         return list(dict.fromkeys(pointers))
 
@@ -1006,6 +1015,8 @@ class Coordinator:
         argo_home: Path,
         config: Optional[Dict[str, Any]] = None,
         completion_evidence_provider: Optional[Callable[[WorktreeHandle], Dict[str, Any]]] = None,
+        authoring_provider: Optional[managed_payload_provenance.AuthoringProvider] = None,
+        integrity_install: Optional[Path] = None,
     ):
         self.project_root = project_root
         self.spec_files = spec_files
@@ -1021,8 +1032,12 @@ class Coordinator:
         # Parent-only seam. Worker results are never consulted for completion
         # acceptance; an unwired provider is an explicit fail-closed state.
         self._completion_evidence_provider = completion_evidence_provider
+        self._authoring_provider = authoring_provider
+        self._integrity_install = integrity_install
 
     def _install_root(self) -> Path:
+        if getattr(self, "_integrity_install", None) is not None:
+            return Path(self._integrity_install).resolve()
         installed = self.project_root / ".nightshift"
         return installed if installed.is_dir() else Path(__file__).resolve().parent
 
@@ -1044,6 +1059,13 @@ class Coordinator:
         self._integrity_receipts[spec_id] = admission
         return admission
 
+    def _worker_install_root(self, handle: WorktreeHandle) -> Path:
+        if getattr(self, "_integrity_install", None) is not None:
+            relative = self._install_root().relative_to(self.project_root.resolve())
+            return handle.worktree_path / relative
+        installed = handle.worktree_path / ".nightshift"
+        return installed if installed.is_dir() else Path(__file__).resolve().parent
+
     def _accept_managed_payload(self, spec_id: str) -> Dict[str, Any]:
         admission = self._integrity_receipts.get(spec_id)
         if admission is None:
@@ -1054,6 +1076,8 @@ class Coordinator:
             receipt_ref=str(admission["integrity_receipt_path"]),
             receipt_sha256=str(admission["integrity_receipt_sha256"]),
             run_id=str(admission.get("integrity_run_id") or self.metrics.run_id),
+            **({"authoring_provider": self._authoring_provider}
+               if getattr(self, "_authoring_provider", None) is not None else {}),
         )
         if not result.ok:
             raise ManagedPayloadIntegrityError(
@@ -1100,9 +1124,7 @@ class Coordinator:
         def admit_worker(spec_id, handle, _worker_run_id):
             if self._shared_integrity_failed:
                 return {"ok": False, "admission": "deny", "reason": "shared managed payload integrity is untrusted"}
-            install = handle.worktree_path / ".nightshift"
-            if not install.is_dir():
-                install = Path(__file__).resolve().parent
+            install = self._worker_install_root(handle)
             return run_install_admission(
                 spec_id, install_root=install, invocation_kind="coordinator",
                 run_id=_worker_run_id,
@@ -1755,9 +1777,7 @@ class Coordinator:
             if not shared_result.ok:
                 self._shared_integrity_failed = True
                 return {**shared_result.to_dict(), "scope": "shared"}
-            install = handle.worktree_path / ".nightshift"
-            if not install.is_dir():
-                install = Path(__file__).resolve().parent
+            install = self._worker_install_root(handle)
             if not handle.integrity_receipt_path or not handle.integrity_receipt_sha256:
                 return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-RECEIPT-MISSING", "scope": "worker"}
             worker_result = managed_payload_provenance.verify_terminal_integrity(
@@ -1766,6 +1786,8 @@ class Coordinator:
                 receipt_ref=handle.integrity_receipt_path,
                 receipt_sha256=handle.integrity_receipt_sha256,
                 run_id=handle.integrity_run_id,
+                **({"authoring_provider": self._authoring_provider}
+                   if getattr(self, "_authoring_provider", None) is not None else {}),
             ).to_dict()
             return {**worker_result, "scope": "worker"}
 
@@ -2306,7 +2328,7 @@ Before starting, read these pointers:
         for devkb_file in context_pointers.get('devkb', []):
             brief += f"- {devkb_file}\n"
 
-        brief += "\n### Project .argo/ Folders (project context)\n"
+        brief += "\n### Project context folders (.agent-context/, .argo/)\n"
         for argo_folder in context_pointers.get('argo_folders', []):
             brief += f"- {argo_folder}\n"
 

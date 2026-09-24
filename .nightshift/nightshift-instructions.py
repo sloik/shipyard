@@ -81,6 +81,7 @@ def accept_instruction_result(
     nightshift_dir: Path,
     official_path: str,
     coordinator_action: Callable[[dict[str, Any]], Any],
+    authoring_provider: Callable | None = None,
 ) -> tuple[dict[str, Any], Any | None]:
     """Gate one instruction-driven result before its first authority action.
 
@@ -100,6 +101,7 @@ def accept_instruction_result(
         receipt_ref=str(binding.get("receipt_ref", "")),
         receipt_sha256=str(binding.get("receipt_sha256", "")),
         run_id=str(binding.get("run_id", "")) or None,
+        **({"authoring_provider": authoring_provider} if authoring_provider is not None else {}),
     ).to_dict()
     if not acceptance["ok"]:
         return acceptance, None
@@ -234,7 +236,10 @@ def _walk_argo_files(project_root: Path) -> list[dict[str, Any]]:
     result = []
     current = project_root.resolve()
     while True:
-        argo_dir = current / ".argo"
+        # SPEC-374: accept-new-then-legacy ordering, mirroring SPEC-373's
+        # .agent-context/ -> .argo/ dual-acceptance pattern in scanner.py.
+        context_dir = current / ".agent-context"
+        argo_dir = context_dir if context_dir.exists() else current / ".argo"
         if argo_dir.exists():
             for name in ("README.md", "context.md"):
                 path = argo_dir / name

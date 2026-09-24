@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -104,11 +104,22 @@ def transition_private_state(
     run_id: str | None = None,
     note: str | None = None,
     payload: dict | None = None,
+    actor: str | None = None,
+    reason: str | None = None,
+    reconsider_when: str | None = None,
+    evidence: Iterable[Mapping[str, object]] = (),
 ) -> dict:
     """Apply one coordinator-owned local lifecycle transition and durable checkpoint.
 
     Repeating the current transition is idempotent. A run gets its UUID before the first
     checkpoint, so the identifier is stable across process restart and terminal resolution.
+
+    SPEC-357 R3: this is the "private-local (explicit opt-in)" kickoff boundary
+    named in R3/AC3 -- it now captures the same ``## State rationale``
+    section/artifact pair as the commit-backed path, through the identical
+    shared routine (``spec_artifacts.capture_state_rationale``), pinned to the
+    pre-mutation ``current`` status so a competing revision is refused rather
+    than silently overwritten.
     """
     spec_file = Path(spec_file)
     parsed = parse_spec_file(spec_file)
@@ -130,11 +141,23 @@ def transition_private_state(
         raise PrivateStateError(
             f"run {latest['run_id']} is already terminal as {latest['status']}"
         )
+    reused_in_flight_checkpoint: dict | None = None
     if status == "in_progress":
         if current == "in_progress" and latest and latest["status"] == "in_progress":
             return latest
         if current != "ready":
             raise PrivateStateError(f"private run must start ready, got {current!r}")
+        if latest and latest["status"] == "in_progress" and run_id is None:
+            # AC3: a prior attempt's checkpoint durably recorded in_progress but
+            # a later step (artifact/section or frontmatter write) failed
+            # before the frontmatter caught up -- this is a retry of that same
+            # in-flight attempt, not a fresh start. Reuse its run_id (and thus
+            # its checkpoint) so the retry resolves through the capture
+            # routine's own snapshot-equality idempotency check instead of
+            # minting a second checkpoint and a second artifact for one
+            # transition.
+            run_id = str(latest.get("run_id") or "") or None
+            reused_in_flight_checkpoint = latest
         run_id = run_id or f"local-{uuid.uuid4()}"
     elif status in TERMINAL_STATUSES:
         if current != "in_progress" or not latest or latest["status"] != "in_progress":
@@ -146,15 +169,16 @@ def transition_private_state(
     else:
         raise PrivateStateError(f"unsupported private lifecycle transition to {status!r}")
 
-    original = spec_file.read_bytes()
+    reason_text = reason.strip() if isinstance(reason, str) else ""
+    if not reason_text:
+        reason_text = (note or "").strip() if isinstance(note, str) else ""
+    if not reason_text:
+        reason_text = f"mechanical transition to {status!r} via run {run_id}"
 
-    def mutate(frontmatter: dict) -> dict:
-        frontmatter["status"] = status
-        return frontmatter
-
-    write_spec_frontmatter(spec_file, mutate)
-    try:
-        return store.update_state(
+    if reused_in_flight_checkpoint is not None:
+        checkpoint = reused_in_flight_checkpoint
+    else:
+        checkpoint = store.update_state(
             spec_id,
             status,
             run_id=run_id,
@@ -162,9 +186,38 @@ def transition_private_state(
             note=note,
             payload={"owner": owner, "assigned_spec": assigned_spec, **(payload or {})},
         )
-    except Exception:
-        spec_file.write_bytes(original)
-        raise
+
+    import spec_artifacts
+
+    try:
+        spec_artifacts.write_status_transition_artifact(
+            spec_artifacts.reports_root_for_spec_path(spec_file), spec_id,
+            from_status=current, to_status=status,
+            actor=actor or owner, reason=reason_text,
+            evidence=[], run_id=run_id,
+            spec_path=spec_file, expected_status=current,
+            reconsider_when=reconsider_when,
+            state_rationale_evidence=evidence,
+        )
+    except Exception as exc:
+        raise PrivateStateError(
+            f"private checkpoint {checkpoint.get('checkpoint_id')} persisted but "
+            f"status-transition artifact write failed; refusal: {exc}; "
+            f"recovery: reconcile {spec_file.name} artifacts and retry"
+        ) from exc
+
+    def mutate(frontmatter: dict) -> dict:
+        frontmatter["status"] = status
+        return frontmatter
+
+    try:
+        write_spec_frontmatter(spec_file, mutate)
+    except Exception as exc:
+        raise PrivateStateError(
+            f"private checkpoint {checkpoint.get('checkpoint_id')} persisted but frontmatter "
+            f"write failed; refusal: {exc}; recovery: reconcile {spec_file.name} to {status}"
+        ) from exc
+    return checkpoint
 
 
 def _safe_relative(raw: str) -> PurePosixPath:

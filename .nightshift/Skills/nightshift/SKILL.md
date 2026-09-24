@@ -1,10 +1,19 @@
 ---
 name: nightshift
-version: 3.23.0
+version: 3.24.0
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
 # Nightshift Kit Skill
+
+For inline run and kickoff, explicit canonical-source authoring uses GIT.md's
+receipt-bound SPEC-365 contract. The parent alone injects `authoring_provider`
+into the existing result-acceptance seam, separately from worker packets. Retain
+the original receipt and strict result; require external authorization and an
+independently validated verdict binding the exact candidate before bootstrap.
+Missing proof stops acceptance, lifecycle, merge and cleanup. Installed copies
+stay strict; the sole serialized queue, fresh-main suite and pending release
+handoff remain required. Never regenerate admission to authorize changed bytes.
 
 The interactive companion for the Nightshift Kit — an autonomous dev loop that reads specs, writes tests, implements code, reviews its own work, and commits results. This skill handles everything humans do *around* the loop: setting it up, writing specs, maintaining the knowledge base, and keeping specs aligned with reality.
 
@@ -527,7 +536,28 @@ to its `## Context`, then set the intent to `status: promoted` and
      `items: []`. Use the `SPEC-GUIDE.md` controlled reason codes and record only
      reviewed counts, R/AC IDs, item kinds, and reasons — never spec prose.
 
-5. **Write spec** to `specs/SPEC-{ID}-{slug}.md`. Confirm with user before writing. When creating an NFR, reconcile every matched non-done spec; when promoting any spec, reconcile it against every active NFR. Use `audit_nfr.py --check-all` where installed.
+5. **Write spec** to `specs/SPEC-{ID}-{slug}.md`, including the `## State
+   rationale` section (SPEC-357; template v12/bugfix v4/analysis v3/research
+   v3) with `record: null` — the template's placeholder text is not a valid
+   value, fill in the real `status`/`reason`/`reconsider_when`/`evidence`
+   from the interview above. Confirm with user before writing. When creating
+   an NFR (excluded from this section — `type: nfr`/`NFR-*` never requires
+   it), reconcile every matched non-done spec; when promoting any spec,
+   reconcile it against every active NFR. Use `audit_nfr.py --check-all`
+   where installed.
+
+5a0. **Record the authoring decision (SPEC-357 R3)** — immediately after
+    writing the file, capture the same declaration as an indexed `decision`
+    artifact so `record` is no longer `null`:
+    ```bash
+    python3 .nightshift/spec_artifacts.py author-decision <spec-file> \
+      --status <draft|planned> --reason "<why this status>" \
+      [--reconsider-when "<...>"] \
+      [--state-evidence '{"kind": "file", "path": "..."}']
+    ```
+    `--reconsider-when` is required whenever `--status` is `draft`/`planned`.
+    Stage the spec file and its `reports/<spec-id>/artifacts/` directory in
+    the same commit as the new spec.
 
 5a. **Promoting `draft`/`planned` -> `ready` (SPEC-291)** — never hand-edit
     `status:` for this transition. Use the canonical entrypoint, which writes
@@ -1263,6 +1293,15 @@ A non-zero exit means the transition was classified as a judgment transition
 (unexpected for `ready -> in_progress`) — pass `--reason "<why>"` and retry
 rather than skipping this step; it is what R3 makes durable and what Step 6
 below, and the board panel, both read back.
+
+This same call also upserts the spec's `## State rationale` section
+(SPEC-357) — the current declaration of *why* the spec is in this status,
+distinct from the derived run-state explanation. No extra step is needed;
+`record-transition` is the one shared capture routine for every kickoff/
+terminal/unblock boundary. Pass `--reconsider-when "<...>"` whenever `--to`
+is `draft`/`planned`/`blocked` (required, refused otherwise), and
+`--state-evidence '{"kind": "file", "path": "..."}'` (repeatable) for any
+typed evidence locator worth recording.
 
 **2b. Commit on main with the spec file and its artifact directory staged.**
 The artifact directory is a sibling of the specs directory's `reports/`, not
@@ -3433,11 +3472,16 @@ speculative explanation of why it worked.
    `-> blocked` is a judgment transition (SPEC-291 R3): record the transition
    artifact *before* committing (below), so the artifact file exists on disk
    to be staged in the same commit — an empty reason is refused, not silently
-   skipped:
+   skipped. This also upserts the spec's `## State rationale` section
+   (SPEC-357); `--reconsider-when` is required (non-empty) whenever `--to`
+   is `blocked` (or `draft`/`planned`) — a concrete condition, decision,
+   date, or review trigger that would change this status, not a repeat of
+   the reason:
    ```bash
    python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
      --from in_progress --to blocked --run-id <started-run-id> \
-     --reason "<specific reason: which check(s) failed and why>"
+     --reason "<specific reason: which check(s) failed and why>" \
+     --reconsider-when "<what would change this: unblock condition, date, or review trigger>"
    ```
 
 2. In `commit-backed`, commit on main: stage both the spec file and its
@@ -3635,6 +3679,14 @@ When detecting project commands, check these locations:
 When in doubt, ask the user rather than guessing.
 
 ### Validation strictness
+
+State rationale uses the shared SPEC-358 gate even for draft authoring: shaped
+new drafts may warn for a pending record, while planned/ready admission requires
+a matching current record. Legacy unchanged declarations remain audit warnings;
+editing a nonterminal legacy spec requires backfill. Run `validate_specs.py
+--staged <repo-root> <kit>/specs` before commit, and a trusted validator in CI with
+`<kit>/specs --base-revision <base> --format json`. Findings are structural checks,
+not proof of the reasoning. See GIT.md for private-local and external evidence.
 
 - `status: draft` → warn on issues, don't block
 - `status: ready` → strict validation, all issues must be resolved

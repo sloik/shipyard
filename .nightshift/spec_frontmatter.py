@@ -519,6 +519,13 @@ def write_spec_frontmatter(
     if refusal:
         raise FrontmatterError(refusal)
 
+    if new_fm.get("status") in {"planned", "ready"} and new_fm.get("status") != parsed.frontmatter.get("status"):
+        from validate_specs import validate_state_rationale_admission
+        findings = validate_state_rationale_admission(new_fm, parsed.body, spec_file)
+        fatal = [finding for finding in findings if not finding.startswith("WARNING: ")]
+        if fatal:
+            raise FrontmatterError("; ".join(fatal))
+
     fm_text = _serialise_frontmatter(new_fm)
 
     fingerprint_metadata = os.environ.get("NIGHTSHIFT_SOURCE_FINGERPRINTS")

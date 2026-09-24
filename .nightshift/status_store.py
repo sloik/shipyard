@@ -1035,7 +1035,10 @@ class StatusStore:
     def transition_commit_backed(self, spec_path: Path, status: str, *, run_id: str,
                                 source: str = "coordinator", note: str | None = None,
                                 reason: str | None = None, evidence: Any = (),
-                                actor: str | None = None) -> dict[str, Any]:
+                                actor: str | None = None,
+                                reconsider_when: str | None = None,
+                                state_rationale_evidence: Any = (),
+                                provenance: str = "authored") -> dict[str, Any]:
         """Write the coordinator checkpoint before tracked frontmatter.
 
         This ordering prevents a store outage from producing a false terminal
@@ -1051,6 +1054,12 @@ class StatusStore:
         ``note`` remains accepted as a reason source for backward-compatible
         callers (e.g. ``unblock_spec.finalize``); ``reason`` takes precedence
         when both are supplied.
+
+        SPEC-357 R3: the same call also upserts the spec's ``## State
+        rationale`` section (through ``spec_artifacts.capture_state_rationale``),
+        pinned to the pre-mutation ``current_status`` so a competing revision
+        landing between read and write is refused rather than silently
+        overwritten.
         """
         import lifecycle
         import spec_artifacts
@@ -1089,6 +1098,10 @@ class StatusStore:
                 from_status=current_status, to_status=status,
                 actor=actor or source, reason=reason_text,
                 evidence=evidence, run_id=run_id,
+                spec_path=path, expected_status=current_status,
+                reconsider_when=reconsider_when,
+                state_rationale_evidence=state_rationale_evidence,
+                provenance=provenance,
             )
         except Exception as exc:
             raise LifecyclePersistenceError(
@@ -1392,6 +1405,71 @@ def classify_status_sync(
         else SYNC_DURABLE_STALE_BEHIND
     )
     return {"durable": durable_status, "effective": durable_status, "reason": reason}
+
+
+def effective_status_view(
+    frontmatter_status: str,
+    durable_state: dict[str, Any] | None,
+    file_mtime: float,
+    spec_path: Path | None = None,
+) -> dict[str, Any]:
+    """SPEC-359 R5: the read-only twin of the board's effective-status choice.
+
+    Applies the same rule as ``should_reconcile_frontmatter_status`` and
+    reuses ``classify_status_sync`` for the mismatch record, but never writes
+    the repair the board's own path performs. ``source`` is
+    ``durable_checkpoint`` only when the durable row's differing status is what
+    is displayed; otherwise the frontmatter governs.
+    """
+    effective, source = frontmatter_status, "frontmatter"
+    durable_status = str(durable_state["status"]) if durable_state and durable_state.get("status") else None
+    if durable_status and durable_status != frontmatter_status and not should_reconcile_frontmatter_status(
+        frontmatter_status, durable_state or {}, file_mtime, spec_path
+    ):
+        effective, source = durable_status, "durable_checkpoint"
+    found = classify_status_sync(frontmatter_status, durable_state, file_mtime, spec_path)
+    return {
+        "declared": frontmatter_status,
+        "effective": effective,
+        "source": source,
+        "sync": {
+            "in_sync": found is None,
+            "durable": durable_status,
+            "effective": effective,
+            "reason": (found or {}).get("reason"),
+        },
+    }
+
+
+def read_durable_states_readonly(db_path: Path, spec_ids: Iterable[str]) -> dict[str, dict[str, Any] | None]:
+    """SPEC-359 R5/R6: batch-read latest durable rows without creating or migrating the store.
+
+    ``StatusStore(...)`` creates the file and runs schema migrations, which a
+    diagnostic read must never do. This opens the existing database read-only
+    and returns ``{}`` when it is absent or unreadable -- "no durable evidence",
+    not an error.
+    """
+    wanted = [str(spec_id) for spec_id in spec_ids]
+    path = Path(db_path)
+    if not wanted or not path.is_file():
+        return {}
+    states: dict[str, dict[str, Any] | None] = {spec_id: None for spec_id in wanted}
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        with closing(conn):
+            for start in range(0, len(wanted), _BATCH_READ_CHUNK):
+                chunk = wanted[start:start + _BATCH_READ_CHUNK]
+                rows = conn.execute(
+                    "SELECT * FROM status_checkpoints WHERE id IN (SELECT MAX(id) FROM status_checkpoints "
+                    f"WHERE spec_id IN ({','.join('?' * len(chunk))}) GROUP BY spec_id)",
+                    tuple(chunk),
+                ).fetchall()
+                for row in rows:
+                    states[str(row["spec_id"])] = _checkpoint_from_row(row).to_dict()
+    except (sqlite3.Error, OSError):
+        return {}
+    return states
 
 
 # ---------------------------------------------------------------------------

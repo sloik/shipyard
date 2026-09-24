@@ -122,6 +122,13 @@ worktree, HEAD, index, project files, and divergent payload; only transitive
 dependents are held for worker-local drift, while shared-control-plane drift
 stops new dispatch and all integration.
 
+Explicit canonical-source authoring follows GIT.md's SPEC-365 contract. The
+parent passes `authoring_provider` separately from worker packets, retaining the
+original receipt and strict result. Bootstrap requires external authorization and
+an independently validated verdict for the exact frozen candidate; missing proof
+stops acceptance, lifecycle, merge and cleanup. Installed copies stay strict.
+Use the existing sole integration queue and fresh-main gate after acceptance.
+
 ### Resume from Checkpoint (if applicable)
 
 Before starting step 1, check for existing checkpoints for the current spec:
