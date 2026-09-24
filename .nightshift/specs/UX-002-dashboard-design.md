@@ -82,7 +82,7 @@ Checklist for each spec:
 ## Acceptance Criteria
 
 - [x] AC-1: Design file (`UX-002-dashboard-design.pen`) is complete and covers all four phases
-- [ ] AC-2: Phase 0 traffic timeline matches the design exactly
+- [x] AC-2: Phase 0 traffic timeline matches the design exactly
 - [x] AC-3: Traffic rows have alternating backgrounds and clear visual hierarchy
 - [x] AC-4: Relative timestamps ("2s ago") with absolute on hover
 - [x] AC-5: Detail panel shows request + matched response side by side with JSON highlighting
@@ -90,7 +90,7 @@ Checklist for each spec:
 - [x] AC-7: Server filter populated dynamically from actual traffic data
 - [x] AC-8: Direction toggle (all / client→server / server→client) works
 - [ ] AC-9: Empty state matches design
-- [ ] AC-10: No visual element exists in the implementation that isn't in the design
+- [x] AC-10: No visual element exists in the implementation that isn't in the design
 - [x] AC-11: No external dependencies — all CSS/JS inline in single HTML file
 - [x] AC-12: Phase 1-3 designs are present in the .pen file (implementation deferred to their respective specs)
 
@@ -103,7 +103,7 @@ Checked against a `-tags server` build driven headlessly (Chromium, 1440×900,
 | AC | Result | Evidence / follow-up |
 |----|--------|----------------------|
 | AC-1 | pass | `.pen` has Phase 0–3 frames plus Phase 4 and per-state frames |
-| AC-2 | **fail** | SPEC-BUG-175 (filter bar drift). Fixed: SPEC-BUG-173 (live rows missed method/latency), SPEC-BUG-174 (REQ rows stayed `pending`; `ok`/`error` labels kept instead of the design's `200 OK`) |
+| AC-2 | pass (fixed) | SPEC-BUG-173 (live rows missed method/latency), SPEC-BUG-174 (REQ rows stayed `pending`; `ok`/`error` labels kept instead of the design's `200 OK`), SPEC-BUG-175 (filter bar drift) |
 | AC-3 | pass | alternate rows use `rgba(177,186,196,0.03)` = design `$row-alt` `#b1bac408`; expanded row has 3 px accent left border |
 | AC-4 | pass | `relativeTime()` text with `title` = absolute UTC timestamp |
 | AC-5 | pass | REQUEST/RESPONSE panes side by side; line-level `jt-*` colours per design |
@@ -111,7 +111,7 @@ Checked against a `-tags server` build driven headlessly (Chromium, 1440×900,
 | AC-7 | pass | `#filter-server` options built from observed traffic (`All servers`, `alpha`) |
 | AC-8 | pass (fixed) | "All" emptied the table (History toggles too); fixed by SPEC-BUG-171 |
 | AC-9 | **fail** | layout/copy differ from `ApsQe` — SPEC-BUG-176 (draft, copy decision needed) |
-| AC-10 | **fail** | extra filter-bar entry badge — SPEC-BUG-175. Known sanctioned deviation: infinite scroll replaced the design's pagination footer (SPEC-BUG-113); the `.pen` footer was not updated |
+| AC-10 | pass (fixed) | extra filter-bar entry badge removed by SPEC-BUG-175. Known sanctioned deviation: infinite scroll replaced the design's pagination footer (SPEC-BUG-113); the `.pen` footer was not updated |
 | AC-11 | pass | no remote/CDN assets; `ds.css`/`ds.js` are embedded, the documented SPEC-005 exception |
 | AC-12 | pass | Phase 1–3 frames present (`d1yZ4`, `YAgf3`, `t7hu7`, …) |
 

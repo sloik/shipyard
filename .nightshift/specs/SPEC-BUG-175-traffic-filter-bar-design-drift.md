@@ -4,7 +4,7 @@ template_version: 3
 priority: 3
 layer: 3
 type: bugfix
-status: ready
+status: done
 after: [SPEC-BUG-171]
 nfrs: [SPEC-NFR-001]
 prior_attempts: []
@@ -40,22 +40,22 @@ deliberately replaced the design's paginated footer.
 
 ## Requirements
 
-- [ ] R1: Server and Method controls are a fixed 160 px wide, per design.
-- [ ] R2: Filter labels use 11 px / 500 and share one baseline.
-- [ ] R3: Controls fit inside the filter bar with the design's 8/16 padding.
-- [ ] R4: Remove the filter-bar entry badge, or keep a single entry count
+- [x] R1: Server and Method controls are a fixed 160 px wide, per design.
+- [x] R2: Filter labels use 11 px / 500 and share one baseline.
+- [x] R3: Controls fit inside the filter bar with the design's 8/16 padding.
+- [x] R4: Remove the filter-bar entry badge, or keep a single entry count
   that stays consistent with the footer, and record which in the run report.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Headless measurement: `#filter-server` and `#filter-method` widths
+- [x] AC1: Headless measurement: `#filter-server` and `#filter-method` widths
   are 160 px regardless of option text.
-- [ ] AC2: All three `#filter-bar .input-label` elements have the same `y`
+- [x] AC2: All three `#filter-bar .input-label` elements have the same `y`
   and computed `font-size: 11px`.
-- [ ] AC3: No filter control's bounding box extends past `#filter-bar`.
-- [ ] AC4: At most one visible entry count, which matches the rows loaded
+- [x] AC3: No filter control's bounding box extends past `#filter-bar`.
+- [x] AC4: At most one visible entry count, which matches the rows loaded
   after live events arrive.
-- [ ] AC5: `go test ./...` (including `internal/web/ui_layout_test.go`) passes.
+- [x] AC5: `go test ./...` (including `internal/web/ui_layout_test.go`) passes.
 
 ## Code Pointers
 
@@ -63,3 +63,20 @@ deliberately replaced the design's paginated footer.
   `trafficCount` / `timelineScrollInfo` updates (~2035–2050, ws handler ~2118)
 - `internal/web/ui/ds.css` — `.app-bar`, `.input-group`, `.input-label`
 - `.nightshift/specs/UX-002-dashboard-design.pen` — frame `rRx2E` → `Filter Bar`
+
+## Resolution — 2026-09-24
+
+- `ds.css`: `#filter-bar` uses a content-sized height with the design's 8/16
+  padding, `align-items: flex-start` (so the three labels share a baseline)
+  and a centred Clear button. `#filter-bar .input-label` is 11px, and
+  `#filter-server`/`#filter-method` are fixed at 160px. The rules are scoped
+  to `#filter-bar`, so History and the other views are unchanged.
+- R4 decision: removed the `#traffic-count` badge, which is not in the design.
+  The footer "Showing N of M entries" (the design's own count) is now the
+  single count. `updateTimelineCount()` refreshes it after every page load and
+  every live insert, not only once all pages have loaded.
+- Measured at 1440×900: selects 160/160px; labels 11px on one baseline; no
+  control extends past the bar; one visible count, which matched the rows
+  after live inserts.
+- Tests: `TestSPECBUG175_FilterBarMatchesDesign` (fails on the pre-fix UI)
+  and a filter-bar + live-count section in `test/smoke/traffic_smoke.mjs`.
