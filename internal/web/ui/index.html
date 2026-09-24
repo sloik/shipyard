@@ -1471,7 +1471,7 @@
         if (!panel) return;
         var jv = panel.querySelector('.json-viewer');
         if (jv) {
-          btn.setAttribute('data-copy', jv.textContent);
+          btn.setAttribute('data-copy', DS.jsonViewerText(jv));
         }
       })(copyBtns[i]);
     }
@@ -2002,7 +2002,10 @@
     var mt = filterMethod.value;
     if (sv) params.set('server', sv);
     if (mt) params.set('method', mt);
-    // Note: direction filter is client-side since the API doesn't support it
+    // Direction is filtered server-side so offset/total stay consistent with
+    // the rows shown (SPEC-BUG-171).
+    var dirVal = getDirectionFilter();
+    if (dirVal) params.set('direction', dirVal);
 
     fetch('/api/traffic?' + params)
       .then(function(resp) { return resp.json(); })
@@ -2011,7 +2014,9 @@
         timelineLoadingEl.style.display = 'none';
         timelineTotal = data.total_count;
 
-        if (timelineTotal === 0 && timelineOffset === 0) {
+        // Only the unfiltered empty result is "no traffic yet"; a filter that
+        // matches nothing must keep the filter bar visible so it can be undone.
+        if (timelineTotal === 0 && timelineOffset === 0 && !sv && !mt && !dirVal) {
           timelineEmpty.style.display = '';
           timelineContent.style.display = 'none';
           recordClientTelemetry('timeline.load', telemetryStart, { rows: 0, total: 0, active_rows: 0, budget: timelineActiveRowBudget });
@@ -2023,14 +2028,6 @@
 
         var items = data.items || [];
         trackFilters(items);
-
-        // Apply client-side direction filter
-        var dirVal = getDirectionFilter();
-        if (dirVal) {
-          items = items.filter(function(item) {
-            return item.direction === dirVal;
-          });
-        }
 
         trafficCount.textContent = timelineTotal + ' entries';
 

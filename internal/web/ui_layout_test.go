@@ -3850,7 +3850,8 @@ func TestSPECBUG142_CopyWiringStaysScopedToEachPanelPayload(t *testing.T) {
 		"panelEl.querySelectorAll('.btn-copy')",
 		"btn.closest('.traffic-panel')",
 		"panel.querySelector('.json-viewer')",
-		"btn.setAttribute('data-copy', jv.textContent)",
+		// SPEC-BUG-172: copy the viewer's plain text, not its line-numbered textContent.
+		"btn.setAttribute('data-copy', DS.jsonViewerText(jv))",
 	} {
 		if !strings.Contains(wireBody, needle) {
 			t.Errorf("SPEC-BUG-142 AC4 FAIL: copy wiring missing %q", needle)
@@ -5139,5 +5140,105 @@ func TestSPECBUG133_AppBarDoesNotWrapPhase4Tabs(t *testing.T) {
 		if !strings.Contains(tabNavBlock, needle) {
 			t.Errorf("SPEC-BUG-133 FAIL (AC 4/5): #tab-nav block missing %q", needle)
 		}
+	}
+}
+
+// TestSPECBUG171_SegToggleEmitsExplicitEmptyValue verifies that a segmented
+// toggle option with data-value="" (the "All" options) emits "" rather than
+// falling back to its label, which filtered every row out.
+func TestSPECBUG171_SegToggleEmitsExplicitEmptyValue(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	content := string(js)
+	idx := strings.Index(content, "function handleSegToggle(el, target)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-171 FAIL: handleSegToggle not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "target.hasAttribute('data-value')") {
+		t.Error("SPEC-BUG-171 AC4 FAIL: handleSegToggle must test data-value presence, not truthiness")
+	}
+	if strings.Contains(body, "getAttribute('data-value') ||") {
+		t.Error("SPEC-BUG-171 AC4 FAIL: data-value=\"\" must not fall back to the button label")
+	}
+
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	page := string(html)
+	for _, toggle := range []string{`id="dir-toggle"`, `id="history-dir-toggle"`, `id="history-time-toggle"`} {
+		i := strings.Index(page, toggle)
+		if i == -1 {
+			t.Fatalf("SPEC-BUG-171 FAIL: %s not found", toggle)
+		}
+		if !strings.Contains(page[i:i+200], `data-value="">All</button>`) {
+			t.Errorf("SPEC-BUG-171 FAIL: %s must keep an explicit empty All value", toggle)
+		}
+	}
+}
+
+// TestSPECBUG171_TimelineDirectionFilteredServerSide verifies the Traffic
+// direction filter is sent to /api/traffic so paging offset and the
+// "Showing N of M" footer match the rows shown.
+func TestSPECBUG171_TimelineDirectionFilteredServerSide(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	idx := strings.Index(content, "function loadPage()")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-171 FAIL: loadPage not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "params.set('direction', dirVal)") {
+		t.Error("SPEC-BUG-171 AC3 FAIL: loadPage must send the direction filter to the API")
+	}
+	if strings.Contains(body, "item.direction === dirVal") {
+		t.Error("SPEC-BUG-171 AC3 FAIL: loadPage must not filter direction client-side after paging")
+	}
+	if !strings.Contains(body, "timelineOffset === 0 && !sv && !mt && !dirVal") {
+		t.Error("SPEC-BUG-171 FAIL: a filter matching nothing must not show the no-traffic empty state")
+	}
+}
+
+// TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers verifies copy text is
+// rebuilt from each line's .lc content joined with newlines, so the
+// line-number gutter never reaches the clipboard.
+func TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	content := string(js)
+	idx := strings.Index(content, "function jsonViewerText(viewer)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-172 FAIL: jsonViewerText helper not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	for _, needle := range []string{
+		"viewer.querySelectorAll('.json-line')",
+		"querySelector('.lc')",
+		"out.join('\\n')",
+		"DS.jsonViewerText = jsonViewerText",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-172 FAIL: jsonViewerText missing %q", needle)
+		}
+	}
+	if strings.Contains(content, "if (jv) text = jv.textContent;") {
+		t.Error("SPEC-BUG-172 R3 FAIL: generic copy fallback still copies raw viewer textContent")
 	}
 }
