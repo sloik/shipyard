@@ -28,11 +28,55 @@ var cmdStdinPipe = func(cmd *exec.Cmd) (io.WriteCloser, error) {
 }
 
 var cmdStdoutPipe = func(cmd *exec.Cmd) (io.ReadCloser, error) {
-	return cmd.StdoutPipe()
+	pipe := newChildOutputPipe()
+	cmd.Stdout = pipe.w
+	return pipe, nil
 }
 
 var cmdStderrPipe = func(cmd *exec.Cmd) (io.ReadCloser, error) {
-	return cmd.StderrPipe()
+	pipe := newChildOutputPipe()
+	cmd.Stderr = pipe.w
+	return pipe, nil
+}
+
+// childOutputWaitDelay bounds how long cmd.Wait keeps copying child output
+// after the child has exited (or the context is done), for when an orphaned
+// grandchild still holds the child's stdout/stderr open.
+var childOutputWaitDelay = 2 * time.Second
+
+// childOutputPipe carries a child's stdout or stderr to the proxy's reader.
+//
+// cmd.StdoutPipe/StderrPipe must not be used here: cmd.Wait closes those pipes
+// as soon as the process exits, so lines the child wrote just before exiting
+// were lost if the reader had not consumed them yet (SPEC-BUG-177). With an
+// io.Writer as cmd.Stdout/Stderr, exec copies the output itself and cmd.Wait
+// returns only after that copy reaches EOF, bounded by cmd.WaitDelay.
+type childOutputPipe struct {
+	r *io.PipeReader
+	w *io.PipeWriter
+}
+
+func newChildOutputPipe() *childOutputPipe {
+	r, w := io.Pipe()
+	return &childOutputPipe{r: r, w: w}
+}
+
+func (c *childOutputPipe) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// Close stops reading; a pending exec copy then fails instead of blocking.
+func (c *childOutputPipe) Close() error { return c.r.Close() }
+
+// finish signals EOF to the reader once cmd.Wait has copied all output.
+func (c *childOutputPipe) finish() { _ = c.w.Close() }
+
+// finishChildOutput ends a child output stream after cmd.Wait. Streams from
+// test seams that are not childOutputPipes are closed instead.
+func finishChildOutput(r io.ReadCloser) {
+	if c, ok := r.(*childOutputPipe); ok {
+		c.finish()
+		return
+	}
+	_ = r.Close()
 }
 
 // Proxy manages a child MCP server process and proxies stdio bidirectionally.
@@ -358,6 +402,7 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	cmd := exec.CommandContext(ctx, p.command, p.args...)
 	cmd.Env = mergeEnv(os.Environ(), p.env)
 	cmd.Dir = p.cwd
+	cmd.WaitDelay = childOutputWaitDelay
 
 	childStdin, err := cmdStdinPipe(cmd)
 	if err != nil {
@@ -385,6 +430,8 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// If the reader stops early, unblock exec's copy so cmd.Wait can return.
+		defer childStderr.Close()
 		scanner := bufio.NewScanner(childStderr)
 		buf := make([]byte, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
@@ -396,6 +443,7 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer childStdout.Close()
 		output := p.output
 		if output == nil {
 			output = os.Stdout
@@ -403,9 +451,20 @@ func (p *Proxy) runChild(ctx context.Context, inputWriter *childInputWriter) err
 		p.pipeAndTap(ctx, childStdout, output, capture.DirectionServerToClient)
 	}()
 
+	// cmd.Wait returns once the child has exited and all of its output has
+	// been handed to the readers (or childOutputWaitDelay has passed).
 	err = cmd.Wait()
 	inputWriter.detach(childStdin)
+	finishChildOutput(childStdout)
+	finishChildOutput(childStderr)
 	wg.Wait()
+
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The child exited cleanly; only an orphaned descendant kept its
+		// output open past childOutputWaitDelay.
+		slog.Warn("child output still open after exit; stopped reading", "name", p.name, "wait_delay", childOutputWaitDelay)
+		err = nil
+	}
 
 	if err == nil {
 		slog.Info("child process exited normally", "name", p.name)
@@ -536,7 +595,9 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 	if msg.Error != nil {
 		status = "error"
 	}
-	if !isResponse && method != "" {
+	// Only a request with an ID awaits a response; a notification (no ID)
+	// is never answered, so it must not read "pending" forever.
+	if !isResponse && method != "" && msgID != "" {
 		status = "pending"
 	}
 
@@ -570,11 +631,14 @@ func (p *Proxy) captureMessage(raw []byte, direction string, ts time.Time) {
 		Timestamp:  ts.UnixMilli(),
 		Direction:  direction,
 		ServerName: p.name,
-		Method:     method,
-		MessageID:  msgID,
-		Status:     status,
-		LatencyMs:  latencyMs,
-		Payload:    string(raw),
+		// entry.Method: for a response the store fills in the request's method.
+		Method:    entry.Method,
+		MessageID: msgID,
+		Status:    status,
+		LatencyMs: latencyMs,
+		Payload:   string(raw),
+		// Lets live viewers update the already-rendered request row.
+		MatchedID: entry.MatchedID,
 	}
 
 	data, _ := json.Marshal(evt)

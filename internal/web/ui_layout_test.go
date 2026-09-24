@@ -3850,7 +3850,8 @@ func TestSPECBUG142_CopyWiringStaysScopedToEachPanelPayload(t *testing.T) {
 		"panelEl.querySelectorAll('.btn-copy')",
 		"btn.closest('.traffic-panel')",
 		"panel.querySelector('.json-viewer')",
-		"btn.setAttribute('data-copy', jv.textContent)",
+		// SPEC-BUG-172: copy the viewer's plain text, not its line-numbered textContent.
+		"btn.setAttribute('data-copy', DS.jsonViewerText(jv))",
 	} {
 		if !strings.Contains(wireBody, needle) {
 			t.Errorf("SPEC-BUG-142 AC4 FAIL: copy wiring missing %q", needle)
@@ -5138,6 +5139,248 @@ func TestSPECBUG133_AppBarDoesNotWrapPhase4Tabs(t *testing.T) {
 	} {
 		if !strings.Contains(tabNavBlock, needle) {
 			t.Errorf("SPEC-BUG-133 FAIL (AC 4/5): #tab-nav block missing %q", needle)
+		}
+	}
+}
+
+// TestSPECBUG171_SegToggleEmitsExplicitEmptyValue verifies that a segmented
+// toggle option with data-value="" (the "All" options) emits "" rather than
+// falling back to its label, which filtered every row out.
+func TestSPECBUG171_SegToggleEmitsExplicitEmptyValue(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	content := string(js)
+	idx := strings.Index(content, "function handleSegToggle(el, target)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-171 FAIL: handleSegToggle not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "target.hasAttribute('data-value')") {
+		t.Error("SPEC-BUG-171 AC4 FAIL: handleSegToggle must test data-value presence, not truthiness")
+	}
+	if strings.Contains(body, "getAttribute('data-value') ||") {
+		t.Error("SPEC-BUG-171 AC4 FAIL: data-value=\"\" must not fall back to the button label")
+	}
+
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	page := string(html)
+	for _, toggle := range []string{`id="dir-toggle"`, `id="history-dir-toggle"`, `id="history-time-toggle"`} {
+		i := strings.Index(page, toggle)
+		if i == -1 {
+			t.Fatalf("SPEC-BUG-171 FAIL: %s not found", toggle)
+		}
+		if !strings.Contains(page[i:i+200], `data-value="">All</button>`) {
+			t.Errorf("SPEC-BUG-171 FAIL: %s must keep an explicit empty All value", toggle)
+		}
+	}
+}
+
+// TestSPECBUG171_TimelineDirectionFilteredServerSide verifies the Traffic
+// direction filter is sent to /api/traffic so paging offset and the
+// "Showing N of M" footer match the rows shown.
+func TestSPECBUG171_TimelineDirectionFilteredServerSide(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	idx := strings.Index(content, "function loadPage()")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-171 FAIL: loadPage not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "params.set('direction', dirVal)") {
+		t.Error("SPEC-BUG-171 AC3 FAIL: loadPage must send the direction filter to the API")
+	}
+	if strings.Contains(body, "item.direction === dirVal") {
+		t.Error("SPEC-BUG-171 AC3 FAIL: loadPage must not filter direction client-side after paging")
+	}
+	if !strings.Contains(body, "timelineOffset === 0 && !sv && !mt && !dirVal") {
+		t.Error("SPEC-BUG-171 FAIL: a filter matching nothing must not show the no-traffic empty state")
+	}
+}
+
+// TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers verifies copy text is
+// rebuilt from each line's .lc content joined with newlines, so the
+// line-number gutter never reaches the clipboard.
+func TestSPECBUG172_JsonViewerCopyTextSkipsLineNumbers(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/ds.js")
+	if err != nil {
+		t.Fatalf("read embedded ds.js: %v", err)
+	}
+	content := string(js)
+	idx := strings.Index(content, "function jsonViewerText(viewer)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-172 FAIL: jsonViewerText helper not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	for _, needle := range []string{
+		"viewer.querySelectorAll('.json-line')",
+		"querySelector('.lc')",
+		"out.join('\\n')",
+		"DS.jsonViewerText = jsonViewerText",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-172 FAIL: jsonViewerText missing %q", needle)
+		}
+	}
+	if strings.Contains(content, "if (jv) text = jv.textContent;") {
+		t.Error("SPEC-BUG-172 R3 FAIL: generic copy fallback still copies raw viewer textContent")
+	}
+}
+
+// TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow verifies the WebSocket
+// handler updates the already-rendered request row when its response arrives,
+// so live rows match a reload.
+func TestSPECBUG173_LiveResponseUpdatesMatchedRequestRow(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+
+	idx := strings.Index(content, "function updateMatchedRequestRow(evt)")
+	if idx == -1 {
+		t.Fatal("SPEC-BUG-173 FAIL: updateMatchedRequestRow not found")
+	}
+	body := content[idx:]
+	if end := strings.Index(body, "\n  function "); end > 0 {
+		body = body[:end]
+	}
+	for _, needle := range []string{
+		`'.table-row[data-id="' + evt.matched_id + '"]:not([data-detail-for])'`,
+		"statusBadge(evt.status)",
+		"latencyPill(evt.latency_ms)",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("SPEC-BUG-173 FAIL: updateMatchedRequestRow missing %q", needle)
+		}
+	}
+
+	wsIdx := strings.Index(content, "ws.onmessage = function(e) {")
+	if wsIdx == -1 {
+		t.Fatal("SPEC-BUG-173 FAIL: traffic ws.onmessage not found")
+	}
+	wsBody := content[wsIdx:]
+	if end := strings.Index(wsBody, "retryBtn.addEventListener"); end > 0 {
+		wsBody = wsBody[:end]
+	}
+	if !strings.Contains(wsBody, "if (evt.matched_id) updateMatchedRequestRow(evt);") {
+		t.Error("SPEC-BUG-173 FAIL: live handler must update the matched request row")
+	}
+	// The update must not be gated on "no filters active", unlike the prepend.
+	if strings.Index(wsBody, "updateMatchedRequestRow(evt)") > strings.Index(wsBody, "if (!filterServer.value") {
+		t.Error("SPEC-BUG-173 FAIL: matched-row update must run even when filters are active")
+	}
+}
+
+// TestSPECBUG175_FilterBarMatchesDesign verifies the Traffic filter bar
+// follows UX-002: fixed 160px Server/Method selects, 11px top-aligned labels,
+// a content-sized bar with 8/16 padding, and no extra entry-count badge.
+func TestSPECBUG175_FilterBarMatchesDesign(t *testing.T) {
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	block := func(selector string) string {
+		m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+		if m == nil {
+			t.Fatalf("SPEC-BUG-175 FAIL: CSS block %q not found", selector)
+		}
+		return m[1]
+	}
+	for selector, decls := range map[string][]string{
+		"#filter-bar":                     {"height: auto;", "padding: 8px 16px;", "align-items: flex-start;"},
+		"#filter-bar .input-label":        {"font-size: var(--font-size-sm);"},
+		"#filter-bar #clear-filters-btn":  {"align-self: center;"},
+		"#filter-server,\n#filter-method": {"width: 160px;"},
+	} {
+		body := block(selector)
+		for _, d := range decls {
+			if !strings.Contains(body, d) {
+				t.Errorf("SPEC-BUG-175 FAIL: %s missing %q", selector, d)
+			}
+		}
+	}
+
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	if strings.Contains(content, `id="traffic-count"`) {
+		t.Error("SPEC-BUG-175 FAIL: the filter-bar entry badge is not in the UX-002 design")
+	}
+	if !strings.Contains(content, "function updateTimelineCount()") {
+		t.Fatal("SPEC-BUG-175 FAIL: updateTimelineCount not found")
+	}
+	if strings.Count(content, "updateTimelineCount();") < 2 {
+		t.Error("SPEC-BUG-175 FAIL: the entry count must update on page loads and live inserts")
+	}
+}
+
+// TestSPECBUG176_TimelineEmptyStateMatchesDesign verifies the Traffic empty
+// state uses the UX-002 design copy and its scoped layout rules.
+func TestSPECBUG176_TimelineEmptyStateMatchesDesign(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	content := string(html)
+	start := strings.Index(content, `<div id="timeline-empty" class="empty-state">`)
+	end := strings.Index(content, "<!-- Traffic Content (hidden until data arrives) -->")
+	if start == -1 || end == -1 || end < start {
+		t.Fatal("SPEC-BUG-176 FAIL: #timeline-empty block not found")
+	}
+	block := content[start:end]
+	for _, needle := range []string{
+		`<div class="empty-title">No traffic yet</div>`,
+		`<div class="empty-desc">Start your MCP server through Shipyard to see traffic here.</div>`,
+		`<div class="step-title">Wrap your MCP server</div>`,
+		`<code class="step-code">shipyard wrap -- npx -y @mcp/server /tmp</code>`,
+		`<div class="step-title">Point your AI client at Shipyard</div>`,
+		`Traffic will appear here automatically as your client communicates with the server.`,
+	} {
+		if !strings.Contains(block, needle) {
+			t.Errorf("SPEC-BUG-176 FAIL: empty state missing design copy %q", needle)
+		}
+	}
+
+	css, err := uiFS.ReadFile("ui/ds.css")
+	if err != nil {
+		t.Fatalf("read embedded ds.css: %v", err)
+	}
+	cssContent := string(css)
+	for selector, decls := range map[string][]string{
+		"#timeline-empty":                            {"min-height: 100%;", "gap: 16px;"},
+		"#timeline-empty .empty-title":               {"font-size: var(--font-size-2xl);"},
+		"#timeline-empty #onboard-cards":             {"width: 480px;", "text-align: left;"},
+		"#timeline-empty .onboard-step .step-number": {"background: var(--accent-emphasis);", "color: var(--text-on-emphasis);"},
+	} {
+		m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`).FindStringSubmatch(cssContent)
+		if m == nil {
+			t.Errorf("SPEC-BUG-176 FAIL: CSS block %q not found", selector)
+			continue
+		}
+		for _, d := range decls {
+			if !strings.Contains(m[1], d) {
+				t.Errorf("SPEC-BUG-176 FAIL: %s missing %q", selector, d)
+			}
 		}
 	}
 }

@@ -187,6 +187,21 @@
      Copy to Clipboard
      ======================================================================== */
 
+  // Plain text of a .json-viewer. Line-numbered viewers render one .json-line
+  // per line with a .ln number span, so textContent would glue the numbers to
+  // the code and drop newlines; rebuild the text from the .lc spans instead.
+  function jsonViewerText(viewer) {
+    var lines = viewer.querySelectorAll('.json-line');
+    if (!lines.length) return viewer.textContent;
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var lc = lines[i].querySelector('.lc');
+      out.push(lc ? lc.textContent : '');
+    }
+    return out.join('\n');
+  }
+  DS.jsonViewerText = jsonViewerText;
+
   function handleCopy(el) {
     var text = el.getAttribute('data-copy');
     if (!text) {
@@ -194,7 +209,7 @@
       var viewer = el.closest('.code-block, .json-viewer, .split-view');
       if (!viewer) viewer = el.parentNode;
       var jv = viewer ? viewer.querySelector('.json-viewer') : null;
-      if (jv) text = jv.textContent;
+      if (jv) text = jsonViewerText(jv);
     }
     if (!text) return;
 
@@ -226,9 +241,14 @@
     target.classList.remove('seg-inactive');
     target.classList.add('seg-active');
 
+    // An explicit data-value="" (e.g. an "All" option) must emit "", not the
+    // button label; only fall back to the label when data-value is absent.
+    var value = target.hasAttribute('data-value')
+      ? target.getAttribute('data-value')
+      : target.textContent.trim();
     var event = new CustomEvent('change', {
       bubbles: true,
-      detail: { value: target.getAttribute('data-value') || target.textContent.trim() }
+      detail: { value: value }
     });
     el.dispatchEvent(event);
   }
