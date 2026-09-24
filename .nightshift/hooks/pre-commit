@@ -221,7 +221,7 @@ for INSTALL_ROOT in "${INSTALL_ROOTS[@]}"; do
     SPEC_TRIGGER=0
     for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
         case "$staged_path" in
-            "$INSTALL_ROOT/specs/"*|"$INSTALL_ROOT/reports/"*)
+            "$INSTALL_ROOT/specs/"*)
                 case "${staged_path##*/}" in _*) continue ;; esac
                 SPEC_TRIGGER=1 ;;
         esac

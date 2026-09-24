@@ -199,10 +199,20 @@ try:
     # runs unmodified on the same call — only the spec-home violation is
     # forced to `False` for this one path, because its own parent trivially
     # satisfies "parent_dir in specs_dirs" for _is_spec_home_violation.
+    # SPEC-376: a root-level path (no "/" at all) has no parent to pass
+    # through `_known_specs_dirs`'s realpath-relative-to-project_root
+    # resolution — that resolution can only ever produce the literal string
+    # "." for `project_root` itself (never the empty string
+    # `_is_spec_home_violation`'s own `parent_dir` computation uses for a
+    # root-level path), so passing `{project_root}` here can never match.
+    # An empty set instead makes `_known_specs_dirs` report "discovery
+    # failed" and `_is_spec_home_violation` fall open (no violation) for
+    # this one classify_write call — the same "exempt this one path" effect
+    # AC1 requires, achieved without changing scope_guard.py itself.
     def _spec_375_home_override(path_str: str) -> set:
         normalized = path_str.replace("\\", "/")
         parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
-        return {project_root / parent} if parent else {project_root}
+        return {project_root / parent} if parent else set()
 
     decisions = [
         module.classify_write(

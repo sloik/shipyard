@@ -2674,6 +2674,20 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
     kit = Path(specs_relative_dir).parent.as_posix()
     prefix = specs_relative_dir.rstrip("/") + "/"
     results = {}
+    # R2 (SPEC-380): one `git ls-tree` spawn for every baseline blob sha under
+    # the spec prefix, rather than one `git rev-parse` spawn per staged path
+    # -- a real corpus is hundreds of files, and a per-path subprocess adds
+    # several seconds to every commit that touches specs/ (measured: ~15ms
+    # per spawn x 436 real specs).
+    baseline_shas: dict[str, str] = {}
+    if has_head:
+        tree = _run_git(repo_root, ["ls-tree", "-r", "-z", baseline_revision, "--", prefix])
+        for record in tree.stdout.split("\0"):
+            if not record:
+                continue
+            meta, tree_path = record.split("\t", 1)
+            _mode, _obj_type, sha = meta.split(" ")
+            baseline_shas[tree_path] = sha
     blobs = _snapshot_blobs(repo_root, {path: entry for path, entry in entries.items() if path.startswith(kit + "/")})
     with tempfile.TemporaryDirectory(prefix="nightshift-index-") as scratch:
         snapshot = Path(scratch).resolve()
@@ -2707,14 +2721,25 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
         for path in sorted(entries):
             if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
                 continue
+            # R2 (SPEC-380): determine is_new/bytes_changed from the blob sha
+            # up front -- by index sha, not decoded text -- so the gate below
+            # applies uniformly to every branch that can populate `results`
+            # for this path (symlink-mode, frontmatter-parse-error, and the
+            # normal validate_file path), not only the last one.
+            baseline_sha = baseline_shas.get(path)
+            is_new = baseline_sha is None
+            bytes_changed = baseline_sha != entries[path]["sha"]
+            reportable = is_new or bytes_changed
             if entries[path]["mode"] == "120000":
-                results.setdefault(path, []).append("state_rationale_evidence_path_escape: spec must be a regular index file")
+                if reportable:
+                    results.setdefault(path, []).append("state_rationale_evidence_path_escape: spec must be a regular index file")
                 continue
             spec_path = snapshot / path
             text = spec_path.read_bytes().decode("utf-8")
             fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
             if parse_errors:
-                results[path] = parse_errors
+                if reportable:
+                    results[path] = parse_errors
                 continue
             findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
             base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
@@ -2722,8 +2747,14 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
             findings.extend(state_rationale_adoption_findings(
                 fm, body, baseline_fm=base_fm, baseline_body=base_body,
-                is_new=baseline_text is None, bytes_changed=text != baseline_text))
-            results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
+                is_new=is_new, bytes_changed=bytes_changed))
+            # R2 (SPEC-380): only report findings for a path this commit actually
+            # touched (new or changed bytes) — an untouched pre-existing spec's
+            # findings never block a commit that didn't change it. The full
+            # corpus is still loaded above (R3) so cross-spec context (e.g.
+            # duplicate-ID checks) keeps working for the paths that DO report.
+            if reportable:
+                results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
     return {"baseline": "head" if has_head else "none", "results": results,
             "counts": rationale_counts(results), "finding_families": finding_family_summary(results, [])}
 

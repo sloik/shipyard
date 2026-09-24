@@ -7,6 +7,55 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.24.1 (2026-09-24)
+
+### `validate_staged` must scope reported findings to changed/new files, not the whole corpus (SPEC-380)
+
+Two related defects in `hooks/pre-commit`'s `SPEC_TRIGGER` and
+`validate_specs.py`'s `validate_staged` meant a commit touching only one
+clean spec or report file could still be rejected by hundreds of unrelated
+pre-existing findings elsewhere in the corpus, the opposite of SPEC-358's own
+stated intent. Defect 1: `SPEC_TRIGGER` fired on a staged `reports/` path
+even though `validate_staged` never examines `reports/` content at all, so a
+report-only commit still ran a full, futile corpus validation. Defect 2: once
+triggered, `validate_staged` reported findings for every staged-index path
+under `specs/`, not just the ones this commit actually changed, so a repo's
+own historical spec debt blocked any commit that triggered validation,
+including one adding a single brand-new, fully compliant spec. Fix: (R1)
+`SPEC_TRIGGER` now fires only on a staged `specs/` path (the underscore
+exclusion from SPEC-379 is unchanged); (R2) `validate_staged` reports a
+staged spec path's findings only when that path is new or its bytes changed
+relative to the baseline in this commit, computed via one `git ls-tree`
+lookup per run rather than one `git rev-parse` per path (real-corpus
+performance parity with pre-fix); (R3) the full corpus is still loaded for
+cross-spec context (e.g. duplicate-ID / `followup.source_spec_id`
+resolution), so a changed file's cross-spec findings against untouched
+siblings still fire correctly. One real, disclosed, in-scope coverage
+narrowing: a cross-spec evidence-anchor finding against an UNTOUCHED
+declaring spec is no longer reported by a `--staged` run when only the
+evidence's TARGET is staged (it still fires when the declaring spec is
+staged too) — see the SPEC-380 report's AC5 section and its `## AC
+Amendments`. No migration. `kit_version` bumped 3.24.0 → 3.24.1: a prior
+commit (`88af7b59`) sealed several completed release-handoff records
+against the 3.24.0 manifest fingerprint, so a same-version reseal would now
+raise `SameVersionResealError` (BUG-331 guard) and orphan those records —
+bumping retains the 3.24.0 manifest instead.
+
+### `protect-write-scope.sh`'s spec-home override now exempts root-level wrong-home paths too (SPEC-376)
+
+`protect-write-scope.sh`'s SPEC-375 `_spec_375_home_override` helper mishandled
+a project-root-level path (no `/` at all): its `parent == ""` branch returned
+`{project_root}`, which `_known_specs_dirs` resolved to the literal string
+`"."` via `Path('.')` normalization -- never matching
+`_is_spec_home_violation`'s own `parent_dir == ""` computation for a
+root-level path, so a `git mv`/`git rm` of a wrong-home spec file sitting
+directly at the project root was still denied (the exact bug SPEC-375 set out
+to fix, for this one shape only). The `parent == ""` branch now returns an
+empty set instead, which makes `_known_specs_dirs` fall open (no
+spec-home violation) for that one `classify_write` call -- no other consumer
+or path shape is affected. No migration; the release handoff remains pending
+and `kit_version` is unchanged.
+
 ## 3.24.0 (2026-09-19)
 
 ### Pre-commit `SPEC_TRIGGER` must not fire on the kit's own underscore-prefixed scaffold files (SPEC-379)
