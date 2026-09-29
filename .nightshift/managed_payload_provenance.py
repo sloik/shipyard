@@ -120,6 +120,34 @@ class MetadataError(ValueError):
     """Managed provenance cannot be established from trustworthy metadata."""
 
 
+class _ReceiptLoadError(MetadataError):
+    """A receipt could not be loaded; carries which check failed (SPEC-387 R3).
+
+    ``check`` is one of ``"stale" | "future-dated" | "digest-mismatch" |
+    "schema" | "unsafe-path"``. ``age_seconds``/``max_age_seconds`` are only
+    populated for the stale/future-dated checks.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        check: str,
+        age_seconds: int | None = None,
+        max_age_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.check = check
+        self.age_seconds = age_seconds
+        self.max_age_seconds = max_age_seconds
+
+
+class _ReceiptMissingError(FileNotFoundError):
+    """The receipt file itself is missing (SPEC-387 R3: ``check == "missing"``)."""
+
+    check = "missing"
+
+
 @dataclass(frozen=True)
 class AuthoringAnchor:
     """Parent-injected authority coordinates, never deserialized from worker output.
@@ -162,6 +190,7 @@ class AcceptanceResult:
     changed_paths: tuple[str, ...] = ()
     ownership: str = "canonical-release"
     remediation: str = "preserve-and-route-canonical-release"
+    receipt_check: Mapping[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -177,6 +206,7 @@ class AcceptanceResult:
             "changed_paths": list(self.changed_paths),
             "ownership": self.ownership,
             "remediation": self.remediation,
+            "receipt_check": dict(self.receipt_check) if self.receipt_check is not None else None,
         }
 
 
@@ -430,42 +460,50 @@ def write_integrity_receipt(
 def _load_receipt(install: Path, receipt_ref: str, receipt_sha256: str) -> tuple[dict[str, Any], bytes]:
     candidate = PurePosixPath(receipt_ref)
     if candidate.is_absolute() or ".." in candidate.parts or not receipt_ref.startswith(RECEIPT_DIR.as_posix() + "/"):
-        raise MetadataError("receipt path is unsafe")
+        raise _ReceiptLoadError("receipt path is unsafe", check="unsafe-path")
     path = install / candidate
     if path.is_symlink() or not path.is_file():
-        raise FileNotFoundError("integrity receipt is missing")
+        raise _ReceiptMissingError("integrity receipt is missing")
     path.resolve().relative_to(install.resolve())
     body = path.read_bytes()
     if len(body) > MAX_RECEIPT_BYTES or _sha256_bytes(body) != receipt_sha256:
-        raise MetadataError("integrity receipt digest mismatch")
+        raise _ReceiptLoadError("integrity receipt digest mismatch", check="digest-mismatch")
     try:
         receipt = json.loads(body.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise MetadataError("integrity receipt encoding or JSON is invalid") from exc
+        raise _ReceiptLoadError("integrity receipt encoding or JSON is invalid", check="schema") from exc
     required = {"schema_version", "invocation_id", "generated_at", "identity", "binding", "release", "admission_artifact_sha256"}
     if not isinstance(receipt, dict) or set(receipt) != required:
-        raise MetadataError("integrity receipt schema is invalid")
+        raise _ReceiptLoadError("integrity receipt schema is invalid", check="schema")
     if receipt.get("schema_version") != INTEGRITY_SCHEMA_VERSION or SAFE_ID.fullmatch(str(receipt.get("invocation_id", ""))) is None:
-        raise MetadataError("integrity receipt version or invocation is invalid")
+        raise _ReceiptLoadError("integrity receipt version or invocation is invalid", check="schema")
     try:
         generated_at = datetime.strptime(receipt["generated_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError) as exc:
-        raise MetadataError("integrity receipt timestamp is invalid") from exc
+        raise _ReceiptLoadError("integrity receipt timestamp is invalid", check="schema") from exc
     now = datetime.now(timezone.utc)
-    if generated_at < now - MAX_RECEIPT_AGE or generated_at > now + MAX_RECEIPT_CLOCK_SKEW:
-        raise MetadataError("integrity receipt is stale or future-dated")
+    if generated_at < now - MAX_RECEIPT_AGE:
+        age = now - generated_at
+        raise _ReceiptLoadError(
+            "integrity receipt is stale",
+            check="stale",
+            age_seconds=int(age.total_seconds()),
+            max_age_seconds=int(MAX_RECEIPT_AGE.total_seconds()),
+        )
+    if generated_at > now + MAX_RECEIPT_CLOCK_SKEW:
+        raise _ReceiptLoadError("integrity receipt is future-dated", check="future-dated")
     for group, keys in (
         (receipt.get("identity"), {"project_sha256", "run_sha256", "spec_sha256"}),
         (receipt.get("binding"), {"git_common_dir_sha256", "worktree_sha256", "install_relative_sha256"}),
         (receipt.get("release"), {"kit_version", "release_fingerprint", "manifest_fingerprint", "manifest_inventory_sha256", "release_marker_sha256"}),
     ):
         if not isinstance(group, dict) or set(group) != keys:
-            raise MetadataError("integrity receipt nested schema is invalid")
+            raise _ReceiptLoadError("integrity receipt nested schema is invalid", check="schema")
     digests = [*receipt["identity"].values(), *receipt["binding"].values(), receipt["release"]["release_fingerprint"], receipt["release"]["manifest_fingerprint"], receipt["release"]["manifest_inventory_sha256"], receipt["admission_artifact_sha256"]]
     if receipt["release"]["release_marker_sha256"] is not None:
         digests.append(receipt["release"]["release_marker_sha256"])
     if any(not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None for item in digests):
-        raise MetadataError("integrity receipt contains invalid digest fields")
+        raise _ReceiptLoadError("integrity receipt contains invalid digest fields", check="schema")
     return receipt, body
 
 
@@ -869,6 +907,7 @@ def verify_terminal_integrity(
     differences: list[dict[str, Any]] = []
     observed_inventory_sha = None
     receipt: dict[str, Any] | None = None
+    receipt_check: dict[str, Any] | None = None
     try:
         receipt, receipt_body = _load_receipt(install, receipt_ref, receipt_sha256)
         invocation_id = receipt["invocation_id"]
@@ -919,11 +958,21 @@ def verify_terminal_integrity(
             outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
         else:
             outcome, reason_code = ALLOW, REASON_CLEAN
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         reason_code = REASON_RECEIPT_MISSING
-    except MetadataError:
+        check_name = getattr(exc, "check", None)
+        if check_name is not None:
+            receipt_check = {"check": check_name, "age_seconds": None, "max_age_seconds": None}
+    except MetadataError as exc:
         if reason_code not in {REASON_RECEIPT_MISMATCH, REASON_PAYLOAD_DRIFT}:
             reason_code = REASON_RECEIPT_INVALID
+        check_name = getattr(exc, "check", None)
+        if check_name is not None:
+            receipt_check = {
+                "check": check_name,
+                "age_seconds": getattr(exc, "age_seconds", None),
+                "max_age_seconds": getattr(exc, "max_age_seconds", None),
+            }
     except (OSError, ValueError):
         reason_code = REASON_METADATA_INVALID
 
@@ -941,6 +990,7 @@ def verify_terminal_integrity(
         "receipt_sha256": receipt_result_hash,
         "observed_inventory_sha256": observed_inventory_sha,
         "differences": differences,
+        "receipt_check": receipt_check,
         "ownership": "canonical-release",
         "remediation": "preserve-and-route-canonical-release",
         "privacy": {"relative_paths_only": True, "content_included": False},
@@ -957,7 +1007,11 @@ def verify_terminal_integrity(
     artifact_sha = None
     try:
         out_dir = _safe_artifact_root(install, ACCEPTANCE_DIR)
-        if SAFE_ID.fullmatch(invocation_id) is None:
+        # SPEC-387 R1: a receipt that could not be loaded at all never learned its
+        # real invocation ID, so it must never share the fixed "unknown" path with
+        # any other failed load. `receipt is None` marks exactly that case; the
+        # SAFE_ID check is kept as defense in depth for any other unsafe ID shape.
+        if receipt is None or SAFE_ID.fullmatch(invocation_id) is None:
             invocation_id = uuid.uuid4().hex
             artifact["invocation_id"] = invocation_id
             body = _canonical_json(artifact)
@@ -979,6 +1033,7 @@ def verify_terminal_integrity(
         artifact_path=artifact_ref,
         artifact_sha256=artifact_sha,
         changed_paths=tuple(sorted({str(row["path"]) for row in differences})[:MAX_REPORTED_PATHS]),
+        receipt_check=receipt_check,
     )
 
 

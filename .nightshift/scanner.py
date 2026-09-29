@@ -739,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         # a standalone library by Cortex, whose intentionally narrow copy does
         # not own the Nightshift release/provenance helper graph.
         from managed_payload_provenance import (
+            MARKER as RELEASE_MARKER_FILENAME,
             MetadataError,
             format_guidance,
             guard_staged_install,
@@ -775,12 +776,28 @@ def main(argv: list[str] | None = None) -> int:
             # and only when a receipt vouches for something; otherwise it stays a
             # ``MetadataError`` exactly as before.
             synced_paths = frozenset(sync_receipt_index(install))
+            # SPEC-385: the install's own release-marker.json is a single-line JSON
+            # copy of the whole release manifest, so staging it trips the escalation
+            # thresholds on every fleet release even though its bytes are not
+            # authored change. Exempt it from escalation the same way verified
+            # managed payload is exempt - but only when it is verified: retained_manifest
+            # raises MetadataError unless the marker's embedded release_manifest
+            # recomputes to the marker's own fingerprint/kit_version/schema_version.
+            # A marker that does not verify (hand-edited, or copied from another
+            # release) is left out here and stays fully counted (R2). Note this is
+            # purely the marker's own internal self-consistency, proven once already
+            # by ``guard_staged_install`` above via the same call inside
+            # ``audit_git_install`` - a marker that fails it never reaches this line,
+            # since that earlier call already raised and was caught above.
             try:
-                released_paths = managed_payload_paths(retained_manifest(install))
+                retained = retained_manifest(install)
             except MetadataError:
                 if not synced_paths:
                     raise
-                released_paths = frozenset()
+                retained = None
+            released_paths = managed_payload_paths(retained) if retained is not None else frozenset()
+            if retained is not None:
+                exempt.add(f"{prefix}{RELEASE_MARKER_FILENAME}")
             exempt.update(f"{prefix}{path}" for path in released_paths | synced_paths)
         managed_paths = frozenset(exempt)
 

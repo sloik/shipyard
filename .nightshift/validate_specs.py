@@ -2768,6 +2768,25 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
         except (OSError, ValueError, yaml.YAMLError) as exc:
             results[f"{kit}/config.yaml"] = [f"staged_configuration_invalid: {exc}"]
         corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
+        # SPEC-386 R4: the warning key (the store path) is resolved lazily,
+        # only if some staged spec's status actually changed this commit --
+        # an unrelated commit never spawns the git subprocesses
+        # ``default_db_path_for_specs_dir`` uses, and a failure resolving it
+        # (e.g. an unreadable/missing project root) becomes the same
+        # operator-facing warning rather than crashing an unrelated commit.
+        _status_store_warning_key_holder: list[str] = []
+
+        def _status_store_warning_key() -> str:
+            if not _status_store_warning_key_holder:
+                import status_store as _status_store_module
+                try:
+                    key = str(_status_store_module.default_db_path_for_specs_dir(
+                        repo_root / specs_relative_dir))
+                except Exception as exc:  # noqa: BLE001 - report, never crash the commit
+                    key = f"<SPEC-386 status-store path could not be resolved: {exc}>"
+                _status_store_warning_key_holder.append(key)
+            return _status_store_warning_key_holder[0]
+
         # SPEC-382 R1/R2: lazily-built baseline snapshot/corpus, used only to
         # tell apart a cross-spec finding this commit CAUSED (absent at
         # baseline, present now -- report it) from one that already existed
@@ -2834,6 +2853,48 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                     findings = findings + state_rationale_adoption_findings(
                         fm, body, baseline_fm=base_fm, baseline_body=base_body,
                         is_new=is_new, bytes_changed=bytes_changed)
+                    # SPEC-386 R1/R2/R6: a staged status edit a terminal durable
+                    # row will never honour. Only meaningful when this spec's
+                    # status actually changed vs HEAD -- a brand-new file
+                    # (base_fm is None) has no prior durable expectation to
+                    # conflict with.
+                    old_status = base_fm.get("status") if base_fm else None
+                    new_status = fm.get("status")
+                    spec_id = str(fm.get("id") or "")
+                    if base_fm is not None and spec_id and old_status != new_status and new_status:
+                        # SPEC-386 R1/R4: the durable store lives beside the
+                        # REAL repository (keyed off its git common dir), never
+                        # the scratch index snapshot -- the snapshot is not a
+                        # git repository, so looking it up there would silently
+                        # find nothing and always pass. Never let a lookup
+                        # failure crash an otherwise-unrelated commit -- report
+                        # it as the same R4 warning instead.
+                        try:
+                            message, warning = spec_artifacts.durable_terminal_conflict(
+                                repo_root / specs_relative_dir, spec_id, str(new_status),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - report, never crash the commit
+                            message, warning = None, f"WARNING: SPEC-386 status-store check failed: {exc}"
+                        if warning is not None:
+                            results.setdefault(_status_store_warning_key(), []).append(warning)
+                        if message is not None:
+                            findings.append(message)
+                        if old_status == "blocked" and new_status != "blocked":
+                            from unblock_spec import RESOLVED_BLOCKER_FIELDS
+                            live_fields = [key for key in RESOLVED_BLOCKER_FIELDS if key in fm]
+                            if live_fields:
+                                findings = [
+                                    f for f in findings
+                                    if "resolved blocker field(s) still present" not in f
+                                ]
+                                findings.append(
+                                    f"{spec_id}: status changed from 'blocked' to {new_status!r} but "
+                                    f"live blocker field(s) remain: {', '.join(live_fields)}. "
+                                    "unblock_spec.py finalize() relocates these into "
+                                    "unblock_history[-1].resolved_blocker (keeping the reason as "
+                                    "history) on a real blocked -> ready transition; resolve them "
+                                    "the same way before this commit."
+                                )
                     results[path] = list(dict.fromkeys(finding.replace(str(snapshot), "<index>") for finding in findings))
                     continue
                 # SPEC-382 R1/R2: this path's own bytes are unchanged (not

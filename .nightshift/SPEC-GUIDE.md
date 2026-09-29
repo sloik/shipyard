@@ -721,6 +721,29 @@ retroactively (R7). `validate_specs.py` validates an existing
 `artifacts/index.json` (schema, on-registry types, listed-file
 existence/tracking, orphan files) but never requires one to exist.
 
+### Durable status governs terminal transitions (SPEC-386)
+
+The board renders the durable status store (`status_store`, sqlite), not the
+spec file. A durable row already at `blocked` or `done` is deliberately
+immutable via frontmatter (SPEC-296-008; BUG-313 R2): a stale or hand-edited
+file must never undo a terminal decision, so editing `status:` in the file
+alone cannot move a spec out of a terminal durable row.
+
+The only routes that actually take effect:
+
+- `blocked -> ready` goes through `unblock_spec.py` (`prepare` /
+  `record_attempt` / `finalize` — see SKILL.md's `/nightshift unblock
+  <spec-id>` section), which writes the durable transition as part of a
+  verified recovery.
+- An operator decision may call `status_store.StatusStore.transition_commit_backed`
+  directly with a non-empty reason.
+- `done` is final: no tooling reopens a durable `done` row.
+
+`validate_specs.py --staged` (SPEC-386 R1/R2) and `spec_artifacts.py
+record-transition` (SPEC-386 R3) both refuse a staged/requested status edit
+that a terminal durable row will not honour, naming the spec, both statuses,
+and this section, before anything is written.
+
 ### State rationale: why a spec has its current status (SPEC-357)
 
 `lifecycle.derive_admission()` maps a stored `status` to a generic reason

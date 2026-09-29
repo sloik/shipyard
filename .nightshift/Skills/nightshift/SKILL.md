@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.24.4
+version: 3.24.10
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -1103,6 +1103,21 @@ post-merge validation, or worktree cleanup. A fresh admission is not a valid
 replacement. Deny or indeterminate preserves the worker branch/worktree and
 routes the release-owned path to its canonical path/spec plus whole-kit release;
 the parent never resets, checks out, bulk-copies, deletes, or auto-repairs it.
+
+**The retained receipt is only valid for `MAX_RECEIPT_AGE` (24 h) after
+admission (SPEC-387).** A kickoff run that outlives 24 h will have its
+terminal-integrity check reject the retained receipt as stale — reported as
+indeterminate `NS-MPI-RECEIPT-INVALID` with a `receipt_check.check == "stale"`
+field carrying the observed age and the 24 h limit, never as a duplicate
+contradiction. As with any indeterminate/deny result, the parent preserves
+the worker branch/worktree exactly as above; it must never accept this run's
+result against a freshly obtained admission — that "fresh admission is not a
+valid replacement" rule above applies here too. The remedy is to re-admit
+(a genuinely fresh installation admission and receipt) and re-run the spec
+from that admission, so its own terminal-integrity check falls inside the
+24 h window on its own run. Never regenerate or backdate an admission to
+retroactively cover this run's already-changed bytes — that would defeat the
+receipt's binding to the exact admitted artifact.
 
 Use this command when a board-copied prompt or human explicitly wants a parent
 agent to start and monitor a Nightshift run without doing implementation work.

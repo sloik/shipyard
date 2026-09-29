@@ -44,10 +44,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import re
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -569,11 +573,59 @@ def append_failure_ledger(ledger_path: Path, args, now: str, dry_run: bool) -> N
 
 
 def next_sequence(metrics_dir: Path, date: str) -> str:
-    """Return a zero-padded 3-digit sequence for today's metrics files."""
+    """Return a sequence above every occupied filename for this date."""
     if not metrics_dir.is_dir():
         return "001"
-    n = sum(1 for _ in metrics_dir.glob(f"{date}_*.yaml")) + 1
-    return f"{n:03d}"
+    prefix = re.compile(rf"^{re.escape(date)}_(\d+)_")
+    occupied = (
+        int(match.group(1))
+        for path in metrics_dir.glob(f"{date}_*.yaml")
+        if (match := prefix.match(path.name))
+    )
+    return f"{max(occupied, default=0) + 1:03d}"
+
+
+@contextmanager
+def metrics_write_lock(metrics_dir: Path):
+    """Serialize all emitters on the directory itself, without a stray lockfile."""
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(metrics_dir, os.O_RDONLY)
+    locked = False
+    try:
+        deadline = time.monotonic() + 10
+        while not locked:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("metrics directory writer lock timed out")
+                time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_new_metrics_row(metrics_dir: Path, date: str, spec_id: str, metrics: dict) -> Path:
+    """Publish a new row without ever opening an existing row for writing."""
+    contents = yaml.safe_dump(metrics, sort_keys=False)
+    for _ in range(16):
+        path = metrics_dir / f"{date}_{next_sequence(metrics_dir, date)}_{spec_id}.yaml"
+        created = False
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                created = True
+                stream.write(contents)
+            return path
+        except FileExistsError:
+            continue
+        except OSError:
+            if created:
+                path.unlink(missing_ok=True)
+            raise
+    raise FileExistsError("metrics sequence remained occupied after 16 retries")
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +974,20 @@ def existing_metrics_for_commit(metrics_dir: Path, spec_id: str, commit_hash: st
     return False
 
 
+def existing_metrics_for_run_id(metrics_dir: Path, spec_id: str, run_id: str) -> bool:
+    """An explicit stable run identity is written only once for a spec."""
+    if not metrics_dir.is_dir():
+        return False
+    for path in metrics_dir.glob(f"*_{spec_id}.yaml"):
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict) and data.get("run_id") == run_id:
+            return True
+    return False
+
+
 def metrics_paths_for_commit(metrics_dir: Path, spec_id: str, commit_hash: str) -> list[Path]:
     """Return every metrics row bound to one terminal commit identity."""
     if not metrics_dir.is_dir():
@@ -1111,14 +1177,20 @@ def main_mark_commit(argv) -> int:
             print(f"[dry-run] would append failure-ledger entry for {spec_id}", file=sys.stderr)
         return 0
 
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    seq = next_sequence(metrics_dir, date)
-    out_path = metrics_dir / f"{date}_{seq}_{spec_id}.yaml"
-    out_path.write_text(yaml.safe_dump(metrics, sort_keys=False))
+    try:
+        with metrics_write_lock(metrics_dir):
+            if existing_metrics_for_commit(metrics_dir, spec_id, commit_hash):
+                print(f"[mark-commit] metrics already recorded for {spec_id} @ {commit_hash[:8]}")
+                return 0
+            out_path = write_new_metrics_row(metrics_dir, date, spec_id, metrics)
+            if status != "completed":
+                now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                append_failure_ledger(metrics_dir / "failure-ledger.json", ns, now, dry_run=False)
+    except (OSError, TimeoutError) as exc:
+        print(f"[mark-commit] ERROR: metrics emission failed: {exc}", file=sys.stderr)
+        return 2
     print(f"[mark-commit] wrote {out_path}")
     if status != "completed":
-        now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        append_failure_ledger(metrics_dir / "failure-ledger.json", ns, now, dry_run=False)
         print(f"[mark-commit] appended failure-ledger entry for {spec_id}")
     return 0
 
@@ -1338,18 +1410,23 @@ def main(argv=None) -> int:
         )
 
     metrics_dir = Path(args.metrics_dir)
-    seq = next_sequence(metrics_dir, date)
-    out_path = metrics_dir / f"{date}_{seq}_{args.spec_id}.yaml"
-
     if args.dry_run:
         print(yaml.safe_dump(metrics, sort_keys=False))
+        if args.status != "completed":
+            append_failure_ledger(metrics_dir / "failure-ledger.json", args, now, True)
     else:
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(yaml.safe_dump(metrics, sort_keys=False))
+        try:
+            with metrics_write_lock(metrics_dir):
+                if args.run_id and existing_metrics_for_run_id(metrics_dir, args.spec_id, args.run_id):
+                    print(f"Metrics already recorded for {args.spec_id} run {args.run_id}")
+                    return 0
+                out_path = write_new_metrics_row(metrics_dir, date, args.spec_id, metrics)
+                if args.status != "completed":
+                    append_failure_ledger(metrics_dir / "failure-ledger.json", args, now, False)
+        except (OSError, TimeoutError) as exc:
+            print(f"Error: metrics emission failed: {exc}", file=sys.stderr)
+            return 2
         print(f"Wrote {out_path}")
-
-    if args.status != "completed":
-        append_failure_ledger(metrics_dir / "failure-ledger.json", args, now, args.dry_run)
 
     return 0
 

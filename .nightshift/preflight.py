@@ -550,7 +550,14 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
     command_results = _command_state(commands, repo)
     result["checks"]["commands"] = command_results
     if command_results["test"]["skipped"]:
-        result["blocking_failures"].append("commands.test is not configured; baseline test gate cannot run.")
+        declared = commands.get("test_not_applicable")
+        reason = declared.strip() if isinstance(declared, str) else ""
+        if reason:
+            result["warnings"].append(
+                f"commands.test_not_applicable declared: {reason}; no test command run."
+            )
+        else:
+            result["blocking_failures"].append("commands.test is not configured; baseline test gate cannot run.")
     for key, item in command_results.items():
         if item["skipped"]:
             if not item["blocking"]:

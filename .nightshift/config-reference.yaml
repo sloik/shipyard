@@ -115,7 +115,7 @@ schema_version: "3.2.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.24.4"
+kit_version: "3.24.10"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -311,6 +311,19 @@ commands:
   # Default:  ""
   # Run the full test suite.
   test: "pytest"
+
+  # Type:     string
+  # Required: no
+  # Default:  absent
+  # Declares that this project intentionally has no test command (for example a
+  # markdown-only skill). Only consulted when `test` is empty and no stack supplies
+  # one; a real test command always wins and this key is then ignored. The value is
+  # the REASON and must be a non-empty string: empty, whitespace-only or non-string
+  # values are ignored and the missing-test-command denial stands. Admission then
+  # ALLOWs with warning NS-CFG-TEST-NOT-APPLICABLE carrying the reason, and preflight
+  # records a warning instead of a blocking failure (no test command is run).
+  # project.name and project.language remain required.
+  # test_not_applicable: "markdown-only skill: nothing to test"
 
   # Type:     integer
   # Required: no

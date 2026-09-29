@@ -7,6 +7,144 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.24.10 (2026-09-29)
+
+### Metrics emissions keep every prior run row (SPEC-389)
+
+The explicit and `--mark-commit` emitters allocate a free date sequence across
+all specs while holding a metrics-directory lock. New rows use exclusive file
+creation, so an occupied target is retried or reported without replacing it.
+Stable explicit run IDs and terminal commit identities remain idempotent, and
+blocked-run failure-ledger entries are appended once per new row. No metrics
+schema or correction-path format changes are required.
+
+## 3.24.9 (2026-09-28)
+
+### Extension sandbox no longer blocks system Python when xcode-select points at a full Xcode (SPEC-388)
+
+`MacOSSandboxBackend.launch` builds a `sandbox-exec` profile whose `file-read-data` deny
+rule allowed only `/usr`, `/System`, `/Library/Apple`, `/Library/Developer/CommandLineTools`,
+`/private/var/db/dyld`, `/dev/urandom`, the executable, its ancestors, and the job root.
+`/usr/bin/python3` is an `xcrun` shim that loads `libxcrun.dylib` from the *active*
+developer directory (`xcode-select -p`, the `/var/db/xcode_select_link` symlink). When that
+directory is a full Xcode install (e.g. `/Applications/Xcode-27.2.0-Beta.app/Contents/Developer`)
+rather than the Command Line Tools, the load fell outside every allowed prefix and every
+system-Python extension child died at start with `unable to load libxcrun ... file system
+sandbox blocked open()`.
+
+`launch` now resolves the active developer directory read-only (`os.path.realpath` of
+`/var/db/xcode_select_link` — not `xcode-select -p`, which would honour a `DEVELOPER_DIR`
+the sandboxed child's scrubbed environment never has) and, only when that directory is not
+already covered by an existing rule, adds exactly two narrow read rules: a `subpath` for
+the resolved directory itself, and a `literal` for the one per-user `xcrun_db` cache file
+the shim also needs to avoid a write-then-fork fallback path this sandbox must not open
+(writes and process-fork remain exactly as restrictive as before). If the developer
+directory cannot be resolved, the profile is byte-identical to today's, and a child that
+dies from the resulting read denial now reports a reason naming the denial
+(`sandbox-read-denied`) instead of a bare `failed` — `ExtensionSupervisor._execute` reads
+a bounded (4 KiB) tail of the child's stderr from a private `0600` sink, classifies it
+against a fixed set of denial markers, records the token as `detail`/`reason` on the
+`FAILED` transition and `terminal.json`, and unlinks the sink before returning; the raw
+stderr text is never persisted.
+
+The two live regression tests named in the spec
+(`test_ac6_live_macos_supports_system_python_entrypoint`,
+`test_ac7_ac11_official_route_releases_captured_caller_before_slow_job`) were red on this
+host before the fix and are green after it. Four new tests cover the added rule's
+exactness/narrowness, a live denial of a sibling path just outside the resolved directory,
+byte-identical-profile-on-resolution-failure, and the denied-start reason.
+
+## 3.24.8 (2026-09-28)
+
+### An unloadable integrity receipt is no longer misreported as a duplicate contradiction (SPEC-387)
+
+`managed_payload_provenance.verify_terminal_integrity` kept its `invocation_id` at the
+placeholder `"unknown"` whenever a receipt could not be loaded at all (stale, digest
+mismatch, bad schema, missing, unsafe path). `"unknown"` passed `SAFE_ID`, so every such
+result was written to the fixed path `acceptance/unknown.json`; once that file existed
+from any earlier failed load, every later load failure hit `FileExistsError`, was
+quarantined, and was reported as `NS-MPI-DUPLICATE-CONTRADICTION` — hiding the real
+reason and wrongly suggesting two conflicting results for the same run. `_load_receipt`
+now raises a typed `_ReceiptLoadError`/`_ReceiptMissingError` naming which check failed
+(`stale` — with observed age and the 24 h limit — `future-dated`, `digest-mismatch`,
+`schema`, `missing`, or `unsafe-path`), and `verify_terminal_integrity` treats
+`receipt is None` (the receipt never loaded) rather than the placeholder ID as the
+signal to mint a fresh `uuid4` result ID, exactly like its existing unsafe-ID branch.
+The result now always reports its own load-failure reason
+(`NS-MPI-RECEIPT-INVALID`/`NS-MPI-RECEIPT-MISSING`) and carries the new
+`receipt_check` field (`{check, age_seconds, max_age_seconds}`) in both the acceptance
+artifact JSON and the returned `AcceptanceResult`/`to_dict()`, defaulted to `None` so
+existing consumers and idempotent-replay equality are unaffected. Genuine
+duplicate/contradiction detection and idempotent replay for a successfully loaded
+receipt are unchanged. SKILL.md's `/nightshift kickoff` section now states the 24 h
+receipt lifetime next to the instruction to retain the receipt, and says to re-admit
+and re-run when a kickoff outlives it — never to regenerate admission to cover changed
+bytes. No schema bump, no migration.
+
+## 3.24.7 (2026-09-28)
+
+### Reject a status edit the durable store will not honour (SPEC-386)
+
+The board renders the durable status store (`status_store`, sqlite), not the spec file. A
+durable row at a terminal status (`blocked`/`done`) is deliberately immutable via frontmatter
+(SPEC-296-008; BUG-313 R2), but nothing told an author at commit time that their edit would
+never take effect: `validate_specs.py --staged` (the pre-commit hook's path) never consulted
+the store, and `spec_artifacts.py record-transition` reported success for a transition the
+board would never show.
+
+- `validate_specs.py --staged` now looks up the latest durable row for every staged spec
+  whose `status:` changed vs HEAD; a terminal row that differs from the new file status is a
+  blocking error naming the spec, both statuses, why (SPEC-296-008), and what to do instead
+  (`unblock_spec.py` prepare/record_attempt/finalize, or an operator-authorized
+  `StatusStore.transition_commit_backed` with a reason; `done` is final).
+  A durable row already equal to the new status passes.
+- `spec_artifacts.py record-transition` refuses the same conflict for a terminal `--from`
+  whose durable row is terminal and not already `--to`, writing nothing.
+- A staged `blocked -> <other>` transition that still carries any `RESOLVED_BLOCKER_FIELDS`
+  key (SPEC-355) is now a blocking error, not a warning, naming the live fields and the
+  `unblock_history[-1].resolved_blocker` relocation `unblock_spec.py finalize()` performs.
+  Specs whose status did not change in the commit keep the existing warning.
+- Never blocks an unrelated commit: unchanged status, no durable row, or no status store at
+  all all pass exactly as before; a store that exists but cannot be opened is a warning naming
+  the store path, never a silent pass and never a blocking error.
+- New `SPEC-GUIDE.md` section "Durable status governs terminal transitions (SPEC-386)"
+  documents the rule and the allowed routes.
+
+No migration.
+
+## 3.24.6 (2026-09-28)
+
+### The release marker no longer trips the escalation gate on every fleet release (SPEC-385)
+
+`scanner.py`'s pre-commit escalation gate (SPEC-214) exempted verified managed payload from
+the `diff_risk`/`token_cost` thresholds but never the install's own `release-marker.json` — a
+single-line JSON copy of the whole release manifest, ~787 KB at kit 3.24.4. Staging it added
+hundreds of thousands of estimated tokens per install, so every fleet apply tripped
+`token_cost` and stopped mid-rollout, needing a blanket `NIGHTSHIFT_ESCALATION_SIGNOFF=1` that
+also disabled the gate for everything else the release staged. `scanner.py main()` now adds
+the staged `<prefix>release-marker.json` to the escalation-exempt set, but only when it is
+verified: `retained_manifest(install)` must accept it, meaning its embedded `release_manifest`
+recomputes to the marker's own `fingerprint`/`kit_version`/`schema_version`. A marker that
+does not verify (hand-edited, or copied from another release) is left out and stays fully
+counted toward escalation, exactly as before. Secret scanning of the marker is unaffected —
+the exemption only ever widens the escalation-threshold set, never the PII/secret finding
+scan, and a planted secret in a staged marker still blocks the commit. No schema bump, no
+migration.
+
+## 3.24.5 (2026-09-24)
+
+### Optional declaration for "this project has no tests" (SPEC-384)
+
+Admission (`validate_install.py`) and `preflight.py` used to deny/block permanently for any
+installed code-domain project with an empty `commands.test` and no stack test command, with
+no way to say "there are no tests here on purpose" (e.g. a markdown-only skill). Added an
+optional, additive `commands.test_not_applicable: "<reason>"` config key: a non-empty string
+reason makes `CFG.COMMAND_DOMAIN` pass with a warning-level `NS-CFG-TEST-NOT-APPLICABLE`
+finding carrying the reason (ALLOW), and `preflight.py` records a warning instead of a
+blocking failure. Empty/whitespace/non-string values are ignored and the original denial
+stands; a real `commands.test` always wins over the declaration. No schema bump, no
+migration. `project.name`/`project.language` remain required.
+
 ## 3.24.4 (2026-09-24)
 
 ### Observability classifier covers every managed kit file (SPEC-383)

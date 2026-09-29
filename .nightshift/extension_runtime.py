@@ -485,6 +485,38 @@ def _preexec(limits: Any) -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
 
 
+# Bounded so a flooding child cannot make this read expensive; large enough
+# to hold the sandbox denial line even after other startup chatter.
+_STDERR_CLASSIFY_TAIL_BYTES = 4096
+# Fixed, non-identifying classification tokens only -- never the raw stderr
+# text (R3: name the denial, without persisting child output).
+_SANDBOX_DENIAL_MARKERS = (
+    ("file system sandbox blocked open()", "sandbox-read-denied"),
+    ("Operation not permitted", "sandbox-denied"),
+)
+
+
+def _classify_sandbox_denial(stderr_sink: Path) -> str | None:
+    """Read a bounded tail of a denied child's stderr and name the denial.
+
+    Returns a fixed token, never the raw text. Returns None (bare "failed",
+    today's behaviour) when the sink is missing/unreadable or names nothing
+    recognizable -- this must never raise into the caller's failure path.
+    """
+    try:
+        with open(stderr_sink, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _STDERR_CLASSIFY_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for marker, token in _SANDBOX_DENIAL_MARKERS:
+        if marker in tail:
+            return token
+    return None
+
+
 class ExtensionSupervisor:
     """One real scheduler with bounded queue/concurrency and durable recovery."""
 
@@ -777,20 +809,32 @@ class ExtensionSupervisor:
                 admission.network_endpoint,
             )
             self.spool.transition(job, JobState.RUNNING.value, producer="supervisor")
-            proc = subprocess.Popen(
-                launch.argv,
-                cwd=execution,
-                stdin=subprocess.DEVNULL,
-                # Domain output is the bounded JSON file contract. Raw child
-                # stdout/stderr are discarded so a flood cannot consume parent
-                # memory or enter any public log/projection.
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=launch.env,
-                close_fds=True,
-                start_new_session=False,
-                preexec_fn=lambda: _preexec(admission.limits),  # noqa: PLW1509 -- child rlimits before exec
+            # Domain output is the bounded JSON file contract; raw child
+            # stdout/stderr never enter any public log/projection. stderr
+            # still goes to a private 0600 sink under the job (not the
+            # sealed execution dir a hostile child controls) so a denied
+            # start can be classified (R3) instead of a bare "failed". Only
+            # a bounded tail is ever read, and the file is unlinked before
+            # this method returns on every path -- the flood/no-log
+            # guarantee is unchanged.
+            stderr_sink = job / ".stderr.sink"
+            stderr_fd = os.open(
+                stderr_sink, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
             )
+            try:
+                proc = subprocess.Popen(
+                    launch.argv,
+                    cwd=execution,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_fd,
+                    env=launch.env,
+                    close_fds=True,
+                    start_new_session=False,
+                    preexec_fn=lambda: _preexec(admission.limits),  # noqa: PLW1509 -- child rlimits before exec
+                )
+            finally:
+                os.close(stderr_fd)
             with self._lock:
                 self._active[job.name] = proc
             process_identity = _process_identity(proc.pid)
@@ -810,6 +854,7 @@ class ExtensionSupervisor:
                 while True:
                     if self._must_cancel(event_name, admission):
                         self._terminate_group(proc)
+                        stderr_sink.unlink(missing_ok=True)
                         return self._cancel(job)
                     try:
                         proc.wait(timeout=0.05)
@@ -828,6 +873,7 @@ class ExtensionSupervisor:
                                     "timestamp": now(),
                                 },
                             )
+                            stderr_sink.unlink(missing_ok=True)
                             return JobState.TIMED_OUT.value
                         if (
                             sys.platform == "darwin"
@@ -849,6 +895,7 @@ class ExtensionSupervisor:
                                     "timestamp": now(),
                                 },
                             )
+                            stderr_sink.unlink(missing_ok=True)
                             return JobState.FAILED.value
             finally:
                 with self._lock:
@@ -858,11 +905,23 @@ class ExtensionSupervisor:
             self._reap_descendants(proc.pid)
             if proc.returncode != 0:
                 state = JobState.FAILED.value
-                self.spool.transition(job, state, producer="supervisor")
-                atomic_json(
-                    job / "terminal.json",
-                    {"schema_version": "1.0.0", "state": state, "timestamp": now()},
+                # R3: a denied start (e.g. the sandbox read-denial this SPEC
+                # widens around) must report why, not a bare "failed". Only a
+                # bounded tail is ever read and the raw text is never
+                # persisted -- only a fixed classification token is.
+                detail = _classify_sandbox_denial(stderr_sink)
+                stderr_sink.unlink(missing_ok=True)
+                self.spool.transition(
+                    job, state, producer="supervisor", detail=detail
                 )
+                terminal_record = {
+                    "schema_version": "1.0.0",
+                    "state": state,
+                    "timestamp": now(),
+                }
+                if detail is not None:
+                    terminal_record["reason"] = detail
+                atomic_json(job / "terminal.json", terminal_record)
                 return state
             # run.completed can become durable after the last wait-loop check
             # but before output sealing. Only background.continue work and the

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,82 @@ def reports_root_for_spec_path(spec_path: Path) -> Path:
     specs_dir = Path(spec_path).resolve().parent
     root = specs_dir.parent if specs_dir.name == "specs" else specs_dir
     return root / "reports"
+
+
+# ---------------------------------------------------------------------------
+# SPEC-386: a status edit a terminal durable row will never honour is
+# rejected at commit time (validate_specs.py --staged, R1/R2) and at
+# ``record-transition`` (R3), with one shared message so operators see the
+# same wording regardless of which surface catches it. Lives here (not
+# status_store.py) because validate_specs.py already imports this module.
+# ---------------------------------------------------------------------------
+
+TERMINAL_STATUS_UNBLOCK_DOC = (
+    'SKILL.md § "`/nightshift unblock <spec-id>` — Evidence-backed Recovery"'
+)
+TERMINAL_STATUS_LIFECYCLE_DOC = (
+    'SPEC-GUIDE.md § "Durable status governs terminal transitions (SPEC-386)"'
+)
+
+
+def terminal_status_conflict_message(spec_id: str, file_status: str, durable_status: str) -> str:
+    """SPEC-386 R2: the spec ID, both statuses, why (SPEC-296-008), and what
+    to do instead (``unblock_spec.py`` or an operator-authorized
+    ``transition_commit_backed``, ``done`` is final), pointing at
+    documentation sections that exist in the kit.
+    """
+    return (
+        f"{spec_id}: frontmatter status {file_status!r} will not take effect -- "
+        f"the durable status store already has this spec at {durable_status!r}, "
+        "a terminal status that is immutable via frontmatter (SPEC-296-008; BUG-313 R2). "
+        "To move a durable 'blocked' spec forward, use unblock_spec.py "
+        f"(prepare / record_attempt / finalize -- {TERMINAL_STATUS_UNBLOCK_DOC}); "
+        "for an explicit operator decision, call StatusStore.transition_commit_backed "
+        f"with a reason ({TERMINAL_STATUS_LIFECYCLE_DOC}). "
+        "'done' is final and cannot be reopened by any frontmatter edit."
+    )
+
+
+def durable_terminal_conflict(
+    specs_dir: Path, spec_id: str, new_status: str,
+) -> tuple[str | None, str | None]:
+    """SPEC-386 R1/R3: look up ``spec_id``'s latest durable row under
+    ``specs_dir`` and decide whether ``new_status`` conflicts with it.
+
+    Returns ``(message, warning)``:
+
+    - ``(None, None)`` -- no conflict (no store, no durable row, durable row
+      already equals ``new_status``, or durable row is not terminal).
+    - ``(message, None)`` -- a blocking conflict; ``message`` is the R2 text.
+    - ``(None, warning)`` -- the store exists but could not be read (R4): a
+      warning naming the store path, never a silent pass, never a block.
+    """
+    import status_store
+
+    db_path = status_store.default_db_path_for_specs_dir(Path(specs_dir))
+    if not db_path.exists():
+        return None, None  # R4: no store at all -- pass exactly as today
+    if not db_path.is_file():
+        return None, f"WARNING: SPEC-386 status-store check could not open {db_path}: not a regular file"
+    # ``read_durable_states_readonly`` fails open: it returns ``{}`` both when
+    # the store cannot be opened/read AND would return ``{}`` for a request
+    # naming no spec ids, but never for a non-empty request against a real,
+    # openable file -- a successful read always seeds every requested id with
+    # at least ``None`` before querying. An empty result here therefore means
+    # the existing file could not be opened, which R4 requires as a warning,
+    # never a silent pass.
+    states = status_store.read_durable_states_readonly(db_path, [spec_id])
+    if not states:
+        return None, f"WARNING: SPEC-386 status-store check could not open {db_path}"
+    state = states.get(spec_id)
+    if state is None:
+        return None, None
+    durable_status = str(state.get("status") or "")
+    if not durable_status or durable_status not in status_store.TERMINAL_DURABLE_STATUSES:
+        return None, None
+    if durable_status == new_status:
+        return None, None
+    return terminal_status_conflict_message(spec_id, new_status, durable_status), None
 
 
 def artifacts_dir(reports_root: Path, spec_id: str) -> Path:
@@ -1448,6 +1525,22 @@ def main(argv: list[str] | None = None) -> int:
     if not spec_id:
         print(json.dumps({"ok": False, "error": f"spec id missing from {spec_path.name}"}))
         return 1
+
+    # SPEC-386 R3: a `--from` that is itself terminal and whose durable row is
+    # terminal and not already `--to` will never take effect on the board --
+    # refuse before writing anything (no artifact, no `## State rationale`
+    # change), with the same message R1/R2 use at commit time. R4: an
+    # unopenable store is a warning, never a blocking error here either --
+    # print it to stderr and let the transition proceed, matching the
+    # commit-time check.
+    import status_store as _status_store_module
+    if ns.from_status in _status_store_module.TERMINAL_DURABLE_STATUSES:
+        message, warning = durable_terminal_conflict(spec_path.parent, spec_id, ns.to_status)
+        if message is not None:
+            print(json.dumps({"ok": False, "error": message}))
+            return 1
+        if warning is not None:
+            print(warning, file=sys.stderr)
 
     reason = (ns.reason or "").strip()
     if is_judgment_transition(ns.from_status, ns.to_status) and not reason:

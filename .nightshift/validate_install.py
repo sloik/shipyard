@@ -823,7 +823,14 @@ def evaluate_config(ctx: ValidationContext) -> tuple[list[ConfigFinding], dict[s
             isinstance(v, dict) and str(v.get("commands", {}).get("test", "") or "").strip()
             for v in stacks.values()
         )
-        if not flat_test and not (stacks and stack_tests_ok):
+        declared = commands.get("test_not_applicable")
+        declared_reason = declared.strip() if isinstance(declared, str) else ""
+        if not flat_test and not (stacks and stack_tests_ok) and declared_reason:
+            findings.append(ConfigFinding("commands.test", "pass", "NS-CFG-OK", "validator", ""))
+            findings.append(ConfigFinding(
+                "commands.test_not_applicable", "warning", "NS-CFG-TEST-NOT-APPLICABLE",
+                "project-maintainer", f"no test command by declaration: {declared_reason}"))
+        elif not flat_test and not (stacks and stack_tests_ok):
             findings.append(ConfigFinding("commands.test", "error", "NS-CFG-TEST-MISSING", "operator",
                                            "configure commands.test or every stack's test command"))
         else:
