@@ -15,7 +15,9 @@ For ``classify_write``, in order, first match wins:
    before anything else. A destination whose basename contains ``:`` or a
    newline, or starts/ends with whitespace, is never writable.
 2. ``spec_wrong_home``   — universal. A new ``SPEC-*.md`` / ``NFR-*.md`` /
-   ``*-QUESTIONS-*.md`` path outside a known specs directory is denied
+   ``*-QUESTIONS-*.md`` path (and, since BUG-341-002, a ``BUG-<digits>*.md``
+   bug spec, except under a ``reports`` directory) outside a known specs
+   directory is denied
    regardless of ``write`` and regardless of whether a spec is active,
    UNLESS the path is the active spec's own file (``spec_self`` wins).
 3. (scope is ``None``: return ``no_active_spec`` — allowed — here.)
@@ -93,6 +95,11 @@ _IMPLICIT_KIT_GLOBS = (
 _CANONICAL_PAYLOAD_EXCEPTION_FILES = frozenset({"CHANGELOG.md", "release-manifest.json"})
 
 _SPEC_HOME_RE = re.compile(r"^(SPEC-.+|NFR-.+|.+-QUESTIONS-.+)\.md$")
+# BUG-341-002: a bug spec (`BUG-<digits>[-suffix].md`, sub-IDs included) is
+# spec-shaped too. BUG only -- not EVAL or any other prefix. Kept separate from
+# `_SPEC_HOME_RE` because bug-named REPORT artifacts are legitimate under a
+# `reports` directory and that carve-out must not reach the existing patterns.
+_BUG_SPEC_HOME_RE = re.compile(r"^BUG-\d+(?:-.+)?\.md$")
 _HEARTBEAT_RE = re.compile(r"(?:^|/)reports/_wip/orchestrator-progress-(?P<spec_id>.+)\.md$")
 # SPEC-301 R1/R2: this only matches the manually-documented SKILL.md Step 5
 # convention (`git worktree add -b nightshift/<SPEC-ID>-<run-id>`), used when
@@ -581,24 +588,45 @@ def _discover_specs_dirs(project_root: Path) -> tuple[set[str], str | None]:
     dirs: set[str] = set()
     try:
         if doctor_file.is_file():
-            spec = importlib.util.spec_from_file_location("_scope_guard_doctor", doctor_file)
+            module_name = "_scope_guard_doctor"
+            spec = importlib.util.spec_from_file_location(module_name, doctor_file)
             if spec and spec.loader:
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                for project in module.find_projects([project_root]):
+                # BUG-341-001: doctor.py defines @dataclass classes, which look
+                # themselves up in sys.modules while being created (Python
+                # 3.14), so the module must be registered for the duration of
+                # exec_module. Restore sys.modules exactly as found afterwards,
+                # on success and on failure.
+                missing = object()
+                previous = sys.modules.get(module_name, missing)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                    projects = list(module.find_projects([project_root]))
+                finally:
+                    if previous is missing:
+                        sys.modules.pop(module_name, None)
+                    else:
+                        sys.modules[module_name] = previous
+                for project in projects:
                     candidate = project / ".nightshift" / "specs"
                     if candidate.is_dir():
                         try:
                             dirs.add(_norm(str(candidate.relative_to(project_root))))
                         except ValueError:
                             pass
-    except Exception:
+    except Exception as exc:
         # Dynamic-import-based fleet discovery must never raise, but if it
         # does (e.g. a doctor.py/interpreter interaction), the always-safe
         # hardcoded fallback below must still run rather than the rule
         # falling open here (BUG-020). Only fall open if that fallback also
-        # finds nothing usable.
-        pass
+        # finds nothing usable. BUG-341-001: the failure is reported on stderr
+        # (class and message); the return value is unchanged.
+        print(
+            f"scope_guard: doctor.py fleet discovery failed ({type(exc).__name__}: {exc}); "
+            "using hardcoded specs directories",
+            file=sys.stderr,
+        )
     for fallback in (project_root / ".nightshift" / "specs", project_root / "canonical" / "specs"):
         if fallback.is_dir():
             dirs.add(_norm(str(fallback.relative_to(project_root))))
@@ -722,7 +750,11 @@ def _is_spec_home_violation(
 ) -> tuple[bool, str | None]:
     """Return ``(violation, warning)`` for the universal spec-home rule."""
     basename = _basename(path_str)
-    if not _SPEC_HOME_RE.match(basename):
+    # BUG-341-002: only a name that is spec-shaped through the BUG branch alone
+    # (a `BUG-341-QUESTIONS-001.md` also matches `_SPEC_HOME_RE` and stays under
+    # the existing rule, with no reports carve-out) may take that carve-out.
+    bug_only = bool(_BUG_SPEC_HOME_RE.match(basename)) and not _SPEC_HOME_RE.match(basename)
+    if not bug_only and not _SPEC_HOME_RE.match(basename):
         return False, None
     # BUG-321: the kit's own manifest-declared payload is never a misplaced
     # spec, wherever inside the kit it sits. Keyed on manifest membership, so
@@ -742,8 +774,25 @@ def _is_spec_home_violation(
     specs_dirs, warning = _known_specs_dirs(project_root, known_specs_dirs)
     if not specs_dirs:
         return False, warning
-    parts = _norm(path_str).rsplit("/", 1)
+    # BUG-341: `specs_dirs` are project-root-RELATIVE strings, so the path's
+    # parent must be compared in the same form. Claude Code's Write/Edit tools
+    # supply an ABSOLUTE `file_path` (the git guard supplies project-relative
+    # ones), and the raw parent of `/proj/.nightshift/specs/SPEC-3-x.md` can
+    # never equal `.nightshift/specs`. Normalise exactly as the rest of this
+    # module does (`_project_relative`: resolve both sides, so a symlinked
+    # project root and `..` segments are handled). A path outside the project
+    # root has no relative form and keeps its raw parent, which matches no
+    # known directory, so it is still a violation.
+    relative = _project_relative(path_str, project_root)
+    parts = (relative if relative is not None else _norm(path_str)).rsplit("/", 1)
     parent_dir = parts[0] if len(parts) == 2 else ""
+    # BUG-341-002 R3: a bug-named report artifact (for example
+    # `.nightshift/reports/BUG-024-x.md` or `reports/_wip/BUG-025-x.md`) is not a
+    # misplaced spec. Decided on the project-relative directory only, so a
+    # `reports` ancestor above the project root never exempts anything and a
+    # path outside the project (no relative form) is still denied.
+    if bug_only and relative is not None and "reports" in parent_dir.split("/"):
+        return False, None
     return parent_dir not in specs_dirs, None
 
 

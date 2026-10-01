@@ -7,6 +7,34 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.24.12 (2026-09-30)
+
+### Fleet specs-directory discovery now loads `doctor.py` and reports a failed load (BUG-341-001)
+
+`scope_guard._discover_specs_dirs` executed the repository's `doctor.py` without registering the
+module in `sys.modules`, so its `@dataclass` classes raised `AttributeError` on Python 3.14 and
+the blanket `except` (BUG-020) silently reduced discovery to the two hardcoded directories. The
+module is now registered for the duration of `exec_module` and `sys.modules` is restored on both
+the success and failure paths, so discovery through `find_projects` works where `doctor.py` is
+present. If loading or running `doctor.py` still raises, the hardcoded fallback still applies,
+nothing raises, the return value is unchanged, and one diagnostic line naming the exception class
+and message is written to stderr. No config, protocol, or metrics schema changes.
+
+Also in 3.24.12 (BUG-341-002): `BUG-<digits>*.md` bug specs are now spec-shaped for the spec-home rule (BUG only, not EVAL), so a misplaced one is denied `spec_wrong_home`, while bug-named report artifacts under a `reports` directory stay allowed.
+
+## 3.24.11 (2026-09-30)
+
+### Write-scope spec-home rule no longer denies absolute-path writes into an install's own specs directory (BUG-341)
+
+`scope_guard._is_spec_home_violation` compared the raw parent directory of a spec-shaped path
+(`SPEC-*`, `NFR-*`, `*-QUESTIONS-*`) against project-root-relative known specs directories. The
+Claude Code `Write` tool supplies an absolute `file_path`, which could never match, so creating a
+spec in `.nightshift/specs/` was denied `spec_wrong_home` while the relative form was allowed. The
+parent is now taken from the same project-relative normalisation used elsewhere in the module
+(symlinked roots and `..` resolved). Spec-shaped paths outside every known specs directory, or
+outside the project root, are still denied in both path forms. No config, protocol, or metrics
+schema changes.
+
 ## 3.24.10 (2026-09-29)
 
 ### Metrics emissions keep every prior run row (SPEC-389)
