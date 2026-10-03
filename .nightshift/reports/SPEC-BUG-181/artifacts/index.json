@@ -36,6 +36,13 @@
       "actor": "coordinator",
       "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run kickoff-20261003-bug181",
       "path": "artifacts/20261003T154754Z-status-transition-ready-in-progress-mechanical-transition-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T17:33:46Z",
+      "actor": "coordinator",
+      "summary": "in_progress -> done: mechanical transition to 'done' via run kickoff-20261003-bug181",
+      "path": "artifacts/20261003T173346Z-status-transition-in-progress-done-mechanical-transition-t.json"
     }
   ]
 }

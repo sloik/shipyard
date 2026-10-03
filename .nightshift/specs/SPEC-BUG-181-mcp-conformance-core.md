@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: in_progress
+status: done
 parent: SPEC-BUG-180
 after: []
 nfrs:
@@ -149,10 +149,10 @@ a view derived from those bytes. Validation still delegates to
 
 ```yaml
 schema_version: 1
-status: in_progress
-reason: mechanical transition to 'in_progress' via run kickoff-20261003-bug181
+status: done
+reason: mechanical transition to 'done' via run kickoff-20261003-bug181
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261003T154754Z-status-transition-ready-in-progress-mechanical-transition-.json
+record: artifacts/20261003T173346Z-status-transition-in-progress-done-mechanical-transition-t.json
 ```
