@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-179",
+  "type": "status-transition",
+  "created": "2026-10-03T15:30:27Z",
+  "actor": "coordinator",
+  "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run coord-20261003-bug179",
+  "from": "ready",
+  "to": "in_progress",
+  "reason": "mechanical transition to 'in_progress' via run coord-20261003-bug179",
+  "evidence": [],
+  "run_id": "coord-20261003-bug179",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "in_progress",
+    "reason": "mechanical transition to 'in_progress' via run coord-20261003-bug179",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

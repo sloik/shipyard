@@ -1,0 +1,30 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-184",
+  "type": "decision",
+  "created": "2026-10-03T15:32:24Z",
+  "actor": "coordinator",
+  "summary": "state rationale authored: draft -- Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for pr",
+  "decision": {
+    "trigger": "state_rationale_authoring",
+    "current_state": "draft",
+    "candidate_states": [
+      "draft"
+    ],
+    "ambiguity_reason": "Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.",
+    "static_findings": [],
+    "resolution": "Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.",
+    "rationale": "Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.",
+    "decision_authority": "coordinator",
+    "reusable_rule_gap": false
+  },
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "draft",
+    "reason": "Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.",
+    "reconsider_when": "SPEC-BUG-180 is promoted and every spec this one depends on is done, or the plan is replanned.",
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

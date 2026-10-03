@@ -1,19 +1,26 @@
 ---
-id: SPEC-BUG-173
+id: SPEC-BUG-182
 template_version: 7
 priority: 1
 layer: 1
 type: refactor
 status: draft
-parent: SPEC-BUG-171
-after: [SPEC-BUG-172]
-nfrs: [SPEC-NFR-001]
+parent: SPEC-BUG-180
+after:
+- SPEC-BUG-181
+nfrs:
+- SPEC-NFR-001
 created: 2026-08-12
 stack: go
-devkb_required: ["go.md", "architecture.md", "testing.md"]
+devkb_required:
+- go.md
+- architecture.md
+- testing.md
 ---
 
 # Negotiate modern and legacy child MCP eras
+
+> Former ID: SPEC-BUG-173 (renumbered by SPEC-BUG-179 on 2026-10-03 to remove a duplicate ID).
 
 ## Problem
 
@@ -37,3 +44,15 @@ devkb_required: ["go.md", "architecture.md", "testing.md"]
 
 - External client-facing bridge/HTTP behavior.
 
+
+## State rationale
+
+```yaml
+schema_version: 1
+status: draft
+reason: Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.
+reconsider_when: SPEC-BUG-180 is promoted and every spec this one depends on is done, or the plan is replanned.
+evidence: []
+provenance: authored
+record: artifacts/20261003T153224Z-decision-state-rationale-authored-draft-drafted-2.json
+```

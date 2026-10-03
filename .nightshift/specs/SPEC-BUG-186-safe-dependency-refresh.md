@@ -1,19 +1,30 @@
 ---
-id: SPEC-BUG-177
+id: SPEC-BUG-186
 template_version: 7
 priority: 2
 layer: 2
 type: refactor
 status: draft
-parent: SPEC-BUG-171
-after: [SPEC-BUG-172, SPEC-BUG-173, SPEC-BUG-174, SPEC-BUG-175, SPEC-BUG-176]
-nfrs: [SPEC-NFR-001]
+parent: SPEC-BUG-180
+after:
+- SPEC-BUG-181
+- SPEC-BUG-182
+- SPEC-BUG-183
+- SPEC-BUG-184
+- SPEC-BUG-185
+nfrs:
+- SPEC-NFR-001
 created: 2026-08-12
 stack: go
-devkb_required: ["go.md", "testing.md", "security.md"]
+devkb_required:
+- go.md
+- testing.md
+- security.md
 ---
 
 # Refresh safe Shipyard dependencies after MCP migration
+
+> Former ID: SPEC-BUG-177 (renumbered by SPEC-BUG-179 on 2026-10-03 to remove a duplicate ID).
 
 ## Problem
 
@@ -34,5 +45,17 @@ Protocol work will touch core runtime dependencies. Mixing unrelated updates obs
 
 ## Out of Scope
 
-- Wails beta (SPEC-BUG-178) and child Python/Go runtime updates.
+- Wails beta (SPEC-BUG-187) and child Python/Go runtime updates.
 
+
+## State rationale
+
+```yaml
+schema_version: 1
+status: draft
+reason: Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for promotion.
+reconsider_when: SPEC-BUG-180 is promoted and every spec this one depends on is done, or the plan is replanned.
+evidence: []
+provenance: authored
+record: artifacts/20261003T153225Z-decision-state-rationale-authored-draft-drafted-2.json
+```

@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-179",
+  "type": "status-transition",
+  "created": "2026-10-03T15:30:27Z",
+  "actor": "coordinator",
+  "summary": "draft -> ready: Mechanical, fully specified rename; user asked for it to be done now.",
+  "from": "draft",
+  "to": "ready",
+  "reason": "Mechanical, fully specified rename; user asked for it to be done now.",
+  "evidence": [],
+  "run_id": "coord-20261003-bug179",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "ready",
+    "reason": "Mechanical, fully specified rename; user asked for it to be done now.",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

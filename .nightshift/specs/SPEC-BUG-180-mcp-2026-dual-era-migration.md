@@ -1,5 +1,5 @@
 ---
-id: SPEC-BUG-171
+id: SPEC-BUG-180
 template_version: 7
 priority: 1
 layer: 0
@@ -8,10 +8,12 @@ status: planned
 after: []
 nfrs: [SPEC-NFR-001]
 created: 2026-08-12
-children: [SPEC-BUG-172, SPEC-BUG-173, SPEC-BUG-174, SPEC-BUG-175, SPEC-BUG-176, SPEC-BUG-177, SPEC-BUG-178]
+children: [SPEC-BUG-181, SPEC-BUG-182, SPEC-BUG-183, SPEC-BUG-184, SPEC-BUG-185, SPEC-BUG-186, SPEC-BUG-187]
 ---
 
 # Shipyard dual-era MCP 2026-07-28 migration
+
+> Former ID: SPEC-BUG-171 (renumbered by SPEC-BUG-179 on 2026-10-03 to remove a duplicate ID).
 
 ## Problem
 
@@ -37,7 +39,7 @@ Target modern `2026-07-28` plus legacy `2025-11-25` on every boundary where the 
 
 ## Rollout
 
-SPEC-BUG-172 → 173 → 174/175 → 176 → 177 → optional 178 → rebuild/sign → isolated live smoke → atomic launchd deploy.
+SPEC-BUG-181 → 173 → 174/175 → 176 → 177 → optional 178 → rebuild/sign → isolated live smoke → atomic launchd deploy.
 
 ## Out of Scope
 
