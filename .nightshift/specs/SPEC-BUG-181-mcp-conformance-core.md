@@ -57,7 +57,7 @@ The gap suite (R3) must name each of these by ID:
 
 ## Requirements
 
-- [ ] R1: Adopt the official Go SDK `github.com/modelcontextprotocol/go-sdk`
+- [x] R1: Adopt the official Go SDK `github.com/modelcontextprotocol/go-sdk`
   v1.8.0 or later for protocol types and version negotiation. Where a custom
   type is kept at the capture boundary, document why in the spec's resolution.
   (v1.8.0 supports `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` and
@@ -119,6 +119,24 @@ The gap suite (R3) must name each of these by ID:
   to SPEC-BUG-182…185.
 - Upgrading `markitdown-mcp` or deciding on the Slack fork (SPEC-BUG-180 R4).
 
+
+## Resolution — 2026-10-03
+
+R1: the official Go SDK (`github.com/modelcontextprotocol/go-sdk` v1.8.0)
+supplies the protocol versions, `_meta` keys, error codes and JSON-RPC
+envelope decoding. It also supplies the fixture servers and clients.
+
+One custom type is kept at the capture boundary: `mcpcore.Envelope` in
+`internal/mcpcore/envelope.go`. Capture must stay byte-identical to what was
+received (R5), and the SDK's decoded `jsonrpc.Message` cannot guarantee that:
+
+- it decodes numeric IDs through `float64`, so an integer above 2^53 loses precision;
+- it is re-encoded on output;
+- it carries no HTTP headers.
+
+`Envelope` keeps a private copy of the raw bytes, a clone of the headers, and
+a view derived from those bytes. Validation still delegates to
+`jsonrpc.DecodeMessage`. Full rationale: `docs/adr/0005-mcp-go-sdk-adoption.md`.
 
 ## Scope Amendments
 
