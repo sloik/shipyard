@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T15:55:59Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose",
+      "path": "artifacts/20261003T155559Z-decision-state-rationale-authored-draft-authored-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:55:59Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: User chose deletion on 2026-10-03; fully specified, mechanical removal.",
+      "path": "artifacts/20261003T155559Z-status-transition-draft-ready-user-chose-deletion-on-2026-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:56:01Z",
+      "actor": "coordinator",
+      "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run coord-20261003-bug156-001",
+      "path": "artifacts/20261003T155601Z-status-transition-ready-in-progress-mechanical-transition-.json"
+    }
+  ]
+}
