@@ -39,7 +39,7 @@ Target modern `2026-07-28` plus legacy `2025-11-25` on every boundary where the 
 
 ## Rollout
 
-SPEC-BUG-181 → 173 → 174/175 → 176 → 177 → optional 178 → rebuild/sign → isolated live smoke → atomic launchd deploy.
+SPEC-BUG-181 → 182 → 183/184 → 185 → 186 → optional 187 → rebuild/sign → isolated live smoke → atomic launchd deploy.
 
 ## Out of Scope
 
