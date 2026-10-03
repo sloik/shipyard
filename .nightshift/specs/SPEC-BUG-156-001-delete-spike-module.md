@@ -4,7 +4,7 @@ template_version: 12
 priority: 2
 layer: 1
 type: bugfix
-status: done
+status: in_progress
 parent: SPEC-BUG-156
 after:
 - SPEC-BUG-156
@@ -82,7 +82,9 @@ PR that the `dependency-review` gate correctly rejects.
 - [x] AC3: `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`
   pass, and `renovate.json` is valid JSON.
 - [x] AC4: The PR's `dependency-review` check passes.
-- [x] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
+- [ ] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
+  (Not met as written: #39 closed linking #41; #40 was merged by the repo owner before it
+  could be closed. Pending the owner's decision on an AC amendment.)
 
 ## Context
 
@@ -101,10 +103,10 @@ PR that the `dependency-review` gate correctly rejects.
 
 ```yaml
 schema_version: 1
-status: done
-reason: mechanical transition to 'done' via run coord-20261003-bug156-001
+status: in_progress
+reason: 'AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owner''s AC-amendment decision.'
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261003T160744Z-status-transition-in-progress-done-mechanical-transition-t.json
+record: artifacts/20261003T174221Z-status-transition-done-in-progress-ac5-is-not-met-as-writt.json
 ```

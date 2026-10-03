@@ -29,6 +29,13 @@
       "actor": "coordinator",
       "summary": "in_progress -> done: mechanical transition to 'done' via run coord-20261003-bug156-001",
       "path": "artifacts/20261003T160744Z-status-transition-in-progress-done-mechanical-transition-t.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T17:42:21Z",
+      "actor": "coordinator",
+      "summary": "done -> in_progress: AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owne",
+      "path": "artifacts/20261003T174221Z-status-transition-done-in-progress-ac5-is-not-met-as-writt.json"
     }
   ]
 }
