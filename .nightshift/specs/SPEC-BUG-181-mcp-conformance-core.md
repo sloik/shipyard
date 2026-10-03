@@ -27,6 +27,7 @@ scope:
   - go.mod
   - go.sum
   - Makefile
+  - .nightshift/coverage-baseline.json
 ---
 
 # MCP 2026-07-28 conformance fixtures and compatibility core
