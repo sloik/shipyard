@@ -4,7 +4,7 @@ template_version: 7
 priority: 1
 layer: 0
 type: refactor
-status: ready
+status: in_progress
 parent: SPEC-BUG-180
 after: []
 nfrs:
@@ -124,10 +124,10 @@ The gap suite (R3) must name each of these by ID:
 
 ```yaml
 schema_version: 1
-status: ready
-reason: 'Reworked 2026-10-03: numbered R1-R6 mapped to AC1-AC6, measured gap list G1-G7, Context and write scope added; SDK and conformance-CLI premises verified against primary sources. Parent SPEC-BUG-180 is a type:main tracker that stays planned, so the earlier ''wait for 180'' condition no longer applies.'
+status: in_progress
+reason: mechanical transition to 'in_progress' via run kickoff-20261003-bug181
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261003T154629Z-status-transition-draft-ready-reworked-2026-10-03-numbered.json
+record: artifacts/20261003T154754Z-status-transition-ready-in-progress-mechanical-transition-.json
 ```

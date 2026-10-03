@@ -29,6 +29,13 @@
       "actor": "coordinator",
       "summary": "validation performed for promotion to ready",
       "path": "artifacts/20261003T154629Z-validation-evidence-validation-performed-for-promotion-to-re.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:47:54Z",
+      "actor": "coordinator",
+      "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run kickoff-20261003-bug181",
+      "path": "artifacts/20261003T154754Z-status-transition-ready-in-progress-mechanical-transition-.json"
     }
   ]
 }
