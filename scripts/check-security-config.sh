@@ -27,7 +27,14 @@ if rg -n --glob '*.go' '#nosec' .; then
 fi
 
 rg -q 'helpers:pinGitHubActionDigests' renovate.json || fail "Renovate digest updates are not enabled"
-rg -q 'github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.117' .github/workflows/desktop.yml || fail "desktop Wails CLI must match go.mod"
+# The desktop build installs the wails3 CLI separately from the Go module, so
+# a library-only bump can leave them on different releases. Compare the pin
+# with go.mod instead of a hard-coded version.
+wails_version=$(awk '$1 == "github.com/wailsapp/wails/v3" { print $2; exit }' go.mod)
+[ -n "$wails_version" ] || fail "go.mod does not require github.com/wailsapp/wails/v3"
+wails_version_re=$(printf '%s' "$wails_version" | sed 's/[.]/\\./g')
+rg -q "github\.com/wailsapp/wails/v3/cmd/wails3@${wails_version_re}(\s|$)" .github/workflows/desktop.yml \
+  || fail "desktop Wails CLI must match go.mod (${wails_version})"
 
 for workflow in .github/workflows/*.yml; do
   rg -q '^permissions:$|^    permissions:$' "$workflow" || fail "$workflow has no explicit permissions"

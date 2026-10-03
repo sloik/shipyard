@@ -19,7 +19,7 @@ jobs:
           go-version: "1.26"
 
       - name: Install Wails v3
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.117
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.27
 
       - name: Build desktop binary
         run: wails3 task build

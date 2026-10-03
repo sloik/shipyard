@@ -26,6 +26,20 @@ func readRepoFile(t *testing.T, rel string) string {
 	return string(data)
 }
 
+// goModWailsVersion returns the github.com/wailsapp/wails/v3 version required
+// in go.mod.
+func goModWailsVersion(t *testing.T) string {
+	t.Helper()
+	for _, line := range strings.Split(readRepoFile(t, "go.mod"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "github.com/wailsapp/wails/v3" {
+			return fields[1]
+		}
+	}
+	t.Fatal("go.mod does not require github.com/wailsapp/wails/v3")
+	return ""
+}
+
 func TestSPECBUG130_WailsV3PackagingTasks(t *testing.T) {
 	taskfile := readRepoFile(t, "Taskfile.yml")
 	for _, needle := range []string{
@@ -98,7 +112,8 @@ func TestSPECBUG130_DesktopWorkflowUsesWailsV3PackagePath(t *testing.T) {
 		t.Fatal("SPEC-BUG-130 FAIL: desktop workflow must not use Wails v2 build commands")
 	}
 	for _, needle := range []string{
-		"github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.117",
+		// The CLI must be pinned to the Wails module version in go.mod.
+		"github.com/wailsapp/wails/v3/cmd/wails3@" + goModWailsVersion(t) + "\n",
 		"wails3 task build",
 		"wails3 task darwin:package",
 		"bin/Shipyard.app",

@@ -6,5 +6,23 @@
   ],
   "ignorePaths": [
     "spike/**"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Keep the wails3 CLI that desktop.yml installs on the go.mod Wails version",
+      "managerFilePatterns": ["/^\\.github/workflows/desktop\\.yml$/"],
+      "matchStrings": [
+        "go install (?<depName>github\\.com/wailsapp/wails/v3)/cmd/wails3@(?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "go"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Update the Wails Go module and the desktop CLI pin in one PR",
+      "matchPackageNames": ["github.com/wailsapp/wails/v3"],
+      "groupName": "wails v3"
+    }
   ]
 }
