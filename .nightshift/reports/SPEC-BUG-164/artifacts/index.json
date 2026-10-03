@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-164",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T15:51:49Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: done -- Implemented and verified 2026-07-24. The bridge uses a 2s metadata client and a 5-minute tools/call ",
+      "path": "artifacts/20261003T155149Z-decision-state-rationale-authored-done-implemente.json"
+    }
+  ]
+}
