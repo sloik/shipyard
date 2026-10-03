@@ -8,6 +8,10 @@ project_name: shipyard
 builds:
   - main: ./cmd/shipyard
     binary: shipyard
+    # The headless build: without this tag cmd/shipyard pulls in the Wails
+    # desktop runtime, which needs cgo and cannot build with CGO_ENABLED=0.
+    tags:
+      - server
     env:
       - CGO_ENABLED=0
     goos:
