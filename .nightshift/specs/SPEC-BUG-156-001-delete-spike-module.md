@@ -4,7 +4,7 @@ template_version: 12
 priority: 2
 layer: 1
 type: bugfix
-status: in_progress
+status: done
 parent: SPEC-BUG-156
 after:
 - SPEC-BUG-156
@@ -52,26 +52,37 @@ proposing updates for the spike).
 
 ## Root Cause
 
-(Filled in at resolution.)
+Dependabot security updates are configured in the GitHub repository settings and
+do not read `renovate.json`, so SPEC-BUG-156's `ignorePaths` never reached them.
+Any vulnerable transitive dependency in the spike's separate `go.mod` produced a
+PR that the `dependency-review` gate correctly rejects.
+
+## Resolution — 2026-10-03
+
+- Deleted `spike/wails-websocket/` and its two dead references (PR #41).
+- PR #41 CI: test, release-build, dependency-review and make smoke all pass.
+- #39 closed as superseded by #41. #40 had already been merged by the repo
+  owner at 2026-10-03T15:42Z before it could be closed; the deletion PR was
+  rebased over that merge, so the bump it carried is removed with the module.
 
 ## Requirements
 
-- [ ] R1: Delete the `spike/wails-websocket/` directory and its `go.mod`/`go.sum`.
-- [ ] R2: Remove the now-dead spike references: the `-exclude-dir=spike/wails-websocket`
+- [x] R1: Delete the `spike/wails-websocket/` directory and its `go.mod`/`go.sum`.
+- [x] R2: Remove the now-dead spike references: the `-exclude-dir=spike/wails-websocket`
   gosec flag in `Makefile` and the `spike/**` entry in `renovate.json`'s
   `ignorePaths`.
-- [ ] R3: Leave SPEC-017 and SPEC-BUG-156 (both done) unchanged. Their findings
+- [x] R3: Leave SPEC-017 and SPEC-BUG-156 (both done) unchanged. Their findings
   remain readable in git history at the deletion commit's parent.
-- [ ] R4: Close Dependabot PRs #39 and #40 as obsolete once the deletion merges.
+- [x] R4: Close Dependabot PRs #39 and #40 as obsolete once the deletion merges.
 
 ## Acceptance Criteria
 
-- [ ] AC1 (R1): `git ls-files spike` is empty and no `go.mod` remains under `spike/`.
-- [ ] AC2 (R2): `git grep -n 'spike/'` finds matches only in `.nightshift/specs/`.
-- [ ] AC3: `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`
+- [x] AC1 (R1): `git ls-files spike` is empty and no `go.mod` remains under `spike/`.
+- [x] AC2 (R2): `git grep -n 'spike/'` finds matches only in `.nightshift/specs/`.
+- [x] AC3: `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`
   pass, and `renovate.json` is valid JSON.
-- [ ] AC4: The PR's `dependency-review` check passes.
-- [ ] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
+- [x] AC4: The PR's `dependency-review` check passes.
+- [x] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
 
 ## Context
 
@@ -90,10 +101,10 @@ proposing updates for the spike).
 
 ```yaml
 schema_version: 1
-status: in_progress
-reason: mechanical transition to 'in_progress' via run coord-20261003-bug156-001
+status: done
+reason: mechanical transition to 'done' via run coord-20261003-bug156-001
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261003T155601Z-status-transition-ready-in-progress-mechanical-transition-.json
+record: artifacts/20261003T160744Z-status-transition-in-progress-done-mechanical-transition-t.json
 ```
