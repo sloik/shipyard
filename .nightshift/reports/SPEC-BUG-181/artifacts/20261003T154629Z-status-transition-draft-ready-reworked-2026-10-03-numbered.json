@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-181",
+  "type": "status-transition",
+  "created": "2026-10-03T15:46:29Z",
+  "actor": "coordinator",
+  "summary": "draft -> ready: Reworked 2026-10-03: numbered R1-R6 mapped to AC1-AC6, measured gap list G1-G7, Context and write scope added; SDK and c",
+  "from": "draft",
+  "to": "ready",
+  "reason": "Reworked 2026-10-03: numbered R1-R6 mapped to AC1-AC6, measured gap list G1-G7, Context and write scope added; SDK and conformance-CLI premises verified against primary sources. Parent SPEC-BUG-180 is a type:main tracker that stays planned, so the earlier 'wait for 180' condition no longer applies.",
+  "evidence": [],
+  "run_id": "kickoff-20261003-bug181",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "ready",
+    "reason": "Reworked 2026-10-03: numbered R1-R6 mapped to AC1-AC6, measured gap list G1-G7, Context and write scope added; SDK and conformance-CLI premises verified against primary sources. Parent SPEC-BUG-180 is a type:main tracker that stays planned, so the earlier 'wait for 180' condition no longer applies.",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

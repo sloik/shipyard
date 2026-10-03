@@ -8,6 +8,27 @@
       "actor": "coordinator",
       "summary": "state rationale authored: draft -- Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for pr",
       "path": "artifacts/20261003T153224Z-decision-state-rationale-authored-draft-drafted-2.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:46:29Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: Reworked 2026-10-03: numbered R1-R6 mapped to AC1-AC6, measured gap list G1-G7, Context and write scope added; SDK and c",
+      "path": "artifacts/20261003T154629Z-status-transition-draft-ready-reworked-2026-10-03-numbered.json"
+    },
+    {
+      "type": "context",
+      "created": "2026-10-03T15:46:29Z",
+      "actor": "coordinator",
+      "summary": "2 finding(s) gathered for promotion to ready",
+      "path": "artifacts/20261003T154629Z-context-2-finding-s-gathered-for-promotion-to-re.json"
+    },
+    {
+      "type": "validation-evidence",
+      "created": "2026-10-03T15:46:29Z",
+      "actor": "coordinator",
+      "summary": "validation performed for promotion to ready",
+      "path": "artifacts/20261003T154629Z-validation-evidence-validation-performed-for-promotion-to-re.json"
     }
   ]
 }
