@@ -55,8 +55,9 @@ func TestRunClientScenario_AgainstFixtureServer(t *testing.T) {
 			if err := RunClientScenario(ctx, era, "tools_call", srv.URL, nil); err == nil || !strings.Contains(err.Error(), "add_numbers") {
 				t.Fatalf("tools_call against a server without add_numbers must fail naming it, got %v", err)
 			}
-			if err := RunClientScenario(ctx, era, "sse-retry", srv.URL, nil); err != nil {
-				t.Fatalf("sse-retry scenario: %v", err)
+			// test_reconnection is provided by the CLI's own test server.
+			if err := RunClientScenario(ctx, era, "sse-retry", srv.URL, nil); err == nil || !strings.Contains(err.Error(), "test_reconnection") {
+				t.Fatalf("sse-retry against the fixture server must fail naming its tool, got %v", err)
 			}
 			// The CLI's own test server provides this tool; the fixture server
 			// does not, so the scenario must fail naming it.

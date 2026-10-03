@@ -1,0 +1,24 @@
+[
+  {
+    "http": "POST",
+    "status": 202,
+    "request_headers": {
+      "Content-Type": "application/json",
+      "Mcp-Protocol-Version": "2025-11-25",
+      "Mcp-Session-Id": "redacted"
+    },
+    "request": {
+      "kind": "notification",
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {
+          "reason": "context canceled",
+          "requestId": 2
+        }
+      }
+    },
+    "response_headers": {},
+    "responses": []
+  }
+]

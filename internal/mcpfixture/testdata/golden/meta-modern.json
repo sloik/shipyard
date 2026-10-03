@@ -1,0 +1,65 @@
+[
+  {
+    "http": "POST",
+    "status": 200,
+    "request_headers": {
+      "Content-Type": "application/json",
+      "Mcp-Method": "tools/call",
+      "Mcp-Name": "fixture_echo_meta",
+      "Mcp-Protocol-Version": "2026-07-28"
+    },
+    "request": {
+      "kind": "request",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              }
+            },
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "shipyard-mcp-fixture",
+              "version": "1.0.0"
+            },
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "x.example/trace": "t-1"
+          },
+          "name": "fixture_echo_meta",
+          "arguments": {}
+        }
+      }
+    },
+    "response_headers": {
+      "Content-Type": "text/event-stream"
+    },
+    "responses": [
+      {
+        "kind": "response",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "shipyard-mcp-fixture",
+                "version": "1.0.0"
+              },
+              "x.example/trace": "t-1"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "meta echoed"
+              }
+            ],
+            "resultType": "complete"
+          }
+        }
+      }
+    ]
+  }
+]

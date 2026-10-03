@@ -128,7 +128,7 @@ func TestIngest_NormalizedViewIsDerivedFromRaw(t *testing.T) {
 	if string(v.Meta["x.example/trace"]) != `"t-1"` {
 		t.Fatalf("Meta pass-through lost custom key: %v", v.Meta)
 	}
-	if !bytes.Contains(v.Params, []byte(`café`)) {
+	if !bytes.Contains(v.Params, []byte("caf\\u00e9")) {
 		t.Fatalf("Params must be the raw params bytes, got %s", v.Params)
 	}
 }
@@ -228,6 +228,9 @@ func TestValidate(t *testing.T) {
 		{"valid response", rawModernResponse, nil, 0, 0},
 		{"valid error", `{"jsonrpc":"2.0","id":"x","error":{"code":-32601,"message":"nope"}}`, nil, 0, 0},
 		{"valid notification", `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`, nil, 0, 0},
+		{"error with null id", `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}`, nil, 0, 0},
+		{"result with null id", `{"jsonrpc":"2.0","id":null,"result":{}}`, nil, -32600, http.StatusBadRequest},
+		{"modern meta with unsupported version", `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}`, nil, mcp.CodeUnsupportedProtocolVersion, http.StatusBadRequest},
 		{"notification with incomplete modern meta", `{"jsonrpc":"2.0","method":"notifications/progress","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`, nil, 0, 0},
 	}
 	for _, tc := range cases {

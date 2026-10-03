@@ -1,4 +1,4 @@
-.PHONY: build test race coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools security-run security-govulncheck security-govulncheck-offline-fixture security-gosec security-self-test quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
+.PHONY: build test race mcp-gap mcp-conformance coverage coverage-check coverage-check-probe format-check lint type-check script-check security-config-check security security-tools security-run security-govulncheck security-govulncheck-offline-fixture security-gosec security-self-test quality quality-self-test tools smoke smoke-build smoke-full deploy-runtime snapshot release wails-dev wails-build wails-build-server package-macos sign-macos notarize-macos build-mcp install-mcp
 
 TOOLS_BIN := $(CURDIR)/.tools/bin
 STATICCHECK := $(TOOLS_BIN)/staticcheck
@@ -85,6 +85,16 @@ test:
 
 race:
 	go test -race -count=1 -timeout 5m ./...
+
+# SPEC-BUG-181: MCP 2026 migration harnesses. Deliberately NOT part of
+# `quality`, `test`, or CI. `mcp-gap` reports the known gaps G1-G7, which stay
+# red until SPEC-BUG-182..185 close them. `mcp-conformance` runs the pinned
+# official conformance CLI against the fixture server and clients (needs node).
+mcp-gap:
+	scripts/mcp-gap-suite.sh
+
+mcp-conformance:
+	scripts/mcp-conformance.sh
 
 # The checked-in baseline is a floor, never an automatically rewritten target.
 # `coverage` emits a fresh, deterministic report; `coverage-check` makes that

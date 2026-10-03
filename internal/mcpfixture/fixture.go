@@ -1,88 +1,179 @@
 // Package mcpfixture provides modern (2026-07-28) and legacy (2025-11-25)
 // MCP fixture servers and clients built on the official Go SDK, a recording
 // HTTP transport, and the conformance-scenario surface used by
-// scripts/mcp-conformance.sh. Stub: implementation pending.
+// scripts/mcp-conformance.sh.
+//
+// The modern fixture supports only 2026-07-28 and serves stateless streamable
+// HTTP; the legacy fixture supports every pre-2026 version and serves
+// stateful streamable HTTP with Mcp-Session-Id. Nothing here is wired into
+// Shipyard's live gateway, bridge, or child handling.
 package mcpfixture
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sloik/shipyard/internal/mcpcore"
 )
 
-// SDKVersion is the pinned go-sdk version.
+// SDKVersion is the pinned go-sdk version the fixtures and waivers track.
 const SDKVersion = "v1.8.0"
 
-// Fixture tool names.
+// Fixture-specific tool names (in addition to the conformance surface).
 const (
+	// ToolEchoMeta echoes the request's _meta back in the result's _meta.
 	ToolEchoMeta = "fixture_echo_meta"
-	ToolError    = "fixture_error"
-	ToolSlow     = "fixture_slow"
+	// ToolError returns a tool-level error result (isError: true).
+	ToolError = "fixture_error"
+	// ToolSlow blocks until its request is cancelled.
+	ToolSlow = "fixture_slow"
 )
 
-// Observer (stub).
-type Observer struct{}
+// fixtureImpl identifies the fixture server and client on the wire.
+var fixtureImpl = &mcp.Implementation{Name: "shipyard-mcp-fixture", Version: "1.0.0"}
 
-// NewObserver (stub).
-func NewObserver() *Observer { return &Observer{} }
-
-// Started (stub).
-func (o *Observer) Started() <-chan struct{} { return nil }
-
-// Cancelled (stub).
-func (o *Observer) Cancelled() <-chan struct{} { return nil }
-
-// NewHandler (stub).
-func NewHandler(mcpcore.Era, *Observer) http.Handler { return http.NotFoundHandler() }
-
-// Connect (stub).
-func Connect(context.Context, mcpcore.Era, string, *http.Client) (*mcp.ClientSession, error) {
-	return nil, errors.New("not implemented")
+// VersionFor returns the protocol version a fixture of the given era speaks.
+func VersionFor(era mcpcore.Era) string {
+	switch era {
+	case mcpcore.EraModern:
+		return mcpcore.ModernVersion
+	case mcpcore.EraLegacy:
+		return mcpcore.LegacyVersion
+	default:
+		return ""
+	}
 }
 
-// VersionFor (stub).
-func VersionFor(mcpcore.Era) string { return "" }
-
-// ParseEra (stub).
-func ParseEra(string) (mcpcore.Era, error) { return mcpcore.EraUnknown, nil }
-
-// ClientScenarios (stub).
-func ClientScenarios() []string { return nil }
-
-// RunClientScenario (stub).
-func RunClientScenario(context.Context, mcpcore.Era, string, string, map[string]any) error {
-	return nil
+// ParseEra parses "modern" or "legacy".
+func ParseEra(s string) (mcpcore.Era, error) {
+	switch s {
+	case "modern":
+		return mcpcore.EraModern, nil
+	case "legacy":
+		return mcpcore.EraLegacy, nil
+	default:
+		return mcpcore.EraUnknown, fmt.Errorf("unknown era %q (want modern or legacy)", s)
+	}
 }
 
-func sdkModuleDir() (string, error) { return "", errors.New("not implemented") }
-
-// Exchange (stub).
-type Exchange struct {
-	HTTPMethod      string
-	Status          int
-	RequestHeaders  http.Header
-	ResponseHeaders http.Header
-	Request         *mcpcore.Envelope
-	Responses       []*mcpcore.Envelope
+// eraVersions lists the protocol versions a fixture server of the era accepts.
+func eraVersions(era mcpcore.Era) []string {
+	var out []string
+	for _, v := range mcpcore.SupportedVersions() {
+		if e, _ := mcpcore.EraForVersion(v); e == era {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
-// Recorder (stub).
-type Recorder struct{}
-
-// NewRecorder (stub).
-func NewRecorder(http.RoundTripper) *Recorder { return &Recorder{} }
-
-// RoundTrip (stub).
-func (r *Recorder) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("not implemented")
+// Observer lets tests watch the slow tool's lifecycle on the server side.
+type Observer struct {
+	startOnce, cancelOnce, releaseOnce sync.Once
+	started, cancelled, release        chan struct{}
 }
 
-// Exchanges (stub).
-func (r *Recorder) Exchanges() []Exchange { return nil }
+// NewObserver returns an Observer with unsignalled channels.
+func NewObserver() *Observer {
+	return &Observer{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
+}
 
-// NormalizeExchanges (stub).
-func NormalizeExchanges([]Exchange) []byte { return nil }
+// Release lets any in-flight slow tool call return normally. It is used to
+// tear down a server whose transport never delivers cancellation.
+func (o *Observer) Release() { o.releaseOnce.Do(func() { close(o.release) }) }
+
+func (o *Observer) releaseCh() <-chan struct{} {
+	if o == nil {
+		return nil
+	}
+	return o.release
+}
+
+// Started is closed when the slow tool begins executing.
+func (o *Observer) Started() <-chan struct{} { return o.started }
+
+// Cancelled is closed when the slow tool observes its request's cancellation.
+func (o *Observer) Cancelled() <-chan struct{} { return o.cancelled }
+
+func (o *Observer) markStarted() {
+	if o != nil {
+		o.startOnce.Do(func() { close(o.started) })
+	}
+}
+
+func (o *Observer) markCancelled() {
+	if o != nil {
+		o.cancelOnce.Do(func() { close(o.cancelled) })
+	}
+}
+
+// NewServer builds a fixture server restricted to the era's protocol
+// versions, with the conformance surface and the fixture tools registered.
+func NewServer(era mcpcore.Era, obs *Observer) *mcp.Server {
+	server := mcp.NewServer(fixtureImpl, &mcp.ServerOptions{
+		SupportedProtocolVersions: eraVersions(era),
+		CompletionHandler:         completionHandler,
+		SubscribeHandler:          func(context.Context, *mcp.SubscribeRequest) error { return nil },
+		UnsubscribeHandler:        func(context.Context, *mcp.UnsubscribeRequest) error { return nil },
+	})
+	registerConformanceSurface(server)
+	registerFixtureTools(server, obs)
+	return server
+}
+
+// NewHandler serves a fixture server over streamable HTTP: stateless for the
+// modern era, stateful (session-bearing) for the legacy era.
+func NewHandler(era mcpcore.Era, obs *Observer) http.Handler {
+	server := NewServer(era, obs)
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{Stateless: era == mcpcore.EraModern})
+}
+
+// Connect connects a fixture client of the given era to a streamable HTTP
+// endpoint. httpClient may be nil.
+func Connect(ctx context.Context, era mcpcore.Era, endpoint string, httpClient *http.Client) (*mcp.ClientSession, error) {
+	return connect(ctx, era, endpoint, httpClient, connectOptions{disableStandaloneSSE: true})
+}
+
+// connectOptions tunes the fixture client. Golden tests disable the
+// standalone SSE stream so recorded traffic is deterministic; conformance
+// scenarios keep the SDK default.
+type connectOptions struct {
+	client               *mcp.ClientOptions
+	oauth                oauthHandler
+	disableStandaloneSSE bool
+}
+
+func connect(ctx context.Context, era mcpcore.Era, endpoint string, httpClient *http.Client, o connectOptions) (*mcp.ClientSession, error) {
+	if era == mcpcore.EraUnknown {
+		return nil, fmt.Errorf("connect: unknown era")
+	}
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:             endpoint,
+		HTTPClient:           httpClient,
+		DisableStandaloneSSE: o.disableStandaloneSSE,
+	}
+	if o.oauth != nil {
+		transport.OAuthHandler = o.oauth
+	}
+	cs, err := mcp.NewClient(fixtureImpl, o.client).Connect(ctx, transport, &mcp.ClientSessionOptions{ProtocolVersion: VersionFor(era)})
+	if err != nil {
+		return nil, fmt.Errorf("connect %s fixture client: %w", era, err)
+	}
+	return cs, nil
+}
+
+// sdkModuleDir locates the pinned go-sdk module in the module cache.
+func sdkModuleDir() (string, error) {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/modelcontextprotocol/go-sdk").Output()
+	if err != nil {
+		return "", fmt.Errorf("go list go-sdk: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}

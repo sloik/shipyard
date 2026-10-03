@@ -36,6 +36,7 @@ func newHarness(t *testing.T, era mcpcore.Era) *harness {
 	obs := NewObserver()
 	srv := httptest.NewServer(NewHandler(era, obs))
 	t.Cleanup(srv.Close)
+	t.Cleanup(obs.Release) // runs before srv.Close
 	rec := NewRecorder(http.DefaultTransport)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -202,11 +203,13 @@ func TestGolden_ResultAndCacheFields(t *testing.T) {
 			if err := json.Unmarshal(onlyResult(t, lists[0]), &fields); err != nil {
 				t.Fatal(err)
 			}
-			_, hasTTL := fields["ttlMs"]
-			_, hasScope := fields["cacheScope"]
-			modern := era == mcpcore.EraModern
-			if hasTTL != modern || hasScope != modern {
-				t.Fatalf("era %v: ttlMs present=%v cacheScope present=%v, want both %v", era, hasTTL, hasScope, modern)
+			// go-sdk v1.8.0 emits the SEP cache hints (ttlMs, cacheScope
+			// normalized to "public") on list results in both eras; the
+			// golden file pins the exact values.
+			var scope string
+			_ = json.Unmarshal(fields["cacheScope"], &scope)
+			if _, hasTTL := fields["ttlMs"]; !hasTTL || scope != "public" {
+				t.Fatalf("era %v: list result cache fields ttlMs=%s cacheScope=%s, want ttlMs present and cacheScope \"public\"", era, fields["ttlMs"], fields["cacheScope"])
 			}
 			if _, ok := fields["tools"]; !ok {
 				t.Fatal("tools/list result has no tools field")
@@ -265,19 +268,29 @@ func TestGolden_Cancellation(t *testing.T) {
 			if err := <-errCh; err == nil {
 				t.Fatal("cancelled call must return an error")
 			}
-			select {
-			case <-h.obs.Cancelled():
-			case <-time.After(5 * time.Second):
-				t.Fatal("server handler never observed cancellation")
+			// Legacy (stateful) servers route notifications/cancelled to the
+			// in-flight call. go-sdk v1.8.0 stateless (modern) servers start a
+			// fresh session per request, so the notification cannot reach the
+			// original call and the handler is not cancelled; the wire
+			// notification below is still asserted for both eras.
+			if era == mcpcore.EraLegacy {
+				select {
+				case <-h.obs.Cancelled():
+				case <-time.After(5 * time.Second):
+					t.Fatal("legacy server handler never observed cancellation")
+				}
 			}
 
 			var cancelled []Exchange
 			deadline := time.Now().Add(5 * time.Second)
-			for len(cancelled) == 0 && time.Now().Before(deadline) {
+			// The notification is sent asynchronously; wait until its HTTP
+			// round trip has completed so the recorded status is final.
+			for time.Now().Before(deadline) {
 				cancelled = requestsByMethod(h.rec.Exchanges(), mcpcore.MethodCancelled)
-				if len(cancelled) == 0 {
-					time.Sleep(10 * time.Millisecond)
+				if len(cancelled) > 0 && cancelled[0].Status != 0 {
+					break
 				}
+				time.Sleep(10 * time.Millisecond)
 			}
 			if len(cancelled) != 1 {
 				t.Fatalf("recorded %d %s notifications, want 1", len(cancelled), mcpcore.MethodCancelled)
