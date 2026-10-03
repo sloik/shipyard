@@ -1,18 +1,17 @@
 # Nightshift Report — 2026-10-03
 
-**Outcome:** blocked
-<!-- Follow-up 2026-10-03: the coordinator relayed a human-approved scope
-     amendment (main 441438b). R1 is resolved. The coverage floors could not be
-     committed: the write-scope hook reads scope.write from the spec frontmatter
-     on main, and 441438b added only the amendment row, not the frontmatter entry.
-     See Scope Blockers. -->
+**Outcome:** done
+<!-- Follow-ups 2026-10-03: human-approved scope amendment (main 441438b) and the
+     matching scope.write frontmatter entry (main e763474) were merged; coverage
+     floors committed and R1 resolved. The one remaining coverage-check failure
+     (internal/secrets/op) is environment-only and also fails on main here. -->
 
 Run: `kickoff-20261003-bug181`. Spec: SPEC-BUG-181, MCP 2026-07-28 conformance fixtures and compatibility core.
 Baseline: `1d0a07206f6893dc95651cfe737f3aff6591653e`. The worktree started at `8609a53`; it was fast-forwarded to the baseline before any work began.
 Branch: `worktree-agent-a7d39841455a362cf`.
 
 ## Summary
-- Specs completed: 0 of 1. Only the coverage-floor commit is outstanding (see Scope Blockers).
+- Specs completed: 1 of 1. Lifecycle status is left to the parent.
 - Tests passed: `go test -race -count=1 ./...` passed in all 17 packages, 0 failures.
 - Build: ✅ pass (`go build ./...`)
 - Vet: ✅ pass (`go vet ./...` and `go vet -tags mcpgap ./...`)
@@ -26,17 +25,15 @@ Branch: `worktree-agent-a7d39841455a362cf`.
   - client-modern leg: 239 checks across 18 scenarios
   - 0 failures, 0 Shipyard waivers
 - Gap suite: exactly G1–G7 open (`scripts/mcp-gap-suite.sh --expect-open G1,G2,G3,G4,G5,G6,G7` reports `expectation met`)
-- Coverage gate (`make coverage-check`, the configured `commands.test`). The total is 80.3%, above the 75.1% floor. I added the three floors in the working tree and the gate was re-run. With those floors in place, its only failure was `internal/secrets/op: 21.1% is below baseline 28.6%`, which is environment-only:
+- Coverage gate (`make coverage-check`, the configured `commands.test`): the only failure is environment-only. The total is 80.3%, above the 75.1% floor, and the three new packages meet their committed floors (95.2 / 87.4 / 84.3). The single remaining finding is `internal/secrets/op: 21.1% is below baseline 28.6%`:
   - The package is identical to main (`git diff 441438b -- internal/secrets` is empty).
   - Its coverage depends on whether the 1Password `op` CLI is on PATH, and it is absent on this host.
   - So main fails the same way here.
   - The floor was not lowered.
-
-  The floors themselves are not committed: the write-scope hook rejected `.nightshift/coverage-baseline.json` (see Scope Blockers). The committed branch therefore still lacks the floors.
 - Review cycles: 2 advisor reviews, one before implementation and one before completion. No separate LOOP Step 7/10 persona pass was performed. The second advisor review led to the `--suite all` comparison, the floor-stability check and the G3/G2 note below.
 
 ## Completed Specs
-- None yet. Everything except the coverage-floor commit is done; see Scope Blockers.
+- SPEC-BUG-181: MCP 2026-07-28 conformance fixtures and compatibility core. ✅ done (worker outcome). The parent owns the `status:` transition and the merge.
 
 ## Changes (SPEC-BUG-181)
 Commits on the branch:
@@ -45,9 +42,11 @@ Commits on the branch:
 - `518c691` `[SPEC-BUG-181] docs: generate nightshift report`
 - A follow-up commit, `[SPEC-BUG-181] fix: register full SDK auth scenario set and document conformance suite choice`. It registers the remaining SDK auth scenarios in the fixture client, records the `core`-versus-`all` rationale, adds the suite-all evidence and applies these report corrections.
 - `cc85741` `[SPEC-BUG-181] chore: merge main scope amendment (441438b)`: a `--no-ff` merge of main. It brings in the human-approved `## Scope Amendments` row, plus main's unrelated `a87838a` (SPEC-BUG-164 tracking files).
-- A final follow-up commit, `[SPEC-BUG-181] docs: add R1 resolution and record coverage-floor blocker`. It adds the spec `## Resolution — 2026-10-03` section, ticks R1 and updates this report. The coverage floors were rejected by the write-scope hook and are not committed.
+- `ffb1e02` `[SPEC-BUG-181] docs: add R1 resolution and record coverage-floor blocker`: adds the spec `## Resolution — 2026-10-03` section and ticks R1.
+- `e6ad913` `[SPEC-BUG-181] chore: merge main scope.write widening (e763474)`: a `--no-ff` merge of main's frontmatter entry that grants `.nightshift/coverage-baseline.json`.
+- A final commit, `[SPEC-BUG-181] chore: add coverage floors for new MCP packages`. It adds the three floors and updates this report.
 
-Compared with the baseline, only `Makefile`, `go.mod` and `go.sum` are modified, ignoring the spec and report files and main's merged SPEC-BUG-164 files. Every other file is new. No live gateway, bridge or child source file is touched.
+Compared with the baseline, only `Makefile`, `go.mod`, `go.sum` and the approved `.nightshift/coverage-baseline.json` are modified, ignoring the spec and report files and main's merged SPEC-BUG-164 files. Every other file is new. No live gateway, bridge or child source file is touched.
 
 - **R1, SDK adoption.** `github.com/modelcontextprotocol/go-sdk v1.8.0` is added to `go.mod`.
   - `internal/mcpcore` takes the supported versions, `_meta` keys, error codes and envelope decoding (`jsonrpc.DecodeMessage`) from the SDK.
@@ -90,7 +89,7 @@ Compared with the baseline, only `Makefile`, `go.mod` and `go.sum` are modified,
 | `make security-gosec` | environment failure, not caused by this change: gosec v2.22.10 hits `internal error: package ... without types` under the local go1.27.1 toolchain. It fails identically on the untouched `internal/capture` package. |
 | `scripts/mcp-conformance.sh` | pass (all three legs; the logs are in `.nightshift/reports/SPEC-BUG-181/evidence/`) |
 | `scripts/mcp-gap-suite.sh` | exit 1, with exactly G1–G7 open (the intended red state; `evidence/gap-suite.txt`) |
-| `make coverage-check` (run with the three floors added in the working tree, then reverted) | environment-only failure. The ratchet's single finding was `internal/secrets/op: 21.1% is below baseline 28.6%`. That package is untouched and identical to main, and the `op` CLI is not installed. New packages: mcpcore 95.2, mcpfixture 87.4, cmd/mcpfixture 84.3; total 80.3%. As committed, without the floors, the gate also reports the three missing floors. |
+| `make coverage-check` (with the committed floors) | environment-only failure. The ratchet's single finding is `internal/secrets/op: 21.1% is below baseline 28.6%`. That package is untouched and identical to main, and the `op` CLI is not installed, so main fails the same way here. New packages: mcpcore 95.2, mcpfixture 87.4, cmd/mcpfixture 84.3; total 80.3%. |
 
 Coverage of the new packages:
 - `internal/mcpcore`: 95.2%
@@ -129,32 +128,22 @@ The total is 80.3%, against a baseline of 75.1%.
 R1 is now ticked. The spec has a `## Resolution — 2026-10-03` section that points to `docs/adr/0005-mcp-go-sdk-adoption.md` and states where the custom capture-boundary type is kept (`mcpcore.Envelope`, `internal/mcpcore/envelope.go`) and why. No R or AC text and no `status:` was changed.
 
 ## Scope Blockers
-- **`.nightshift/coverage-baseline.json` is still not writable.** The repo owner's amendment row is on main at `441438b` and is merged here as `cc85741`. But the commit with the floors was rejected:
-  ```
-  [nightshift write-scope] BLOCKED — spec SPEC-BUG-181 declares write scope: internal/**, cmd/**, test/**, scripts/**, docs/**, go.mod, go.sum, Makefile
-  [nightshift write-scope]   DENY outside_root .nightshift/coverage-baseline.json
-  ```
-  - Cause: `.nightshift/scope_guard.py` resolves the write scope from the spec's frontmatter `scope.write` **on main** (`git show main:<spec>`).
-  - A `## Scope Amendments` row only authorizes a *widening of that frontmatter list*. Widenings without a covering row are rolled back, so the row on its own grants nothing.
-  - `441438b` added the row but did not add `.nightshift/coverage-baseline.json` to `scope.write`.
-  - The hook has no environment-variable bypass.
-  - I cannot fix this from the branch: the guard reads main, and I must not change the frontmatter.
-- **Smallest recovery.** Choose one.
-  - **(a)** On main, add `- .nightshift/coverage-baseline.json` to the spec frontmatter `scope.write`. The existing 2026-10-03 amendment row covers that widening. Then re-run this follow-up; I add the floors and commit.
-  - **(b)** The parent commits the floors itself, adding these entries to the `packages` map of `.nightshift/coverage-baseline.json`, alphabetically after `internal/gateway`:
-    ```json
-    "github.com/sloik/shipyard/internal/mcpcore": 95.2,
-    "github.com/sloik/shipyard/internal/mcpfixture": 87.4,
-    "github.com/sloik/shipyard/internal/mcpfixture/cmd/mcpfixture": 84.3,
-    ```
-  - These follow the file's convention: a floor equals the measured value at one decimal, and the values were stable across three runs. `total` and `measured_at` stay unchanged.
-- **Environment-only residual, not a blocker.** `internal/secrets/op` measures 21.1% against a 28.6% floor.
+- Resolved.
+  - The repo owner approved widening scope to `.nightshift/coverage-baseline.json` only. The `## Scope Amendments` row is on main at `441438b`, merged here as `cc85741`.
+  - Main commit `e763474` mirrors it into the frontmatter `scope.write`, merged here as `e6ad913`. The guard (`scope_guard.py`) reads the write scope from that frontmatter list, and an amendment row on its own does not grant a path.
+  - Floors were added following the file's convention: a floor equals the measured value at one decimal, keys are in alphabetical order, and the values were stable across three runs.
+    - `internal/mcpcore`: 95.2
+    - `internal/mcpfixture`: 87.4
+    - `internal/mcpfixture/cmd/mcpfixture`: 84.3
+  - `total` and `measured_at` are unchanged.
+  - `.nightshift/coverage-exclusions.json` and `.staticcheck.conf` were not touched.
+- Environment-only residual, not a blocker: `internal/secrets/op` measures 21.1% against a 28.6% floor.
   - The package is untouched and identical to main.
   - Its tests branch on `exec.LookPath("op")`, and the 1Password CLI is not installed on this host.
   - It fails here on main too. It was not lowered.
 
 ## Blocked Specs
-- SPEC-BUG-181: MCP 2026-07-28 conformance fixtures and compatibility core. ⏸ worker-blocked. The only remaining step is the coverage-floor commit, which needs recovery (a) or (b) under Scope Blockers.
+None
 
 ## Open Questions
 - SPEC-BUG-181 § R1: resolved. The spec now has a `## Resolution — 2026-10-03` section, and R1 is ticked.
@@ -169,7 +158,7 @@ R1 is now ticked. The spec has a `## Resolution — 2026-10-03` section that poi
 ## Report Action Log
 | Report | `## Open Questions` / `## Blocked Specs` present? | Action taken |
 | --- | --- | --- |
-| (this report) | Yes | deferred: coverage floors need the scope.write frontmatter entry on main, or a parent commit |
+| (this report) | Yes | resolved_in_report |
 
 ## Discovered TODOs
 - `make security-gosec` cannot run under the local go1.27.1 toolchain (gosec v2.22.10 internal error). This is unrelated to this spec.
