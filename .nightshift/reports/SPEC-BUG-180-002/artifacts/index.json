@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-180-002",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T17:35:47Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Suggested as a follow-up by the SPEC-BUG-181 run on 2026-10-03; not yet reviewed for promotion.",
+      "path": "artifacts/20261003T173547Z-decision-state-rationale-authored-draft-suggested.json"
+    }
+  ]
+}
