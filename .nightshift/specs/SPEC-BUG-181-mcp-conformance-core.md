@@ -120,6 +120,12 @@ The gap suite (R3) must name each of these by ID:
 - Upgrading `markitdown-mcp` or deciding on the Slack fork (SPEC-BUG-180 R4).
 
 
+## Scope Amendments
+
+| Date | Path or glob | Change (old → new) | Reason | Approved by |
+| --- | --- | --- | --- | --- |
+| 2026-10-03 | .nightshift/coverage-baseline.json | not writable → writable | `make coverage-check` requires reviewed coverage floors for the new `internal/mcpcore` and `internal/mcpfixture` packages | human:Lukasz |
+
 ## State rationale
 
 ```yaml
