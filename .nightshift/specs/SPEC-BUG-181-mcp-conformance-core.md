@@ -62,39 +62,39 @@ The gap suite (R3) must name each of these by ID:
   type is kept at the capture boundary, document why in the spec's resolution.
   (v1.8.0 supports `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` and
   `2024-11-05`; verified in `mcp/shared.go`.)
-- [ ] R2: Add modern (`2026-07-28`) and legacy (`2025-11-25`) fixture clients
+- [x] R2: Add modern (`2026-07-28`) and legacy (`2025-11-25`) fixture clients
   and servers, plus golden cases for discovery, `_meta`, errors, result and
   cache fields, routing headers, cancellation, and session-header absence.
-- [ ] R3: Add a gap suite, invoked separately from `go test ./...`, with one
+- [x] R3: Add a gap suite, invoked separately from `go test ./...`, with one
   named case per known gap G1–G7. Each case fails while its gap exists. Later
   child specs (SPEC-BUG-182…185) turn their cases green. The gap suite is
   never wired into the default test run or CI as a required check.
-- [ ] R4: Integrate the official MCP conformance CLI
+- [x] R4: Integrate the official MCP conformance CLI
   (`@modelcontextprotocol/conformance`), pinned to an exact version (0.1.16 or
   later stable), against the fixture servers and clients. Expected-failure
   waivers may only be copied verbatim from the pinned go-sdk's
   `conformance/baseline.yml`. Shipyard adds zero waivers of its own.
-- [ ] R5: The shared core keeps raw envelopes and headers alongside any
+- [x] R5: The shared core keeps raw envelopes and headers alongside any
   normalized view. Capture records stay byte-identical to what was received.
-- [ ] R6: Record the new dependency's license, security posture, and the exact
+- [x] R6: Record the new dependency's license, security posture, and the exact
   revision to roll back to.
 
 ## Acceptance Criteria
 
-- [ ] AC1 (R2, R3): The fixtures exercise both eras. Running the gap suite
+- [x] AC1 (R2, R3): The fixtures exercise both eras. Running the gap suite
   reports exactly G1–G7 as failing, each with its gap ID in the test name.
-- [ ] AC2 (R1, R5): `go test -race -count=1 ./...` and `go vet ./...` pass,
+- [x] AC2 (R1, R5): `go test -race -count=1 ./...` and `go vet ./...` pass,
   and the existing capture and parser tests pass unchanged.
-- [ ] AC3 (R4): The pinned conformance CLI runs against the fixture servers
+- [x] AC3 (R4): The pinned conformance CLI runs against the fixture servers
   and clients through one documented command. Every failure is either listed
   in the pinned SDK's baseline or fixed. The waiver list contains no
   Shipyard-added entry.
-- [ ] AC4 (R5): A test proves that a captured request/response pair keeps its
+- [x] AC4 (R5): A test proves that a captured request/response pair keeps its
   raw bytes and headers after passing through the shared core.
-- [ ] AC5 (R6): A dependency record under `docs/` names the SDK version,
+- [x] AC5 (R6): A dependency record under `docs/` names the SDK version,
   license, security notes, and the rollback revision (`95bc5a1` or the
   baseline the run starts from).
-- [ ] AC6: Live gateway, bridge, and child behavior is unchanged. The existing
+- [x] AC6: Live gateway, bridge, and child behavior is unchanged. The existing
   smoke and integration tests pass with no edits to their assertions.
 
 ## Context

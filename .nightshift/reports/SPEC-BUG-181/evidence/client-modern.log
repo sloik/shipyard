@@ -1,0 +1,90 @@
+Running core suite (18 scenarios) in parallel...
+
+Starting scenario: tools_call
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51598/mcp
+(node:90289) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Starting scenario: auth/metadata-var1
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51600/mcp
+Starting scenario: elicitation-sep1034-client-defaults
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51604/mcp
+Starting scenario: auth/metadata-var3
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51606/mcp
+Starting scenario: auth/metadata-var2
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51614/mcp
+Starting scenario: auth/scope-from-www-authenticate
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51619/mcp
+Starting scenario: auth/scope-from-scopes-supported
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51624/mcp
+Starting scenario: auth/basic-cimd
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51626/mcp
+Starting scenario: sse-retry
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51627
+Starting scenario: auth/scope-omitted-when-undefined
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51629/mcp
+Starting scenario: auth/scope-step-up
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51643/mcp
+Starting scenario: auth/pre-registration
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51645/mcp
+With context: {"client_id":"pre-registered-client","client_secret":"pre-registered-secret"}
+Starting scenario: auth/token-endpoint-auth-post
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51647/mcp
+Starting scenario: auth/metadata-default
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51649/mcp
+Starting scenario: auth/token-endpoint-auth-none
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51660/mcp
+Starting scenario: auth/scope-retry-limit
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51665/mcp
+Starting scenario: auth/token-endpoint-auth-basic
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51667/mcp
+Starting scenario: initialize
+Executing client: /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/tmp.KMi1kZEWrC/mcpfixture client -era modern http://localhost:51668
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/tools_call-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/initialize-2026-10-03T16-24-43-066Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/elicitation-sep1034-client-defaults-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/basic-cimd-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/pre-registration-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/scope-omitted-when-undefined-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/token-endpoint-auth-none-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/token-endpoint-auth-post-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/scope-from-www-authenticate-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/metadata-var2-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/scope-from-scopes-supported-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/metadata-default-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/metadata-var1-2026-10-03T16-24-43-088Z
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: list tools: calling "tools/list": sending "tools/list": Forbidden
+
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/token-endpoint-auth-basic-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/scope-step-up-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/metadata-var3-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/auth/scope-retry-limit-2026-10-03T16-24-43-088Z
+Results saved to /var/folders/gp/3j7chn99383bpn0cpkqfrsvm0000gn/T/shipyard-mcp-conformance/client-modern/sse-retry-2026-10-03T16-24-43-088Z
+
+=== SUITE SUMMARY ===
+
+✓ initialize: 1 passed, 0 failed
+✓ tools_call: 1 passed, 0 failed
+✓ elicitation-sep1034-client-defaults: 5 passed, 0 failed
+✓ sse-retry: 3 passed, 0 failed
+✓ auth/metadata-default: 14 passed, 0 failed
+✓ auth/metadata-var1: 14 passed, 0 failed
+✓ auth/metadata-var2: 14 passed, 0 failed
+✓ auth/metadata-var3: 14 passed, 0 failed
+✓ auth/basic-cimd: 14 passed, 0 failed
+✓ auth/scope-from-www-authenticate: 15 passed, 0 failed
+✓ auth/scope-from-scopes-supported: 15 passed, 0 failed
+✓ auth/scope-omitted-when-undefined: 15 passed, 0 failed
+✓ auth/scope-step-up: 24 passed, 0 failed
+✓ auth/scope-retry-limit: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-basic: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-post: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-none: 19 passed, 0 failed
+✓ auth/pre-registration: 14 passed, 0 failed
+
+Total: 239 passed, 0 failed, 0 warnings
+
+[32mBaseline check passed: all failures are expected.[0m

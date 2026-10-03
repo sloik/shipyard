@@ -1,0 +1,19 @@
+MCP 2026 gap suite (SPEC-BUG-181)
+  G1: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/proxy.TestMCPGap_G1_ManagedChildVersionNegotiation
+  G2: OPEN (3 case(s))
+      fail  github.com/sloik/shipyard/cmd/shipyard-mcp.TestMCPGap_G2_BridgeDiscoverOffersModern
+      fail  github.com/sloik/shipyard/internal/auth.TestMCPGap_G2_GatewayDiscoverOffersModern
+      fail  github.com/sloik/shipyard/internal/web.TestMCPGap_G2_PassthroughDiscoverOffersModern
+  G3: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/auth.TestMCPGap_G3_ModernClientReceivesNoSessionHeader
+  G4: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/auth.TestMCPGap_G4_UnsupportedProtocolVersionHeaderRejected
+  G5: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/auth.TestMCPGap_G5_InvalidEnvelopeRejected
+  G6: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/auth.TestMCPGap_G6_MetaPassedThroughToChild
+  G7: OPEN (1 case(s))
+      fail  github.com/sloik/shipyard/internal/proxy.TestMCPGap_G7_CancellationForwardedToChild
+open gaps: G1,G2,G3,G4,G5,G6,G7
+gap exit=1
