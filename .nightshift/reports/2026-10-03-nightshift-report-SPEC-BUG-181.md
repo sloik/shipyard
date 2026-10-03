@@ -28,7 +28,7 @@ Branch: `worktree-agent-a7d39841455a362cf`.
 - Coverage gate (`make coverage-check`, the configured `commands.test`): ❌ fails. The total is 80.3%, above the 75.1% floor. The causes are:
   - three new packages have no floor, which needs an out-of-scope file;
   - one pre-existing environmental floor, `internal/secrets/op`, is not met.
-- Review cycles: 1. Self-review covered all six personas, and advisor review happened before implementation.
+- Review cycles: 2 advisor reviews, one before implementation and one before completion. No separate LOOP Step 7/10 persona pass was performed. The second advisor review led to the `--suite all` comparison, the floor-stability check and the G3/G2 note below.
 
 ## Completed Specs
 - None. SPEC-BUG-181 is implemented and evidenced but is reported blocked. See Scope Blockers.
@@ -37,7 +37,8 @@ Branch: `worktree-agent-a7d39841455a362cf`.
 Commits on the branch:
 - `4ef9d73` `[SPEC-BUG-181] test: add red core, fixture, golden and G1-G7 gap tests`: the red tests, with compile-only stubs.
 - `24a034c` `[SPEC-BUG-181] feat: MCP conformance fixtures and compatibility core`
-- This report commit, `[SPEC-BUG-181] docs: generate nightshift report`.
+- `518c691` `[SPEC-BUG-181] docs: generate nightshift report`
+- A follow-up commit, `[SPEC-BUG-181] fix: register full SDK auth scenario set and document conformance suite choice`. It registers the remaining SDK auth scenarios in the fixture client, records the `core`-versus-`all` rationale, adds the suite-all evidence and applies these report corrections.
 
 Compared with the baseline, only `Makefile`, `go.mod` and `go.sum` are modified. Every other file is new. No live gateway, bridge or child source file is touched.
 
@@ -60,6 +61,7 @@ Compared with the baseline, only `Makefile`, `go.mod` and `go.sum` are modified.
 - **R4, conformance.** `scripts/mcp-conformance.sh` / `make mcp-conformance` pins the CLI at `0.1.16`, which is the latest stable release; there is no `@latest`. It runs against the `mcpfixture` binary at `internal/mcpfixture/cmd/mcpfixture`.
   - The waivers in `test/mcp-conformance/expected-failures.yml` are a byte copy of go-sdk v1.8.0 `conformance/baseline.yml`. `TestConformanceWaivers_AreVerbatimSDKBaseline` enforces this.
   - The script fails any leg that runs zero scenarios.
+  - The client legs use suite `core`, not `all`. Under CLI 0.1.16 the go-sdk v1.8.0 reference `everything-client` itself fails two `all`-suite scenarios that the pinned baseline does not list: `auth/2025-03-26-oauth-metadata-backcompat` and `auth/cross-app-access-complete-flow`. The baseline tracks CLI 0.2.0-alpha.11. With the SDK's full auth scenario set registered, the fixture client fails exactly the same 7 scenarios (5 waived, those 2 not). Under the zero-Shipyard-waiver rule, `core` is the largest suite that can honestly pass, and all 18 of its scenarios pass. Evidence: `evidence/suite-all-*.log`. The rationale is also in the script header.
 - **R5, raw preservation.** `Ingest` copies the bytes and clones the headers. Every accessor returns a copy, and the derived view is never re-encoded into the raw slot.
 - **R6, dependency record.** `docs/dependencies/go-sdk.md` covers:
   - the version, the upstream commit `3f3b699b2b67e1ed033a63d6651671dab53c2d32`, and the `go.sum` hash;
@@ -103,6 +105,9 @@ The total is 80.3%, against a baseline of 75.1%.
   Evidence: `evidence/gap-suite.txt`.
 - [x] **AC2 (R1, R5).** `go test -race -count=1 ./...` and `go vet ./...` pass. No existing test file was modified (`git diff --name-status 1d0a072` lists only additions, plus `Makefile`, `go.mod` and `go.sum`), so the capture and parser tests pass unchanged.
 - [x] **AC3 (R4).** One documented command, `scripts/mcp-conformance.sh` (or `make mcp-conformance`), runs the pinned CLI `0.1.16` against the fixture server and both fixture clients. There are zero failures, and the waiver list is the verbatim SDK baseline, with no Shipyard entry.
+  - Server: `--spec-version 2025-11-25`, the full active suite, 30 scenarios.
+  - Clients: suite `core`, 18 scenarios per era.
+  - Suite `all` was also run. Its only non-baseline failures are the two scenarios that the SDK reference client also fails (see R4 above). No Shipyard waiver was added to hide them.
 - [x] **AC4 (R5).** `TestPair_CaptureRoundTripKeepsRawBytesAndHeaders` and `TestIngest_KeepsRawBytesAndHeadersWithoutAliasing` in `internal/mcpcore/core_test.go` cover this.
   - The input defeats any re-encoding: odd whitespace and key order, a `\u00e9` escape, an integer ID of 2^53+1, and multi-value headers.
   - The pair keeps its bytes and headers after validation.
@@ -122,8 +127,15 @@ R1 is not ticked in the spec. The decision is recorded in ADR 0005, but R1's wor
   - `github.com/sloik/shipyard/internal/mcpfixture`, measured at 87.4%
   - `github.com/sloik/shipyard/internal/mcpfixture/cmd/mcpfixture`, measured at 84.3%
 
-  I did not write the file.
-  - **Smallest recovery:** the parent adds these three floors to the baseline's `packages` map. It may instead add the test-only `mcpfixture` packages to `.nightshift/coverage-exclusions.json` with a rationale, like `internal/teststubchild`. Then rerun `make coverage-check`.
+  I did not write the file. The three values were identical across three consecutive runs, so they are stable floors.
+  - **Smallest recovery:** the parent adds these entries to the `packages` map in `.nightshift/coverage-baseline.json`:
+    ```json
+    "github.com/sloik/shipyard/internal/mcpcore": 95.2,
+    "github.com/sloik/shipyard/internal/mcpfixture": 87.4,
+    "github.com/sloik/shipyard/internal/mcpfixture/cmd/mcpfixture": 84.3
+    ```
+    Alternatively, it lists the two test-only `mcpfixture` packages in `.nightshift/coverage-exclusions.json` with a rationale, as `internal/teststubchild` is. Then it reruns `make coverage-check`.
+  - **Expected residual on this host only:** after the floors are added, `make coverage-check` will still report `internal/secrets/op: 21.1% is below baseline 28.6%` here (see the next bullet). That failure is environmental. The check passes on a host where the 1Password `op` CLI is installed, which is presumably where the 28.6% floor was measured. It is not evidence that the floor fix failed.
 - **Pre-existing, not caused by this change:** `internal/secrets/op` measures 21.1% against a 28.6% floor.
   - The package is untouched (`git diff 1d0a072 -- internal/secrets` is empty).
   - Its tests branch on `exec.LookPath("op")`, and the 1Password CLI is not installed on this host.
@@ -140,6 +152,7 @@ R1 is not ticked in the spec. The decision is recorded in ADR 0005, but R1's wor
   1. go-sdk v1.8.0 emits `ttlMs` and `cacheScope` on list results in both eras.
   2. In stateless (modern) mode the SDK client sends `notifications/cancelled`, but it cannot cancel the original in-flight call, because each request gets a fresh session. G7's fix must not rely on SDK stateless cancellation.
   3. `capture.Store` persists payload bytes but not headers.
+- SPEC-BUG-182…185, G3 owner (advisory): the G3 case is not independent of G2. It goes red only because the modern SDK client falls back to `initialize`, and it does that only because `server/discover` is missing on the gateway, which is the G2 gap. Whichever spec closes G2 will probably turn G3 green as a side effect, even if `initialize` still issues `Mcp-Session-Id` unconditionally for legacy-era sessions. The G3 owner should keep or extend a direct check of the `initialize` path if that behaviour is in scope.
 
 ## Report Action Log
 | Report | `## Open Questions` / `## Blocked Specs` present? | Action taken |

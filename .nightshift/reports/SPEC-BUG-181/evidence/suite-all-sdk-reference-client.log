@@ -1,0 +1,263 @@
+Running all suite (26 scenarios) in parallel...
+
+Starting scenario: initialize
+Starting scenario: tools_call
+Starting scenario: elicitation-sep1034-client-defaults
+Starting scenario: sse-retry
+Starting scenario: auth/metadata-default
+Starting scenario: auth/metadata-var1
+Starting scenario: auth/metadata-var2
+Starting scenario: auth/metadata-var3
+Starting scenario: auth/basic-cimd
+Starting scenario: auth/scope-from-www-authenticate
+Starting scenario: auth/scope-from-scopes-supported
+Starting scenario: auth/scope-omitted-when-undefined
+Starting scenario: auth/scope-step-up
+Starting scenario: auth/scope-retry-limit
+Starting scenario: auth/token-endpoint-auth-basic
+Starting scenario: auth/token-endpoint-auth-post
+Starting scenario: auth/token-endpoint-auth-none
+Starting scenario: auth/pre-registration
+Starting scenario: auth/2025-03-26-oauth-metadata-backcompat
+Starting scenario: auth/2025-03-26-oauth-endpoint-fallback
+Starting scenario: auth/resource-mismatch
+Starting scenario: auth/offline-access-scope
+Starting scenario: auth/offline-access-not-supported
+Starting scenario: auth/client-credentials-jwt
+Starting scenario: auth/client-credentials-basic
+Starting scenario: auth/cross-app-access-complete-flow
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59976/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59977/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59993/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59994/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59999/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60000/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60001/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60002/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60003/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60004/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60005/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60006/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60007/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60008/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60009/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60010/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60011/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60012/mcp
+With context: {"client_id":"pre-registered-client","client_secret":"pre-registered-secret"}
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60013/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60014/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60015/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60016/mcp
+With context: {"client_id":"conformance-test-client","client_secret":"conformance-test-secret"}
+(node:35213) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59975
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:59978
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60018/mcp
+With context: {"client_id":"conformance-test-client","private_key_pem":"-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2K8UfJxtkGdY5ibz\nKuPvZ1w1/FMioYWceV1nkkSAHuKhRANCAASGtS5pA7iUjUQM5Aud3xx/tNzDpcxQ\nxGDigf6AKodgsccGpSUNf3qidTMyXvdq8IPQHPg/S4T8gAUOSDiroeqQ\n-----END PRIVATE KEY-----","signing_algorithm":"ES256"}
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Unknown scenario: "auth/client-credentials-basic"
+Available scenarios:
+  - auth/2025-03-26-oauth-endpoint-fallback
+  - auth/2025-03-26-oauth-metadata-backcompat
+  - auth/authorization-server-migration
+  - auth/basic-cimd
+  - auth/iss-normalized
+  - auth/iss-not-advertised
+  - auth/iss-supported
+  - auth/iss-supported-missing
+  - auth/iss-unexpected
+  - auth/iss-wrong-issuer
+  - auth/metadata-default
+  - auth/metadata-issuer-mismatch
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/offline-access-not-supported
+  - auth/offline-access-scope
+  - auth/pre-registration
+  - auth/resource-mismatch
+  - auth/scope-from-scopes-supported
+  - auth/scope-from-www-authenticate
+  - auth/scope-omitted-when-undefined
+  - auth/scope-retry-limit
+  - auth/scope-step-up
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-none
+  - auth/token-endpoint-auth-post
+  - elicitation-sep1034-client-defaults
+  - http-custom-headers
+  - http-invalid-tool-headers
+  - http-standard-headers
+  - initialize
+  - json-schema-2020-12-preservation
+  - json-schema-ref-no-deref
+  - request-metadata
+  - sep-2322-client-request-state
+  - sse-retry
+  - tools_call
+
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/sdkconf/everything-client http://localhost:60024/mcp
+With context: {"client_id":"conformance-test-xaa-client","client_secret":"conformance-test-xaa-secret","idp_client_id":"conformance-test-idp-client","idp_id_token":"eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJkZW1vLXVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbCI6ImRlbW8tdXNlckBleGFtcGxlLmNvbSIsImF1ZCI6ImNvbmZvcm1hbmNlLXRlc3QtaWRwLWNsaWVudCIsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3Q6NjAwMjIiLCJpYXQiOjE3OTEwNDU3MjQsImV4cCI6MTc5MTA0OTMyNH0.a4eQIDLYW07Q27f5XVBcoxDvsRaIdZ9NOn_BWUC4OUXNboxSgmIzfjwmd9EBpPv2-b2uqnyDj2UPWhAOYL6H2Q","idp_issuer":"http://localhost:60022","idp_token_endpoint":"http://localhost:60022/token"}
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Unknown scenario: "auth/client-credentials-jwt"
+Available scenarios:
+  - auth/2025-03-26-oauth-endpoint-fallback
+  - auth/2025-03-26-oauth-metadata-backcompat
+  - auth/authorization-server-migration
+  - auth/basic-cimd
+  - auth/iss-normalized
+  - auth/iss-not-advertised
+  - auth/iss-supported
+  - auth/iss-supported-missing
+  - auth/iss-unexpected
+  - auth/iss-wrong-issuer
+  - auth/metadata-default
+  - auth/metadata-issuer-mismatch
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/offline-access-not-supported
+  - auth/offline-access-scope
+  - auth/pre-registration
+  - auth/resource-mismatch
+  - auth/scope-from-scopes-supported
+  - auth/scope-from-www-authenticate
+  - auth/scope-omitted-when-undefined
+  - auth/scope-retry-limit
+  - auth/scope-step-up
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-none
+  - auth/token-endpoint-auth-post
+  - elicitation-sep1034-client-defaults
+  - http-custom-headers
+  - http-invalid-tool-headers
+  - http-standard-headers
+  - initialize
+  - json-schema-2020-12-preservation
+  - json-schema-ref-no-deref
+  - request-metadata
+  - sep-2322-client-request-state
+  - sse-retry
+  - tools_call
+
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Unknown scenario: "auth/cross-app-access-complete-flow"
+Available scenarios:
+  - auth/2025-03-26-oauth-endpoint-fallback
+  - auth/2025-03-26-oauth-metadata-backcompat
+  - auth/authorization-server-migration
+  - auth/basic-cimd
+  - auth/iss-normalized
+  - auth/iss-not-advertised
+  - auth/iss-supported
+  - auth/iss-supported-missing
+  - auth/iss-unexpected
+  - auth/iss-wrong-issuer
+  - auth/metadata-default
+  - auth/metadata-issuer-mismatch
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/offline-access-not-supported
+  - auth/offline-access-scope
+  - auth/pre-registration
+  - auth/resource-mismatch
+  - auth/scope-from-scopes-supported
+  - auth/scope-from-www-authenticate
+  - auth/scope-omitted-when-undefined
+  - auth/scope-retry-limit
+  - auth/scope-step-up
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-none
+  - auth/token-endpoint-auth-post
+  - elicitation-sep1034-client-defaults
+  - http-custom-headers
+  - http-invalid-tool-headers
+  - http-standard-headers
+  - initialize
+  - json-schema-2020-12-preservation
+  - json-schema-ref-no-deref
+  - request-metadata
+  - sep-2322-client-request-state
+  - sse-retry
+  - tools_call
+
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Scenario "auth/2025-03-26-oauth-metadata-backcompat" failed: client.Connect(): calling "initialize": sending "initialize": rejected by transport: failed to get authorization server metadata: metadata issuer "http://localhost:59993/oauth" does not match issuer URL "http://localhost:59993"
+
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Scenario "auth/resource-mismatch" failed: client.Connect(): calling "initialize": sending "initialize": rejected by transport: failed to register client: registration failed with status 404 Not Found: <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /register</pre>
+</body>
+</html>
+
+
+Client exited with code 1
+
+Stderr:
+2026/10/03 18:42:04 Scenario "auth/scope-retry-limit" failed: session.ListTools(): calling "tools/list": sending "tools/list": Forbidden
+
+
+=== SUITE SUMMARY ===
+
+✓ initialize: 1 passed, 0 failed
+✓ tools_call: 1 passed, 0 failed
+✓ elicitation-sep1034-client-defaults: 5 passed, 0 failed
+✓ sse-retry: 3 passed, 0 failed
+✓ auth/metadata-default: 14 passed, 0 failed
+✓ auth/metadata-var1: 14 passed, 0 failed
+✓ auth/metadata-var2: 14 passed, 0 failed
+✓ auth/metadata-var3: 14 passed, 0 failed
+✓ auth/basic-cimd: 14 passed, 0 failed
+✓ auth/scope-from-www-authenticate: 15 passed, 0 failed
+✓ auth/scope-from-scopes-supported: 15 passed, 0 failed
+✓ auth/scope-omitted-when-undefined: 15 passed, 0 failed
+✓ auth/scope-step-up: 24 passed, 0 failed
+✓ auth/scope-retry-limit: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-basic: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-post: 19 passed, 0 failed
+✓ auth/token-endpoint-auth-none: 19 passed, 0 failed
+✓ auth/pre-registration: 14 passed, 0 failed
+✗ auth/2025-03-26-oauth-metadata-backcompat: 2 passed, 3 failed
+✓ auth/2025-03-26-oauth-endpoint-fallback: 8 passed, 0 failed
+✓ auth/resource-mismatch: 5 passed, 0 failed
+✓ auth/offline-access-scope: 13 passed, 0 failed
+✓ auth/offline-access-not-supported: 15 passed, 0 failed
+✗ auth/client-credentials-jwt: 0 passed, 1 failed
+✗ auth/client-credentials-basic: 0 passed, 1 failed
+✗ auth/cross-app-access-complete-flow: 0 passed, 2 failed
+
+Total: 282 passed, 7 failed, 0 warnings
+
+[33mExpected failures (in baseline):[0m
+  ~ auth/client-credentials-jwt
+  ~ auth/client-credentials-basic
+
+[31mUnexpected failures (not in baseline):[0m
+  ✗ auth/2025-03-26-oauth-metadata-backcompat
+  ✗ auth/cross-app-access-complete-flow
+
+[31mUnexpected failures detected: these scenarios are not in your expected-failures baseline.[0m

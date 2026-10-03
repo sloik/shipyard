@@ -9,6 +9,14 @@
 #   client-legacy fixture client offering 2025-11-25, suite "core"
 #   client-modern fixture client offering 2026-07-28 (falls back to initialize), suite "core"
 #
+# Why client suite "core" and not "all": under CLI 0.1.16 the go-sdk v1.8.0
+# reference everything-client itself fails two "all"-suite scenarios that its
+# baseline does not list (auth/2025-03-26-oauth-metadata-backcompat,
+# auth/cross-app-access-complete-flow; the baseline tracks 0.2.0-alpha.11).
+# The fixture client fails exactly the same set. With zero Shipyard-added
+# waivers, "core" (18 scenarios, every one passing) is the largest suite that
+# can honestly pass. Re-evaluate when the CLI pin is bumped.
+#
 # Waivers: test/mcp-conformance/expected-failures.yml is a byte-for-byte copy of
 # the pinned go-sdk's conformance/baseline.yml (enforced by
 # TestConformanceWaivers_AreVerbatimSDKBaseline). Shipyard adds no waivers.

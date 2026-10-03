@@ -34,12 +34,18 @@ var clientScenarios = map[string]scenarioFunc{
 }
 
 func init() {
+	// The same authorization-code scenario set the go-sdk v1.8.0
+	// everything-client registers.
 	for _, name := range []string{
-		"auth/metadata-default", "auth/metadata-var1", "auth/metadata-var2", "auth/metadata-var3",
-		"auth/basic-cimd", "auth/scope-from-www-authenticate", "auth/scope-from-scopes-supported",
-		"auth/scope-omitted-when-undefined", "auth/scope-step-up", "auth/scope-retry-limit",
-		"auth/token-endpoint-auth-basic", "auth/token-endpoint-auth-post", "auth/token-endpoint-auth-none",
-		"auth/pre-registration", "auth/2025-03-26-oauth-metadata-backcompat", "auth/2025-03-26-oauth-endpoint-fallback",
+		"auth/2025-03-26-oauth-metadata-backcompat", "auth/2025-03-26-oauth-endpoint-fallback",
+		"auth/authorization-server-migration", "auth/basic-cimd",
+		"auth/iss-normalized", "auth/iss-not-advertised", "auth/iss-supported", "auth/iss-supported-missing",
+		"auth/iss-unexpected", "auth/iss-wrong-issuer",
+		"auth/metadata-default", "auth/metadata-issuer-mismatch", "auth/metadata-var1", "auth/metadata-var2", "auth/metadata-var3",
+		"auth/offline-access-not-supported", "auth/offline-access-scope", "auth/pre-registration", "auth/resource-mismatch",
+		"auth/scope-from-scopes-supported", "auth/scope-from-www-authenticate", "auth/scope-omitted-when-undefined",
+		"auth/scope-retry-limit", "auth/scope-step-up",
+		"auth/token-endpoint-auth-basic", "auth/token-endpoint-auth-none", "auth/token-endpoint-auth-post",
 	} {
 		clientScenarios[name] = runAuth
 	}
