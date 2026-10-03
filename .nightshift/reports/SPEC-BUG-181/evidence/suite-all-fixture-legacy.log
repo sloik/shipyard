@@ -1,0 +1,147 @@
+Running all suite (26 scenarios) in parallel...
+
+Starting scenario: initialize
+Starting scenario: tools_call
+Starting scenario: elicitation-sep1034-client-defaults
+Starting scenario: sse-retry
+Starting scenario: auth/metadata-default
+Starting scenario: auth/metadata-var1
+Starting scenario: auth/metadata-var2
+Starting scenario: auth/metadata-var3
+Starting scenario: auth/basic-cimd
+Starting scenario: auth/scope-from-www-authenticate
+Starting scenario: auth/scope-from-scopes-supported
+Starting scenario: auth/scope-omitted-when-undefined
+Starting scenario: auth/scope-step-up
+Starting scenario: auth/scope-retry-limit
+Starting scenario: auth/token-endpoint-auth-basic
+Starting scenario: auth/token-endpoint-auth-post
+Starting scenario: auth/token-endpoint-auth-none
+Starting scenario: auth/pre-registration
+Starting scenario: auth/2025-03-26-oauth-metadata-backcompat
+Starting scenario: auth/2025-03-26-oauth-endpoint-fallback
+Starting scenario: auth/resource-mismatch
+Starting scenario: auth/offline-access-scope
+Starting scenario: auth/offline-access-not-supported
+Starting scenario: auth/client-credentials-jwt
+Starting scenario: auth/client-credentials-basic
+Starting scenario: auth/cross-app-access-complete-flow
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60470/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60471/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60487/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60488/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60493/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60494/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60495/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60496/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60497/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60498/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60499/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60500/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60501/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60502/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60503/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60504/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60505/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60506/mcp
+With context: {"client_id":"pre-registered-client","client_secret":"pre-registered-secret"}
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60507/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60508/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60509/mcp
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60510/mcp
+With context: {"client_id":"conformance-test-client","client_secret":"conformance-test-secret"}
+(node:37339) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60469
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60472
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60557/mcp
+With context: {"client_id":"conformance-test-client","private_key_pem":"-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgab87UMXTWR5tx7bE\nKq7qGzc31Dv5a/SJEAlqJ7SYBTKhRANCAAQcW7iymh6AdO3EbMInMNzAobNUktt2\n2uoWm8GqiDjWdWQZ3LuojjMxhrZ/jhJssyQBDg24ImR5bWMOotsHyEWt\n-----END PRIVATE KEY-----","signing_algorithm":"ES256"}
+Executing client: /private/tmp/claude-501/-Users-ed-Dropbox-Developer-Repos-shipyard/04889064-f513-472e-8d58-21b71fc42cda/scratchpad/mcpfixture client -era legacy http://localhost:60566/mcp
+With context: {"client_id":"conformance-test-xaa-client","client_secret":"conformance-test-xaa-secret","idp_client_id":"conformance-test-idp-client","idp_id_token":"eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJkZW1vLXVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbCI6ImRlbW8tdXNlckBleGFtcGxlLmNvbSIsImF1ZCI6ImNvbmZvcm1hbmNlLXRlc3QtaWRwLWNsaWVudCIsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3Q6NjA1NjQiLCJpYXQiOjE3OTEwNDU3NjcsImV4cCI6MTc5MTA0OTM2N30.N9OY8D6oZSr2nnq0-zwE0eS9pQFdF6IldSsMiiiZbtDnfh5H2-VfFBZ1sCOarbyTjKko3frD4ua-GhTDT1Bu4Q","idp_issuer":"http://localhost:60564","idp_token_endpoint":"http://localhost:60564/token"}
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: unknown conformance scenario "auth/client-credentials-basic" (have [auth/2025-03-26-oauth-endpoint-fallback auth/2025-03-26-oauth-metadata-backcompat auth/authorization-server-migration auth/basic-cimd auth/iss-normalized auth/iss-not-advertised auth/iss-supported auth/iss-supported-missing auth/iss-unexpected auth/iss-wrong-issuer auth/metadata-default auth/metadata-issuer-mismatch auth/metadata-var1 auth/metadata-var2 auth/metadata-var3 auth/offline-access-not-supported auth/offline-access-scope auth/pre-registration auth/resource-mismatch auth/scope-from-scopes-supported auth/scope-from-www-authenticate auth/scope-omitted-when-undefined auth/scope-retry-limit auth/scope-step-up auth/token-endpoint-auth-basic auth/token-endpoint-auth-none auth/token-endpoint-auth-post elicitation-sep1034-client-defaults initialize sse-retry tools_call])
+
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: unknown conformance scenario "auth/cross-app-access-complete-flow" (have [auth/2025-03-26-oauth-endpoint-fallback auth/2025-03-26-oauth-metadata-backcompat auth/authorization-server-migration auth/basic-cimd auth/iss-normalized auth/iss-not-advertised auth/iss-supported auth/iss-supported-missing auth/iss-unexpected auth/iss-wrong-issuer auth/metadata-default auth/metadata-issuer-mismatch auth/metadata-var1 auth/metadata-var2 auth/metadata-var3 auth/offline-access-not-supported auth/offline-access-scope auth/pre-registration auth/resource-mismatch auth/scope-from-scopes-supported auth/scope-from-www-authenticate auth/scope-omitted-when-undefined auth/scope-retry-limit auth/scope-step-up auth/token-endpoint-auth-basic auth/token-endpoint-auth-none auth/token-endpoint-auth-post elicitation-sep1034-client-defaults initialize sse-retry tools_call])
+
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: unknown conformance scenario "auth/client-credentials-jwt" (have [auth/2025-03-26-oauth-endpoint-fallback auth/2025-03-26-oauth-metadata-backcompat auth/authorization-server-migration auth/basic-cimd auth/iss-normalized auth/iss-not-advertised auth/iss-supported auth/iss-supported-missing auth/iss-unexpected auth/iss-wrong-issuer auth/metadata-default auth/metadata-issuer-mismatch auth/metadata-var1 auth/metadata-var2 auth/metadata-var3 auth/offline-access-not-supported auth/offline-access-scope auth/pre-registration auth/resource-mismatch auth/scope-from-scopes-supported auth/scope-from-www-authenticate auth/scope-omitted-when-undefined auth/scope-retry-limit auth/scope-step-up auth/token-endpoint-auth-basic auth/token-endpoint-auth-none auth/token-endpoint-auth-post elicitation-sep1034-client-defaults initialize sse-retry tools_call])
+
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: connect legacy fixture client: calling "initialize": sending "initialize": rejected by transport: failed to get authorization server metadata: metadata issuer "http://localhost:60487/oauth" does not match issuer URL "http://localhost:60487"
+
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: connect legacy fixture client: calling "initialize": sending "initialize": rejected by transport: failed to register client: registration failed with status 404 Not Found: <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /register</pre>
+</body>
+</html>
+
+
+
+Client exited with code 1
+
+Stderr:
+mcpfixture: list tools: calling "tools/list": sending "tools/list": Forbidden
+
+
+=== SUITE SUMMARY ===
+
+✓ initialize: 1 passed, 0 failed
+✓ tools_call: 1 passed, 0 failed
+✓ elicitation-sep1034-client-defaults: 5 passed, 0 failed
+✓ sse-retry: 3 passed, 0 failed
+✓ auth/metadata-default: 13 passed, 0 failed
+✓ auth/metadata-var1: 13 passed, 0 failed
+✓ auth/metadata-var2: 13 passed, 0 failed
+✓ auth/metadata-var3: 13 passed, 0 failed
+✓ auth/basic-cimd: 13 passed, 0 failed
+✓ auth/scope-from-www-authenticate: 14 passed, 0 failed
+✓ auth/scope-from-scopes-supported: 14 passed, 0 failed
+✓ auth/scope-omitted-when-undefined: 14 passed, 0 failed
+✓ auth/scope-step-up: 23 passed, 0 failed
+✓ auth/scope-retry-limit: 10 passed, 0 failed
+✓ auth/token-endpoint-auth-basic: 18 passed, 0 failed
+✓ auth/token-endpoint-auth-post: 18 passed, 0 failed
+✓ auth/token-endpoint-auth-none: 18 passed, 0 failed
+✓ auth/pre-registration: 13 passed, 0 failed
+✗ auth/2025-03-26-oauth-metadata-backcompat: 1 passed, 3 failed
+✓ auth/2025-03-26-oauth-endpoint-fallback: 7 passed, 0 failed
+✓ auth/resource-mismatch: 3 passed, 0 failed
+✓ auth/offline-access-scope: 12 passed, 0 failed
+✓ auth/offline-access-not-supported: 14 passed, 0 failed
+✗ auth/client-credentials-jwt: 0 passed, 1 failed
+✗ auth/client-credentials-basic: 0 passed, 1 failed
+✗ auth/cross-app-access-complete-flow: 0 passed, 2 failed
+
+Total: 254 passed, 7 failed, 0 warnings
+
+[33mExpected failures (in baseline):[0m
+  ~ auth/client-credentials-jwt
+  ~ auth/client-credentials-basic
+
+[31mUnexpected failures (not in baseline):[0m
+  ✗ auth/2025-03-26-oauth-metadata-backcompat
+  ✗ auth/cross-app-access-complete-flow
+
+[31mUnexpected failures detected: these scenarios are not in your expected-failures baseline.[0m

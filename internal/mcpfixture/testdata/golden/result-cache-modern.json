@@ -1,0 +1,213 @@
+[
+  {
+    "http": "POST",
+    "status": 200,
+    "request_headers": {
+      "Content-Type": "application/json",
+      "Mcp-Method": "tools/list",
+      "Mcp-Protocol-Version": "2026-07-28"
+    },
+    "request": {
+      "kind": "request",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              }
+            },
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "shipyard-mcp-fixture",
+              "version": "1.0.0"
+            },
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    },
+    "response_headers": {
+      "Content-Type": "text/event-stream"
+    },
+    "responses": [
+      {
+        "kind": "response",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "resultType": "complete",
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "shipyard-mcp-fixture",
+                "version": "1.0.0"
+              }
+            },
+            "ttlMs": 0,
+            "cacheScope": "public",
+            "tools": [
+              {
+                "description": "Echoes request _meta into result _meta",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "fixture_echo_meta"
+              },
+              {
+                "description": "Returns a tool-level error result",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "fixture_error"
+              },
+              {
+                "description": "Blocks until cancelled",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "fixture_slow"
+              },
+              {
+                "description": "Tool with JSON Schema 2020-12 features",
+                "inputSchema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "$defs": {
+                    "address": {
+                      "type": "object",
+                      "properties": {
+                        "street": {
+                          "type": "string"
+                        },
+                        "city": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "address": {
+                      "$ref": "#/$defs/address"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "name": "json_schema_2020_12_tool"
+              },
+              {
+                "description": "Audio content",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_audio_content"
+              },
+              {
+                "description": "Server-initiated elicitation",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "The message to show the user"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "additionalProperties": false
+                },
+                "name": "test_elicitation"
+              },
+              {
+                "description": "Elicitation defaults (SEP-1034)",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_elicitation_sep1034_defaults"
+              },
+              {
+                "description": "Elicitation enums (SEP-1330)",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_elicitation_sep1330_enums"
+              },
+              {
+                "description": "Embedded resource content",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_embedded_resource"
+              },
+              {
+                "description": "Tool-level error",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_error_handling"
+              },
+              {
+                "description": "Image content",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_image_content"
+              },
+              {
+                "description": "Text, image and resource content",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_multiple_content_types"
+              },
+              {
+                "description": "Server-initiated sampling",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "prompt": {
+                      "type": "string",
+                      "description": "The prompt to send to the LLM"
+                    }
+                  },
+                  "required": [
+                    "prompt"
+                  ],
+                  "additionalProperties": false
+                },
+                "name": "test_sampling"
+              },
+              {
+                "description": "Simple text content",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_simple_text"
+              },
+              {
+                "description": "Emits log messages",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_tool_with_logging"
+              },
+              {
+                "description": "Reports progress",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "name": "test_tool_with_progress"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,49 @@
+[
+  {
+    "http": "POST",
+    "status": 200,
+    "request_headers": {
+      "Content-Type": "application/json",
+      "Mcp-Protocol-Version": "2025-11-25",
+      "Mcp-Session-Id": "redacted"
+    },
+    "request": {
+      "kind": "request",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "x.example/trace": "t-1"
+          },
+          "name": "fixture_echo_meta",
+          "arguments": {}
+        }
+      }
+    },
+    "response_headers": {
+      "Content-Type": "text/event-stream"
+    },
+    "responses": [
+      {
+        "kind": "response",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "_meta": {
+              "x.example/trace": "t-1"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "meta echoed"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+]
