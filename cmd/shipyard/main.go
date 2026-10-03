@@ -91,12 +91,12 @@ func acquireDesktopInstanceLock(dir string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("open desktop lock: %w", err)
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFileExclusive(file); err != nil {
 		file.Close()
 		return nil, errDesktopInstanceAlreadyRunning
 	}
 	release := func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = unlockFile(file)
 		_ = file.Close()
 	}
 	return release, nil
