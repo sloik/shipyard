@@ -171,7 +171,8 @@ snapshot:
 release:
 	goreleaser release --clean
 
-# Desktop app targets require Wails v3.0.0-alpha2.117, matching go.mod.
+# Desktop app targets require the wails3 CLI at the github.com/wailsapp/wails/v3
+# version in go.mod (scripts/check-security-config.sh enforces the CI pin).
 wails-dev:
 	wails3 dev
 
