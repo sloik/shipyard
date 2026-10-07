@@ -15,7 +15,9 @@ Exit code is 0 when no blocking preflight failures are found, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -210,6 +212,98 @@ def _run(cmd: str, cwd: Path, timeout: int | None = None) -> tuple[int, str]:
         return 124, "TIMEOUT"
     except OSError as exc:
         return 127, str(exc)
+
+
+def _repository_head(repo: Path) -> str | None:
+    """Return the exact commit checked out at *repo*, or None when unavailable."""
+    code, output = _run("git rev-parse --verify HEAD^{commit}", repo)
+    head = output.strip()
+    return head if code == 0 and _GIT_OBJECT_ID_RE.fullmatch(head) else None
+
+
+_GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_SPEC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_INVOCATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_ADMISSION_VALUES = frozenset({"allow", "deny", "indeterminate"})
+PROJECTION_SCHEMA_VERSION = "1.0.0"
+
+
+def _pattern_or_none(value: Any, pattern: re.Pattern[str]) -> str | None:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _count_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def sanitized_preflight_projection(result: Any, *, result_sha256: str) -> dict[str, Any]:
+    """Project a retained preflight result onto an allowlist of parsed fields (SPEC-390-002 R1).
+
+    The retained result holds local paths, command lines and test output, so it
+    never crosses a verifier boundary. This projection is built field by field:
+    every value is re-validated against a closed shape (a digest, an enum, a
+    boolean, a count, an identifier) and replaced by ``None`` when it is not one.
+    A field therefore cannot smuggle free text or a host path through, and a
+    value the result did not carry is reported as unset rather than invented.
+
+    ``result_sha256`` is the digest of the retained bytes the caller parsed.
+    ``repository_head`` is the raw commit the run executed against; it is for the
+    parent to turn into a protocol digest and must not reach a verifier as-is.
+    """
+    if not isinstance(result, dict):
+        raise ValueError("preflight result is not a mapping")
+    if not isinstance(result_sha256, str) or not _SHA256_RE.fullmatch(result_sha256):
+        raise ValueError("result digest must be a lowercase SHA-256")
+    checks = result.get("checks") if isinstance(result.get("checks"), dict) else {}
+    admission = checks.get("install_admission")
+    admission = admission if isinstance(admission, dict) else {}
+    git = checks.get("git") if isinstance(checks.get("git"), dict) else {}
+    commands = checks.get("commands") if isinstance(checks.get("commands"), dict) else {}
+    test = commands.get("test") if isinstance(commands.get("test"), dict) else {}
+    coverage = admission.get("coverage")
+    coverage_projection = (
+        {
+            key: _count_or_none(coverage.get(key))
+            for key in ("applicable", "checked", "passed", "failed")
+        }
+        if isinstance(coverage, dict)
+        else None
+    )
+    failures = result.get("blocking_failures")
+    return {
+        "schema_version": PROJECTION_SCHEMA_VERSION,
+        "result_sha256": result_sha256,
+        "spec_id": _pattern_or_none(result.get("spec_id"), _SPEC_ID_RE),
+        "timestamp": _pattern_or_none(result.get("timestamp"), _TIMESTAMP_RE),
+        "ok": _bool_or_none(result.get("ok")),
+        "blocking_failure_count": len(failures) if isinstance(failures, list) else None,
+        "git_clean": _bool_or_none(git.get("clean")),
+        "install_admission": {
+            "ok": _bool_or_none(admission.get("ok")),
+            "admission": admission.get("admission")
+            if admission.get("admission") in _ADMISSION_VALUES else None,
+            "invocation_id": _pattern_or_none(
+                admission.get("integrity_run_id"), _INVOCATION_ID_RE
+            ),
+            "artifact_sha256": _pattern_or_none(admission.get("artifact_sha256"), _SHA256_RE),
+            "integrity_receipt_sha256": _pattern_or_none(
+                admission.get("integrity_receipt_sha256"), _SHA256_RE
+            ),
+            "coverage": coverage_projection,
+        },
+        "declared_test": {
+            "configured": bool(test) and test.get("cmd") is not None and test.get("skipped") is False,
+            "exit": _count_or_none(test.get("exit")),
+            "skipped": _bool_or_none(test.get("skipped")),
+        },
+        "repository_head": _pattern_or_none(result.get("repository_head"), _GIT_OBJECT_ID_RE),
+    }
 
 
 def _git_status(repo: Path) -> dict[str, Any]:
@@ -462,6 +556,9 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
         "spec_id": spec_id,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "repo": str(repo),
+        # SPEC-390-002: the commit this run executed against, so a retained
+        # result can be bound to an exact candidate instead of an author's claim.
+        "repository_head": _repository_head(repo),
         "checks": {},
         "blocking_failures": [],
         "warnings": [],
@@ -525,6 +622,17 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
             )
             result["blocking_failures"].append(f"Unresolved after: dependencies: {unresolved}.")
 
+        # SPEC-419: the sequential run route applies the same project spec_metadata policy
+        # (version first) as promotion and parallel dispatch; an invalid policy refuses too.
+        if status in {"planned", "ready", "in_progress"}:
+            try:
+                from spec_frontmatter import load_spec_metadata_policy, spec_metadata_problems
+                metadata_problems = spec_metadata_problems(frontmatter, load_spec_metadata_policy(config_path))
+            except ImportError:  # pragma: no cover - a kit without the shared policy reader
+                metadata_problems = ["spec_metadata_validation_unavailable: sync the managed spec_frontmatter.py"]
+            result["checks"]["spec_metadata"] = {"ok": not metadata_problems, "problems": metadata_problems}
+            result["blocking_failures"].extend(metadata_problems)
+
         # SPEC-358 R6: route planned/ready/in_progress preflight through the
         # same '## State rationale' static rules as the CLI validator and the
         # pre-commit hook, instead of a second independent check. An unavailable
@@ -574,6 +682,39 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
     return result
 
 
+PREFLIGHT_DIGEST_DIR = Path("_wip") / "preflight-digests"
+
+
+def write_preflight_digest_record(
+    metrics_dir: Path, spec_id: str, repository_head: str | None, body: bytes,
+) -> Path | None:
+    """Record the retained result's SHA-256 out of band (SPEC-390-002-002 R1).
+
+    The record lives under ``<metrics_dir>/_wip/`` (untracked, parent-private),
+    never in the spec, a report or any committed file, so the digest stays an
+    out-of-band reference. Nothing is written when the head is unknown.
+    """
+    if not repository_head:
+        return None
+    record_dir = metrics_dir / PREFLIGHT_DIGEST_DIR
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record = record_dir / f"{spec_id}.json"
+    record.write_text(
+        json.dumps(
+            {
+                "spec_id": spec_id,
+                "repository_head": repository_head,
+                "result_sha256": hashlib.sha256(body).hexdigest(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return record
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Nightshift Step 1 preflight checks.")
     parser.add_argument("--spec-id", required=True)
@@ -619,7 +760,9 @@ def main(argv: list[str] | None = None) -> int:
     metrics_dir.mkdir(parents=True, exist_ok=True)
     out = metrics_dir / f"{args.spec_id}.preflight.json"
     result["artifact_path"] = str(out)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    body = (json.dumps(result, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    out.write_bytes(body)
+    write_preflight_digest_record(metrics_dir, args.spec_id, result.get("repository_head"), body)
 
     if result["ok"]:
         print(f"Wrote {out} (preflight ok)")

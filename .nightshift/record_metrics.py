@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover - environment guard
     print("Error: PyYAML is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+import spec_id as spec_id_grammar
 from loop_events import PHASE_IDS, PHASE_MEASUREMENT_STATES, load_events
 from token_usage import apply_token_measurements, derive_token_measurements
 
@@ -541,6 +542,270 @@ def build_metrics(args, git: dict, cfg: dict) -> dict:
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# SPEC-NS-KIT-002-001: verification instrumentation.
+#
+# Per-dispatch verifier timings, per-stage timings and per-suite samples are
+# recorded into a sidecar `<metrics_dir>/<spec_id>.verification.json` (the
+# SPEC-092 `<id>.validation.json` precedent) and mirrored into the terminal
+# commit as repeatable `Nightshift-Verifier-Dispatch` / `Nightshift-Stage-Timing`
+# trailers. Both are folded additively into the metrics row under a top-level
+# `verification` block. A value the coordinator could not measure is the string
+# `unavailable`, never 0 (the row validator already forbids 0-as-unknown for
+# phases; this block follows the same rule).
+# ---------------------------------------------------------------------------
+
+REDISPATCH_REASON_ENUM = {
+    "defect_fail", "unauditable_verdict", "contamination", "surface_env_gap",
+    "stale_head", "budget_expiry", "other",
+}
+DISPATCH_OUTCOME_ENUM = {"pass", "fail", "no_verdict", "rejected", "other"}
+STAGE_ENUM = (
+    "worker_implementation", "surface_preparation", "verifier", "post_verdict_gates",
+    "post_verdict_scope", "post_verdict_terminal_integrity", "post_verdict_fresh_main",
+    "merge_cleanup", "coordination_gate_wait", "cleanup_diagnostic",
+)
+IOS_PHASE_KEYS = ("simulator_create_s", "simulator_boot_s", "build_for_testing_s", "test_execution_s")
+UNAVAILABLE = "unavailable"
+_ARM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+TRAILER_DISPATCH = "Nightshift-Verifier-Dispatch"
+TRAILER_STAGE = "Nightshift-Stage-Timing"
+TRAILER_VERIFIER_S = "Nightshift-Verification-Duration-S"
+
+
+def timing_sidecar_path(metrics_dir: Path, spec_id: str) -> Path:
+    return metrics_dir / f"{spec_id}.verification.json"
+
+
+def _num_or_unavailable(payload: dict, key: str, *, integer: bool = False, field: str = "") -> object:
+    value = payload.get(key, UNAVAILABLE)
+    if value is None or value == UNAVAILABLE:
+        return UNAVAILABLE
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    if ok and integer and int(value) != value:
+        ok = False
+    if not ok:
+        raise ValueError(f"{field or key} must be a non-negative {'integer' if integer else 'number'} or 'unavailable'")
+    return int(value) if integer else (round(float(value), 3) if isinstance(value, float) else value)
+
+
+def validate_timing_record(kind: str, payload: dict) -> dict:
+    """Validate and normalise one dispatch/stage/sample record; raise ValueError."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"{kind} record must be an object")
+    if kind == "dispatch":
+        number = payload.get("dispatch")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValueError("dispatch must be an integer >= 1")
+        start, end = _parse_timestamp(payload.get("started_at")), _parse_timestamp(payload.get("ended_at"))
+        if start is None:
+            raise ValueError("started_at must be an ISO-8601 timestamp")
+        if end is None or end < start:
+            raise ValueError("ended_at must be an ISO-8601 timestamp not before started_at")
+        outcome = payload.get("outcome")
+        if outcome not in DISPATCH_OUTCOME_ENUM:
+            raise ValueError(f"outcome must be one of {sorted(DISPATCH_OUTCOME_ENUM)}")
+        reason = payload.get("redispatch_reason")
+        if number == 1 and reason is not None:
+            raise ValueError("redispatch_reason must be null for dispatch 1")
+        if number > 1 and reason not in REDISPATCH_REASON_ENUM:
+            raise ValueError(
+                f"redispatch_reason must be one of {sorted(REDISPATCH_REASON_ENUM)} for dispatch {number}"
+            )
+        return {
+            "dispatch": number, "started_at": payload["started_at"], "ended_at": payload["ended_at"],
+            "duration_s": round((end - start).total_seconds(), 3),
+            "outcome": outcome, "redispatch_reason": reason,
+        }
+    if kind == "stage":
+        stage = payload.get("stage")
+        if stage not in STAGE_ENUM:
+            raise ValueError(f"stage must be one of {list(STAGE_ENUM)}")
+        return {"stage": stage, "seconds": _num_or_unavailable(payload, "seconds", field="seconds")}
+    if kind == "sample":
+        number = payload.get("sample")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValueError("sample must be an integer >= 1")
+        suite, arm = payload.get("suite"), payload.get("arm")
+        if not isinstance(suite, str) or not _ARM_RE.fullmatch(suite):
+            raise ValueError("suite must be a short identifier")
+        if not isinstance(arm, str) or not _ARM_RE.fullmatch(arm):
+            raise ValueError("arm must be a short identifier")
+        wall = _num_or_unavailable(payload, "wall_s", field="wall_s")
+        record = {
+            "suite": suite, "arm": arm, "sample": number, "wall_s": wall,
+            "executed_tests": _num_or_unavailable(payload, "executed_tests", integer=True),
+            "skipped_tests": _num_or_unavailable(payload, "skipped_tests", integer=True),
+            "load_start": _num_or_unavailable(payload, "load_start"),
+            "load_end": _num_or_unavailable(payload, "load_end"),
+        }
+        if payload.get("ios_phases") is not None:
+            ios = payload["ios_phases"]
+            if not isinstance(ios, dict) or set(ios) - set(IOS_PHASE_KEYS):
+                raise ValueError(f"ios_phases keys must be within {list(IOS_PHASE_KEYS)}")
+            record["ios_phases"] = {k: _num_or_unavailable(ios, k, field=k) for k in IOS_PHASE_KEYS}
+        return record
+    raise ValueError(f"unknown timing record kind {kind!r}")
+
+
+def load_timing_sidecar(path: Path) -> dict:
+    """Read a sidecar; absent or unreadable yields an empty (uninstrumented) record."""
+    empty = {"schema_version": 1, "dispatches": [], "stages": {}, "samples": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    return {
+        "schema_version": 1,
+        "dispatches": [d for d in data.get("dispatches", []) if isinstance(d, dict)],
+        "stages": data.get("stages") if isinstance(data.get("stages"), dict) else {},
+        "samples": [s for s in data.get("samples", []) if isinstance(s, dict)],
+    }
+
+
+def append_timing_record(metrics_dir: Path, spec_id: str, kind: str, payload: dict) -> Path:
+    """Validate then upsert one record into the spec's sidecar (atomic, locked)."""
+    record = validate_timing_record(kind, payload)
+    path = timing_sidecar_path(metrics_dir, spec_id)
+    with metrics_write_lock(metrics_dir):
+        data = load_timing_sidecar(path)
+        if kind == "dispatch":
+            data["dispatches"] = sorted(
+                [d for d in data["dispatches"] if d.get("dispatch") != record["dispatch"]] + [record],
+                key=lambda d: d["dispatch"],
+            )
+        elif kind == "stage":
+            data["stages"][record["stage"]] = record["seconds"]
+        else:
+            key = (record["suite"], record["arm"], record["sample"])
+            data["samples"] = [
+                s for s in data["samples"] if (s.get("suite"), s.get("arm"), s.get("sample")) != key
+            ] + [record]
+        data["spec_id"] = spec_id
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    return path
+
+
+def render_timing_trailers(timing: dict) -> list[str]:
+    """Terminal-commit trailer lines for a sidecar (one contiguous block, BUG-017)."""
+    lines = []
+    for d in timing.get("dispatches", []):
+        lines.append(
+            f"{TRAILER_DISPATCH}: {d['dispatch']} {d['started_at']} {d['ended_at']} "
+            f"{d['outcome']} {d.get('redispatch_reason') or 'none'}"
+        )
+    for stage in STAGE_ENUM:
+        if stage in timing.get("stages", {}):
+            lines.append(f"{TRAILER_STAGE}: {stage}={timing['stages'][stage]}")
+    if timing.get("dispatches"):
+        total = round(sum(d["duration_s"] for d in timing["dispatches"]), 3)
+        lines.append(f"{TRAILER_VERIFIER_S}: {total:g}")
+    return lines
+
+
+def parse_timing_trailers(repo: Path, ref: str) -> dict:
+    """Recover dispatches/stages from terminal trailers; malformed lines are skipped."""
+    def values(key: str) -> list[str]:
+        out = _run_git(
+            repo, ["log", "-1", f"--format=%(trailers:key={key},valueonly,separator=%x0a)", ref]
+        )
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    timing = {"schema_version": 1, "dispatches": [], "stages": {}, "samples": []}
+    for line in values(TRAILER_DISPATCH):
+        parts = line.split()
+        if len(parts) != 5 or not parts[0].isdigit():
+            continue
+        try:
+            timing["dispatches"].append(validate_timing_record("dispatch", {
+                "dispatch": int(parts[0]), "started_at": parts[1], "ended_at": parts[2],
+                "outcome": parts[3], "redispatch_reason": None if parts[4] == "none" else parts[4],
+            }))
+        except ValueError:
+            continue
+    for line in values(TRAILER_STAGE):
+        stage, _, raw = line.partition("=")
+        try:
+            seconds = raw if raw == UNAVAILABLE else float(raw)
+            record = validate_timing_record("stage", {"stage": stage, "seconds": seconds})
+        except ValueError:
+            continue
+        timing["stages"][record["stage"]] = record["seconds"]
+    return timing
+
+
+def merge_timing(sidecar: dict, trailers: dict) -> dict:
+    """Trailers (immutable, in history) win over the mutable sidecar where both exist."""
+    return {
+        "dispatches": trailers["dispatches"] or sidecar["dispatches"],
+        "stages": {**sidecar["stages"], **trailers["stages"]},
+        "samples": sidecar["samples"],
+    }
+
+
+def apply_verification_instrumentation(metrics: dict, timing: dict, project: str) -> None:
+    """Additively fold recorded verification timing into one metrics row.
+
+    No recorded data leaves the row untouched (legacy shape, duration_s 0 /
+    unavailable). Samples alone never invent a verifier duration.
+    """
+    dispatches, stages, samples = timing["dispatches"], timing["stages"], timing["samples"]
+    if project:
+        metrics["project"] = project
+    if not (dispatches or stages or samples):
+        return
+    block: dict = {"dispatch_count": len(dispatches), "dispatches": dispatches}
+    if dispatches:
+        total = round(sum(d["duration_s"] for d in dispatches), 3)
+        block["duration_s"] = total
+        block["measurement_state"] = "measured"
+        cv = metrics["phases"]["completion_verification"]
+        cv["duration_s"], cv["measurement_state"] = total, "measured"
+    else:
+        block["duration_s"], block["measurement_state"] = UNAVAILABLE, UNAVAILABLE
+    block["stages"] = {stage: stages.get(stage, UNAVAILABLE) for stage in STAGE_ENUM}
+    block["suites"] = samples
+    metrics["verification"] = block
+
+
+def derive_project(install_or_repo: Path) -> str:
+    return install_or_repo.resolve().name
+
+
+def main_record_timing(argv) -> int:
+    p = argparse.ArgumentParser(description="Record one verification timing record (SPEC-NS-KIT-002-001).")
+    p.add_argument("--record-timing", required=True, choices=["dispatch", "stage", "sample"])
+    p.add_argument("--timing-json", required=True)
+    p.add_argument("--spec-id", required=True)
+    p.add_argument("--metrics-dir", default=".nightshift/metrics")
+    args = p.parse_args(argv)
+    try:
+        payload = json.loads(args.timing_json)
+        path = append_timing_record(Path(args.metrics_dir), args.spec_id, args.record_timing, payload)
+    except (ValueError, OSError, TimeoutError) as exc:
+        print(f"Error: cannot record {args.record_timing} timing: {exc}", file=sys.stderr)
+        return 2
+    print(f"Recorded {args.record_timing} timing in {path}")
+    return 0
+
+
+def main_render_timing_trailers(argv) -> int:
+    p = argparse.ArgumentParser(description="Print terminal-commit timing trailers from the sidecar.")
+    p.add_argument("--render-timing-trailers", action="store_true")
+    p.add_argument("--spec-id", required=True)
+    p.add_argument("--metrics-dir", default=".nightshift/metrics")
+    args = p.parse_args(argv)
+    for line in render_timing_trailers(
+        load_timing_sidecar(timing_sidecar_path(Path(args.metrics_dir), args.spec_id))
+    ):
+        print(line)
+    return 0
+
+
 def append_failure_ledger(ledger_path: Path, args, now: str, dry_run: bool) -> None:
     """Append a minimal failure record (matches metrics-schema.md minimal form)."""
     entry = {
@@ -647,9 +912,9 @@ def write_new_metrics_row(metrics_dir: Path, date: str, spec_id: str, metrics: d
 # (e.g. the one-off `FART-TEST-*` fixture ID) is a real spec-completion
 # family, and none has ever appeared in a `chore: mark ... done|blocked`
 # commit subject in this repo's history.
-_MARK_COMMIT_ID_FAMILY = r"(?:SPEC|BUG|NFR)"
+_MARK_COMMIT_ID = spec_id_grammar.COMMIT_ID_PATTERN
 MARK_COMMIT_RE = re.compile(
-    r"^chore: mark (" + _MARK_COMMIT_ID_FAMILY + r"-(?:[A-Z0-9]+-)*\d+) (done|blocked)$"
+    r"^chore: mark (" + _MARK_COMMIT_ID + r") (done|blocked)$"
 )
 # SPEC-256: a subject that clearly *intends* to be a mark-done/blocked commit — it
 # begins with the strict prefix and names a terminal outcome word — but carries
@@ -659,7 +924,7 @@ MARK_COMMIT_RE = re.compile(
 # pattern exists only to distinguish "not a mark-commit" from "a mark-commit
 # whose subject drifted from the strict grammar" so the latter can fail loudly.
 _MARK_COMMIT_NEAR_MISS_RE = re.compile(
-    r"^chore: mark (" + _MARK_COMMIT_ID_FAMILY + r"-(?:[A-Z0-9]+-)*\d+) (done|blocked)\b(.+)$"
+    r"^chore: mark (" + _MARK_COMMIT_ID + r") (done|blocked)\b(.+)$"
 )
 _REPORT_TESTS_RE = re.compile(r"[Tt]ests?\s+passed:?\s*(\d+)\s*/\s*(\d+)")
 
@@ -840,6 +1105,11 @@ def derive_resolution(
     }
     if 1 <= unblock_rung <= 5:
         resolution["unblock_rung"] = unblock_rung
+    # BUG-NS-KIT-107 R3: the merged revision, only when the trailer is present, so rows
+    # for older commits keep their exact shape.
+    merged = commit_trailer(repo, evidence_commit, "Nightshift-Merged-Revision").lower()
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", merged):
+        resolution["merged_revision"] = merged
     return resolution
 
 
@@ -1169,6 +1439,14 @@ def main_mark_commit(argv) -> int:
 
     metrics = build_metrics(ns, git, cfg)
     metrics["resolution"] = resolution
+    apply_verification_instrumentation(
+        metrics,
+        merge_timing(
+            load_timing_sidecar(timing_sidecar_path(metrics_dir, spec_id)),
+            parse_timing_trailers(repo, args.mark_commit),
+        ),
+        derive_project(install_dir.parent),
+    )
     date = completed_at[:10] if len(completed_at) >= 10 else "0000-00-00"
 
     if args.dry_run:
@@ -1358,6 +1636,10 @@ def main(argv=None) -> int:
         return main_verify_amend_head(argv)
     if "--mark-commit" in argv:
         return main_mark_commit(argv)
+    if "--record-timing" in argv:
+        return main_record_timing(argv)
+    if "--render-timing-trailers" in argv:
+        return main_render_timing_trailers(argv)
 
     args = parse_args(argv)
     args.build_pass = args.build_pass == "true"
@@ -1410,6 +1692,11 @@ def main(argv=None) -> int:
         )
 
     metrics_dir = Path(args.metrics_dir)
+    apply_verification_instrumentation(
+        metrics,
+        load_timing_sidecar(timing_sidecar_path(metrics_dir, args.spec_id)),
+        derive_project(Path(args.repo)),
+    )
     if args.dry_run:
         print(yaml.safe_dump(metrics, sort_keys=False))
         if args.status != "completed":

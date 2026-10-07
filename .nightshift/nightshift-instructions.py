@@ -104,8 +104,28 @@ def accept_instruction_result(
         **({"authoring_provider": authoring_provider} if authoring_provider is not None else {}),
     ).to_dict()
     if not acceptance["ok"]:
+        if acceptance.get("reason_code") == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+            # SPEC-NS-KIT-007 R3: superseded closes the run (re-admit and re-run); never accepted.
+            acceptance = {**acceptance, "acceptance_outcome": acceptance["outcome"], "outcome": "superseded"}
         return acceptance, None
     return acceptance, coordinator_action(acceptance)
+
+
+def abandon_instruction_run(packet: dict[str, Any], *, nightshift_dir: Path,
+                            spec_file: Path, official_path: str, abandonment_provider) -> dict[str, Any]:
+    """One parent recovery contract for official instruction routes.
+
+    The provider is injected separately by the parent; no worker packet can
+    supply authorization, a result callback, merge or cleanup authority.
+    """
+    import unblock_spec
+    if official_path not in OFFICIAL_INSTRUCTION_RESULT_PATHS:
+        raise InstructionAdmissionError("unknown administrative recovery path")
+    selected = parse_spec_file(Path(spec_file)).frontmatter
+    if selected.get("id") != packet.get("spec_id"):
+        raise InstructionAdmissionError("administrative recovery selected spec mismatch")
+    return unblock_spec.abandon_invalid_run(Path(spec_file), Path(nightshift_dir),
+        abandonment_provider=abandonment_provider)
 
 
 @dataclass(frozen=True)

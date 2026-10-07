@@ -124,6 +124,12 @@ nfr_waivers: []      # Matched-but-inapplicable NFRs only: [{id: NFR-001, reason
                      # or [] to declare "reviewed all active NFRs, none apply to this spec."
                      # validate_specs.py errors on status: ready specs missing this field.
                      # Agent MUST read referenced NFR files and treat their ## Constraint sections as binding AC.
+version:             # Optional target PRODUCT release (e.g. v1, v2): a plain string label, never template_version or kit_version.
+                     # Leave empty (unassigned) unless this project's config.yaml sets spec_metadata.fields.version.required
+                     # or allowed_values; promotion to planned/ready and dispatch then refuse a missing or disallowed value.
+tags: []             # Optional concern labels (e.g. [ux, backend]): unique, nonblank, case-sensitive strings; never touches/NFR scope_tags.
+                     # Leave [] (untagged) unless this project's config.yaml sets spec_metadata.fields.tags.required
+                     # or allowed_values; promotion to planned/ready and dispatch then refuse a missing or disallowed tag.
 created: 2026-03-17
 # --- Multi-stack & domain fields (optional, v3) ---
 stack:                # Stack name from config.yaml stacks: section (e.g., "python-api")

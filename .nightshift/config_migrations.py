@@ -26,6 +26,7 @@ so this migration never reformats or reorders unrelated documents or comments.
 
 from __future__ import annotations
 
+import json
 import re
 
 # SPEC-327 R4: shared table. validate_install.py's REQUIRED_CONFIG_SECTIONS
@@ -297,6 +298,83 @@ MIGRATIONS: dict[str, "callable[[str], str]"] = {
     TARGET_SCHEMA_VERSION: add_resilience_and_unblock_blocks,
     LATEST_SCHEMA_VERSION: add_required_config_sections,
 }
+
+
+def opt_in_spec_metadata_version(
+    text: str, *, required: bool = False, allowed_values: list[str] | None = None,
+) -> str:
+    """SPEC-419 R5: the explicit, opt-in way to add a ``spec_metadata`` version policy to a config.
+
+    NOT part of ``MIGRATIONS``: the registered schema chain never adds, rewrites or removes
+    ``spec_metadata`` (it is project-owned policy), and nothing here touches a spec. A config
+    that already has a top-level ``spec_metadata:`` is returned byte-identical, so a project's
+    chosen policy survives and the call is idempotent. Raises ``ValueError`` for an empty,
+    blank, padded, duplicate or non-string allowlist, mirroring the policy reader's rules.
+    """
+    if _has_top_level_key(text, "spec_metadata"):
+        return text
+    if not isinstance(required, bool):
+        raise ValueError("required must be a boolean")
+    if allowed_values is not None:
+        if not isinstance(allowed_values, list) or not allowed_values:
+            raise ValueError("allowed_values must be null or a non-empty list")
+        if any(not isinstance(item, str) or not item.strip() or item != item.strip() for item in allowed_values):
+            raise ValueError("allowed_values entries must be nonblank, unpadded strings")
+        if len(set(allowed_values)) != len(allowed_values):
+            raise ValueError("allowed_values must not contain duplicates")
+    allowed = "null" if allowed_values is None else "[" + ", ".join(json.dumps(item) for item in allowed_values) + "]"
+    block = (
+        "spec_metadata:\n  fields:\n    version:\n"
+        f"      required: {'true' if required else 'false'}\n      allowed_values: {allowed}\n"
+    )
+    return _append_block(text, block)
+
+
+def opt_in_spec_metadata_tags(
+    text: str, *, required: bool = False, allowed_values: list[str] | None = None,
+) -> str:
+    """SPEC-420 R5: the explicit, opt-in way to add a ``spec_metadata`` tags policy to a config.
+
+    Like the version helper it is NOT part of ``MIGRATIONS``: the registered chain never adds,
+    rewrites or removes project policy and nothing here touches a spec. A config that already
+    declares ``spec_metadata.fields.tags`` is returned byte-identical (idempotent, project policy
+    wins). A config with a ``spec_metadata.fields:`` block (for example the version policy) gets the
+    tags entry inserted beside it; one without any ``spec_metadata`` gets a new block. Raises
+    ``ValueError`` for an invalid allowlist (mirrors the policy reader) or a layout it cannot extend safely.
+    """
+    import yaml  # noqa: PLC0415 - only the opt-in path needs a real parse
+
+    if not isinstance(required, bool):
+        raise ValueError("required must be a boolean")
+    if allowed_values is not None:
+        if not isinstance(allowed_values, list) or not allowed_values:
+            raise ValueError("allowed_values must be null or a non-empty list")
+        if any(not isinstance(item, str) or not item.strip() or item != item.strip() for item in allowed_values):
+            raise ValueError("allowed_values entries must be nonblank, unpadded strings")
+        if len(set(allowed_values)) != len(allowed_values):
+            raise ValueError("allowed_values must not contain duplicates")
+    merged: dict = {}
+    for document in yaml.safe_load_all(text):
+        if isinstance(document, dict):
+            merged.update(document)
+    existing = merged.get("spec_metadata")
+    if isinstance(existing, dict) and isinstance(existing.get("fields"), dict) and "tags" in existing["fields"]:
+        return text
+    allowed = "null" if allowed_values is None else "[" + ", ".join(json.dumps(item) for item in allowed_values) + "]"
+    entry = f"    tags:\n      required: {'true' if required else 'false'}\n      allowed_values: {allowed}\n"
+    if not _has_top_level_key(text, "spec_metadata"):
+        return _append_block(text, "spec_metadata:\n  fields:\n" + entry)
+    match = re.search(r"^  fields:[ \t]*\n", text, re.MULTILINE)
+    if match is None:
+        raise ValueError("spec_metadata has no `  fields:` block to extend; add the tags policy by hand")
+    result = text[: match.end()] + entry + text[match.end():]
+    check: dict = {}
+    for document in yaml.safe_load_all(result):
+        if isinstance(document, dict):
+            check.update(document)
+    if "tags" not in ((check.get("spec_metadata") or {}).get("fields") or {}):
+        raise ValueError("could not extend spec_metadata safely; add the tags policy by hand")
+    return result
 
 
 KIT_VERSION_LINE = re.compile(r'^(kit_version:\s*")[^"]*(")', re.MULTILINE)

@@ -995,6 +995,56 @@ failure:
 
 ---
 
+## Verification instrumentation (SPEC-NS-KIT-002-001)
+
+Optional-additive. A row recorded with no dispatch, stage or sample data has no
+`verification` key and keeps `phases.completion_verification.duration_s: 0` with
+`measurement_state: unavailable` (legacy shape, still valid). Anything the
+coordinator could not measure is the string `unavailable`, never `0`.
+
+Source: sidecar `metrics/<spec_id>.verification.json`, written by
+`record_metrics.py --record-timing dispatch|stage|sample --timing-json '<json>'
+--spec-id <id> --metrics-dir <dir>` (and by `verification_report.py suite-sample`),
+plus repeatable terminal-commit trailers (`record_metrics.py
+--render-timing-trailers --spec-id <id>` prints them). When both exist the
+trailers win. `--mark-commit` and the direct emitter both fold them in.
+
+```yaml
+project: <install project name>          # every row, derived from the project directory
+verification:
+  dispatch_count: <int>
+  duration_s: <sum of dispatch durations | unavailable>
+  measurement_state: measured | unavailable
+  dispatches:                            # one per verifier dispatch
+    - dispatch: <int >= 1>
+      started_at: <ISO-8601>
+      ended_at: <ISO-8601>
+      duration_s: <number>
+      outcome: pass | fail | no_verdict | rejected | other
+      redispatch_reason: null | defect_fail | unauditable_verdict | contamination
+                         | surface_env_gap | stale_head | budget_expiry | other
+  stages:                                # seconds or `unavailable`
+    worker_implementation: <n>   surface_preparation: <n>   verifier: <n>
+    post_verdict_gates: <n>      post_verdict_scope: <n>
+    post_verdict_terminal_integrity: <n>  post_verdict_fresh_main: <n>
+    merge_cleanup: <n>           coordination_gate_wait: <n>   cleanup_diagnostic: <n>
+  suites:                                # one per sample, per suite and arm
+    - suite: <id>  arm: <id>  sample: <int >= 1>  wall_s: <n>
+      executed_tests: <int|unavailable>  skipped_tests: <int|unavailable>
+      load_start: <1-min load|unavailable>  load_end: <1-min load|unavailable>
+      ios_phases:                        # Xcode projects only; each <n|unavailable>
+        simulator_create_s  simulator_boot_s  build_for_testing_s  test_execution_s
+```
+
+`redispatch_reason` is null for dispatch 1 and required, from the closed set, for
+every later dispatch. Trailer forms: `Nightshift-Verifier-Dispatch: <n> <start>
+<end> <outcome> <reason|none>`, `Nightshift-Stage-Timing: <stage>=<seconds|unavailable>`,
+`Nightshift-Verification-Duration-S: <sum>`. `verification_report.py
+throughput-report --metrics-dir [LABEL=]<dir>...` prints per-project medians and
+distributions from these rows; rows without them count toward totals only.
+
+---
+
 ## Token usage telemetry (SPEC-298)
 
 Token telemetry is **opt-in and optional-additive**. A metrics row that never

@@ -13,6 +13,7 @@ Usage:
   python3 validate_specs.py <file_or_directory> [--format json|text]
 """
 
+import functools
 import json
 import re
 import shutil
@@ -25,10 +26,12 @@ if __name__ == "__main__":
     sys.dont_write_bytecode = True
 
 from dependency_registry import DependencyRegistryResolver
+import spec_id as spec_id_grammar
 from deployment_tiers import deployment_block_findings, resolve_deployment_policy
 from lifecycle import migrate_legacy_planning, validate_blocked
 import lifecycle
 import spec_artifacts
+import spec_frontmatter
 
 try:
     import yaml
@@ -734,6 +737,10 @@ _NAMED_FINDING_FAMILIES: tuple[str, ...] = (
 # one conceptual finding into many singleton "families". Ordered; first match
 # wins, evaluated only after the named constants above.
 _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("unregistered-type", "unregistered type:"),
+    ("unknown-dependency", "unknown dependency:"),
+    ("spec-metadata-policy", "spec metadata:"),
+    ("spec-metadata-config", "spec_metadata policy:"),
     ("done-spec-unchecked-checkbox", "but has an unchecked checkbox in"),
     ("missing-required-field-id", "missing required field: id"),
     ("missing-required-field-status", "missing required field: status"),
@@ -774,6 +781,32 @@ _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
     ("release-handoff-completed-spec-not-done", "release handoff completed"),
     ("status-sync-mismatch", "status-sync mismatch"),
     ("ac-amendment-undocumented", "ac_amendment_undocumented:"),
+    # BUG-NS-KIT-119: families that predate the table but were landing in
+    # ``unclassified-finding``. Owner = the spec that introduced the emitter.
+    ("resolved-blocker-field-residual", "resolved blocker field(s) still present"),  # SPEC-355
+    ("real-use-evidence-live-execution-incomplete", "requires completed live execution"),  # real-use experiments (6c17db23)
+    ("live-item-evidence-reference-missing", "is missing a valid evidence reference"),  # real_use_evidence LE evidence rule
+    ("artifact-orphan-unindexed", "orphan artifact file not listed in index.json"),  # SPEC-291
+    ("artifact-index-missing", "exists with no index.json"),  # SPEC-291
+    ("ac-amendment-deleted", "ac_amendment_deleted:"),  # SPEC-260
+    ("spec-id-not-fleet-unique", "not fleet-unique"),  # fleet ID uniqueness (warning only)
+    ("untracked-report-artifact", "untracked report artifact:"),  # artifact_reachability.py
+    ("untracked-run", "untracked run:"),  # artifact_reachability.py
+    ("artifact-index-untracked-file", "references an untracked artifact file"),  # SPEC-291 spec_artifacts.py
+    # SPEC-416 spec-ID grammar family (spec_id.py emits spec_id_kind_type).
+    ("spec-id-grammar", "spec_id_grammar:"),
+    ("spec-id-code-mismatch", "spec_id_code_mismatch:"),
+    ("spec-id-kind-type", "spec_id_kind_type:"),
+    ("spec-id-collision", "spec_id_collision:"),
+    ("spec-id-enforcement-inactive", "spec_id_enforcement_inactive:"),
+    ("spec-id-legacy-list-invalid", "spec_id_legacy_list_invalid:"),
+    ("registry-code-invalid", "registry code:"),
+    ("staged-configuration-invalid", "staged_configuration_invalid:"),  # SPEC-397-001
+    ("deploy-environment", "deploy_environment:"),
+    ("board-column-defaults", "board_column_defaults"),  # SPEC-080
+    # Catch-all for the remaining real_use_evidence sub-findings; deliberately last so every
+    # more specific real-use marker above keeps its own family.
+    ("real-use-evidence", "real_use_evidence:"),
 )
 
 # A finding matching neither table above still needs a stable, machine-
@@ -785,6 +818,82 @@ _UNCLASSIFIED_FINDING_FAMILY = "unclassified-finding"
 # finished or retired spec's historical claim does not keep future findings
 # owned once the spec itself is closed.
 _TERMINAL_SPEC_STATUSES = frozenset({"done", "superseded", "retired"})
+
+
+def load_spec_type_registry(guide_path: Path | None = None) -> set[str] | None:
+    """The ``type:`` values in SPEC-GUIDE.md ``## Spec Types`` (BUG-NS-KIT-100 R1); ``None`` when no guide is installed.
+
+    The one registry reader: ``board_ctl.py rules check`` calls it too, so the validator
+    and the rules pre-flight cannot disagree about which types exist.
+    """
+    path = guide_path or Path(__file__).resolve().parent / "SPEC-GUIDE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    start = text.find("\n## Spec Types")
+    if start < 0:
+        return None
+    end = text.find("\n### Rules", start)
+    section = text[start:end if end > 0 else len(text)]
+    return set(re.findall(r"^\|\s*`([a-z][a-z-]*)`\s*\|", section, re.MULTILINE))
+
+
+# BUG-NS-KIT-118: an unregistered type is an audit WARNING only for these finished statuses.
+UNREGISTERED_TYPE_AUDIT_STATUSES = frozenset({"done", "superseded", "retired", "blocked"})
+
+
+def spec_type_registry_finding(fm: dict, registry: set[str] | None) -> str | None:
+    """An unregistered-type message for ``fm``, or ``None`` (NFR- ids may use any registered type's slot).
+
+    An error for draft/planned/ready/in_progress; an audit WARNING for done/superseded/retired/blocked.
+    """
+    if registry is None or "type" not in fm:
+        return None
+    spec_type = fm.get("type")
+    if isinstance(spec_type, str) and spec_type in registry:
+        return None
+    if str(fm.get("id", "")).startswith("NFR-"):
+        return None  # SPEC-GUIDE "Spec Types / Rules": an NFR- id is NFR-family whatever dated-run type it uses
+    message = (f"unregistered type: {spec_type!r} is not in the SPEC-GUIDE.md Spec Types registry: "
+               + ", ".join(sorted(registry)))
+    status = fm.get("status")
+    if isinstance(status, str) and status in UNREGISTERED_TYPE_AUDIT_STATUSES:
+        # BUG-NS-KIT-118: finished specs are history nobody edits; same audit wording as the dangling-`after:` case.
+        return f"WARNING: audit: {message} (status {status}; history is not rewritten)"
+    return message
+
+
+_OPEN_DEPENDENCY_STATUSES = frozenset({"planned", "ready", "in_progress"})
+
+
+def dependency_existence_findings(fm: dict, corpus: list[dict]) -> list[str]:
+    """``after:`` and bare-id ``requires_specs`` entries naming no spec in the same directory (BUG-NS-KIT-100 R2).
+
+    Error for planned/ready/in_progress; WARNING for draft; terminal and other statuses get an
+    audit WARNING so history is not rewritten. Qualified ``{project, spec}`` entries are not
+    resolved here (cross-project resolution stays with the dependency registry).
+    """
+    known = {str(item.get("id")) for item in corpus if isinstance(item, dict)}
+    after = fm.get("after")
+    requires = fm.get("requires_specs")
+    candidates = [("after", str(dep)) for dep in after] if isinstance(after, list) else []
+    if isinstance(requires, list):
+        candidates += [("requires_specs", entry) for entry in requires if isinstance(entry, str)]
+    status = fm.get("status") if isinstance(fm.get("status"), str) else None
+    spec_id = fm.get("id", "?")
+    findings = []
+    for field, dep in candidates:
+        if dep in known:
+            continue
+        message = f"unknown dependency: {spec_id} {field} names {dep!r}, which is not a spec in this specs directory"
+        if status in _OPEN_DEPENDENCY_STATUSES:
+            findings.append(message)
+        elif status == "draft":
+            findings.append("WARNING: " + message)
+        else:
+            findings.append(f"WARNING: audit: {message} (status {status}; history is not rewritten)")
+    return findings
 
 
 def classify_finding_family(message: str) -> str:
@@ -1071,11 +1180,20 @@ def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str], di
 
 
 def _evidence_reference_exists(reference: str, spec_file: Path) -> bool:
-    """Resolve an evidence reference relative to the spec file or kit dir."""
+    """Resolve an evidence reference relative to the spec file, kit dir or project root."""
     if not reference or reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
         return False
     roots = [spec_file.parent, spec_file.parent.parent]
-    return any((root / reference).is_file() for root in roots)
+    if any((root / reference).is_file() for root in roots):
+        return True
+    # SPEC-NS-KIT-004 R4: a committed project file outside the kit directory
+    # (the kit dir's parent is the project root); symlinks may not escape it.
+    project_root = spec_file.parent.parent.parent
+    candidate = project_root / reference
+    try:
+        return candidate.is_file() and candidate.resolve().is_relative_to(project_root.resolve())
+    except OSError:
+        return False
 
 
 def validate_real_use_evidence(
@@ -1281,6 +1399,222 @@ def fleet_uniqueness_findings(specs_dir: Path, spec_files: list[Path]) -> dict[s
                     f"WARNING: spec id {spec_id} also exists in {record.spec_path} — not fleet-unique"
                 )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# SPEC-416: mandatory project-prefixed IDs for NEW specs (R4), R5 legacy lists
+# ---------------------------------------------------------------------------
+
+# The frozen legacy-ID lists ship beside this module (the kit's
+# ``spec-id-legacy/`` in canonical, ``.nightshift/spec-id-legacy/`` installed).
+LEGACY_ID_DIR = Path(__file__).resolve().parent / "spec-id-legacy"
+
+
+def load_legacy_ids(code: str, legacy_dir: Path | None = None) -> set[str] | None:
+    """The frozen legacy-ID set for a project code; ``None`` when no list exists."""
+    path = (legacy_dir or LEGACY_ID_DIR) / f"{code}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ids = payload["ids"]
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("ids must be a list of strings")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"legacy ID list {path.name} is unreadable: {exc}") from exc
+    return set(ids)
+
+
+def _grammar_finding(spec_id: str, code: str) -> str | None:
+    if spec_id_grammar.parse_id(spec_id, strict=True) is not None:
+        return None
+    return (
+        f"spec_id_grammar: new spec id {spec_id} does not match the required grammar "
+        f"{spec_id_grammar.GRAMMAR} (kind one of {', '.join(spec_id_grammar.ID_KINDS)}; "
+        f"this project's code is {code}, e.g. SPEC-{code}-001)"
+    )
+
+
+def _code_finding(spec_id: str, code: str) -> str | None:
+    parsed = spec_id_grammar.parse_id(spec_id, strict=True)
+    if parsed is None or parsed.code == code:
+        return None
+    return (
+        f"spec_id_code_mismatch: spec id {spec_id} carries code {parsed.code} but this "
+        f"project's registered code is {code}"
+    )
+
+
+def _pairing_finding(spec_id: str, spec_type: object) -> str | None:
+    return spec_id_grammar.kind_type_mismatch(spec_id, spec_type)
+
+
+@functools.lru_cache(maxsize=64)
+def _checkout_identity(directory: Path) -> tuple[str, str] | None:
+    """(git common dir, repo-relative prefix) for ``directory``; ``None`` outside git."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute",
+             "--git-common-dir", "--show-prefix"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.splitlines()
+    if proc.returncode != 0 or len(lines) < 2:
+        return None
+    return str(Path(lines[0]).resolve()), lines[1]
+
+
+def _same_checkout_family(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` are the same directory of one repository in two of its worktrees."""
+    if not (a.is_dir() and b.is_dir()):
+        return False
+    ida, idb = _checkout_identity(a.resolve()), _checkout_identity(b.resolve())
+    return ida is not None and ida == idb
+
+
+def _collision_findings(
+    spec_id: str,
+    spec_path: Path,
+    content: bytes,
+    records: tuple,
+    owner_specs_dir: Path,
+) -> list[str]:
+    findings = []
+    for record in records:
+        if record.spec_path == spec_path or record.spec_path.parent == owner_specs_dir:
+            continue
+        if _same_checkout_family(record.spec_path.parent, owner_specs_dir):
+            continue  # the owning project seen from a linked worktree, not a second owner
+        try:
+            if record.spec_path.read_bytes() == content:
+                continue  # an identical copy is a mirror, not a second owner
+        except OSError:
+            continue
+        findings.append(
+            f"spec_id_collision: spec id {spec_id} in {spec_path} is already used in "
+            f"{record.spec_path} (project {record.project.name}); new spec IDs must be fleet-unique"
+        )
+    return findings
+
+
+def _read_spec_identity(spec_file: Path) -> tuple[Path, str, object, bytes] | None:
+    try:
+        content = spec_file.read_bytes()
+        fm = yaml.safe_load(content.decode("utf-8").split("\n---", 1)[0][3:]) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if isinstance(fm, dict) and fm.get("id"):
+        return spec_file.resolve(), str(fm["id"]), fm.get("type"), content
+    return None
+
+
+def _id_problems(spec_id, spec_type, code, path, content, records, owner_dir) -> list[str]:
+    problems = [
+        _grammar_finding(spec_id, code),
+        _code_finding(spec_id, code),
+        _pairing_finding(spec_id, spec_type),
+        *_collision_findings(spec_id, path, content, records, owner_dir),
+    ]
+    return [problem for problem in problems if problem]
+
+
+def new_id_findings(
+    specs_dir: Path,
+    spec_files: list[Path],
+    *,
+    registry_path: Path | None = None,
+    legacy_dir: Path | None = None,
+    owner_specs_dir: Path | None = None,
+) -> dict[str, list[str]]:
+    """R4: ERROR findings for NEW spec IDs (not on the project's frozen legacy list).
+
+    Enforcement needs the owning project's registered ``code`` and its legacy
+    list.  When either is unavailable the check is inactive and one WARNING is
+    reported under the registry name instead of silently passing.
+    """
+    owner_dir = Path(owner_specs_dir if owner_specs_dir is not None else specs_dir).resolve()
+    findings: dict[str, list[str]] = {path.name: [] for path in spec_files}
+    resolver = DependencyRegistryResolver(owner_dir, registry_path=registry_path, cache_seconds=0)
+    registry_name = resolver.registry_path.name
+    owner = resolver.current_project()
+    if owner is None or not owner.code:
+        _, registry_error = resolver.records_for(())
+        # An unreadable registry is already reported (SPEC-218); stay quiet about it here.
+        if resolver.registry_path.is_file() and registry_error is None:
+            findings[registry_name] = [
+                "WARNING: spec_id_enforcement_inactive: this project has no registered code in "
+                f"{registry_name}; regenerate the registry (nightshift-sync) to enforce "
+                f"{spec_id_grammar.GRAMMAR} on new specs"
+            ]
+        return findings
+    try:
+        legacy = load_legacy_ids(owner.code, legacy_dir)
+    except ValueError as exc:
+        findings[registry_name] = [f"spec_id_legacy_list_invalid: {exc}"]
+        return findings
+    if legacy is None:
+        findings[registry_name] = [
+            f"WARNING: spec_id_enforcement_inactive: no legacy ID list for code {owner.code}; "
+            "generate it with validate_specs.py --generate-legacy-ids"
+        ]
+        return findings
+
+    identities = [item for item in map(_read_spec_identity, spec_files) if item is not None]
+    candidates = [item for item in identities if item[1] not in legacy]
+    if not candidates:
+        return findings
+    records_by_id, _ = resolver.records_for(item[1] for item in candidates)
+    name_of = {path.resolve(): path.name for path in spec_files}
+    for path, spec_id, spec_type, content in candidates:
+        findings[name_of[path]].extend(
+            _id_problems(spec_id, spec_type, owner.code, path, content, records_by_id.get(spec_id, ()), owner_dir)
+        )
+    return findings
+
+
+def generate_legacy_ids(
+    registry_path: Path,
+    legacy_dir: Path,
+    *,
+    codes: list[str] | None = None,
+) -> dict[str, int]:
+    """R5: freeze each registered project's legacy-ID list from its CURRENT specs.
+
+    An ID is legacy when the new-ID rules (grammar, own code, kind/type pairing,
+    fleet uniqueness) would reject it today, so every existing spec validates
+    clean afterwards.  Reads each registered project's specs; writes only
+    ``<legacy_dir>/<CODE>.json``.
+    """
+    from dependency_registry import _expand_path, specs_dir_for_project
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    rows = [row for row in registry.get("projects", []) if isinstance(row, dict)]
+    problems = spec_id_grammar.validate_project_codes(rows)
+    if problems:
+        raise ValueError("registry codes invalid: " + "; ".join(problems))
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    for row in rows:
+        code = row["code"]
+        if codes is not None and code not in codes:
+            continue
+        project_specs = specs_dir_for_project(_expand_path(row["path"]))
+        rejected: list[str] = []
+        if project_specs is not None:
+            resolver = DependencyRegistryResolver(project_specs, registry_path=registry_path, cache_seconds=0)
+            files = [p for p in sorted(project_specs.glob("*.md")) if not p.name.startswith("_")]
+            identities = [item for item in map(_read_spec_identity, files) if item is not None]
+            records_by_id, _ = resolver.records_for(item[1] for item in identities)
+            for path, spec_id, spec_type, content in identities:
+                if _id_problems(spec_id, spec_type, code, path, content,
+                                records_by_id.get(spec_id, ()), project_specs.resolve()):
+                    rejected.append(spec_id)
+        payload = {"schema_version": 1, "project_code": code, "ids": sorted(set(rejected))}
+        (legacy_dir / f"{code}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        counts[code] = len(payload["ids"])
+    return counts
 
 
 def parse_frontmatter_and_body(content: str) -> tuple[dict | None, str | None, list[str], int | None]:
@@ -1870,6 +2204,15 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     errors.extend(validate_scope(fm))
     errors.extend(validate_scope_amendments(body))
     errors.extend(validate_resolved_blocker_fields(fm))
+    # BUG-NS-KIT-100 R1/R2: the type registry and dependency existence, in file and directory mode.
+    type_finding = spec_type_registry_finding(fm, load_spec_type_registry())
+    if type_finding:
+        errors.append(type_finding)
+    errors.extend(dependency_existence_findings(
+        fm, all_specs if all_specs is not None else _load_directory_frontmatters(spec_file.parent)))
+    # SPEC-419: the project's spec_metadata policy (version first; tags share it), same severity convention.
+    errors.extend(spec_frontmatter.spec_metadata_findings(
+        fm, spec_frontmatter.load_spec_metadata_policy(config_path)))
     # R8: a ready code spec with neither scope: nor touches: silently gets
     # the project-root default — surface that as a warning, never an error,
     # so historical specs are not retroactively required to declare either.
@@ -2236,6 +2579,14 @@ def validate_registry_file(registry_path: Path) -> list:
                 f"non-portable absolute path {path!r} — regenerate the registry "
                 "(nightshift-sync) to emit an {{ARGO_HOME}}-relative token"
             )
+    # SPEC-416 R3: a registry that carries project codes must carry valid, unique ones
+    # (an absent code is the pre-adoption state and is reported by the enforcement warning).
+    errors.extend(
+        f"registry code: {problem}"
+        for problem in spec_id_grammar.validate_project_codes(
+            [proj for proj in projects if isinstance(proj, dict) and "code" in proj]
+        )
+    )
     return errors
 
 
@@ -2271,6 +2622,12 @@ def validate_config_file(config_path: Path) -> list:
     # preference, so unlike board_column_defaults its findings are errors
     # (no WARNING: prefix) -- they must not be silently non-fatal.
     findings.extend(deployment_block_findings(cfg))
+
+    # SPEC-419: an invalid spec_metadata policy refuses promotion/dispatch, so it is an error here too.
+    findings.extend(
+        f"spec_metadata policy: {error}"
+        for error in spec_frontmatter.parse_spec_metadata_policy(cfg).errors
+    )
 
     return findings
 
@@ -2367,6 +2724,14 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None, *
     )
     for name, warnings in fleet_findings.items():
         results.setdefault(name, []).extend(warnings)
+
+    # SPEC-416 R4: errors for new IDs outside the grammar / own code / fleet.
+    for name, new_findings in new_id_findings(
+        specs_dir,
+        [path for path in sorted(specs_dir.glob("*.md")) if not path.name.startswith("_")],
+    ).items():
+        if new_findings:
+            results.setdefault(name, []).extend(new_findings)
 
     # SPEC-252: the per-spec pass above can only reach an artifact a spec
     # declares.  Sweep the sibling handoff directory from the artifact side so
@@ -2707,6 +3072,60 @@ def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[
             target.symlink_to(destination)
 
 
+def _untouched_spec_skip_tokens(
+    repo_root: Path, kit: str, entries: dict, baseline_revision: str | None,
+) -> list[str] | None:
+    """SPEC-397-001 R1: tokens that decide which untouched specs a commit can affect.
+
+    Returns ``None`` when the exhaustive per-spec pass must run (a baseline is
+    missing, or the commit changes anything whose effect on other specs cannot be
+    bounded by name). Otherwise returns the ids/file stems/report-directory names
+    of every changed spec: an untouched spec whose own text names none of them
+    cannot see a different corpus, so its findings equal its baseline findings
+    and the SPEC-382 differential would stay silent for it anyway.
+    """
+    if baseline_revision is None:
+        return None
+    base_entries = _git_tree_entries(repo_root, baseline_revision, kit + "/")
+    changed = [path for path in set(entries) | set(base_entries)
+               if path.startswith(kit + "/") and entries.get(path) != base_entries.get(path)]
+    spec_prefix = kit + "/specs/"
+    reports_prefix = kit + "/reports/"
+    tokens: set[str] = set()
+    base_spec_paths: dict[str, dict[str, str]] = {}
+    for path in changed:
+        name = path.rsplit("/", 1)[-1]
+        if path.startswith(spec_prefix) and path.endswith(".md") and "/" not in path[len(spec_prefix):] \
+                and not name.startswith("_"):
+            tokens.add(name[:-3])
+            if path in base_entries:
+                base_spec_paths[path] = base_entries[path]
+        elif path.startswith(reports_prefix) and path.count("/") > reports_prefix.count("/"):
+            tokens.add(path[len(reports_prefix):].split("/", 1)[0])
+        else:
+            return None
+    staged_specs = {p: entries[p] for p in changed if p in entries and p.startswith(spec_prefix) and p.endswith(".md")}
+    staged_blobs = _snapshot_blobs(repo_root, staged_specs) if staged_specs else {}
+    base_blobs = _snapshot_blobs(repo_root, base_spec_paths) if base_spec_paths else {}
+    sides = [(entry, staged_blobs) for entry in staged_specs.values()]
+    sides += [(entry, base_blobs) for entry in base_spec_paths.values()]
+    for entry, blob_map in sides:
+        if entry is None or entry["mode"] not in {"100644", "100755"}:
+            continue
+        try:
+            parsed = yaml.safe_load(blob_map[entry["sha"]].decode("utf-8").split("\n---", 1)[0][3:]) or {}
+        except (UnicodeDecodeError, yaml.YAMLError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        if is_nfr_family(parsed):
+            return None  # an NFR change can alter findings on any spec
+        if parsed.get("id"):
+            tokens.add(str(parsed["id"]))
+    tokens.discard("")
+    return sorted(tokens)
+
+
 def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
     """Validate inert files from one captured index, running only this trusted module.
 
@@ -2767,6 +3186,11 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 raise ValueError("configuration must contain YAML mappings")
         except (OSError, ValueError, yaml.YAMLError) as exc:
             results[f"{kit}/config.yaml"] = [f"staged_configuration_invalid: {exc}"]
+        else:
+            # SPEC-419: a staged config carrying an invalid spec_metadata policy is refused with its diagnostic.
+            policy_errors = spec_frontmatter.load_spec_metadata_policy(config).errors
+            if policy_errors:
+                results[f"{kit}/config.yaml"] = [f"spec_metadata policy: {error}" for error in policy_errors]
         corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
         # SPEC-386 R4: the warning key (the store path) is resolved lazily,
         # only if some staged spec's status actually changed this commit --
@@ -2817,6 +3241,8 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             )
             return [finding.replace(str(base_dir), "<index>") for finding in base_findings]
 
+        skip_tokens = _untouched_spec_skip_tokens(repo_root, kit, entries, baseline_revision)
+        staged_id_candidates: list[tuple[str, Path]] = []
         try:
             for path in sorted(entries):
                 if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
@@ -2836,16 +3262,22 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                     continue
                 spec_path = snapshot / path
                 text = spec_path.read_bytes().decode("utf-8")
+                if not reportable and skip_tokens is not None and not any(token in text for token in skip_tokens):
+                    # SPEC-397-001 R1: unchanged bytes, and no changed spec or
+                    # report directory is named in this spec's text, so its
+                    # findings equal its baseline findings -- nothing to report.
+                    continue
                 fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
                 if parse_errors:
                     if reportable:
                         results[path] = parse_errors
                     continue
                 findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
-                base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
-                baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
-                base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
                 if reportable:
+                    staged_id_candidates.append((path, spec_path))
+                    base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
+                    baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
+                    base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
                     # R2 (SPEC-380): only these adoption findings depend purely on
                     # this path's own bytes vs its own baseline, never on the rest
                     # of the corpus -- keep them scoped to reportable paths, as
@@ -2915,11 +3347,63 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 new_findings = [finding for finding in normalized if finding not in baseline_findings]
                 if new_findings:
                     results[path] = new_findings
+            # SPEC-416 R4: one fleet pass for every spec this commit adds or edits.
+            if staged_id_candidates:
+                id_findings = new_id_findings(
+                    snapshot / specs_relative_dir,
+                    [spec_path for _, spec_path in staged_id_candidates],
+                    owner_specs_dir=repo_root / specs_relative_dir,
+                )
+                for rel_path, spec_path in staged_id_candidates:
+                    extra = id_findings.get(spec_path.name, [])
+                    if extra:
+                        results.setdefault(rel_path, []).extend(
+                            finding.replace(str(snapshot), "<index>") for finding in extra)
         finally:
             if _baseline_snapshot_holder:
                 shutil.rmtree(_baseline_snapshot_holder[0], ignore_errors=True)
     return {"baseline": "head" if has_head else "none", "results": results,
             "counts": rationale_counts(results), "finding_families": finding_family_summary(results, [])}
+
+
+def _spec_metadata_audit_main(args: list[str]) -> int:
+    """SPEC-419/420 R5: list the specs a spec_metadata policy would flag, before enforcement (read-only).
+
+    ``--field version|tags`` (default version) with ``--required`` / ``--allowed a,b`` previews that
+    field's policy on top of the project's own config without editing it; nothing is written and no spec metadata is touched.
+    """
+    if not args or args[0].startswith("--"):
+        print("Usage: python3 validate_specs.py --spec-metadata-audit <specs-dir> [--config PATH] "
+              "[--field version|tags] [--required] [--allowed v1,v2]", file=sys.stderr)
+        return 1
+    specs_dir = Path(args[0])
+    if not specs_dir.is_dir():
+        print(f"Error: {specs_dir} is not a directory", file=sys.stderr)
+        return 1
+    config = Path(args[args.index("--config") + 1]) if "--config" in args and args.index("--config") + 1 < len(args) \
+        else spec_frontmatter.project_config_path_for_specs_dir(specs_dir)
+    policy = spec_frontmatter.load_spec_metadata_policy(config)
+    field = args[args.index("--field") + 1] if "--field" in args and args.index("--field") + 1 < len(args) else "version"
+    if field not in spec_frontmatter.SPEC_METADATA_FIELD_NAMES:
+        print(f"Error: --field must be one of {', '.join(spec_frontmatter.SPEC_METADATA_FIELD_NAMES)}", file=sys.stderr)
+        return 1
+    if "--required" in args or "--allowed" in args:
+        base = policy.field(field)
+        allowed = base.allowed_values
+        if "--allowed" in args and args.index("--allowed") + 1 < len(args):
+            allowed = tuple(item for item in args[args.index("--allowed") + 1].split(","))
+        fields = {name: {"required": item.required,
+                         "allowed_values": list(item.allowed_values) if item.allowed_values is not None else None}
+                  for name, item in policy.fields.items()}
+        fields[field] = {"required": base.required or "--required" in args,
+                         "allowed_values": list(allowed) if allowed is not None else None}
+        policy = spec_frontmatter.parse_spec_metadata_policy({"spec_metadata": {"fields": fields}})
+    rows = spec_frontmatter.spec_metadata_audit(_load_directory_frontmatters(specs_dir), policy)
+    print(json.dumps({
+        "specs_dir": str(specs_dir), "config": str(config), "policy_errors": list(policy.errors),
+        "affected": rows, "affected_count": len(rows),
+    }, indent=2, ensure_ascii=False))
+    return 1 if policy.errors or any(row["severity"] == "error" for row in rows) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2957,14 +3441,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 1 if has_errors else 0
+    if argv and argv[0] == "--generate-legacy-ids":
+        # SPEC-416 R5: freeze each registered project's legacy-ID list (generated, never hand-written).
+        rest = argv[1:]
+        if not rest or rest[0].startswith("--"):
+            print("Usage: python3 validate_specs.py --generate-legacy-ids <projects-registry.json> "
+                  "[--out DIR]", file=sys.stderr)
+            return 1
+        out_dir = LEGACY_ID_DIR
+        if "--out" in rest and rest.index("--out") + 1 < len(rest):
+            out_dir = Path(rest[rest.index("--out") + 1])
+        try:
+            counts = generate_legacy_ids(Path(rest[0]), out_dir)
+        except (OSError, ValueError) as exc:
+            print(f"[validate_specs --generate-legacy-ids] REFUSED: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"legacy_ids": counts}, indent=2, sort_keys=True))
+        return 0
+    if argv and argv[0] == "--spec-metadata-audit":
+        return _spec_metadata_audit_main(argv[1:])
     if any(arg in {"--help", "-h"} for arg in argv):
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
             "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH] [--base-revision REV]\n"
             "       python3 validate_specs.py --staged <repo-root> [<kit>/specs]\n"
+            "       python3 validate_specs.py --spec-metadata-audit <specs-dir> [--config PATH] "
+            "[--field version|tags] [--required] [--allowed v1,v2]\n"
             "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]"
         )
         print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
+        print("SPEC-416: a NEW spec ID (not on the project's legacy list) that breaks the ID grammar, "
+              "the project code or fleet uniqueness is an error.")
+        print("       python3 validate_specs.py --generate-legacy-ids <projects-registry.json> [--out DIR]")
         return 0
     if not argv:
         print(
@@ -3062,6 +3570,9 @@ def main(argv: list[str] | None = None) -> int:
             path_results[path.name].extend(
                 fleet_uniqueness_findings(path.parent, [path]).get(path.name, [])
             )
+            for name, new_findings in new_id_findings(path.parent, [path]).items():
+                if new_findings:
+                    path_results.setdefault(name, []).extend(new_findings)
         else:
             path_results = {
                 str(path): ["path does not exist or is not a Markdown spec file"]

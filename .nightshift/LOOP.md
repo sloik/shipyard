@@ -1,6 +1,6 @@
 # Autonomous Execution Loop
 
-**Kit Version:** 3.18.1 | **Date:** 2026-09-08
+**Kit Version:** 3.25.0 | **Date:** 2026-09-08
 **Purpose:** The heart of the Nightshift Kit. This document describes the full 16-step autonomous cycle that an agent follows to complete a single spec and move to the next one.
 
 ---
@@ -121,6 +121,10 @@ replace this parent-owned decision. Deny/indeterminate preserves the branch,
 worktree, HEAD, index, project files, and divergent payload; only transitive
 dependents are held for worker-local drift, while shared-control-plane drift
 stops new dispatch and all integration.
+
+Kickoff routes bind the result receipt to the worker worktree's install and a separate control-plane
+receipt to the parent's. A superseded control plane is re-admitted once and re-checked once; a superseded
+result receipt ends the run `superseded` (re-admit and re-run, never accept the old candidate).
 
 Explicit canonical-source authoring follows GIT.md's SPEC-365 contract. The
 parent passes `authoring_provider` separately from worker packets, retaining the
@@ -404,6 +408,19 @@ This sub-phase runs the baseline execution gate: `commands.test` is mandatory, l
 **Why:** Establish a clean baseline. If tests are already failing, fix pre-existing failures before touching specs. An agent working from a broken state can't tell whether its changes broke something or whether it was already broken.
 
 **Git:** No commits at this stage — just diagnostics. See `GIT.md` § Baseline and Dirty Tree.
+
+**Main test-status ledger (SPEC-NS-KIT-002-002, optional).** When the project keeps a ledger
+(`verification_report.py ledger ...`, default `.nightshift/test-status-ledger.json`), run the full suite once at
+pre-flight, or reuse the ledger when `verification_report.py ledger check` reports an identity match (inputs,
+command/selection/flags/env, toolchain, device/data policy, host, full coverage, unexpired receipt).
+Pre-flight proceeds when every failure is *excused*: the exact same test failing with the same
+signature, with an unexpired BUG-linked entry, that the spec neither changes nor owns and that is
+no current AC, safety or NFR obligation. Any other failure is a regression and blocks as today.
+After a fix, re-run only `verification_report.py ledger plan` output (failed IDs plus every whole test class
+in each changed test file, plus dependents only where coverage is explicit); a change to the build
+project, resources, shared helpers, app lifecycle or persistence forces a full run. Finish with one
+full run on the candidate. Skipped, timed-out or non-executed tests are `unavailable`, never a pass.
+Anything not proven to match falls back to the full run above; the ledger never weakens a gate.
 
 **If pre-flight fails:**
 - Read the error output carefully
@@ -1260,6 +1277,7 @@ If you haven't run the verification command in this step, you cannot claim it pa
    - `config.yaml` → `commands.build` (skip with WARN if null)
 2. Run the complete test suite (not just new tests):
    - `config.yaml` → `commands.test` (GATE if null — should have been handled in Step 1)
+   - **Worker hand-back tier (SPEC-396):** when `config.yaml` → `commands.test_fast` is configured, a worker running Step 9 for its hand-back check runs `commands.test_fast` instead. It is the same suite and options as `commands.test` minus the tests marked `slow` or `browser`. `commands.test` stays the complete suite: verifiers, preflight dispatch and the release gate keep running it, and the release gate's full-suite run remains the proof of record. When `commands.test_fast` is absent, run `commands.test`. Never substitute `commands.test_fast` for `commands.test` at the Step 1 baseline gate or in a verifier.
    - **Apply the Test Timeout Protocol** (see section below Test Gate in Step 1) to wrap the command if timeout is configured
 3. Run all static analysis:
    - `config.yaml` → `commands.lint` (skip with SUGGEST if null)
@@ -2170,6 +2188,8 @@ reasoning are unavailable to the standard verification gate by construction.
    the same spec), disambiguate deterministically by appending `-run2`,
    `-run3`, etc. — never truncate the prior file. `board.finalize_report()`
    implements this convention; reuse it rather than hand-rolling the path.
+   The kickoff brief (`guides/run-2.md`, Step 4e) and the small-lane worker guide
+   (`guides/worker-small.md`) name this same path.
 4. **Verify the file exists** — confirm `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` is present and non-empty before continuing. If it is missing or empty, write it again.
    For a bounded parallel run, the parent coordinator (not the worker) must
    create the completion receipt after independent review. Bind it to the exact
@@ -2389,6 +2409,18 @@ When any stall signal triggers:
    `/nightshift kickoff <SPEC-ID>` prompt, the parent kickoff agent owns the
    controller-backed unblock protocol: `unblock_spec.py prepare`,
    `record_attempt`, and `finalize`. The worker never changes lifecycle state or
+   merges. After verified recovery the parent may use `unblock_spec.py resume`
+   to dispatch the verifier on the unchanged candidate: persist a recovery record
+   (`make_recovery_record`/`persist_recovery_record`), then run
+   `python3 unblock_spec.py resume <spec-file> --root <root> --run-id <id> --record <record> --identity-file <identity.json> [--candidate <ref>]`.
+   It names the first invalid stage. With a reusable worker proof (same tree and
+   child-002 identity, receipts unexpired and within 24 h of issuance) go
+   `ready -> in_progress` and dispatch the verifier directly; otherwise use the
+   ordinary kickoff. Reused stages are marked reused; scope, terminal integrity,
+   serial integration and fresh-main always run, and the parent alone marks done.
+   `--operator` needs `--authorized-by/--statement`, cannot skip a protected gate,
+   and records any exception. Add `fast_path_trailers` output
+   (`Nightshift-Recovery-Fast-Path`) to the terminal commit.
    merges. Ineligible external, unsafe, destructive, scope-changing, or ambiguous
    cases are recorded as controlled skips; verified recovery moves only
    `blocked -> ready`. The Block Reason/report includes the attempt artifact,
@@ -2468,3 +2500,65 @@ All behavior is configurable in `config.yaml`. Key sections:
 ---
 
 > This loop is designed to run unsupervised. Trust the process. A human reviews the results in the morning.
+
+
+### Invalid old-run administrative recovery
+
+For the retained wrong-identity/duplicate-contradiction case, use GIT.md's
+SPEC-387-001 receipt-bound invalid-run abandonment contract. The parent alone
+injects `abandonment_provider` into `unblock_spec.abandon_invalid_run`,
+`Coordinator.abandon_invalid_run`, or the official instruction
+`abandon_instruction_run` API. It proves original A separately from exact sealed
+successor B and the original target-only supported rollout report. This records
+rejected-old-run and administrative blocked only. Existing prepare,
+record_attempt and finalize revalidate before every mutation/restart; verified
+controller recovery alone reaches ready. Preserve old evidence and candidate;
+never accept, merge, complete or clean the old run. A new run requires its own
+original admission. Ordinary installed, authoring, expiry and parallel callback
+gates remain strict.
+
+### Heavy-suite lease, verifier budget and one-shot handoff (SPEC-NS-KIT-002-007)
+
+- **Lease.** `verification_report.py suite-sample` takes an advisory per-host lease for a
+  heavy command (any `heavy_suite.command_patterns` substring in config.yaml; default
+  `xcodebuild`), records the wait as the `coordination_gate_wait` stage and starts the sample
+  clock after acquisition. It reads the coordinator like `hooks/main-freeze.sh` and fails open
+  with a warning on outage. Kit code has no coordinator write path: a session serialises by
+  claiming the host key with `local_session_claim_paths` (`verification_report.HEAVY_LEASE_KEY`)
+  before a heavy suite, as the freeze does; an unclaimed key runs with a warning, and another
+  session's live claim makes the waiter record gate wait.
+- **Budgets.** Worker, verifier and integration time are separate (`Budget`). Verifier time is
+  sized from recorded suite wall times x samples x arms (default 1800 s per sample); integration
+  (merge, fresh-main gates, owned-process cleanup drain) from recorded post-verdict stages
+  (default 3600 s + 120 s). An expiry is a `budget_expiry` record that keeps its partial samples
+  and is never a verdict. A passed independent verdict is never reverted or blocked by a
+  whole-run clock; only the integration budget's own expiry is recorded.
+- **Handoff.** After worker-done run one command as a **background job** and wait on its result
+  file (`.nightshift/reports/<ID>/handoff.json`, `status` `running` until it finishes); never wrap
+  it in a foreground call, whose outer timeout is shorter than the derived prepare-dispatch
+  timeout (2 x the slowest recorded build, floor 1800 s). `--kit-root` must be the install the
+  admission receipt was issued for (`canonical` in the kit's own repo, else `.nightshift`).
+
+  ```bash
+  python3 .nightshift/verification_report.py handoff --project-root . --worktree <wt> \
+    --spec-id <ID> --spec-path <repo-relative-spec> --run-id <run> --baseline <base> \
+    --branch <branch> --worker-done-head <sha> --receipt-ref <ref> --receipt-sha256 <sha> \
+    --report-path <report> --private-dir <private-dir> [--suite-command <cmd> ...]
+  ```
+
+  Order: head check, managed-path drift on main, terminal integrity (once, `run_id=None`),
+  embedded scope gate, report headings and no failed-check marker, prepare-dispatch, brief from
+  the SKILL template (ACs verbatim from main, canonical verdict block; the example report path is
+  neutralised), brief contamination check, head check again, then the `work.completed` and
+  `verification.requested` checkpoints. It refuses if the worker head moved. The private dir holds
+  only `brief.md`, `plan.json` and the surface; the result goes to
+  `.nightshift/reports/<ID>/handoff.json`.
+- **Diagnostics.** `suite-sample --output-dir <private>` persists the full output (fsync) and
+  prints a bounded summary: path, sha256, head/tail and `NS-EXIT=<code>`. Native exit, diagnostic
+  inventory, transport and cleanup are separate fields (`run_native_observed`): an inventory
+  timeout never cancels the native command; the native exit is written before diagnostics are
+  rendered; a missing exit or native timeout stays `unavailable` and a suite-success marker never
+  implies exit 0. After one exact-owned TERM, `observe_signalled_cleanup` only reads inventories:
+  a same PID/start/owner row with an exiting argv keeps draining; only a complete inventory with
+  the positive control and no row proves absence; PID reuse, changed start, foreign or unknown
+  identity, an incomplete inventory or an expired drain is a cleanup gap, never a native failure.

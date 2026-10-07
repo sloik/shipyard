@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import yaml
 from ac_review import validate as validate_ac_review
 from loop_events import open_run_log
-from unblock_spec import AC_REVIEW_ELIGIBILITY, prepare
+from unblock_spec import AC_REVIEW_ELIGIBILITY, _attempts_dir, finalize, prepare
 
 
 class LadderError(ValueError):
@@ -63,9 +63,18 @@ def _max_loosened(root: Path) -> int:
 
 def plan_ladder(spec_file: Path, project_root: Path, run_id: str, *,
                 from_rung: int | None = None) -> dict[str, Any]:
-    """Return the opt-in ladder plan and admission verdict without mutation."""
+    """Return the opt-in ladder plan and admission verdict; it dispatches nothing.
+
+    The admission is the ordinary controller's ``prepare``, which adopts the spec's pre-ledger attempt
+    files once and durably issues the packet (SPEC-NS-KIT-109), so a later plan on the same
+    fingerprint supersedes this packet; it changes no lifecycle state.
+    """
     start = _start_rung(from_rung)
     packet = prepare(spec_file, project_root, run_id, allow_escalation=True)
+    if packet.get("finalize_only"):
+        # BUG-NS-KIT-109: this run's own success is on file; only finalize remains.
+        return {"mode": "finalize-only", "run_id": run_id, "spec_id": packet["spec_id"],
+                "from_rung": None, "admission": packet, "plan": []}
     return {
         "mode": "drive to done",
         "run_id": run_id,
@@ -154,13 +163,19 @@ def drive_to_done(spec_file: Path, project_root: Path, run_id: str, *,
 
     A ``done`` return is an evidence conclusion for the parent.  This function
     deliberately performs no lifecycle transition; the parent must still run the
-    ordinary fresh-main gate and terminal commit path.
+    ordinary fresh-main gate and terminal commit path. The one exception is
+    ``finalize-only`` mode: when this run's own automatic ``succeeded`` attempt is
+    already on file, no worker is dispatched and the ladder only finalizes it.
     """
     root = Path(project_root).resolve()
     summary = plan_ladder(spec_file, root, run_id, from_rung=from_rung)
     if dry_run:
         return summary
     packet = summary["admission"]
+    if summary["mode"] == "finalize-only":
+        attempt = _attempts_dir(root) / f"{str(packet['packet_id']).replace(':', '_')}-succeeded.md"
+        return {**summary, "terminal_state": finalize(packet, attempt, root),
+                "human_action_needed": False, "rungs": []}
     result_map = results or {}
     entered: list[dict[str, Any]] = []
     current = summary["from_rung"]

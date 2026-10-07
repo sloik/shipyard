@@ -18,12 +18,15 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
+import spec_id as spec_id_grammar
+
 
 @dataclass(frozen=True)
 class ProjectRef:
     name: str
     path: Path
     port: int | None = None
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,9 +136,57 @@ def specs_dir_for_project(project_path: Path) -> Path | None:
         project_path / ".nightshift" / "specs",
         project_path / "specs",
     )
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
+    existing = [candidate for candidate in candidates if candidate.is_dir()]
+    if len(existing) == 2 and not _has_real_specs(existing[0]) and _has_real_specs(existing[1]):
+        # SPEC-416: the kit checkout (canonical/) keeps its real specs in flat
+        # ``specs/`` beside a synced ``.nightshift/specs`` holding only templates.
+        return existing[1].resolve()
+    return existing[0].resolve() if existing else None
+
+
+def _has_real_specs(directory: Path) -> bool:
+    return any(not path.name.startswith("_") for path in directory.glob("*.md"))
+
+
+def propose_new_id(
+    specs_dir: Path,
+    kind: str = "SPEC",
+    *,
+    registry_path: Path | None = None,
+    extra_ids: Iterable[str] = (),
+) -> str | None:
+    """SPEC-416 R6: the next ``{kind}-{CODE}-NNN`` for ``specs_dir``'s project.
+
+    Never returns an ID present in any registered project.  ``None`` when the
+    project has no registered ``code`` (callers keep their legacy minting).
+    """
+    resolver = DependencyRegistryResolver(Path(specs_dir), registry_path=registry_path, cache_seconds=0)
+    project = resolver.current_project()
+    if project is None or not project.code:
+        return None
+    return spec_id_grammar.mint_id(kind, project.code, set(resolver.all_ids()) | {str(item) for item in extra_ids})
+
+
+def _worktree_origin(path: Path) -> Path | None:
+    """Map ``<root>/.claude/worktrees/<name>/<rest>`` to ``<root>/<rest>``."""
+    parts = path.parts
+    for index in range(len(parts) - 3):
+        if parts[index] == ".claude" and parts[index + 1] == "worktrees":
+            return Path(*parts[:index], *parts[index + 3:])
+    return None
+
+
+def _match_project(projects: Sequence[ProjectRef], specs_dir: Path) -> ProjectRef | None:
+    for candidate in (specs_dir, _worktree_origin(specs_dir)):
+        if candidate is None:
+            continue
+        for project in projects:
+            if specs_dir_for_project(project.path) == candidate:
+                return project
+        for project in projects:
+            # A kit checkout keeps flat ``specs/`` beside a nested ``.nightshift`` copy.
+            if (project.path / "specs").resolve() == candidate:
+                return project
     return None
 
 
@@ -171,11 +222,20 @@ class DependencyRegistryResolver:
         cache_seconds: float = 5.0,
     ) -> None:
         self.specs_dir = Path(specs_dir).resolve()
-        self.registry_path = Path(registry_path).resolve() if registry_path else self.specs_dir.parent / "projects-registry.json"
+        if registry_path:
+            self.registry_path = Path(registry_path).resolve()
+        else:
+            beside = self.specs_dir.parent / "projects-registry.json"
+            # The kit's own checkout keeps its registry under canonical/.nightshift/
+            # (it has no .nightshift/ of its own); SPEC-416 resolves it from there.
+            nested = self.specs_dir.parent / ".nightshift" / "projects-registry.json"
+            self.registry_path = nested.resolve() if not beside.is_file() and nested.is_file() else beside.resolve()
         self.cache_seconds = max(0.0, cache_seconds)
         self._loaded_at = 0.0
         self._records: dict[str, list[SpecRecord]] = {}
         self._registry_error: str | None = None
+        self._projects: list[ProjectRef] = []
+        self._current: ProjectRef | None = None
 
     def invalidate(self) -> None:
         self._loaded_at = 0.0
@@ -226,6 +286,20 @@ class DependencyRegistryResolver:
             {spec_id: tuple(self._records.get(spec_id, ())) for spec_id in requested},
             self._registry_error,
         )
+
+    def current_project(self) -> ProjectRef | None:
+        """The registered project owning ``specs_dir`` (``None`` when unregistered).
+
+        A checkout under ``<root>/.claude/worktrees/<name>/`` resolves to the
+        registered project at ``<root>`` so a worker's commit sees its project.
+        """
+        self._refresh_if_stale()
+        return self._current
+
+    def all_ids(self) -> set[str]:
+        """Every spec ID found in any registered project (and this specs dir)."""
+        self._refresh_if_stale()
+        return set(self._records)
 
     def resolve_in_project(self, project_name: str, spec_id: str) -> tuple[SpecRecord | None, str | None]:
         """Resolve one explicit cross-project prerequisite without mutating it.
@@ -290,7 +364,8 @@ class DependencyRegistryResolver:
             return
         records: dict[str, list[SpecRecord]] = {}
         projects, registry_error = self._load_projects()
-        current = next((project for project in projects if specs_dir_for_project(project.path) == self.specs_dir), None)
+        current = _match_project(projects, self.specs_dir)
+        registered_current = current
         if current is None:
             root = self.specs_dir.parent.parent if self.specs_dir.parent.name == ".nightshift" else self.specs_dir.parent
             current = ProjectRef(root.name.upper(), root)
@@ -317,6 +392,8 @@ class DependencyRegistryResolver:
 
         self._records = records
         self._registry_error = registry_error
+        self._projects = projects
+        self._current = registered_current
         self._loaded_at = time.monotonic()
 
     def _load_projects(self) -> tuple[list[ProjectRef], str | None]:
@@ -334,9 +411,11 @@ class DependencyRegistryResolver:
             if not isinstance(row, dict) or not isinstance(row.get("path"), str):
                 continue
             port = row.get("port")
+            code = row.get("code")
             projects.append(ProjectRef(
                 str(row.get("name") or Path(row["path"]).name).upper(),
                 _expand_path(row["path"]),
                 port if isinstance(port, int) else None,
+                code if isinstance(code, str) and code else None,
             ))
         return projects, None

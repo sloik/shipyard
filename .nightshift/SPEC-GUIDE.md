@@ -273,6 +273,10 @@ Before asking the user any questions, the agent should:
 
 **After Phase 2:** Agent should have values for `type`, `layer`, and `after` in the frontmatter.
 
+**Target version (only when the project's policy asks, SPEC-419):** read `spec_metadata.fields.version` in the project's `config.yaml` (see "Target Version Metadata" below). If `required: true` or `allowed_values` is set, ask "Which product release is this for?", offer the allowed labels, and write the answer as `version: <label>`. Otherwise leave it unassigned; never guess a version or backfill one.
+
+**Tags (only when the project's policy asks, SPEC-420):** read `spec_metadata.fields.tags` in the project's `config.yaml` (see "Spec Tags Metadata" below). If `required: true` or `allowed_values` is set, ask "Which concerns does this spec belong to?", offer the configured vocabulary, and write the answers as `tags: [<tag>, ...]`. Otherwise leave tags out; never invent tags from the title or files, and never backfill them.
+
 > **Vocabulary cross-link:** for the lifecycle, blocker semantics, and "done" criteria of non-code types (`nfr`, `research`, `analysis`), see `canonical/VOCABULARY.md`. That doc is also synced to every project as `.nightshift/VOCABULARY.md` and is required-read for sub-agents whose brief includes NFR injections or whose domain is non-code. Note also: "spike" (Agile sense) is not a separate type — it maps to `research` or `analysis`.
 
 ---
@@ -432,6 +436,13 @@ criterion because `prepare-dispatch` withholds that report material from the
 standard verifier surface.
 
 ---
+
+### Known failures on main and the test-status ledger (SPEC-NS-KIT-002-002)
+
+A test that already fails on main may be excused only as the exact same test failing with the same
+signature, through a ledger entry that links a BUG spec and has not expired. List a test the spec
+changes or owns in its requirements: the ledger never excuses it, nor any AC, safety or NFR
+obligation. A spec whose evidence depends on such a test must name it in `## Context`.
 
 ## Phase 5: Context & Constraints
 
@@ -703,8 +714,8 @@ rather than resolving a gap and writing `status: ready` by hand. The knowledge
 behind a promotion must be recallable from `artifacts/index.json` alone,
 without the promoting session's transcript.
 
-**The commit-backed/private-local kickoff choke points (SKILL.md Step
-2/6)** mutate frontmatter directly (an `Edit` + `git commit`, or
+**The commit-backed/private-local kickoff choke points (`guides/run.md`
+Step 2, `guides/run-7.md` Step 6)** mutate frontmatter directly (an `Edit` + `git commit`, or
 `transition_private_state`) rather than calling `transition_commit_backed`
 directly, so they call `spec_artifacts.py record-transition <spec-file>
 --from <status> --to <status> --run-id <run-id> [--reason "<why>"]`
@@ -732,8 +743,8 @@ alone cannot move a spec out of a terminal durable row.
 The only routes that actually take effect:
 
 - `blocked -> ready` goes through `unblock_spec.py` (`prepare` /
-  `record_attempt` / `finalize` — see SKILL.md's `/nightshift unblock
-  <spec-id>` section), which writes the durable transition as part of a
+  `record_attempt` / `finalize` — see `guides/unblock.md`, the `/nightshift unblock
+  <spec-id>` guide), which writes the durable transition as part of a
   verified recovery.
 - An operator decision may call `status_store.StatusStore.transition_commit_backed`
   directly with a non-empty reason.
@@ -825,7 +836,7 @@ boundary calls it, so no author hand-writes `record`:
   section as part of the same durable transition, pinned to the
   pre-mutation status so a competing revision landing mid-flight is refused
   rather than silently overwritten.
-- **Commit-backed and private-local kickoff/terminal** (SKILL.md Step 2/6)
+- **Commit-backed and private-local kickoff/terminal** (`guides/run.md` Step 2, `guides/run-7.md` Step 6)
   mutate frontmatter directly, so their existing `record-transition` call
   now also carries the section:
   ```bash
@@ -1139,6 +1150,52 @@ reconciling any bounded read-only review.
 
 Optional fields `provides`, `requires`, and `touches` help the board/orchestrator explain sequencing without replacing dependency declarations. `after:` is the hard dependency graph **within this project only**. For a prerequisite owned by another registered project, use `requires_specs:` with an explicit project and spec ID; admission reads that project without mutating it and refuses only the consumer if it is not `done`, unknown, missing, or malformed. `requires` warnings tell an agent that a capability provider is missing or should probably be declared as a hard dependency. `touches` warnings prevent unsafe parallel work when two ready specs edit the same protocol file or capability.
 
+## Target Version Metadata (SPEC-419)
+
+`version:` names the **intended product release** of a spec (for example `v1` or `v2`). It is not the spec's revision, `template_version`, the config `schema_version`, the kit's `kit_version`, or a release-handoff version, and it never orders or schedules work: dependencies (`after:`, `requires_specs:`), overlap rules and priority are unchanged, and a spec for `v2` still waits on a `v1` prerequisite exactly as before.
+
+```yaml
+version: v2        # one plain string label per spec; labels are opaque and case-sensitive
+```
+
+A missing or empty `version:` means *unassigned*. A blank string, a padded string (`" v2"`), a number (`version: 2`) or a list is invalid. Each project decides, in its own `config.yaml`, whether the field is mandatory and which labels it accepts (no value is ever inferred; the shared reader also serves SPEC-420's `tags`):
+
+```yaml
+spec_metadata:
+  fields:
+    version:
+      required: true            # default false
+      allowed_values: [v1, v2]  # default null = any nonblank string; [] is a configuration error
+```
+
+| Spec status | A violation is |
+| --- | --- |
+| `draft` | a `WARNING` (the draft can still be saved) |
+| `planned`, `ready`, `in_progress` | an error: promotion (`spec_promotion.py`, `board_ctl.py rules check`), `nightshift-dag.py admission`/`next`/`dispatch-spec` and parallel dispatch all refuse it |
+| `done`, `superseded`, other | an `audit` warning only; history is never rewritten |
+
+An invalid `spec_metadata` block (non-boolean `required`, empty/duplicate/blank/non-string `allowed_values`) refuses promotion and dispatch for every spec with a `spec_metadata policy:` diagnostic until fixed. Before opting in, list the specs the policy would flag, without editing anything: `python3 validate_specs.py --spec-metadata-audit <specs-dir> --required --allowed v1,v2`. Config migration/sync keeps the project's chosen policy and rewrites no spec; `config_migrations.opt_in_spec_metadata_version(text, required=..., allowed_values=...)` is the explicit, idempotent way to add the block. The board shows the label on each card and offers an exact-match VERSION filter (All, Unassigned, or one label) that combines with the other board filters and never changes dispatch.
+
+## Spec Tags Metadata (SPEC-420)
+
+`tags:` labels a spec by concern (for example `ux`, `backend`, `security`), several per spec. Tags are organizational metadata only: they are not `touches`, capabilities (`provides`/`requires`), NFR `scope_tags`, `domain` or dependencies, they never bind an NFR, and shared or disjoint tags never imply that two specs can or cannot run in parallel (overlap, `after:` and priority are unchanged).
+
+```yaml
+tags: [ux, accessibility]   # a list of unique, nonblank, unpadded, case-sensitive strings
+```
+
+Missing, null or `[]` means *untagged*. A scalar (`tags: ux`), a non-string member (`tags: [1]`), a duplicate, a blank or a padded member is invalid; nothing is split on commas, case-folded or normalized. Each project decides in its own `config.yaml`, next to `version`, whether tags are mandatory and which tags it accepts:
+
+```yaml
+spec_metadata:
+  fields:
+    tags:
+      required: true                          # default false; true = at least one valid tag
+      allowed_values: [ux, backend, security] # default null = any valid tag; [] is a configuration error
+```
+
+Severity, the invalid-config behavior (promotion and dispatch refuse with a `spec_metadata policy:` diagnostic) and the read-only preview are the same as for `version`: `python3 validate_specs.py --spec-metadata-audit <specs-dir> --field tags --required --allowed ux,backend` lists the affected specs before you opt in. `config_migrations.opt_in_spec_metadata_tags(text, required=..., allowed_values=...)` is the explicit, idempotent opt-in (it extends an existing `spec_metadata.fields:` block and keeps a chosen tags policy); config sync never rewrites the policy and nothing backfills or rewrites a spec's tags. Removing a tag from `allowed_values` leaves the specs untouched and makes the ones that carry it show up as violations, so they are visible before anyone promotes them. The board shows the tags on each card and offers a TAGS filter (All, Untagged, or one or more tags; a spec matches when it has ANY selected tag) that combines with the status/version/type filters and never changes dispatch. Configured tags and any legacy values found on specs are both selectable, so an invalid value stays inspectable.
+
 ## Write scope
 
 Optional frontmatter `scope:` (template v10, SPEC-300-001) declares WHERE a
@@ -1279,6 +1336,44 @@ Rules:
 
 ## ID Assignment Rules
 
+### Spec ID grammar and project codes (SPEC-416)
+
+A new spec ID has the form `{KIND}-{CODE}-{NNN}(-{NNN})*`:
+
+- `{CODE}` is the project's registered code, `[{FAMILY}-]{PROJECT}`: one or two
+  letter-only segments, each 2-6 uppercase ASCII letters, no digits, unique
+  fleet-wide (`ARGO`, `ACHAT`, `CTX-CORE`, `NS-KIT`). A family stem is never also a
+  standalone project code. The code is the `code` field of the project's entry in
+  `projects-registry.json`; Nightshift Control shows it and flags a missing or
+  malformed one. `spec_prefixes` is unrelated legacy routing data.
+- `{NNN}` is zero-padded, at least 3 digits; child segments follow as before
+  (`SPEC-NS-KIT-002-001`). Parsing is unambiguous: code segments are letters-only
+  and number segments are digits-only, so `SPEC-CTX-CORE-052` is kind `SPEC`, code
+  `CTX-CORE`, number `052`. Every kit consumer uses the one parser in `spec_id.py`.
+- `{KIND}` comes from the closed `id_kind` vocabulary. It is the ID's leading word and
+  is **not** the frontmatter `type:`. For new IDs the pairing is fully strict:
+
+  | `id_kind` | Required `type:` | Example |
+  |---|---|---|
+  | `SPEC` | every type except `bugfix`, `nfr`, `questions` | `SPEC-DEMO-001` |
+  | `BUG` | `bugfix` | `BUG-DEMO-003` |
+  | `NFR` | `nfr` | `NFR-DEMO-001` |
+  | `QUESTIONS` | `questions` | `QUESTIONS-DEMO-001` |
+
+  `QUESTIONS` leads for new IDs (`QUESTIONS-{CODE}-NNN`).
+- **Legacy rule.** Existing IDs are never renamed. Each project has a frozen legacy-ID
+  list (`spec-id-legacy/<CODE>.json`, generated by
+  `validate_specs.py --generate-legacy-ids`, never edited by hand). A legacy ID
+  validates, resolves and runs exactly as before. `validate_specs.py` reports an
+  **error** for any other spec whose ID breaks the grammar, carries another project's
+  code, collides with an ID in another registered project, or pairs the wrong kind
+  with its `type:`.
+- Cross-project references do not change: use `requires_specs: [{project: REGISTERED_NAME,
+  spec: ID}]` with the registered project name; `after:` stays within the project.
+- Mint IDs with `check_followup_spec.py [--kind SPEC|BUG|NFR|QUESTIONS]`; in a project
+  with a registered code it proposes `{KIND}-{CODE}-NNN` and never an ID present anywhere in
+  the registered fleet.
+
 ### Never assign a spec ID manually
 
 Spec IDs must be generated by `check_followup_spec.py` — never by scanning specs
@@ -1382,6 +1477,32 @@ kickoff with that session's ID, label, and age. The claim is renewed on the
 existing heartbeat and released on either `done` or `blocked`. Coordinator
 unavailability is a recorded warning, not a gate failure. See `ORCHESTRATOR.md`
 for the bounded owned/unowned/unknown ownership query and report evidence.
+
+### Main freeze lease (SPEC-NS-KIT-001)
+
+A freeze of the main branch is an advisory coordinator path claim, not a
+message. **Request:** the holder calls `local_session_claim_path(session_id, key,
+purpose="main-freeze: <reason>", ttl_minutes=30)`, where `key` is the output of
+`hooks/main-freeze.sh key` (`<git common dir>/.nightshift-main-freeze`, shared
+by every worktree of the repository). **Renew** with `local_session_renew_claim`;
+**release** with `local_session_release_claim` (also released when the holder's
+session ends or is reaped, and it lapses at its TTL). The pre-commit hook and the
+coordinator's merge step refuse a commit or merge on main by any other session:
+`BLOCKED by main-freeze lease (SPEC-NS-KIT-001)`, naming the holder's session ID
+and label, the reason, the expiry and how to release. A committer whose session
+cannot be resolved is refused too; set `NIGHTSHIFT_COORDINATOR_SESSION` to its
+coordinator session ID. Commits on other branches and in run worktrees are never
+affected. "Freeze started/cleared" messages are informational only; just the
+lease gates.
+
+Tradeoff: the check fails open. If the coordinator store is unreachable,
+unreadable or slow (bounded to about 2 seconds), the commit proceeds with a
+warning, so an outage cannot brick commits and a freeze is not enforced while
+the coordinator is down; a store file that does not exist is allowed silently
+(`NIGHTSHIFT_MAIN_FREEZE_VERBOSE=1` prints a note). A freeze is a coordination aid, not a security control
+or a lock; `git commit --no-verify` bypasses it like every other kit hook. A
+directory claim on the repository root or `.git` makes the freeze claim return
+`claimed: false` (claims are subtree-aware); release that claim first.
 
 | Transition | Mandatory preconditions |
 |---|---|
@@ -1502,6 +1623,7 @@ listing values inline.
 | `eval` | Time-boxed investigation or proof-of-concept — see [output artifact placement](#output-artifact-placement-for-report-verified-evals-spec-354) if ACs describe report content |
 | `nfr` | Non-functional requirement: standing quality constraint with no done or blocked state — use `_TEMPLATE-NFR.md` |
 | `main` | Parent spec grouping sub-specs; never executed directly by the loop |
+| `docs` | Documentation-only change: guides, templates, prose and generated documentation; no behavioural code |
 
 ### Research types (`_TEMPLATE-RESEARCH.md`)
 
@@ -1527,6 +1649,7 @@ listing values inline.
 | Value | When to use |
 |-------|-------------|
 | `questions` | Consolidated tracker for open questions gathered from specs or run reports |
+| `task` | Dated operational run (an audit, sweep or migration pass) that is executed once and closed, not a code deliverable |
 
 ### Rules
 

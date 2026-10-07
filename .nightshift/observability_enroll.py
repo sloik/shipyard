@@ -24,6 +24,7 @@ from observability_store import ObservabilityStoreError, StoreContext, enroll
 
 MANAGED_PUBLIC_PREFIXES = (
     ".nightshift/hooks/", ".nightshift/prompts/", ".nightshift/scenarios/",
+    ".nightshift/spec-id-legacy/",  # SPEC-416: frozen per-project legacy-ID lists
 )
 # Kept in sync with CANONICAL_PROTOCOL_FILES in nightshift-sync.py (SPEC-191
 # follow-up): that list is the single source of truth for what ships as
@@ -47,7 +48,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/extension_registry.py", ".nightshift/extension_runtime.py", ".nightshift/extension_sandbox.py",
     ".nightshift/failure_persistence.py", ".nightshift/fleet_metrics.py", ".nightshift/followup_decisions.py",
     ".nightshift/followup_metrics.py", ".nightshift/followup_processor.py", ".nightshift/goal_gate.py",
-    ".nightshift/handler_registry.py", ".nightshift/hooks/commit-msg", ".nightshift/hooks/pre-commit",
+    ".nightshift/handler_registry.py", ".nightshift/hooks/commit-msg", ".nightshift/hooks/main-freeze.sh", ".nightshift/hooks/pre-commit",
     ".nightshift/integration_broker.py", ".nightshift/kickoff_reconciliation.py", ".nightshift/lifecycle.py",
     ".nightshift/loop_events.py", ".nightshift/loop_observability.py", ".nightshift/managed_payload_provenance.py",
     ".nightshift/metric-ranges.yaml", ".nightshift/metrics-schema.md", ".nightshift/metrics/_SCHEMA.md",
@@ -73,6 +74,40 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/resilience_ladder.py", ".nightshift/scope_guard.py",
     ".nightshift/spec_artifacts.py", ".nightshift/spec_promotion.py",
     ".nightshift/token_usage.py",
+    # SPEC-417-001: on-demand guides.
+    ".nightshift/guides/board-and-api.md",
+    # SPEC-417-004: the rules guide.
+    ".nightshift/guides/rules.md",
+    # SPEC-417-005: command bodies moved out of SKILL.md.
+    ".nightshift/guides/release.md",
+    ".nightshift/guides/unblock.md",
+    ".nightshift/guides/kickoff.md",
+    ".nightshift/guides/run.md",
+    ".nightshift/guides/run-2.md",
+    ".nightshift/guides/run-3.md",
+    ".nightshift/guides/run-4.md",
+    ".nightshift/guides/run-5.md",
+    ".nightshift/guides/run-6.md",
+    ".nightshift/guides/run-7.md",
+    ".nightshift/guides/run-8.md",
+    # SPEC-NS-KIT-101: pinned verifier blocks and four more command bodies.
+    ".nightshift/guides/pinned-briefs.md",
+    ".nightshift/guides/pinned-checks.md",
+    ".nightshift/guides/pinned-validator.md",
+    ".nightshift/guides/doctor.md",
+    ".nightshift/guides/validate.md",
+    ".nightshift/guides/knowledge.md",
+    ".nightshift/guides/address-issues.md",
+    # SPEC-NS-KIT-108: small-spec lane worker guide.
+    ".nightshift/guides/worker-small.md",
+    # SPEC-417-002: read-only board client.
+    ".nightshift/board_ctl.py",
+    # SPEC-417-003: the status-write gate shared by board.py and board_ctl.py.
+    ".nightshift/status_transition.py",
+    # SPEC-NS-KIT-003: the reduced-dependency-graph helper.
+    ".nightshift/dependency_graph_view.py",
+    # SPEC-416: the shared spec-ID grammar module.
+    ".nightshift/spec_id.py",
 }
 PRIVATE_PREFIXES = (
     ".nightshift/reports/", ".nightshift/metrics/", ".nightshift/knowledge/",

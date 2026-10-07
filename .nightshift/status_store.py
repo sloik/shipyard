@@ -16,7 +16,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 # SPEC-303: bound-parameter chunk for the batch status read; one connection
 # is reused across chunks.
@@ -529,6 +529,18 @@ class StatusStore:
                     )
         return existing.to_dict()
 
+    def list_terminal_decisions(self, spec_id: str, *, source: str) -> list[dict[str, Any]]:
+        """Return every immutable terminal-decision row of one spec and source, oldest first."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM terminal_decisions
+                WHERE spec_id = ? AND source = ? ORDER BY id ASC
+                """,
+                (spec_id, source),
+            ).fetchall()
+        return [_terminal_decision_from_row(row).to_dict() for row in rows]
+
     def get_terminal_decision_history(
         self, spec_id: str, run_id: str,
     ) -> list[dict[str, Any]]:
@@ -1038,7 +1050,9 @@ class StatusStore:
                                 actor: str | None = None,
                                 reconsider_when: str | None = None,
                                 state_rationale_evidence: Any = (),
-                                provenance: str = "authored") -> dict[str, Any]:
+                                provenance: str = "authored",
+                                before_administrative_write: Callable[[], None] | None = None,
+                                extra_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Write the coordinator checkpoint before tracked frontmatter.
 
         This ordering prevents a store outage from producing a false terminal
@@ -1083,16 +1097,24 @@ class StatusStore:
             reason_text = f"mechanical transition to {status!r} via run {run_id}"
 
         try:
-            checkpoint = self.update_state(
-                spec_id, status, run_id=run_id, source=source, note=note or reason_text,
-                payload={"spec_path": str(path), "canonical_spec_path": str(path)},
-            )
+            if before_administrative_write is not None:
+                before_administrative_write()
+            checkpoint = self.get_state(spec_id) if before_administrative_write is not None else None
+            payload = {"spec_path": str(path), "canonical_spec_path": str(path), **(extra_payload or {})}
+            if not (checkpoint and checkpoint.get("status") == status and checkpoint.get("run_id") == run_id
+                    and checkpoint.get("source") == source and checkpoint.get("note") == (note or reason_text)
+                    and checkpoint.get("payload") == payload):
+                checkpoint = self.update_state(
+                    spec_id, status, run_id=run_id, source=source, note=note or reason_text, payload=payload,
+                )
         except Exception as exc:
             raise LifecyclePersistenceError(
                 f"durable lifecycle checkpoint failed; frontmatter unchanged; "
                 f"recovery: rerun coordinator transition for {spec_id}"
             ) from exc
         try:
+            if before_administrative_write is not None:
+                before_administrative_write()
             spec_artifacts.write_status_transition_artifact(
                 spec_artifacts.reports_root_for_spec_path(path), spec_id,
                 from_status=current_status, to_status=status,
@@ -1110,6 +1132,8 @@ class StatusStore:
                 f"recovery: reconcile {path.name} artifacts and retry"
             ) from exc
         try:
+            if before_administrative_write is not None:
+                before_administrative_write()
             write_spec_frontmatter(path, lambda fm: {**fm, "status": status})
         except Exception as exc:
             raise LifecyclePersistenceError(

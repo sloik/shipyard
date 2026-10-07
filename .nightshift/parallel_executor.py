@@ -36,6 +36,12 @@ from dependency_registry import (
     parse_requires_specs_text,
 )
 
+from spec_frontmatter import (
+    SpecMetadataPolicy,
+    parse_spec_metadata_policy,
+    spec_metadata_policy_for_specs_dir,
+    spec_metadata_problems,
+)
 from worktree_paths import (
     WorktreePathError,
     assert_managed_worktree_path,
@@ -79,6 +85,9 @@ class AdmissionSpec:
     touches: Tuple[str, ...] = ()
     priority: int = 1
     spec_path: Optional[Path] = None
+    # SPEC-419: policy violations of the spec's own ``spec_metadata`` values (strict, severity-free);
+    # a ready spec carrying any is never admitted. Informational for every other status.
+    metadata_problems: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -288,7 +297,14 @@ class BoundedWorktreeDispatcher:
         failed, self._failed = self._failed, []
         return failed
 
+    def _spec_metadata_policy(self) -> SpecMetadataPolicy:
+        """SPEC-419: the project's own policy -- the executor's config when it carries one, else its config.yaml."""
+        if isinstance(self.config, dict) and "spec_metadata" in self.config:
+            return parse_spec_metadata_policy(self.config)
+        return spec_metadata_policy_for_specs_dir(self.specs_dir)
+
     def _load_specs(self) -> List[AdmissionSpec]:
+        policy = self._spec_metadata_policy()
         specs: List[AdmissionSpec] = []
         qualified_by_consumer: Dict[str, tuple[tuple[tuple[str, str], ...], str | None]] = {}
         for path in sorted(self.specs_dir.glob("*.md")):
@@ -338,6 +354,7 @@ class BoundedWorktreeDispatcher:
                 touches=tuple(data.get("touches") or ()),
                 priority=int(data.get("priority", 1)),
                 spec_path=path.resolve(),
+                metadata_problems=tuple(spec_metadata_problems(data, policy)),
             ))
         # Admission must observe a prerequisite's current on-disk status on
         # every refill; the resolver's short structural cache is unsuitable for
@@ -362,6 +379,7 @@ class BoundedWorktreeDispatcher:
                 spec.touches,
                 spec.priority,
                 spec.spec_path,
+                spec.metadata_problems,
             ))
         self._dependency_statuses = statuses
         self._dependency_errors = errors
@@ -373,7 +391,7 @@ class BoundedWorktreeDispatcher:
             if spec.spec_id == worker.spec_id:
                 return AdmissionSpec(
                     spec.spec_id, "in_progress", spec.after, spec.touches,
-                    spec.priority, spec.spec_path,
+                    spec.priority, spec.spec_path, spec.metadata_problems,
                 )
         return AdmissionSpec(worker.spec_id, "in_progress")
 
@@ -428,7 +446,8 @@ class BoundedWorktreeDispatcher:
                     dispatched.handle.status = "held"
                     dispatched.handle.outcome = outcome if isinstance(outcome, dict) else {"outcome": str(outcome)}
                     dispatched.handle.integrity_acceptance = acceptance if isinstance(acceptance, dict) else {"outcome": "indeterminate"}
-                    self._block_dependents(spec_id)
+                    if not (isinstance(acceptance, dict) and acceptance.get("outcome") == "superseded"):
+                        self._block_dependents(spec_id)  # a superseded run re-runs; dependents just wait on `after`
                     continue
                 dispatched.handle.status = "completed"
                 dispatched.handle.outcome = outcome
@@ -1702,7 +1721,7 @@ class SerializedIntegrationQueue:
                     if isinstance(acceptance, dict) and acceptance.get("scope") == "shared":
                         shared_integrity_failure = reason_code
                         self._record_shared_integrity_failure(reason_code)
-                    else:
+                    elif not (isinstance(acceptance, dict) and acceptance.get("outcome") == "superseded"):
                         self._block_dependents(handle.spec_id)
                     continue
             integration_ref = handle.verified_revision or handle.branch_name
@@ -3522,6 +3541,10 @@ def plan_dynamic_admission(
                     f"blocked by dependency {ancestor}",
                     blocking_ancestor=ancestor,
                 )
+            elif spec.status == "ready" and spec.metadata_problems:
+                decisions[spec.spec_id] = AdmissionDecision(
+                    spec.spec_id, "invalid", "spec_metadata_invalid", "; ".join(spec.metadata_problems)
+                )
             elif spec.status != "ready":
                 decisions[spec.spec_id] = AdmissionDecision(
                     spec.spec_id, "not_ready", "status_not_ready", f"status is {spec.status}"
@@ -3600,6 +3623,7 @@ def parallel_admission_decisions(
     *,
     worker_limit: int = 1,
     missing_touches_policy: str = "exclusive",
+    spec_metadata_policy: Optional[SpecMetadataPolicy] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """Read-only per-spec view of one ``plan_dynamic_admission`` pass (SPEC-359 R2).
 
@@ -3647,6 +3671,7 @@ def parallel_admission_decisions(
             after=tuple(str(dep) for dep in after) + keys if isinstance(after, list) else keys,
             touches=tuple(str(item) for item in touches) if isinstance(touches, list) else (),
             priority=priority if isinstance(priority, int) else 1,
+            metadata_problems=tuple(spec_metadata_problems(fm, spec_metadata_policy)),
         ))
     plan = plan_dynamic_admission(
         admission_specs, worker_limit, missing_touches_policy=missing_touches_policy,

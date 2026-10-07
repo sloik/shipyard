@@ -115,7 +115,7 @@ schema_version: "3.2.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.24.12"
+kit_version: "3.25.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -310,7 +310,21 @@ commands:
   # Required: yes (but can be "")
   # Default:  ""
   # Run the full test suite.
+  # The canonical kit's own suite runs per test through pytest-xdist
+  # (`-n auto --maxprocesses 4 --dist loadgroup`): at most 4 workers by default.
+  # Set the environment variable PYTEST_XDIST_AUTO_NUM_WORKERS=<n> for one run to
+  # lower the worker count (1 = a single worker). The cap is a ceiling, so the
+  # variable cannot raise the count above 4.
   test: "pytest"
+
+  # Type:     string
+  # Required: no
+  # Default:  absent (workers fall back to `test`)
+  # Fast worker hand-back tier (SPEC-396): the same command as `test` minus the
+  # tests marked `slow` or `browser`, e.g. `pytest -m "not slow and not browser"`.
+  # Workers run it at hand-back. Verifiers, preflight dispatch and the release gate
+  # keep running `test`, the complete suite, which remains the release proof.
+  # test_fast: "pytest -m 'not slow and not browser'"
 
   # Type:     string
   # Required: no
@@ -324,6 +338,16 @@ commands:
   # records a warning instead of a blocking failure (no test command is run).
   # project.name and project.language remain required.
   # test_not_applicable: "markdown-only skill: nothing to test"
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  absent (every commit that stages project code runs type_check)
+  # Globs, relative to the project root, naming project CODE paths (SPEC-NS-KIT-004).
+  # When set, a commit whose staged paths match none of them (docs-only) skips
+  # `type_check` in the pre-commit hook; lint, the secret/PII scanner and spec
+  # validation still run, and a commit staging any matching path runs everything.
+  # `*` also matches `/`. Must be a list of non-empty strings.
+  # code_paths: ["src/*", "Sources/*", "*.swift"]
 
   # Type:     integer
   # Required: no
@@ -576,6 +600,60 @@ unblock:
   to_done:
     max_rung: 5                    # integer, 1..5; default 5
     dry_run: false                 # boolean; default false
+
+---
+
+# =============================================================================
+# Spec metadata policy (SPEC-419 version, SPEC-420 tags)
+# =============================================================================
+# Each project decides whether an optional spec metadata field is mandatory and
+# which values it accepts. Nothing here is inferred from a release or another
+# project, and a missing block means every field is optional and unrestricted
+# (no existing spec has to change). The policy is read from THIS project's own
+# config only.
+#
+# `version` is the intended PRODUCT RELEASE a spec belongs to ("v1", "v2"). It is
+# not the spec's revision, `template_version`, the config `schema_version`, the
+# Nightshift `kit_version`, or a release-handoff version. A spec carries at most
+# one label (`version: v2`); labels are opaque, case-sensitive strings with no
+# SemVer or ordering rules. A missing or null value means "unassigned".
+#
+#   required: true       -> a nonblank `version:` is mandatory
+#   allowed_values: null -> any nonblank string; a list (e.g. [v1, v2]) -> exact match only
+#
+# An empty list, a non-boolean `required`, or a blank/duplicate/non-string entry is
+# a configuration error: promotion and dispatch refuse with a spec_metadata
+# diagnostic until it is fixed. Severity follows the validator convention: a
+# violation is a WARNING on a draft, an error on planned/ready/in_progress (it
+# blocks promotion and dispatch), and an audit warning on done/superseded specs
+# (their history is never rewritten). Preview the specs a policy would flag with
+# `python3 validate_specs.py --spec-metadata-audit <specs-dir> --required --allowed v1,v2`.
+# The registered config migration/sync never adds, changes, or removes this block; opt in
+# explicitly with config_migrations.opt_in_spec_metadata_version (it edits no spec).
+#
+# `tags` (SPEC-420) are organizational labels for concerns such as ux, backend or security: a
+# YAML list of unique, nonblank, unpadded, case-sensitive strings (`tags: [ux, accessibility]`).
+# Missing, null or [] means untagged. A scalar, a non-string member, a duplicate, a blank or padded
+# member is invalid (no comma splitting, no case folding, nothing normalized). Tags are separate from
+# `touches`, capabilities, NFR scope_tags, domain and dependencies, and never imply scheduling
+# compatibility.
+#
+#   required: true       -> at least one valid tag is mandatory
+#   allowed_values: null -> any valid tag; a list (e.g. [ux, backend, security]) -> every tag must match exactly
+#
+# Same severity convention, config-error behavior and audit as `version`
+# (`validate_specs.py --spec-metadata-audit <specs-dir> --field tags --required --allowed ux,backend`);
+# `config_migrations.opt_in_spec_metadata_tags` is the explicit opt-in. Removing a value from
+# allowed_values leaves the tags in place and makes the specs that carry it visible as violations.
+
+spec_metadata:
+  fields:
+    version:
+      required: false              # boolean; default false
+      allowed_values: null         # null (any nonblank string) or a non-empty list of exact labels, e.g. [v1, v2]
+    tags:
+      required: false              # boolean; default false (true = at least one tag)
+      allowed_values: null         # null (any valid tag) or a non-empty list of exact tags, e.g. [ux, backend, security]
 
 ---
 

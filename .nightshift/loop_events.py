@@ -207,6 +207,52 @@ def emit_resilience_rung(
              rung=rung, outcome=outcome, evidence_refs=refs)
 
 
+# SPEC-NS-KIT-108: which lane a run used (`small` = worker-small.md plus the condensed
+# parent checklist, `full` = the whole loop) and the lane-relevant counters.  One bounded
+# event per run, written to the same run stream the other emitters use; the existing
+# `verification_report.py throughput-report` reads it back.  An unmeasured counter is the
+# string `unavailable`, never 0 (the SPEC-NS-KIT-002-001 convention).
+LANES = frozenset({"small", "full"})
+LANE_UNAVAILABLE = "unavailable"
+LANE_COUNTER_FIELDS = ("parent_tool_calls", "worker_wall_s", "verifier_wall_s", "verifier_dispatches")
+
+
+def _lane_counter(name: str, value, *, integer: bool):
+    if value == LANE_UNAVAILABLE:
+        return value
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    if ok and integer and int(value) != value:
+        ok = False
+    if not ok:
+        raise ValueError(f"{name} must be a non-negative {'integer' if integer else 'number'} or 'unavailable'")
+    return int(value) if integer else round(float(value), 3)
+
+
+def emit_lane_event(
+    log: "RunEventLog", spec_id: str, *, lane: str, parent_tool_calls, worker_wall_s,
+    verifier_wall_s, verifier_dispatches, redispatch_reasons=(),
+) -> dict:
+    """Append one `lane_recorded` event: the lane tag plus every lane counter (all required)."""
+    from record_metrics import REDISPATCH_REASON_ENUM
+
+    if lane not in LANES:
+        raise ValueError(f"lane must be one of {sorted(LANES)}")
+    counters = {
+        "parent_tool_calls": _lane_counter("parent_tool_calls", parent_tool_calls, integer=True),
+        "worker_wall_s": _lane_counter("worker_wall_s", worker_wall_s, integer=False),
+        "verifier_wall_s": _lane_counter("verifier_wall_s", verifier_wall_s, integer=False),
+        "verifier_dispatches": _lane_counter("verifier_dispatches", verifier_dispatches, integer=True),
+    }
+    reasons = list(redispatch_reasons)
+    if any(item not in REDISPATCH_REASON_ENUM for item in reasons):
+        raise ValueError(f"redispatch reasons must be within {sorted(REDISPATCH_REASON_ENUM)}")
+    dispatches = counters["verifier_dispatches"]
+    if isinstance(dispatches, int) and len(reasons) > max(dispatches - 1, 0):
+        raise ValueError("more redispatch reasons than redispatches")
+    log.emit("lane_recorded", spec_id=spec_id, lane=lane, redispatch_reasons=reasons, **counters)
+    return {"lane": lane, "redispatch_reasons": reasons, **counters}
+
+
 def record_official_followup_decisions(
     log: "RunEventLog", *, source_spec_id: str, terminal_resolution: str,
     discovery_phase: str, evidence_ref: str, outcomes: list[str], recorded_at: str,
@@ -441,3 +487,41 @@ class RunEventLog:
 
 def open_run_log(nightshift_dir: Path, run_id: Optional[str] = None) -> RunEventLog:
     return RunEventLog(nightshift_dir=nightshift_dir, run_id=run_id or generate_run_id())
+
+
+def _count_arg(raw: str):
+    return raw if raw == LANE_UNAVAILABLE else float(raw)
+
+
+def main(argv=None) -> int:
+    """`loop_events.py lane ...`: the parent's one-line emitter for the lane tag and counters."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Emit a loop event (SPEC-NS-KIT-108).")
+    sub = parser.add_subparsers(dest="command", required=True)
+    lane = sub.add_parser("lane", help="record the lane tag and lane counters for one run")
+    lane.add_argument("--nightshift-dir", default=".nightshift")
+    lane.add_argument("--run-id", required=True)
+    lane.add_argument("--spec-id", required=True)
+    lane.add_argument("--lane", required=True)
+    for field in LANE_COUNTER_FIELDS:
+        lane.add_argument("--" + field.replace("_", "-"), required=True, type=_count_arg,
+                          help="a non-negative number or 'unavailable'")
+    lane.add_argument("--redispatch-reason", action="append", default=[])
+    args = parser.parse_args(argv)
+    try:
+        event = emit_lane_event(
+            open_run_log(Path(args.nightshift_dir), args.run_id), args.spec_id, lane=args.lane,
+            parent_tool_calls=args.parent_tool_calls, worker_wall_s=args.worker_wall_s,
+            verifier_wall_s=args.verifier_wall_s, verifier_dispatches=args.verifier_dispatches,
+            redispatch_reasons=args.redispatch_reason,
+        )
+    except ValueError as exc:
+        print(f"Error: cannot record lane event: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(event, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

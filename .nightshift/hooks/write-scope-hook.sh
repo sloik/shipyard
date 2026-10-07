@@ -180,9 +180,12 @@ try:
         ):
             if not specs_dir.is_dir():
                 continue
-            matches = sorted(specs_dir.glob(f"{active_spec_id}-*.md")) + sorted(specs_dir.glob(f"{active_spec_id}.md"))
-            if matches:
-                spec_file = matches[0]
+            try:
+                spec_file = module.find_spec_file(specs_dir, active_spec_id)
+            except module.AmbiguousSpecFile as exc:
+                emit_deny(f"BLOCKED - {exc}")
+                raise SystemExit(0)
+            if spec_file is not None:
                 break
         if spec_file is not None:
             spec_relpath = str(spec_file.relative_to(project_root)).replace("\\", "/")

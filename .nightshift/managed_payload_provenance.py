@@ -69,6 +69,7 @@ REASON_PAYLOAD_DRIFT = "NS-MPI-PAYLOAD-DRIFT"
 REASON_RECEIPT_MISSING = "NS-MPI-RECEIPT-MISSING"
 REASON_RECEIPT_INVALID = "NS-MPI-RECEIPT-INVALID"
 REASON_RECEIPT_MISMATCH = "NS-MPI-RECEIPT-MISMATCH"
+REASON_RELEASE_SUPERSEDED = "NS-MPI-RELEASE-SUPERSEDED"
 REASON_METADATA_INVALID = "NS-MPI-METADATA-INVALID"
 REASON_ARTIFACT_FAILURE = "NS-MPI-ARTIFACT-FAILURE"
 REASON_DUPLICATE_CONTRADICTION = "NS-MPI-DUPLICATE-CONTRADICTION"
@@ -164,6 +165,420 @@ class AuthoringAnchor:
 
 
 AuthoringProvider = Callable[[Path, str], AuthoringAnchor]
+
+
+@dataclass(frozen=True)
+class AbandonmentAnchor:
+    """Externally retained parent authority for rejection, never acceptance.
+
+    As with AuthoringAnchor, the callable is the trust boundary. The parent
+    independently validates human authorization, verifier independence and the
+    actual supported release invocation before retaining this exact digest.
+    Worker packets, configuration and environment variables cannot supply it.
+    """
+
+    authority_path: Path
+    authority_sha256: str
+    candidate_checkout: Path
+    release_source: Path | None = None
+    release_root: Path | None = None
+
+
+AbandonmentProvider = Callable[[Path, str], AbandonmentAnchor]
+ABANDONMENT_POLICY = "receipt-bound-invalid-run-abandonment-v1"
+ABANDONMENT_DIR = Path("reports/_wip/managed-payload-integrity/abandonment")
+REASON_INVALID_RUN_ABANDONED = "NS-MPI-INVALID-RUN-ABANDONED"
+
+
+def _abandonment_path(value: Any) -> str:
+    if (not isinstance(value, str) or not value or value.startswith("/")
+            or "\\" in value or ":" in value
+            or any(ord(c) < 32 for c in value)
+            or any(p in {"", ".", ".."} for p in value.split("/"))):
+        raise MetadataError("unsafe administrative evidence path")
+    return value
+
+
+def _abandonment_artifact(install: Path, item: Any) -> tuple[dict, bytes]:
+    if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+        raise MetadataError("invalid administrative evidence binding")
+    relative = _abandonment_path(item["path"])
+    if not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
+        raise MetadataError("invalid administrative evidence digest")
+    path = install / relative
+    for index in range(1, len(PurePosixPath(relative).parts) + 1):
+        if install.joinpath(*PurePosixPath(relative).parts[:index]).is_symlink():
+            raise MetadataError("aliased administrative evidence")
+    if not path.is_file() or path.stat().st_nlink != 1:
+        raise MetadataError("missing or aliased administrative evidence")
+    body = path.read_bytes()
+    if len(body) > MAX_ACCEPTANCE_BYTES or _sha256_bytes(body) != item["sha256"]:
+        raise MetadataError("administrative evidence changed")
+    value = json.loads(body)
+    if not isinstance(value, dict):
+        raise MetadataError("invalid administrative evidence JSON")
+    return value, body
+
+
+def _abandonment_blob(repo: Path, revision: str, path: str) -> bytes:
+    _abandonment_path(path)
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+        raise MetadataError("full pinned Git identity required")
+    tree = _run_git(repo, "ls-tree", "-z", revision, "--", path)
+    rows = [row for row in tree.stdout.split(b"\0") if row]
+    if tree.returncode or len(rows) != 1:
+        raise MetadataError("pinned administrative Git evidence missing")
+    info, name = rows[0].split(b"\t", 1)
+    if info.split()[:2] != [b"100644", b"blob"] or name.decode() != path:
+        raise MetadataError("pinned administrative evidence has unsafe mode")
+    result = _run_git(repo, "show", f"{revision}:{path}")
+    if result.returncode:
+        raise MetadataError("pinned administrative blob unavailable")
+    return result.stdout
+
+
+def _abandonment_marker(repo: Path, prefix: str, revision: str) -> tuple[dict, bytes]:
+    body = _abandonment_blob(repo, revision, f"{prefix}/{MARKER}")
+    marker = json.loads(body)
+    if not isinstance(marker, dict) or not isinstance(marker.get("release_manifest"), dict):
+        raise MetadataError("pinned installed marker missing its full manifest")
+    manifest = marker["release_manifest"]
+    _authoring_inventory(manifest)
+    if any(marker.get(key) != manifest.get(key) for key in ("kit_version", "schema_version", "fingerprint")):
+        raise MetadataError("pinned installed marker disagrees with manifest")
+    _authoring_committed_inventory(repo, prefix, revision, _authoring_inventory(manifest))
+    return manifest, body
+
+
+def _abandonment_receipt(install: Path, record: dict) -> tuple[dict, bytes]:
+    # Inspect only this externally pinned rejected receipt after expiry. The
+    # ordinary loader and every result-acceptance caller remain unchanged.
+    receipt, body = _abandonment_artifact(install, {
+        "path": record["receipt_ref"], "sha256": record["receipt_sha256"]})
+    try:
+        return _load_receipt(install, record["receipt_ref"], record["receipt_sha256"])
+    except _ReceiptLoadError as exc:
+        if exc.check != "stale":
+            raise
+    required = {"schema_version", "invocation_id", "generated_at", "identity", "binding", "release", "admission_artifact_sha256"}
+    if set(receipt) != required or receipt["schema_version"] != INTEGRITY_SCHEMA_VERSION:
+        raise MetadataError("invalid rejected receipt schema")
+    groups = (("identity", {"project_sha256", "run_sha256", "spec_sha256"}),
+              ("binding", {"git_common_dir_sha256", "worktree_sha256", "install_relative_sha256"}),
+              ("release", {"kit_version", "release_fingerprint", "manifest_fingerprint", "manifest_inventory_sha256", "release_marker_sha256"}))
+    for key, fields in groups:
+        if not isinstance(receipt[key], dict) or set(receipt[key]) != fields:
+            raise MetadataError("invalid rejected receipt fields")
+    values = [*receipt["identity"].values(), *receipt["binding"].values(),
+              *(receipt["release"][key] for key in groups[-1][1] if key != "kit_version"),
+              receipt["admission_artifact_sha256"]]
+    if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in values):
+        raise MetadataError("invalid rejected receipt digests")
+    return receipt, body
+
+
+def _abandonment_record(install: Path, spec_id: str, provider: AbandonmentProvider) -> tuple[dict, AbandonmentAnchor]:
+    if not callable(provider):
+        raise MetadataError("administrative rejection requires an external parent provider")
+    anchor = provider(install, spec_id)
+    if not isinstance(anchor, AbandonmentAnchor):
+        raise MetadataError("invalid external abandonment anchor")
+    authority = Path(anchor.authority_path)
+    roots = [_git_root(install), Path(anchor.candidate_checkout).resolve()]
+    roots += [_git_root(Path(p).resolve()) for p in (anchor.release_source, anchor.release_root) if p is not None]
+    # Fail closed: the authority may not live in any linked checkout of these repositories.
+    for repository in list(roots):
+        listing = _run_git(repository, "worktree", "list", "--porcelain", "-z")
+        if listing.returncode:
+            raise MetadataError("cannot enumerate linked checkouts for authority location")
+        roots += [Path(field[len("worktree "):].decode()).resolve()
+                  for field in listing.stdout.split(b"\0") if field.startswith(b"worktree ")]
+    if (not authority.is_absolute() or authority.is_symlink()
+            or any(p.is_symlink() for p in authority.parents)
+            or any(authority.resolve() == root or root in authority.resolve().parents for root in roots)
+            or not isinstance(anchor.authority_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", anchor.authority_sha256)):
+        raise MetadataError("authority must be externally retained, outside all candidate/source roots")
+    body = authority.read_bytes()
+    if len(body) > MAX_ACCEPTANCE_BYTES or _sha256_bytes(body) != anchor.authority_sha256:
+        raise MetadataError("external parent authority changed")
+    record = json.loads(body)
+    fields = {"schema_version", "policy", "authorization_id", "user_authorization_sha256", "binding",
+              "spec_id", "spec_path", "receipt_ref", "receipt_sha256", "invocation_id", "wrong_run_id",
+              "baseline_revision", "candidate_commit", "candidate_tree", "candidate_binding", "control_paths",
+              "retained_evidence", "independent_verification", "active_release"}
+    if not isinstance(record, dict) or set(record) != fields:
+        raise MetadataError("invalid bounded abandonment authority schema")
+    if (record["schema_version"] != INTEGRITY_SCHEMA_VERSION or record["policy"] != ABANDONMENT_POLICY
+            or record["spec_id"] != spec_id or not SAFE_ID.fullmatch(str(record["authorization_id"]))
+            or not SAFE_ID.fullmatch(str(record["invocation_id"]))
+            or not SAFE_ID.fullmatch(str(record["wrong_run_id"]))):
+        raise MetadataError("invalid abandonment policy or selected identity")
+    for key in ("user_authorization_sha256", "receipt_sha256"):
+        if not isinstance(record[key], str) or not re.fullmatch(r"[0-9a-f]{64}", record[key]):
+            raise MetadataError("missing external authorization or receipt digest")
+    for key in ("baseline_revision", "candidate_commit", "candidate_tree"):
+        if not isinstance(record[key], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record[key]):
+            raise MetadataError("invalid pinned rejected-candidate identity")
+    _authoring_verdict(record)
+    return record, anchor
+
+
+def _abandonment_rollout(install: Path, repo: Path, prefix: str, old: dict, active: dict,
+                        record: dict, anchor: AbandonmentAnchor) -> None:
+    import release
+
+    binding = record["active_release"]
+    rollout = binding["rollout"]
+    fields = {"source_binding", "source_relative", "source_commit", "source_tree", "report", "invocation",
+              "release_root_binding", "lineage"}
+    if not isinstance(rollout, dict) or set(rollout) != fields or anchor.release_source is None or anchor.release_root is None:
+        raise MetadataError("successor requires original supported target-local rollout evidence")
+    source, root = Path(anchor.release_source).resolve(), Path(anchor.release_root).resolve()
+    source_repo = _git_root(source)
+    source_relative = _abandonment_path(rollout["source_relative"])
+    if (source != source_repo / source_relative or rollout["source_binding"] != _git_binding(source)
+            or rollout["release_root_binding"] != _git_binding(root) or _git_root(root) != root):
+        raise MetadataError("supported rollout source or consumer binding changed")
+    manifest_body = _abandonment_blob(source_repo, rollout["source_commit"], f"{source_relative}/release-manifest.json")
+    manifest = json.loads(manifest_body)
+    if manifest != active or _authoring_git(source_repo, "rev-parse", f"{rollout['source_commit']}^{{tree}}") != rollout["source_tree"]:
+        raise MetadataError("source release does not reconstruct the exact installed successor")
+    _authoring_committed_inventory(source_repo, source_relative, rollout["source_commit"], _authoring_inventory(manifest))
+    retained = release.resolve_retained_manifest(manifest, version=old["kit_version"], fingerprint=old["fingerprint"])
+    if retained is None or retained != release.flatten_retained(old):
+        raise MetadataError("successor does not retain the complete original release")
+    if rollout["lineage"] != {"predecessor": old["fingerprint"], "successor": active["fingerprint"],
+                              "authorization_sha256": record["user_authorization_sha256"]}:
+        raise MetadataError("explicit external A-to-B authorization required")
+    for item in (rollout["report"], rollout["invocation"]):
+        if (not isinstance(item, dict) or not str(item.get("path", "")).startswith("reports/_wip/")
+                or _run_git(repo, "check-ignore", "-q", f"{prefix}/{item['path']}").returncode):
+            raise MetadataError("original supported rollout evidence must remain target-local and ignored")
+    report, _body = _abandonment_artifact(install, rollout["report"])
+    expected = {"exit_code": 0, "dry_run": False, "managed_payload_mode": "canonical_replace",
+                "file_level_patch_attempted": False, "canonical_suite_probe": "passed", "canonical_suite_runs": 1,
+                "canonical_suite_result": "passed", "failure_class": None, "unexpected_failure": None,
+                "rollback_attempted": False, "push_attempted": False, "skipped": [], "untouched": [], "conflicts": [],
+                "verified_installs": [str(install)], "eligible_installs": [],
+                "planned_installs": 1, "planned_repositories": 1,
+                "release_fingerprint": active["fingerprint"], "release_version": active["kit_version"]}
+    if any(key not in report or report[key] != value or type(report[key]) is not type(value) for key, value in expected.items()):
+        raise MetadataError("missing, partial, failed or non-target-only supported rollout report")
+    if (report.get("old_fingerprints") != {str(install): old["fingerprint"]}
+            or report.get("repository_commits") != [{"repository": str(repo), "commit": binding["installed_revision"], "verified_installs": 1}]
+            or not isinstance(report.get("smoke_checks_run"), int)
+            or report["smoke_checks_run"] < len(manifest["smoke_checks"])):
+        raise MetadataError("original delivery commit and predecessor evidence required; no no-commit replay")
+    parent = _authoring_git(repo, "rev-parse", f"{binding['installed_revision']}^")
+    preceding, _marker = _abandonment_marker(repo, prefix, parent)
+    if _authoring_inventory(preceding) != _authoring_inventory(old) or preceding["fingerprint"] != old["fingerprint"]:
+        raise MetadataError("delivery commit does not follow the admitted original release")
+    invocation, _body = _abandonment_artifact(install, rollout["invocation"])
+    expected_invocation = {"api": "release_coordinator.coordinate_release", "metrics_writer": "release_coordinator.write_metrics",
+        "canonical": str(source), "installs": [str(install)], "dry_run": False, "release_root": str(root),
+        "manifest_sha256": _sha256_bytes(manifest_body), "source_observed_inventory": _manifest_inventory(manifest),
+        "source_commit": rollout["source_commit"], "source_tree": rollout["source_tree"], "report_sha256": rollout["report"]["sha256"]}
+    if invocation != expected_invocation:
+        raise MetadataError("retained actual invocation/source payload differs from committed B")
+
+
+def verify_invalid_run_abandonment(install: Path, *, spec_id: str,
+                                  abandonment_provider: AbandonmentProvider) -> dict[str, Any]:
+    """Read-only bounded proof for rejecting one old run. Never terminal allow."""
+    try:
+        if Path(install).is_symlink() or SAFE_ID.fullmatch(spec_id) is None:
+            raise MetadataError("unsafe administrative install or selected spec")
+        install = Path(install).resolve()
+        repo = _git_root(install)
+        prefix = install.relative_to(repo).as_posix()
+        record, anchor = _abandonment_record(install, spec_id, abandonment_provider)
+        spec_path = _abandonment_path(record["spec_path"])
+        if (record["binding"] != _git_binding(install) or spec_path != f"{prefix}/specs/{Path(spec_path).name}"
+                or install.name == "canonical"):
+            raise MetadataError("authority does not bind this exact installed project/checkout")
+        receipt, _body = _abandonment_receipt(install, record)
+        if (receipt["invocation_id"] != record["invocation_id"]
+                or record["receipt_ref"] != f"{RECEIPT_DIR.as_posix()}/{record['invocation_id']}.json"
+                or receipt["binding"] != record["binding"]
+                or receipt["identity"] != {"project_sha256": record["binding"]["git_common_dir_sha256"],
+                    "run_sha256": _digest_text(record["invocation_id"]), "spec_sha256": _digest_text(spec_id)}
+                or _digest_text(record["wrong_run_id"]) == receipt["identity"]["run_sha256"]):
+            raise MetadataError("only the original wrong-run-identity receipt is eligible")
+        evidence = record["retained_evidence"]
+        if not isinstance(evidence, dict) or set(evidence) != {"admission", "acceptance", "quarantine", "failed_verifier"}:
+            raise MetadataError("all original rejected-run evidence is required")
+        admission, _ = _abandonment_artifact(install, evidence["admission"])
+        rejected, _ = _abandonment_artifact(install, evidence["acceptance"])
+        quarantined, _ = _abandonment_artifact(install, evidence["quarantine"])
+        _abandonment_artifact(install, evidence["failed_verifier"])
+        if (evidence["admission"]["sha256"] != receipt["admission_artifact_sha256"]
+                or admission.get("admission") != "allow" or admission.get("exit_code") != 0
+                or admission.get("invocation_id") != receipt["invocation_id"]
+                or evidence["acceptance"]["path"] != f"{ACCEPTANCE_DIR.as_posix()}/{record['invocation_id']}.json"
+                or evidence["quarantine"]["path"] != f"{ACCEPTANCE_DIR.as_posix()}/quarantine/{record['invocation_id']}-{evidence['quarantine']['sha256']}.json"):
+            raise MetadataError("original admission/rejection/quarantine identity mismatch")
+        for item, outcome, reason in ((rejected, INDETERMINATE, REASON_RECEIPT_MISMATCH), (quarantined, ALLOW, REASON_CLEAN)):
+            if (item.get("invocation_id") != record["invocation_id"] or item.get("receipt_sha256") != record["receipt_sha256"]
+                    or item.get("outcome") != outcome or item.get("reason_code") != reason or item.get("differences") != []):
+                raise MetadataError("retained artifacts do not prove wrong identity then duplicate contradiction")
+        old, old_marker = _abandonment_marker(repo, prefix, record["baseline_revision"])
+        if (receipt["release"]["release_fingerprint"] != old["fingerprint"]
+                or receipt["release"]["manifest_fingerprint"] != old["fingerprint"]
+                or receipt["release"]["manifest_inventory_sha256"] != _inventory_digest(old)
+                or receipt["release"]["release_marker_sha256"] != _sha256_bytes(old_marker)):
+            raise MetadataError("pinned original Git release does not reconstruct admission A")
+        controls = record["control_paths"]
+        if not isinstance(controls, list) or not controls or len(controls) > MAX_REPORTED_PATHS or len(set(controls)) != len(controls):
+            raise MetadataError("bounded enumerated report/control paths required")
+        for path in controls:
+            _abandonment_path(path)
+            if path != spec_path and not path.startswith(f"{prefix}/reports/"):
+                raise MetadataError("old candidate may contain only enumerated report/control edits")
+            if path in {f"{prefix}/{p}" for p in _authoring_inventory(old)} or path == f"{prefix}/{MARKER}":
+                raise MetadataError("report/control authorization cannot include managed bytes")
+        candidate = Path(anchor.candidate_checkout).resolve()
+        if (_git_root(candidate) != candidate or record["candidate_binding"] != _git_binding(candidate / prefix)
+                or record["candidate_binding"]["git_common_dir_sha256"] != record["binding"]["git_common_dir_sha256"]
+                or _authoring_git(candidate, "rev-parse", "HEAD") != record["candidate_commit"]
+                or _authoring_git(candidate, "rev-parse", "HEAD^{tree}") != record["candidate_tree"]
+                or _authoring_git(candidate, "status", "--porcelain=v1", "--untracked-files=all")
+                or _run_git(candidate, "merge-base", "--is-ancestor", record["baseline_revision"], record["candidate_commit"]).returncode):
+            raise MetadataError("frozen rejected candidate identity or footprint changed")
+        changes = _authoring_git(candidate, "diff", "--name-only", "-z", record["baseline_revision"], record["candidate_commit"])
+        if any(path not in controls for path in changes.split("\0") if path):
+            raise MetadataError("old candidate changed application or nonenumerated evidence")
+        candidate_old, candidate_marker = _abandonment_marker(candidate, prefix, record["candidate_commit"])
+        if candidate_old != old or candidate_marker != old_marker:
+            raise MetadataError("frozen candidate altered the original release")
+        observations, observed_sha = _observe_payload(candidate / prefix, old)
+        if (any(r["observed_kind"] != "file" or r["observed_sha256"] != r["expected_sha256"]
+                or r["observed_executable"] != r["expected_executable"] for r in observations)
+                or _release_owned_aliases(candidate / prefix, old)
+                or quarantined.get("observed_inventory_sha256") != observed_sha):
+            raise MetadataError("frozen candidate or original corrected retry did not equal full A")
+        active_binding = record["active_release"]
+        if not isinstance(active_binding, dict) or set(active_binding) != {"fingerprint", "inventory_sha256", "marker_sha256", "installed_revision", "rollout"}:
+            raise MetadataError("exact active installed revision required")
+        active, marker = _abandonment_marker(repo, prefix, active_binding["installed_revision"])
+        if (active_binding["fingerprint"] != active["fingerprint"] or active_binding["inventory_sha256"] != _inventory_digest(active)
+                or active_binding["marker_sha256"] != _sha256_bytes(marker)
+                or _active_manifest(install) != active or _sha256_file(install / MARKER) != _sha256_bytes(marker)
+                or (install / MARKER).is_symlink() or bool((install / MARKER).stat().st_mode & 0o111)):
+            raise MetadataError("active install is not the exact committed whole release")
+        observations, _ = _observe_payload(install, active)
+        if (any(r["observed_kind"] != "file" or r["observed_sha256"] != r["expected_sha256"]
+                or r["observed_executable"] != r["expected_executable"] for r in observations)
+                or _release_owned_aliases(install, active)):
+            raise MetadataError("active installed bytes/modes/aliases differ from sealed release")
+        if active["fingerprint"] == old["fingerprint"]:
+            if active != old or marker != old_marker or active_binding["rollout"] is not None:
+                raise MetadataError("original-release equality proof conflicts")
+        else:
+            _abandonment_rollout(install, repo, prefix, old, active, record, anchor)
+        rollout_paths = {f"{prefix}/{p}" for p in _authoring_inventory(old).keys() | _authoring_inventory(active).keys()}
+        rollout_paths |= {f"{prefix}/{MARKER}", f"{prefix}/config.yaml", *controls}
+        changes = _authoring_git(repo, "diff", "--name-only", "-z", record["baseline_revision"], active_binding["installed_revision"])
+        if any(p not in rollout_paths and not p.startswith(f"{prefix}/.migrations/") for p in changes.split("\0") if p):
+            raise MetadataError("installed delivery changed application or unrelated control bytes")
+        if _run_git(repo, "merge-base", "--is-ancestor", active_binding["installed_revision"], "HEAD").returncode:
+            raise MetadataError("installed revision is outside the active checkout history")
+        current = _authoring_git(repo, "diff", "--name-only", "-z", active_binding["installed_revision"])
+        current += "\0" + _authoring_git(repo, "ls-files", "--others", "--exclude-standard", "-z")
+        recovery_roots = (f"{prefix}/reports/{spec_id}/", f"{prefix}/knowledge/attempts/", f"{prefix}/runs/")
+        if any(p not in controls and not p.startswith(recovery_roots) for p in current.split("\0") if p):
+            raise MetadataError("active application or non-recovery footprint changed")
+        body = {"schema_version": INTEGRITY_SCHEMA_VERSION, "policy": ABANDONMENT_POLICY,
+            "outcome": "rejected-old-run", "reason_code": REASON_INVALID_RUN_ABANDONED,
+            "spec_id": spec_id, "spec_path": spec_path, "invocation_id": record["invocation_id"],
+            "authority_sha256": anchor.authority_sha256, "binding": record["binding"],
+            "receipt": {"path": record["receipt_ref"], "sha256": record["receipt_sha256"]},
+            "retained_evidence": evidence, "baseline_revision": record["baseline_revision"],
+            "candidate_commit": record["candidate_commit"], "candidate_tree": record["candidate_tree"],
+            "original_fingerprint": old["fingerprint"], "active_fingerprint": active["fingerprint"],
+            "installed_revision": active_binding["installed_revision"],
+            "rollout_report": active_binding["rollout"]["report"] if active_binding["rollout"] is not None else None,
+            "controller_eligibility": "eligible", "causal_confidence": "demonstrated", "human_action_required": False,
+            "privacy": {"relative_paths_only": True, "content_included": False}}
+        reference = f"{ABANDONMENT_DIR.as_posix()}/{record['invocation_id']}.json"
+        return {**body, "artifact_path": reference, "artifact_sha256": _sha256_bytes(_canonical_json(body))}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        if isinstance(exc, MetadataError):
+            raise
+        raise MetadataError("invalid or unavailable bounded administrative evidence") from exc
+
+
+def _quarantine_abandonment_rejection(install: Path, spec_id: str, provider) -> list[str]:
+    """Preserve a sanitized rejected replay only when this decision already exists.
+
+    Returns the sanitized failure notes (empty when nothing failed); callers surface them.
+    """
+    failures: list[str] = []
+    install = Path(install).resolve()
+    directory = install / ABANDONMENT_DIR
+    if not directory.is_dir() or directory.is_symlink():
+        return failures
+    for path in directory.glob("*.json"):
+        try:
+            if path.is_symlink() or path.stat().st_nlink != 1 or path.stat().st_size > MAX_ACCEPTANCE_BYTES:
+                failures.append(f"{path.name}: unsafe decision file not quarantined")
+                continue
+            previous_body = path.read_bytes()
+            previous = json.loads(previous_body)
+            invocation = previous.get("invocation_id", "")
+            if (previous.get("spec_id") != spec_id or previous.get("policy") != ABANDONMENT_POLICY
+                    or previous.get("outcome") != "rejected-old-run" or not SAFE_ID.fullmatch(invocation)
+                    or path.name != f"{invocation}.json"):
+                continue
+            authority_sha = None
+            try:
+                anchor = provider(install, spec_id) if callable(provider) else None
+                if isinstance(anchor, AbandonmentAnchor) and re.fullmatch(r"[0-9a-f]{64}", str(anchor.authority_sha256)):
+                    authority_sha = anchor.authority_sha256
+            except Exception:
+                pass
+            body = _canonical_json({"schema_version": INTEGRITY_SCHEMA_VERSION, "policy": ABANDONMENT_POLICY,
+                "outcome": "rejected-administrative-replay", "reason_code": "NS-MPI-ABANDONMENT-BINDING-CHANGED",
+                "spec_id": spec_id, "invocation_id": invocation,
+                "original_decision_sha256": _sha256_bytes(previous_body), "authority_sha256": authority_sha,
+                "privacy": {"relative_paths_only": True, "content_included": False}})
+            quarantine = _safe_artifact_root(install, ABANDONMENT_DIR / "quarantine")
+            _atomic_write_new(quarantine / f"{invocation}-{_sha256_bytes(body)}.json", body, limit=MAX_ACCEPTANCE_BYTES)
+        except FileExistsError:
+            continue  # byte-identical quarantine already retained (idempotent replay)
+        except (OSError, ValueError, TypeError, AttributeError, MetadataError) as exc:
+            failures.append(f"{path.name}: {type(exc).__name__}")
+            continue
+    return failures
+
+
+def _with_quarantine_failures(message: str, failures: list[str]) -> str:
+    return f"{message}; rejected-replay quarantine failed: {', '.join(failures)}" if failures else message
+
+
+def record_invalid_run_abandonment(install: Path, *, spec_id: str,
+                                  abandonment_provider: AbandonmentProvider) -> dict[str, Any]:
+    """Atomically retain a distinct rejection decision; never overwrite acceptance."""
+    try:
+        decision = verify_invalid_run_abandonment(install, spec_id=spec_id, abandonment_provider=abandonment_provider)
+    except MetadataError as exc:
+        failures = _quarantine_abandonment_rejection(install, spec_id, abandonment_provider)
+        if failures:
+            raise MetadataError(_with_quarantine_failures(str(exc), failures)) from exc
+        raise
+    install = Path(install).resolve()
+    root = _safe_artifact_root(install, ABANDONMENT_DIR)
+    body = _canonical_json({k: v for k, v in decision.items() if k not in {"artifact_path", "artifact_sha256"}})
+    # Reconstruct again immediately before this mutation, including on replay.
+    if verify_invalid_run_abandonment(install, spec_id=spec_id, abandonment_provider=abandonment_provider) != decision:
+        raise MetadataError("administrative binding changed before decision persistence")
+    try:
+        _atomic_write_new(root / f"{decision['invocation_id']}.json", body, limit=MAX_ACCEPTANCE_BYTES)
+    except FileExistsError as exc:
+        quarantine = _safe_artifact_root(install, ABANDONMENT_DIR / "quarantine")
+        _atomic_write_new(quarantine / f"{decision['invocation_id']}-{_sha256_bytes(body)}.json", body, limit=MAX_ACCEPTANCE_BYTES)
+        raise MetadataError("contradictory administrative decision quarantined") from exc
+    return decision
 
 
 @dataclass(frozen=True)
@@ -885,98 +1300,19 @@ def _verify_authoring_integrity(install: Path, *, spec_id: str, receipt_ref: str
         return AcceptanceResult(INDETERMINATE, REASON_ARTIFACT_FAILURE, None, None)
 
 
-def verify_terminal_integrity(
-    install: Path,
-    *,
-    spec_id: str,
-    receipt_ref: str,
-    receipt_sha256: str,
-    run_id: str | None = None,
-    authoring_provider: AuthoringProvider | None = None,
-) -> AcceptanceResult:
-    """Compare the admitted manifest payload before any result acceptance action."""
-    install = install.resolve()
-    if authoring_provider is not None:
-        return _verify_authoring_integrity(install, spec_id=spec_id, receipt_ref=receipt_ref,
-                                          receipt_sha256=receipt_sha256, run_id=run_id,
-                                          authoring_provider=authoring_provider)
-    invocation_id = "unknown"
-    receipt_body = b""
-    outcome = INDETERMINATE
-    reason_code = REASON_RECEIPT_INVALID
-    differences: list[dict[str, Any]] = []
-    observed_inventory_sha = None
-    receipt: dict[str, Any] | None = None
-    receipt_check: dict[str, Any] | None = None
-    try:
-        receipt, receipt_body = _load_receipt(install, receipt_ref, receipt_sha256)
-        invocation_id = receipt["invocation_id"]
-        if SAFE_ID.fullmatch(spec_id) is None:
-            raise MetadataError("unsafe selected spec identity")
-        expected_binding = _git_binding(install)
-        expected_identity = {
-            "project_sha256": expected_binding["git_common_dir_sha256"],
-            "run_sha256": _digest_text(run_id or invocation_id),
-            "spec_sha256": _digest_text(spec_id),
-        }
-        if receipt["binding"] != expected_binding or receipt["identity"] != expected_identity:
-            reason_code = REASON_RECEIPT_MISMATCH
-            raise MetadataError("integrity receipt does not bind this run/spec/worktree")
-        # From this point onward the receipt itself is trusted. Any missing or
-        # corrupt active manifest/marker is observed payload drift, not a
-        # receipt parse failure.
-        outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
-        manifest = _active_manifest(install)
-        marker_sha = _sha256_file(install / MARKER)
-        release = receipt["release"]
-        if (
-            manifest.get("fingerprint") != release["manifest_fingerprint"]
-            or _inventory_digest(manifest) != release["manifest_inventory_sha256"]
-        ):
-            outcome, reason_code = INDETERMINATE, REASON_RECEIPT_MISMATCH
-            raise MetadataError("integrity receipt binds a different manifest")
-        if marker_sha != release["release_marker_sha256"]:
-            outcome = DENY
-            reason_code = REASON_PAYLOAD_DRIFT
-            differences.append({
-                "path": MARKER,
-                "expected_sha256": release["release_marker_sha256"],
-                "observed_sha256": marker_sha,
-                "expected_executable": False,
-                "observed_executable": bool((install / MARKER).stat().st_mode & 0o111) if (install / MARKER).is_file() else None,
-                "observed_kind": "file" if (install / MARKER).is_file() else "missing_or_replaced",
-            })
-        observations, observed_inventory_sha = _observe_payload(install, manifest)
-        differences.extend(
-            row for row in observations
-            if row["observed_kind"] != "file"
-            or row["observed_sha256"] != row["expected_sha256"]
-            or row["observed_executable"] != row["expected_executable"]
-        )
-        differences.extend(_release_owned_aliases(install, manifest))
-        if differences:
-            outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
-        else:
-            outcome, reason_code = ALLOW, REASON_CLEAN
-    except FileNotFoundError as exc:
-        reason_code = REASON_RECEIPT_MISSING
-        check_name = getattr(exc, "check", None)
-        if check_name is not None:
-            receipt_check = {"check": check_name, "age_seconds": None, "max_age_seconds": None}
-    except MetadataError as exc:
-        if reason_code not in {REASON_RECEIPT_MISMATCH, REASON_PAYLOAD_DRIFT}:
-            reason_code = REASON_RECEIPT_INVALID
-        check_name = getattr(exc, "check", None)
-        if check_name is not None:
-            receipt_check = {
-                "check": check_name,
-                "age_seconds": getattr(exc, "age_seconds", None),
-                "max_age_seconds": getattr(exc, "max_age_seconds", None),
-            }
-    except (OSError, ValueError):
-        reason_code = REASON_METADATA_INVALID
+ATTEMPTS_DIR = ACCEPTANCE_DIR / "attempts"
 
-    receipt_result_hash = _sha256_bytes(receipt_body) if receipt_body else receipt_sha256 if isinstance(receipt_sha256, str) else None
+
+def _acceptance_artifact(
+    receipt: dict[str, Any] | None,
+    invocation_id: str,
+    outcome: str,
+    reason_code: str,
+    receipt_result_hash: str | None,
+    observed_inventory_sha: str | None,
+    differences: list[dict[str, Any]],
+    receipt_check: dict[str, Any] | None,
+) -> dict[str, Any]:
     artifact = {
         "schema_version": INTEGRITY_SCHEMA_VERSION,
         "invocation_id": invocation_id,
@@ -1002,7 +1338,180 @@ def verify_terminal_integrity(
         "observed_inventory_sha256": artifact["observed_inventory_sha256"],
         "differences": artifact["differences"],
     }))
-    body = _canonical_json(artifact)
+    return artifact
+
+
+def _stored_allow(dest: Path, receipt_result_hash: str | None, invocation_id: str) -> bytes | None:
+    """Bytes of an existing allow slot written for exactly this receipt, else None."""
+    try:
+        if dest.is_symlink() or not dest.is_file():
+            return None
+        raw = dest.read_bytes()
+        stored = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        isinstance(stored, dict)
+        and stored.get("outcome") == ALLOW
+        and stored.get("reason_code") == REASON_CLEAN
+        and stored.get("invocation_id") == invocation_id
+        and receipt_result_hash is not None
+        and stored.get("receipt_sha256") == receipt_result_hash
+    ):
+        return raw
+    return None
+
+
+_STORED_RESULT_CHECK = {"check": "stored-result", "age_seconds": None, "max_age_seconds": None}
+
+
+def _write_attempt(install: Path, invocation_id: str, artifact: Mapping[str, Any], body: bytes) -> tuple[str, str]:
+    """Record a non-allow result once, outside the acceptance slot (SPEC-NS-KIT-006 R1)."""
+    target = _safe_artifact_root(install, ATTEMPTS_DIR) / f"{invocation_id}-{artifact['result_sha256']}.json"
+    try:
+        digest, _replayed = _atomic_write_new(target, body, limit=MAX_ACCEPTANCE_BYTES)
+    except FileExistsError:
+        digest = _sha256_bytes(target.read_bytes())  # same result already recorded
+    return target.relative_to(install).as_posix(), digest
+
+
+def _prior_attempts(attempts: Path, invocation_id: str) -> list[str]:
+    digests = []
+    for path in attempts.glob(f"{invocation_id}-*.json"):
+        digest = path.name[len(invocation_id) + 1:-len(".json")]
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            digests.append(digest)
+    return sorted(digests)
+
+
+def verify_terminal_integrity(
+    install: Path,
+    *,
+    spec_id: str,
+    receipt_ref: str,
+    receipt_sha256: str,
+    run_id: str | None = None,
+    authoring_provider: AuthoringProvider | None = None,
+) -> AcceptanceResult:
+    """Compare the admitted manifest payload before any result acceptance action."""
+    install = install.resolve()
+    if authoring_provider is not None:
+        return _verify_authoring_integrity(install, spec_id=spec_id, receipt_ref=receipt_ref,
+                                          receipt_sha256=receipt_sha256, run_id=run_id,
+                                          authoring_provider=authoring_provider)
+    invocation_id = "unknown"
+    receipt_body = b""
+    outcome = INDETERMINATE
+    reason_code = REASON_RECEIPT_INVALID
+    differences: list[dict[str, Any]] = []
+    observed_inventory_sha = None
+    receipt: dict[str, Any] | None = None
+    receipt_check: dict[str, Any] | None = None
+    # Read-back needs to know which kind of non-allow this call computed (SPEC-NS-KIT-006).
+    run_bound = False
+    manifest_differs = False
+    drift_rows: list[dict[str, Any]] = []
+    drift_sha: str | None = None
+    try:
+        receipt, receipt_body = _load_receipt(install, receipt_ref, receipt_sha256)
+        invocation_id = receipt["invocation_id"]
+        if SAFE_ID.fullmatch(spec_id) is None:
+            raise MetadataError("unsafe selected spec identity")
+        expected_binding = _git_binding(install)
+        expected_identity = {
+            "project_sha256": expected_binding["git_common_dir_sha256"],
+            "run_sha256": _digest_text(run_id or invocation_id),
+            "spec_sha256": _digest_text(spec_id),
+        }
+        if receipt["binding"] != expected_binding or receipt["identity"] != expected_identity:
+            reason_code = REASON_RECEIPT_MISMATCH
+            raise MetadataError("integrity receipt does not bind this run/spec/worktree")
+        run_bound = True
+        # From this point onward the receipt itself is trusted. Any missing or
+        # corrupt active manifest/marker is observed payload drift, not a
+        # receipt parse failure.
+        outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
+        manifest = _active_manifest(install)
+        marker_sha = _sha256_file(install / MARKER)
+        release = receipt["release"]
+        if (
+            manifest.get("fingerprint") != release["manifest_fingerprint"]
+            or _inventory_digest(manifest) != release["manifest_inventory_sha256"]
+        ):
+            # SPEC-NS-KIT-006 R3: observe the active payload before classifying, so a
+            # self-consistent sealed release is superseded and a drifted one is a mismatch.
+            manifest_differs = True
+            observations, drift_sha = _observe_payload(install, manifest)
+            drift_rows = [
+                row for row in observations
+                if row["observed_kind"] != "file"
+                or row["observed_sha256"] != row["expected_sha256"]
+                or row["observed_executable"] != row["expected_executable"]
+            ]
+            drift_rows.extend(_release_owned_aliases(install, manifest))
+            if drift_rows:
+                outcome, reason_code = INDETERMINATE, REASON_RECEIPT_MISMATCH
+            else:
+                outcome, reason_code = INDETERMINATE, REASON_RELEASE_SUPERSEDED
+                observed_inventory_sha = drift_sha
+                receipt_check = {
+                    "check": "superseded",
+                    "age_seconds": None,
+                    "max_age_seconds": None,
+                    "admitted_fingerprint": release["manifest_fingerprint"],
+                    "active_fingerprint": manifest.get("fingerprint"),
+                    "active_kit_version": manifest.get("kit_version"),
+                }
+        else:
+            if marker_sha != release["release_marker_sha256"]:
+                outcome = DENY
+                reason_code = REASON_PAYLOAD_DRIFT
+                differences.append({
+                    "path": MARKER,
+                    "expected_sha256": release["release_marker_sha256"],
+                    "observed_sha256": marker_sha,
+                    "expected_executable": False,
+                    "observed_executable": bool((install / MARKER).stat().st_mode & 0o111) if (install / MARKER).is_file() else None,
+                    "observed_kind": "file" if (install / MARKER).is_file() else "missing_or_replaced",
+                })
+            observations, observed_inventory_sha = _observe_payload(install, manifest)
+            differences.extend(
+                row for row in observations
+                if row["observed_kind"] != "file"
+                or row["observed_sha256"] != row["expected_sha256"]
+                or row["observed_executable"] != row["expected_executable"]
+            )
+            differences.extend(_release_owned_aliases(install, manifest))
+            if differences:
+                outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
+            else:
+                outcome, reason_code = ALLOW, REASON_CLEAN
+    except FileNotFoundError as exc:
+        reason_code = REASON_RECEIPT_MISSING
+        check_name = getattr(exc, "check", None)
+        if check_name is not None:
+            receipt_check = {"check": check_name, "age_seconds": None, "max_age_seconds": None}
+    except MetadataError as exc:
+        if reason_code not in {REASON_RECEIPT_MISMATCH, REASON_PAYLOAD_DRIFT}:
+            reason_code = REASON_RECEIPT_INVALID
+        check_name = getattr(exc, "check", None)
+        if check_name is not None:
+            receipt_check = {
+                "check": check_name,
+                "age_seconds": getattr(exc, "age_seconds", None),
+                "max_age_seconds": getattr(exc, "max_age_seconds", None),
+            }
+    except (OSError, ValueError):
+        reason_code = REASON_METADATA_INVALID
+
+    receipt_result_hash = _sha256_bytes(receipt_body) if receipt_body else receipt_sha256 if isinstance(receipt_sha256, str) else None
+
+    def build() -> tuple[dict[str, Any], bytes]:
+        built = _acceptance_artifact(receipt, invocation_id, outcome, reason_code, receipt_result_hash,
+                                     observed_inventory_sha, differences, receipt_check)
+        return built, _canonical_json(built)
+
+    artifact, body = build()
     artifact_ref = None
     artifact_sha = None
     try:
@@ -1015,9 +1524,52 @@ def verify_terminal_integrity(
             invocation_id = uuid.uuid4().hex
             artifact["invocation_id"] = invocation_id
             body = _canonical_json(artifact)
-        dest = out_dir / f"{invocation_id}.json"
-        artifact_sha, _replayed = _atomic_write_new(dest, body, limit=MAX_ACCEPTANCE_BYTES)
-        artifact_ref = dest.relative_to(install).as_posix()
+            dest = out_dir / f"{invocation_id}.json"
+            artifact_sha, _replayed = _atomic_write_new(dest, body, limit=MAX_ACCEPTANCE_BYTES)
+            artifact_ref = dest.relative_to(install).as_posix()
+        else:
+            dest = out_dir / f"{invocation_id}.json"
+            slot_ref = dest.relative_to(install).as_posix()
+            stored = _stored_allow(dest, receipt_result_hash, invocation_id)
+            if stored is not None:
+                mode = "readback"
+            elif os.path.lexists(dest):
+                mode = "legacy"  # pre-fix non-allow slot (or foreign allow): first write wins
+            else:
+                mode = "allow" if outcome == ALLOW else "attempt"
+            if mode == "allow":
+                # SPEC-NS-KIT-006 R1/R4: only an allow consumes the slot.
+                artifact["prior_attempts"] = _prior_attempts(_safe_artifact_root(install, ATTEMPTS_DIR), invocation_id)
+                body = _canonical_json(artifact)
+                try:
+                    artifact_sha, _replayed = _atomic_write_new(dest, body, limit=MAX_ACCEPTANCE_BYTES)
+                    artifact_ref = slot_ref
+                except FileExistsError:
+                    stored = _stored_allow(dest, receipt_result_hash, invocation_id)
+                    if stored is None:
+                        raise
+                    mode = "readback"
+            if mode == "legacy":
+                artifact_sha, _replayed = _atomic_write_new(dest, body, limit=MAX_ACCEPTANCE_BYTES)
+                artifact_ref = slot_ref
+            elif mode == "attempt":
+                artifact_ref, artifact_sha = _write_attempt(install, invocation_id, artifact, body)
+            elif mode == "readback":
+                # SPEC-NS-KIT-006 R2 (model ReadRes): wrong run -> mismatch; any observed
+                # drift, also on the manifest-differs branch -> deny; else the stored allow.
+                if outcome != ALLOW:
+                    if manifest_differs and drift_rows:
+                        outcome, reason_code = DENY, REASON_PAYLOAD_DRIFT
+                        differences, observed_inventory_sha = drift_rows, drift_sha
+                    if outcome == DENY:
+                        receipt_check = dict(_STORED_RESULT_CHECK)
+                    artifact, body = build()
+                    artifact_ref, artifact_sha = _write_attempt(install, invocation_id, artifact, body)
+                    if reason_code == REASON_RELEASE_SUPERSEDED:
+                        outcome, reason_code, differences = ALLOW, REASON_CLEAN, []
+                if outcome == ALLOW:
+                    receipt_check = dict(_STORED_RESULT_CHECK)
+                    artifact_ref, artifact_sha = slot_ref, _sha256_bytes(stored)
     except FileExistsError:
         _quarantine_duplicate(install, invocation_id, body)
         outcome, reason_code = INDETERMINATE, REASON_DUPLICATE_CONTRADICTION

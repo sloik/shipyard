@@ -48,11 +48,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
-from spec_frontmatter import promotion_transition_error
+from spec_frontmatter import promotion_transition_error, spec_metadata_policy_for_specs_dir
 import deployment_tiers
 import lifecycle
 import skill_tutorial
 import spec_artifacts
+import spec_id as spec_id_grammar
 
 # SPEC-332: the status-sync rule is shared with validate_specs.py; the module
 # is stdlib-only managed payload, so it is always importable.
@@ -97,11 +98,6 @@ def _registry_field_help() -> dict[str, str]:
 # every path component, which is not free on a synced filesystem, and this was
 # being recomputed per corpus-signature call and per spec with a release handoff.
 _RELEASE_HANDOFFS_DIR = Path(__file__).resolve().parent / "release-handoffs"
-
-_FRONTMATTER_RECONCILE_STATUSES = frozenset({
-    "planned", "draft", "ready", "in_progress", "blocked",
-    "active", "done", "superseded", "retired",
-})
 
 
 class PerformanceRegistry:
@@ -206,110 +202,15 @@ _PERFORMANCE_KEYS = frozenset({
 performance_registry = PerformanceRegistry()
 
 
-def _checkpoint_epoch(state: dict) -> float | None:
-    """Return checkpoint timestamp seconds, or None when unavailable."""
-    raw = state.get("created_at")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _should_reconcile_frontmatter_status(
-    frontmatter_status: str,
-    durable_state: dict,
-    file_mtime: float,
-    spec_path: Path | None = None,
-) -> bool:
-    """Whether a newer file status may repair a durable row.
-
-    A durable row already at a terminal status (`done`/`blocked`) is
-    authoritative and immutable via frontmatter — that is SPEC-296-008's
-    original protection, and BUG-313 R2 requires it survive intact: a
-    terminal durable row must never be silently overwritten by a later,
-    different frontmatter status.
-
-    A durable row that is still *non-terminal*, however, may be
-    forward-reconciled by a newer, terminal (`done`/`blocked`) frontmatter
-    status. Nightshift's documented interactive/manual coordinator workflow
-    (SKILL.md's finalization steps: edit frontmatter, `chore: mark <id>
-    done` commit) never itself calls `nightshift_coordinator.py`'s
-    automated terminal-decision projector — without this forward reconcile
-    the durable store would freeze at its last non-terminal value forever
-    (BUG-313). Once this repair fires it writes the terminal status back to
-    the durable store (see `_effective_status`), so the row itself becomes
-    terminal and the guard above then protects it from any further changes.
-    """
-    durable_status = str(durable_state.get("status", ""))
-    if durable_status == frontmatter_status:
-        return False
-    if durable_status in {"done", "blocked"}:
-        return False
-    if frontmatter_status not in _FRONTMATTER_RECONCILE_STATUSES:
-        return False
-    payload = durable_state.get("payload")
-    if spec_path is not None and isinstance(payload, dict):
-        checkpoint_path = payload.get("spec_path")
-        if checkpoint_path and Path(str(checkpoint_path)) != spec_path:
-            return False
-    checkpoint_mtime = _checkpoint_epoch(durable_state)
-    if checkpoint_mtime is None:
-        return True
-    return file_mtime >= checkpoint_mtime
-
-
-# SPEC-290: the frontmatter field that persists a status-transfer refusal so
-# it survives past the toast that first reported it, and is discoverable by
-# any tool reading the spec file directly (not only the board).
-TRANSFER_REFUSAL_FIELD = "transfer_refusal"
-_TRANSFER_REFUSAL_MAX_LEN = 300
-
-
-def _sanitize_transfer_refusal_text(text: str) -> str:
-    """Collapse to one line and cap length so the value is a safe YAML scalar.
-
-    A raw refusal detail can be multi-line or arbitrarily long; a folded YAML
-    scalar with text at line-start could otherwise corrupt a later regex-based
-    field rewrite (e.g. the status line).
-    """
-    collapsed = " ".join(str(text).split())
-    if len(collapsed) > _TRANSFER_REFUSAL_MAX_LEN:
-        collapsed = collapsed[: _TRANSFER_REFUSAL_MAX_LEN - 1].rstrip() + "…"
-    return collapsed
-
-
-def _render_scalar_field_line(key: str, value: str) -> str:
-    """Render ``key: value`` as one safely-quoted YAML mapping line."""
-    dumped = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True)
-    return dumped.rstrip("\n")
-
-
-def _upsert_or_remove_field_line(fm_block: str, key: str, rendered_line: str | None) -> str:
-    """Upsert or delete a single top-level ``key: ...`` line, else no-op.
-
-    Every other line — order, list style, date quoting — is preserved
-    byte-for-byte, matching ``_update_status_file``'s regex approach rather
-    than a full YAML re-serialization.
-    """
-    lines = fm_block.split("\n")
-    prefix = f"{key}:"
-    out: list[str] = []
-    found = False
-    for line in lines:
-        if line.startswith(prefix):
-            found = True
-            if rendered_line is not None:
-                out.append(rendered_line)
-            continue
-        out.append(line)
-    if not found and rendered_line is not None:
-        if out and out[-1] == "":
-            out.insert(len(out) - 1, rendered_line)
-        else:
-            out.append(rendered_line)
-    return "\n".join(out)
+# SPEC-290 / SPEC-417-003: the transfer-refusal helpers and the status-write gates live in the
+# FastAPI-free status_transition.py so `board_ctl.py transition` runs the identical code.
+import status_transition
+from status_transition import (
+    TRANSFER_REFUSAL_FIELD,
+    render_scalar_field_line as _render_scalar_field_line,
+    sanitize_transfer_refusal_text as _sanitize_transfer_refusal_text,
+    upsert_or_remove_field_line as _upsert_or_remove_field_line,
+)
 
 
 @dataclass
@@ -357,6 +258,18 @@ class SpecCache:
         self._recompose: dict[str, tuple[dict, dict]] = {}
         self._pass_memo: tuple | None = None  # (signature, snapshot, parallel, qualified)
         self._rationale_memo: dict[str, tuple] = {}
+        # BUG-NS-KIT-001: the fleet-wide dependency scan (every registered project's specs, re-read
+        # when its 5 s cache expires) used to run inside `_lock`, so every ~10 s poll parked all
+        # single-spec reads behind it for 1.5-4 s. It now refreshes under this separate lock first.
+        self._dependency_refresh_lock = threading.Lock()
+
+    def _refresh_dependency_cache(self) -> None:
+        """Refresh the dependency resolver's structural cache without holding `_lock`.
+
+        `resolve()` inside the corpus pass then finds the cache fresh and does no filesystem work.
+        """
+        with self._dependency_refresh_lock:
+            self._dependency_resolver._refresh_if_stale()
 
     # ------------------------------------------------------------------
     # Public API
@@ -389,10 +302,11 @@ class SpecCache:
                 if self._corpus_signature() == self._projection_signature:
                     projected = self._projection.get(spec_id)
                     return dict(projected) if projected is not None else None
-            for item in self.get_all_frontmatter():
-                if item.get("id") == spec_id:
-                    return dict(item)
-            return None
+        # Signature changed (or never derived): do the slow fleet scan outside the lock, then the pass.
+        for item in self.get_all_frontmatter():
+            if item.get("id") == spec_id:
+                return dict(item)
+        return None
 
     def _invalidate_projection(self) -> None:
         self._projection = {}
@@ -476,7 +390,13 @@ class SpecCache:
                     stamps.append((stat.st_mtime, stat.st_size))
                 except OSError:
                     stamps.append(None)
-        return (files, tuple(artifacts), tuple(stamps), self._explanation_stamp(parent))
+        # SPEC-419: the project's spec_metadata policy is an input of every readiness/admission result.
+        try:
+            config_stat = os.stat(parent / "config.yaml")
+            config_stamp = (config_stat.st_mtime_ns, config_stat.st_size)
+        except OSError:
+            config_stamp = None
+        return (files, tuple(artifacts), tuple(stamps), self._explanation_stamp(parent), config_stamp)
 
     def _explanation_stamp(self, project_root: Path) -> tuple:
         """SPEC-359 R6: stat-only stamps of every extra input an explanation reads.
@@ -510,6 +430,7 @@ class SpecCache:
 
     def get_all_frontmatter(self) -> list[dict]:
         """Return all frontmatter dicts, checking mtime for staleness."""
+        self._refresh_dependency_cache()
         with self._lock:
             return self._get_all_frontmatter_locked()
 
@@ -571,6 +492,8 @@ class SpecCache:
         )
         admission_specs = self._dependency_resolution.combined_specs(by_id)
         help_text = _registry_field_help()
+        metadata_policy = spec_metadata_policy_for_specs_dir(Path(self._specs_dir))
+        self._metadata_policy = metadata_policy
         try:
             from lifecycle import derive_admission
         except ImportError:
@@ -592,6 +515,7 @@ class SpecCache:
                         body,
                         admission_specs,
                         self._dependency_resolution.errors,
+                        spec_metadata_policy=metadata_policy,
                     )
                     hold_detail = None
                     item["readiness"] = admission.readiness.level.value
@@ -682,6 +606,7 @@ class SpecCache:
             parallel, qualified = parallel_admission_decisions(
                 {str(item["id"]): item for item in public if item.get("id")},
                 self._dependency_resolver, worker_limit=worker_limit, missing_touches_policy=policy,
+                spec_metadata_policy=getattr(self, "_metadata_policy", None),
             )
         except Exception:
             log.exception("parallel admission evidence unavailable; explanations omit it")
@@ -866,60 +791,12 @@ class SpecCache:
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
-        if status not in _VALID_SPEC_STATUSES:
-            raise ValueError(f"invalid status: {status}")
-        allowed_statuses = _allowed_statuses_for_spec(entry.frontmatter)
-        if status not in allowed_statuses:
-            refusal_msg = _status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}"
-            self._record_transfer_refusal(entry, refusal_msg)
-            raise ValueError(refusal_msg)
-        refusal = promotion_transition_error(entry.frontmatter, status, specs_dir=self._specs_dir)
-        if refusal:
-            self._record_transfer_refusal(entry, refusal)
-            raise ValueError(refusal)
-        if status == "done":
-            # BUG-337: release-manifest.json is canonical-only release
-            # bookkeeping (see release_handoff.py's comment on
-            # managed_paths) and is deliberately never distributed to
-            # fleet installs. `canonical` here always resolves to this
-            # running copy's own directory, which on a fleet install is
-            # that install's `.nightshift/`, not the true canonical kit
-            # repository. Mirror validate_specs.py's `manifest_path.is_file()`
-            # guard (validate_specs.py ~line 1377): an install with no
-            # manifest has nothing to validate a release-handoff
-            # declaration against, so the check is skipped -- not failed
-            # -- and the transition proceeds. This applies uniformly, even
-            # if the spec itself carries an explicit `release_handoff:`
-            # declaration, exactly as validate_specs.py already treats it:
-            # release-handoff declarations are only checked against an
-            # actual manifest. Where a manifest is present (the canonical
-            # repository itself), this branch is unchanged and still hard
-            # gates release-impact specs per SPEC-189 AC2.
-            import release_handoff
-            canonical = Path(__file__).resolve().parent
-            manifest_path = canonical / "release-manifest.json"
-            if manifest_path.is_file():
-                try:
-                    manifest = json.loads(manifest_path.read_text())
-                except (OSError, json.JSONDecodeError) as exc:
-                    self._record_transfer_refusal(entry, str(exc))
-                    raise ValueError(f"release handoff validation unavailable: {exc}") from exc
-                errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
-                if errors:
-                    joined = "; ".join(errors)
-                    self._record_transfer_refusal(entry, joined)
-                    raise ValueError(joined)
-
         current_status = str(entry.frontmatter.get("status") or "")
-        reason_text = reason.strip() if isinstance(reason, str) else ""
-        if lifecycle.is_judgment_transition(current_status, status) and not reason_text:
-            refusal_msg = (
-                f"status transition {current_status} -> {status} requires a non-empty reason"
-            )
-            self._record_transfer_refusal(entry, refusal_msg)
-            raise ValueError(refusal_msg)
-        if not reason_text:
-            reason_text = f"mechanical board transition to {status}"
+        reason_text = status_transition.gate_status_write(
+            entry.frontmatter, status, reason=reason, specs_dir=self._specs_dir,
+            canonical_dir=Path(__file__).resolve().parent,
+            record_refusal=lambda message: self._record_transfer_refusal(entry, message),
+        )
 
         if self._status_store is not None:
             self._status_store.transition_commit_backed(
@@ -1233,7 +1110,7 @@ class SpecCache:
                 else self._status_store.get_state(spec_id)
             )
             if state and state.get("status"):
-                if _should_reconcile_frontmatter_status(file_status, state, file_mtime, self._entries[spec_id].path):
+                if status_store_module.should_reconcile_frontmatter_status(file_status, state, file_mtime, self._entries[spec_id].path):
                     self._status_store.update_state(
                         spec_id,
                         file_status,
@@ -1551,8 +1428,9 @@ class BoardBranchError(RuntimeError):
 
 
 def _project_root_for_specs_dir(specs_dir: Path) -> Path:
-    """Return the project root for a Nightshift specs directory."""
-    return specs_dir.parent.parent if specs_dir.name == "specs" else specs_dir.parent
+    """Return the project root for a Nightshift specs directory (SPEC-417-002: one shared formula)."""
+    from board_ctl import project_root_for_specs_dir
+    return project_root_for_specs_dir(specs_dir)
 
 
 def _read_config_documents(config_path: Path) -> list[dict]:
@@ -2067,6 +1945,7 @@ def render_prompt(scope: str, id: str, payload: "dict | None" = None) -> JSONRes
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = HTML_TEMPLATE
+    html = html.replace("\"__SPEC_ID_STRICT_RE__\"", json.dumps(spec_id_grammar.STRICT_ID_JS_PATTERN))
     html = html.replace("__PROJECT__", project_name)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project_name)
@@ -2216,6 +2095,20 @@ def record_client_performance(payload: dict) -> dict:
 @app.get("/api/specs")
 def get_specs() -> list[dict]:
     return cache.get_all_frontmatter()
+
+
+@app.get("/api/spec-metadata")
+def get_spec_metadata_policy() -> dict:
+    """SPEC-419: the project's spec_metadata policy (read-only; the board filter's choices and diagnostics)."""
+    policy = spec_metadata_policy_for_specs_dir(Path(cache._specs_dir))
+    return {
+        "fields": {
+            name: {"required": item.required,
+                   "allowed_values": list(item.allowed_values) if item.allowed_values is not None else None}
+            for name, item in policy.fields.items()
+        },
+        "errors": list(policy.errors),
+    }
 
 
 @app.get("/api/statuses")
@@ -3415,6 +3308,28 @@ body {
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
 }
 #col-vis-dropdown.open { display: block; }
+#version-filter-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+#version-filter-wrap label { color: var(--text-muted); }
+#version-filter { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 3px; font: inherit; padding: 3px 4px; }
+#version-filter.active { border-color: var(--c-theme); }
+#tag-filter-wrap { position: relative; }
+#tag-filter-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 0;
+  z-index: 500;
+  min-width: 150px;
+  max-height: 60vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#tag-filter-dropdown.open { display: block; }
+.tag-badge { border-style: dashed; }
 #type-filter-wrap { position: relative; }
 #type-filter-dropdown {
   display: none;
@@ -3741,6 +3656,24 @@ body {
   overflow-y: auto;
   padding: 16px;
 }
+
+/* BUG-NS-KIT-001 R5: while the clicked spec's content is not yet on screen the panel says so and the
+   content still shown (another spec's, or a pre-refresh copy) is dimmed and inert. */
+.panel-loading {
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: rgba(255, 193, 7, 0.18);
+  border-bottom: 1px solid rgba(255, 193, 7, 0.5);
+}
+.panel-loading[hidden] { display: none; }
+#panel[data-loading] #panel-body { opacity: 0.4; pointer-events: none; }
+/* A selection made while the panel is closed slides it in right away (without the `open` class, which
+   still means "a spec's content is shown") so the loading banner is visible. */
+#panel[data-loading] { right: 0; }
+#panel.side-left[data-loading] { left: 0; right: auto; }
+#panel.side-bottom[data-loading] { bottom: var(--recent-bar-h, 0px); }
 
 #panel-title {
   font-size: 15px;
@@ -4162,6 +4095,48 @@ button.artifact-row:focus-visible,
   margin-bottom: 8px;
 }
 .panel-md li { margin-bottom: 3px; }
+/* SPEC-393: blocks `.panel-md` used to leave unstyled fell back to browser
+   defaults (th 16px bold centred, h4 14px, blockquote 16px), so Markdown
+   tables such as `## AC Amendments` read louder than the h2 above them.
+   Bring them to body-copy scale; the h1-h3/p/code/pre/a/ul/ol/li rules above
+   are untouched. */
+.panel-md h4, .panel-md h5, .panel-md h6 {
+  color: var(--text);
+  margin: 12px 0 6px;
+  font-size: 11px;
+}
+.panel-md blockquote {
+  font-size: 11px;
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+.panel-md table {
+  width: 100%;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.panel-md th, .panel-md td {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--border);
+  /* `anywhere` lets a 600-char unbroken token wrap inside its cell; the
+     10ch floor keeps short cells (an ISO date) from being squeezed to one
+     character per line by that same rule. */
+  overflow-wrap: anywhere;
+  min-width: 10ch;
+}
+.panel-md th {
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-hi);
+}
 
 /* ── Reports panel ── */
 .panel-header-left {
@@ -4696,6 +4671,16 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <button class="btn" id="btn-type-filter" onclick="toggleTypeFilterDropdown()" title="Filter board and graph by spec type">⊟ TYPE</button>
       <div id="type-filter-dropdown"></div>
     </div>
+    <div id="tag-filter-wrap">
+      <button class="btn" id="btn-tag-filter" aria-haspopup="true" aria-expanded="false" aria-controls="tag-filter-dropdown" onclick="toggleTagFilterDropdown()" title="Filter board and graph by spec tags (view only; never changes dispatch)">⊟ TAGS</button>
+      <div id="tag-filter-dropdown" role="group" aria-label="Filter board and graph by tags"></div>
+    </div>
+    <div id="version-filter-wrap">
+      <label for="version-filter">VERSION</label>
+      <select id="version-filter" aria-label="Filter board and graph by target version" title="Filter board and graph by target version (view only; never changes dispatch)" onchange="onVersionFilterChange(this.value)">
+        <option value="all">All</option>
+      </select>
+    </div>
     <button class="btn" id="btn-theme-mode" onclick="toggleDarkMode()">☀</button>
     <button class="btn" id="btn-theme-color" onclick="cycleThemeColor()" title="Theme color">◉</button>
   </div>
@@ -4745,6 +4730,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <button id="panel-side-toggle" onclick="togglePanelSide()" title="Dock panel to the other side">⇄</button>
     <button id="panel-close" onclick="clearSelection()">✕</button>
   </div>
+  <div id="panel-loading" class="panel-loading" role="status" aria-live="polite" hidden></div>
   <div id="panel-body">
     <!-- View: spec detail -->
     <div id="panel-view-spec">
@@ -4880,6 +4866,9 @@ let searchTimer = null;
 let graphEdgesDataset = null;
 let graphNodesDataset = null;
 let openPanelId = null;       // spec id currently shown in detail panel
+let panelLoadingId = null;     // BUG-NS-KIT-001: the spec a user selection is still loading, else null
+let panelLoadingVersion = 0;
+let panelShownId = null;       // the spec whose content (header + body) is currently on screen
 let panelRequestVersion = 0;  // monotonically rejects a late prior selection
 let openPanelMtime = null;    // _mtime snapshot of spec currently shown in panel
 let openPanelBlockerClass = ''; // blocker_class of spec currently shown in panel (SPEC-268)
@@ -4907,7 +4896,12 @@ const GRAPH_SNAP_PX = 35;      // grid size in graph-coordinate space
 let graphHiddenStatuses = new Set(); // statuses hidden in graph view ONLY (independent of board's hiddenColumns)
 let showGroupingEdges = true;        // dashed parent (grouping-membership) edges in graph view; toggle to de-clutter high-fan-out parents
 let showArchived = false;            // when false, done specs older than ARCHIVED_AGE_DAYS are hidden from board + graph
+let showAllDependencies = false;     // SPEC-NS-KIT-003: false = graph hides edges implied by another displayed path (session-only, never persisted)
+let graphOmittedEdges = [];          // last reduced projection: [{edge, via:[ids]}] — read-only diagnostics for the inspector
 let activeTypeFilters = new Set();   // empty = show all types; non-empty = show only listed types (board + graph)
+let versionFilter = 'all';           // SPEC-419: 'all' | 'unassigned' | 'v:<label>' exact match (board + graph); session-only, a reload returns to All
+let tagFilter = new Set();           // SPEC-420: empty = All; tokens 'untagged' and 't:<tag>' match ANY (board + graph); session-only, a reload returns to All
+let specMetadataPolicy = {fields: {}, errors: []};  // SPEC-419: GET /api/spec-metadata (read-only)
 let isDragging = false;             // true while a SortableJS drag is in progress
 let renderBoardQueued = false;      // renderBoard() was called during a drag — flush on onCardDrop
 const ARCHIVED_AGE_DAYS = 14;
@@ -5368,11 +5362,19 @@ async function loadProjectsRegistry() {
   } catch {}
 }
 
-// Longest-prefix-match across all OTHER projects in the registry. Returns the
-// matching project entry (with port + name + path), or null when the spec
-// belongs to this project (or no match).
+const SPEC_ID_STRICT_RE = new RegExp("__SPEC_ID_STRICT_RE__");  // SPEC-416 R1 grammar, from spec_id.py
+
+// SPEC-416: an R1 ID ({KIND}-{CODE}-{NNN}) names its owner by project code.
+// Longest-prefix-match across all OTHER projects in the registry is the legacy
+// fallback. Returns the matching project entry (with port + name + path), or
+// null when the spec belongs to this project (or no match).
 function resolveExternalProject(specId) {
   if (!projectsRegistry || !Array.isArray(projectsRegistry.projects)) return null;
+  const coded = SPEC_ID_STRICT_RE.exec(specId);
+  if (coded) {
+    const owner = projectsRegistry.projects.find(p => p.code === coded[2]);
+    if (owner) return owner.name === CURRENT_PROJECT ? null : owner;
+  }
   let best = null, bestLen = 0;
   for (const p of projectsRegistry.projects) {
     if (p.name === CURRENT_PROJECT) continue;
@@ -5653,6 +5655,8 @@ async function loadSpecs() {
   const data = await r.json();
   if (!Array.isArray(data)) throw new Error('/api/specs: unexpected response type');
   specs = data;
+  refreshVersionFilterOptions();
+  loadSpecMetadataPolicy();
   renderPendingWork();
   // Fetch worktree state in parallel; missing or empty result is fine
   fetch('/api/worktree-status').then(r => r.ok ? r.json() : {}).then(ws => {
@@ -5766,6 +5770,7 @@ function renderBoard() {
   // for the same spec — producing a visual duplicate. Queue instead and flush in onCardDrop.
   if (isDragging) { renderBoardQueued = true; return; }
   renderBoardQueued = false;
+  refreshVersionFilterOptions();
   const boardView = document.getElementById('board-view');
   const blocksMap = buildBlocksMap();
 
@@ -5780,6 +5785,8 @@ function renderBoard() {
       if (!showArchived && isArchived(s)) return false;
       // Type filter: when active, only show specs whose type is selected
       if (activeTypeFilters.size > 0 && !activeTypeFilters.has(s.type || 'feature')) return false;
+      if (!specMatchesVersionFilter(s)) return false;
+      if (!specMatchesTagFilter(s)) return false;
       return true;
     });
 
@@ -5886,6 +5893,10 @@ function renderCard(spec, blocksMap) {
   const dots = '●'.repeat(Math.min(priority, 3));
 
   const typeBadge = spec.type ? `<span class="badge">${spec.type}</span>` : '';
+  const versionBadge = (spec.version !== undefined && spec.version !== null)
+    ? `<span class="badge version-badge" title="Target product version (not template_version or kit_version)">${_escHtml(String(spec.version))}</span>` : '';
+  const tagBadges = specTagLabels(spec).map(t =>
+    `<span class="badge tag-badge" title="Spec tag (organizational label; not touches or NFR scope_tags)">${_escHtml(t)}</span>`).join('');
   const layerBadge = spec.layer !== undefined && spec.layer !== null
     ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'layer'))}">L${spec.layer}</span>` : '';
   const readinessBadge = spec.readiness
@@ -5925,7 +5936,7 @@ function renderCard(spec, blocksMap) {
       <span class="card-dots">${dots}</span>
     </div>
     <div class="card-title">${displayTitle}</div>
-    <div class="card-meta">${typeBadge}${layerBadge}${readinessBadge}${runStateBadge}${depHtml}</div>
+    <div class="card-meta">${typeBadge}${versionBadge}${tagBadges}${layerBadge}${readinessBadge}${runStateBadge}${depHtml}</div>
     ${wtHtml}
   `;
 
@@ -6158,6 +6169,8 @@ function updateColumnCounts() {
     const count = specs.filter(s => {
       if (effectiveStatus(s) !== col.id) return false;
       if (!showArchived && isArchived(s)) return false;
+      if (!specMatchesVersionFilter(s)) return false;
+      if (!specMatchesTagFilter(s)) return false;
       return true;
     }).length;
     const el = document.getElementById(`count-${col.id}`);
@@ -6286,6 +6299,8 @@ function renderPanelMeta(specId, fm) {
     ['created', fm.created],
   ];
   if (fm.stack) fields.push(['stack', fm.stack]);
+  const panelTags = specTagLabels(fm);
+  if (panelTags.length) fields.push(['tags', panelTags.join(', ')]);
   // SPEC-360 R6: a declared scope is a read-only collapsible row.
   if (fm.scope && typeof fm.scope === 'object' && !Array.isArray(fm.scope)) {
     const scopeText = Object.entries(fm.scope)
@@ -6821,9 +6836,41 @@ document.getElementById('panel-body').addEventListener('click', function(e) {
   if (open) openArtifact(open.dataset.artifactSpec || openPanelId, open.dataset.artifactPath);
 });
 
+// BUG-NS-KIT-001 R5: visible loading/stale state from the moment a spec is selected until its
+// content is on screen. `data-loading` also dims the content still shown (see CSS).
+function beginPanelLoading(specId, version) {
+  const panel = document.getElementById('panel');
+  const banner = document.getElementById('panel-loading');
+  panelLoadingId = specId;
+  panelLoadingVersion = version;
+  panel.dataset.loading = specId;
+  panel.setAttribute('aria-busy', 'true');
+  banner.textContent = panelShownId && panelShownId !== specId
+    ? `Loading ${specId}… (still showing ${panelShownId})`
+    : (panelShownId === specId ? `Refreshing ${specId}…` : `Loading ${specId}…`);
+  banner.hidden = false;
+}
+
+function endPanelLoading(version) {
+  if (version !== panelLoadingVersion) return;  // a newer selection owns the indicator
+  const panel = document.getElementById('panel');
+  panelLoadingId = null;
+  delete panel.dataset.loading;
+  panel.removeAttribute('aria-busy');
+  document.getElementById('panel-loading').hidden = true;
+}
+
 async function openPanel(specId, { keepNavStack = false } = {}) {
-  const performanceStart = performanceClock();
+  // BUG-NS-KIT-001 R3: a refresh of the spec already on screen (poll, status action: keepNavStack
+  // on the shown spec) must never cancel a selection the user made after it was scheduled; before
+  // this guard a poll reloading spec A won the request-version race against a click on B and the
+  // panel ended on A.
+  if (keepNavStack && specId === panelShownId && panelLoadingId && panelLoadingId !== specId) return false;
   const requestVersion = ++panelRequestVersion;
+  beginPanelLoading(specId, requestVersion);
+  let loaded = false;
+  try {
+  const performanceStart = performanceClock();
   if (!keepNavStack) specNavStack = [];
   const fetchStart = performanceClock();
   let r;
@@ -6893,6 +6940,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     }
     chipsHtml += '</div>';
   }
+  chipsHtml += omittedEdgesPanelHtml(specId);
   document.getElementById('panel-chips').innerHTML = chipsHtml;
   attachSpecRefPreview(document.getElementById('panel-chips'));
 
@@ -6924,6 +6972,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   openPanelBlockerClass = fm.blocker_class || fm.block_reason || '';
 
   openPanelId = specId;
+  panelShownId = specId;
   openPanelMtime = fm._mtime || null;
   applyActiveCard(specId);
   document.getElementById('panel').classList.add('open');
@@ -6960,7 +7009,12 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     reportPerformance('panel_body_paint', performanceStart);
     reportPerformance('spec_panel_ready', performanceStart);
   });
+  loaded = true;
   return true;
+  } finally {
+    if (!loaded && requestVersion === panelLoadingVersion && !panelShownId) closePanel();
+    endPanelLoading(requestVersion);
+  }
 }
 
 function applyActiveCard(specId) {
@@ -6976,6 +7030,7 @@ function closePanel() {
 
 function clearSelection() {
   openPanelId = null;
+  panelShownId = null;
   openPanelMtime = null;
   panelView = 'spec';
   cancelArtifactFetch();
@@ -7066,6 +7121,122 @@ function toggleDeps() {
   renderBoard();
 }
 
+// SPEC-NS-KIT-003: reduced dependency view. Mirrors canonical/dependency_graph_view.py
+// (reduce_dependency_edges); tests/test_dependency_graph_view.py runs both on the same fixtures.
+// Hides an edge only when another directed path between its endpoints remains among the
+// DISPLAYED dependency edges. Self-loops, unknown endpoints and anything touching a cycle stay.
+// External nodes are keyed project::id. Pure projection: never mutates edges or metadata.
+function reduceDependencyEdges(edges, nodes) {
+  const keys = nodes ? new Map() : null;
+  if (nodes) for (const n of nodes) {
+    const id = String(n.id);
+    if (keys.has(id) && n.external) continue;
+    keys.set(id, (n.external && n.project) ? `${n.project}::${id}` : id);
+  }
+  const endpoint = (e, side) => {
+    const project = e[side + '_project'];
+    const raw = String(e[side]);
+    if (project) return `${project}::${raw}`;
+    if (!keys) return raw;
+    return keys.has(raw) ? keys.get(raw) : null;
+  };
+  const resolved = edges.map(e => [e, endpoint(e, 'from'), endpoint(e, 'to')]);
+  const adj = new Map();
+  for (const [, f, t] of resolved) {
+    if (f !== null && t !== null && f !== t) {
+      if (!adj.has(f)) adj.set(f, new Set());
+      adj.get(f).add(t);
+    }
+  }
+  const reach = (start) => {
+    const seen = new Set();
+    const stack = [...(adj.get(start) || [])];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const nx of (adj.get(cur) || [])) stack.push(nx);
+    }
+    return seen;
+  };
+  const cyclic = new Set();
+  for (const n of adj.keys()) if (reach(n).has(n)) cyclic.add(n);
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const dag = new Map();
+  for (const [n, targets] of adj) {
+    if (!cyclic.has(n)) dag.set(n, [...targets].filter(t => !cyclic.has(t)).sort(cmp));
+  }
+  const alternatePath = (u, v) => {
+    const parent = new Map();
+    const queue = [];
+    for (const w of (dag.get(u) || [])) {
+      if (w !== v && !parent.has(w)) { parent.set(w, u); queue.push(w); }
+    }
+    for (let qi = 0; qi < queue.length; qi++) {
+      const cur = queue[qi];
+      for (const nx of (dag.get(cur) || [])) {
+        if (nx === v) {
+          const path = [v, cur];
+          while (path[path.length - 1] !== u) path.push(parent.get(path[path.length - 1]));
+          return path.reverse();
+        }
+        if (!parent.has(nx) && nx !== u) { parent.set(nx, cur); queue.push(nx); }
+      }
+    }
+    return null;
+  };
+  const verdicts = new Map();
+  const kept = [], omitted = [];
+  for (const [edge, f, t] of resolved) {
+    let via = null;
+    if (f !== null && t !== null && f !== t && !cyclic.has(f) && !cyclic.has(t)) {
+      const k = JSON.stringify([f, t]);
+      if (!verdicts.has(k)) verdicts.set(k, alternatePath(f, t));
+      via = verdicts.get(k);
+    }
+    if (via === null) kept.push(edge); else omitted.push({ edge, via });
+  }
+  const ek = (e) => [String(e.from), String(e.to)];
+  const order = (a, b) => cmp(ek(a)[0], ek(b)[0]) || cmp(ek(a)[1], ek(b)[1]);
+  kept.sort(order);
+  omitted.sort((a, b) => order(a.edge, b.edge));
+  return { kept, omitted };
+}
+
+// Note under the legend + spec-inspector rows that explain which declared arrows are not drawn.
+function omittedEdgeText(o) {
+  const via = (o.via || []).map(id => String(id).replace(/^.*::/, ''));
+  return `${o.edge.from} → ${o.edge.to} is implied by ${via.join(' → ')}`;
+}
+async function toggleShowAllDependencies() {
+  // The legend is rebuilt on every render; keep keyboard focus on the switch so it can be pressed again.
+  const hadFocus = !!document.activeElement && document.activeElement.id === 'graph-show-all-deps';
+  showAllDependencies = !showAllDependencies;
+  renderGraphLegend();
+  await showGraph(openPanelId || undefined);
+  if (openPanelId) refreshPanelDependencies();
+  if (hadFocus) { const sw = document.getElementById('graph-show-all-deps'); if (sw) sw.focus(); }
+}
+function renderGraphDependencyNote() {
+  const el = document.getElementById('graph-dep-note');
+  if (!el) return;
+  if (showAllDependencies || !graphOmittedEdges.length) {
+    el.textContent = showAllDependencies ? 'All declared dependency arrows shown.' : 'No implied arrows to hide.';
+    el.title = '';
+    return;
+  }
+  el.textContent = `${graphOmittedEdges.length} implied arrow${graphOmittedEdges.length === 1 ? '' : 's'} hidden — select a spec for details`;
+  el.title = graphOmittedEdges.map(omittedEdgeText).join('\\n');
+}
+// HTML for the inspector: omitted arrows ending at (or starting from) specId. Empty unless the reduced graph is active.
+function omittedEdgesPanelHtml(specId) {
+  if (activeTab !== 'graph' || showAllDependencies) return '';
+  const rows = graphOmittedEdges.filter(o => o.edge.to === specId || o.edge.from === specId);
+  if (!rows.length) return '';
+  const li = rows.map(o => `<li>${_escHtml(omittedEdgeText(o))}</li>`).join('');
+  return `<div class="omitted-deps" id="omitted-deps" role="note" style="margin:6px 0;font-size:11px"><div><b>Not drawn in the reduced graph</b> (declared in metadata):</div><ul style="margin:2px 0;padding-left:16px">${li}</ul><div style="opacity:.7;font-size:10px">Each arrow is implied by another dependency path. <button class="btn" id="omitted-deps-show-all" onclick="toggleShowAllDependencies()">Show all dependencies</button></div></div>`;
+}
+
 async function showGraph(selectId) {
   const performanceStart = performanceClock();
   activeTab = 'graph';
@@ -7121,6 +7292,8 @@ async function showGraph(selectId) {
     const liveSpec = specs.find(s => s.id === n.id);
     if (!showArchived && liveSpec && isArchived(liveSpec)) return false;
     if (activeTypeFilters.size > 0 && liveSpec && !activeTypeFilters.has(liveSpec.type || 'feature')) return false;
+    if (liveSpec && !specMatchesVersionFilter(liveSpec)) return false;
+    if (liveSpec && !specMatchesTagFilter(liveSpec)) return false;
     return true;
   });
   const visibleIds = new Set(visibleNodes.map(n => n.id));
@@ -7173,8 +7346,16 @@ async function showGraph(selectId) {
     };
   });
 
-  const edgesArr = graphData.edges
-    .filter(e => visibleIds.has(e.from) && visibleIds.has(e.to))
+  // SPEC-NS-KIT-003: reduce over the DISPLAYED dependency edges only (filters recompute it; parent
+  // lines are never dependency edges), unless the user asked for every declared arrow.
+  const displayedDeps = graphData.edges.filter(e => visibleIds.has(e.from) && visibleIds.has(e.to));
+  const reduction = showAllDependencies
+    ? { kept: displayedDeps, omitted: [] }
+    : reduceDependencyEdges(displayedDeps, visibleNodes);
+  graphOmittedEdges = reduction.omitted;
+  window.graphOmittedEdges = graphOmittedEdges;
+  renderGraphDependencyNote();
+  const edgesArr = reduction.kept
     .map((e, i) => ({
       id: i,
       from: e.from,
@@ -7718,6 +7899,26 @@ function renderGraphLegend() {
     showGraph();  // re-render with/without grouping edges
   });
   el.appendChild(ge);
+  // SPEC-NS-KIT-003: reduced/full dependency arrows. Keyboard-operable switch; view-only, writes nothing.
+  const sd = document.createElement('div');
+  sd.id = 'graph-show-all-deps';
+  sd.className = 'legend-item' + (showAllDependencies ? '' : ' legend-hidden');
+  sd.setAttribute('role', 'switch');
+  sd.setAttribute('tabindex', '0');
+  sd.setAttribute('aria-checked', showAllDependencies ? 'true' : 'false');
+  sd.innerHTML = `<span class="legend-dot" style="background:transparent;border-top:2px solid var(--text-muted);border-radius:0"></span>Show all dependencies`;
+  sd.title = showAllDependencies ? 'Hide arrows implied by another dependency path' : 'Reduced view hides arrows implied by another path; click to draw every declared dependency';
+  sd.addEventListener('click', toggleShowAllDependencies);
+  sd.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleShowAllDependencies(); }
+  });
+  el.appendChild(sd);
+  const note = document.createElement('div');
+  note.id = 'graph-dep-note';
+  note.setAttribute('aria-live', 'polite');
+  note.style.cssText = 'font-size:10px;opacity:.75;max-width:230px;white-space:normal';
+  el.appendChild(note);
+  renderGraphDependencyNote();
 }
 
 async function showBoard() {
@@ -7882,6 +8083,11 @@ document.addEventListener('click', (e) => {
   if (dd.classList.contains('open') && !e.target.closest('#col-vis-wrap')) {
     dd.classList.remove('open');
   }
+  const tgd = document.getElementById('tag-filter-dropdown');
+  if (tgd.classList.contains('open') && !e.target.closest('#tag-filter-wrap')) {
+    tgd.classList.remove('open');
+    document.getElementById('btn-tag-filter').setAttribute('aria-expanded', 'false');
+  }
   // Close type-filter dropdown when clicking outside it
   const tdd = document.getElementById('type-filter-dropdown');
   if (tdd.classList.contains('open') && !e.target.closest('#type-filter-wrap')) {
@@ -8000,6 +8206,135 @@ function toggleColVis(colId, visible) {
   else hiddenColumns.add(colId);
   renderBoard();
   saveSettings();
+}
+
+// SPEC-419: the target version of a spec, or null when unassigned. Labels are opaque,
+// case-sensitive strings; a non-string value is invalid metadata and matches no exact choice.
+function specVersionLabel(spec) {
+  return typeof spec.version === 'string' && spec.version !== '' ? spec.version : null;
+}
+
+function specMatchesVersionFilter(spec) {
+  if (versionFilter === 'all') return true;
+  const label = (spec.version === undefined || spec.version === null) ? null : spec.version;
+  if (versionFilter === 'unassigned') return label === null;
+  return label === versionFilter.slice(2);
+}
+
+function refreshVersionFilterOptions() {
+  const select = document.getElementById('version-filter');
+  if (!select) return;
+  const configured = ((specMetadataPolicy.fields || {}).version || {}).allowed_values || [];
+  const seen = new Set(configured);
+  const observed = [...new Set(specs.map(specVersionLabel).filter(v => v !== null && !seen.has(v)))].sort();
+  const labels = [...configured, ...observed];
+  const options = [['all', 'All'], ['unassigned', 'Unassigned'], ...labels.map(v => ['v:' + v, v])];
+  if (versionFilter.startsWith('v:') && !options.some(o => o[0] === versionFilter)) {
+    options.push([versionFilter, versionFilter.slice(2)]);   // keep the active choice visible after a refresh
+  }
+  const signature = JSON.stringify(options);
+  if (select.dataset.signature !== signature) {
+    select.innerHTML = '';
+    for (const [value, text] of options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      select.appendChild(option);
+    }
+    select.dataset.signature = signature;
+  }
+  select.value = versionFilter;
+  select.classList.toggle('active', versionFilter !== 'all');
+}
+
+function onVersionFilterChange(value) {
+  versionFilter = value || 'all';
+  refreshVersionFilterOptions();
+  renderBoard();
+  if (activeTab === 'graph') showGraph();
+}
+
+function clearVersionFilter() {
+  onVersionFilterChange('all');
+}
+
+async function loadSpecMetadataPolicy() {
+  try {
+    const r = await fetch('/api/spec-metadata');
+    if (r.ok) specMetadataPolicy = await r.json();
+  } catch { /* policy only enriches filter choices; the filter still works from observed versions */ }
+  refreshVersionFilterOptions();
+}
+
+// SPEC-420: the tag labels of a spec (board view only). A list contributes its nonblank string
+// members; a legacy scalar string counts as one observed value so an invalid value stays inspectable.
+function specTagLabels(spec) {
+  const raw = spec.tags;
+  if (Array.isArray(raw)) return [...new Set(raw.filter(t => typeof t === 'string' && t.trim() !== ''))];
+  if (typeof raw === 'string' && raw.trim() !== '') return [raw];
+  return [];
+}
+
+function specMatchesTagFilter(spec) {
+  if (tagFilter.size === 0) return true;
+  const labels = specTagLabels(spec);
+  if (labels.length === 0) return tagFilter.has('untagged');
+  return labels.some(t => tagFilter.has('t:' + t));
+}
+
+function tagFilterChoices() {
+  const configured = ((specMetadataPolicy.fields || {}).tags || {}).allowed_values || [];
+  const seen = new Set(configured);
+  const observed = [...new Set(specs.flatMap(specTagLabels).filter(t => !seen.has(t)))].sort();
+  return [...configured, ...observed];
+}
+
+function buildTagFilterDropdown() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  dd.innerHTML = '';
+  const entries = [['all', 'All'], ['untagged', 'Untagged'], ...tagFilterChoices().map(t => ['t:' + t, t])];
+  for (const [token, text] of entries) {
+    const item = document.createElement('label');
+    item.className = 'type-filter-item';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.dataset.token = token;
+    box.addEventListener('change', () => onTagFilterChange(token, box.checked));
+    item.appendChild(box);
+    item.appendChild(document.createTextNode(' ' + text));
+    dd.appendChild(item);
+  }
+  syncTagFilterControls();
+}
+
+function syncTagFilterControls() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  if (!dd) return;
+  for (const box of dd.querySelectorAll('input[type=checkbox]')) {
+    box.checked = box.dataset.token === 'all' ? tagFilter.size === 0 : tagFilter.has(box.dataset.token);
+  }
+  const btn = document.getElementById('btn-tag-filter');
+  if (btn) btn.classList.toggle('active', tagFilter.size > 0);
+}
+
+function toggleTagFilterDropdown() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  buildTagFilterDropdown();
+  dd.classList.toggle('open');
+  document.getElementById('btn-tag-filter').setAttribute('aria-expanded', String(dd.classList.contains('open')));
+}
+
+function onTagFilterChange(token, checked) {
+  if (token === 'all') tagFilter.clear();            // All is the default and clears every selection
+  else if (checked) tagFilter.add(token);
+  else tagFilter.delete(token);
+  syncTagFilterControls();
+  renderBoard();
+  if (activeTab === 'graph') showGraph();
+}
+
+function clearTagFilter() {
+  onTagFilterChange('all', true);
 }
 
 function buildTypeFilterDropdown() {
@@ -9021,10 +9356,12 @@ async function copyQuestionsPrompt() {
     '| reports/2026-01-01-nightshift-report-SPEC-000.md | No | none_found |',
     '',
     'Consolidate all questions into a new QUESTIONS spec file at',
-    '.nightshift/specs/{PROJECT}-QUESTIONS-NNN.md using this exact format:',
+    '.nightshift/specs/QUESTIONS-{CODE}-NNN.md using this exact format',
+    '({CODE} is the registered spec-ID code of this project; a project with no registered',
+    'code keeps the legacy {PROJECT}-QUESTIONS-NNN name):',
     '',
     '---',
-    'id: {PROJECT}-QUESTIONS-NNN',
+    'id: QUESTIONS-{CODE}-NNN',
     'type: questions',
     'status: draft',
     `created: ${today}`,
@@ -9114,15 +9451,17 @@ function updateReportsBtnLabel() {
 function classifySpecsChange(prev, fresh, prevWtStatus, freshWtStatus) {
   const prevById = new Map(prev.map(s => [s.id, s]));
   const freshById = new Map(fresh.map(s => [s.id, s]));
-  const added = [], removed = [], statusChanged = [], onlyMtimeChanged = [];
+  const added = [], removed = [], statusChanged = [], onlyMtimeChanged = [], afterChanged = [];
   for (const [id, f] of freshById) {
     const p = prevById.get(id);
     if (!p) { added.push(id); continue; }
+    // SPEC-NS-KIT-003 R4: a changed prerequisite list changes the graph's edges (and so its reduction).
+    if (JSON.stringify(p.after || []) !== JSON.stringify(f.after || [])) afterChanged.push(id);
     if (effectiveStatusFor(p, prevWtStatus) !== effectiveStatusFor(f, freshWtStatus)) statusChanged.push(id);
     else if (p._mtime !== f._mtime) onlyMtimeChanged.push(id);
   }
   for (const id of prevById.keys()) if (!freshById.has(id)) removed.push(id);
-  return { added, removed, statusChanged, onlyMtimeChanged };
+  return { added, removed, statusChanged, onlyMtimeChanged, afterChanged };
 }
 
 function hasSpecsChange(change) {
@@ -9160,7 +9499,7 @@ function mergeFreshSpecs(prevSpecs, freshSpecs, pendingMoves) {
 }
 
 function graphNeedsFullRebuild(change) {
-  return !!(change.added.length || change.removed.length || change.statusChanged.length);
+  return !!(change.added.length || change.removed.length || change.statusChanged.length || (change.afterChanged || []).length);
 }
 
 // Board diff render. Single-card swap when only mtime changed; falls back to
@@ -9246,6 +9585,7 @@ function refreshPanelDependencies() {
     for (const dep of blocks) chipsHtml += renderSpecChip(dep);
     chipsHtml += '</div>';
   }
+  chipsHtml += omittedEdgesPanelHtml(openPanelId);
   const el = document.getElementById('panel-chips');
   if (el) {
     el.innerHTML = chipsHtml;
@@ -9757,6 +10097,7 @@ def export_board_html(
 
     # ── 7. Patch HTML_TEMPLATE ──────────────────────────────────────────
     html = HTML_TEMPLATE
+    html = html.replace("\"__SPEC_ID_STRICT_RE__\"", json.dumps(spec_id_grammar.STRICT_ID_JS_PATTERN))
     html = html.replace("__PROJECT__", project)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project)
@@ -9950,6 +10291,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Nightshift Board — local Kanban for specs")
     parser.add_argument("--port", type=int, default=None,
                         help="Port (default: hash-based per project, range 7800-7999)")
+    parser.add_argument("--print-port", action="store_true",
+                        help="Print the resolved port and exit without starting the board")
     parser.add_argument("--open", action="store_true", dest="open_browser",
                         help="Auto-open browser after startup")
     parser.add_argument("--specs", type=str, default=None,
@@ -9967,14 +10310,22 @@ if __name__ == "__main__":
 
     # When deployed as .nightshift/specs, go up two levels to reach project root
     project_root = _project_root_for_specs_dir(specs_dir)
+    # SPEC-417-002: the name and port formulas live in board_ctl.py (FastAPI-free) so the
+    # read-side client and this launcher can never disagree.
+    from board_ctl import default_port_for_name, project_name_for_root
+    project_name = project_name_for_root(project_root)
+
+    # One derivation serves both startup and the launcher's readiness probe.
+    port = args.port if args.port is not None else default_port_for_name(project_name)
+    if args.print_port:
+        print(port)
+        sys.exit(0)
+
     try:
         board_branch = _validate_board_branch(project_root, specs_dir.parent / "config.yaml")
     except BoardBranchError as exc:
         print(f"✗ Board branch validation failed: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    _name_src = project_root
-    project_name = _name_src.name.lstrip('.').upper() or "PROJECT"
 
     if args.export:
         # Static export mode — write HTML and exit, no server started.
@@ -9991,8 +10342,6 @@ if __name__ == "__main__":
         print(f"✓ Exported {out_path} ({out_path.stat().st_size // 1024} KB)")
         sys.exit(0)
 
-    # Hash-based port: deterministic per project, range 7800-7999
-    port = args.port if args.port is not None else (7800 + sum(ord(c) for c in project_name) % 200)
     board_port = port  # SPEC-371-003 R4: module global for board_url auto-fill
 
     _bootstrap_start = time.monotonic()

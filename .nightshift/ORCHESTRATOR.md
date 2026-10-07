@@ -11,6 +11,10 @@ holds that result and transitive dependents while preserving its branch and
 worktree; a shared-install failure stops subsequent dispatch and all integration
 without misreporting already-running workers.
 
+The result receipt is bound to the worker install; the control-plane receipt to the parent's. A control-plane
+`NS-MPI-RELEASE-SUPERSEDED` gets one fresh shared admission and one re-check. A result-receipt one closes the
+run `superseded`: no merge, branch and worktree preserved, spec back to ready, and dependents are not blocked.
+
 Canonical-source authoring is the explicit parent-owned SPEC-365 path documented
 in GIT.md. Inject `authoring_provider` independently of worker packets/outcomes;
 retain original receipts, strict results, approved main scope, exact candidate and
@@ -164,7 +168,10 @@ inspectable:
    the smallest bounded recovery task. The parent applies the controller-backed
    unblock protocol (`unblock_spec.py prepare`, `record_attempt`, `finalize`)
    before terminal resolution. The worker supplies evidence only: the parent
-   retains lifecycle, merge, metrics, and cleanup ownership.
+   retains lifecycle, merge, metrics, and cleanup ownership. Retry state is the
+   durable ledger, not the attempt files; a missing or corrupt ledgered attempt
+   file closes its fingerprint with a named reason, and the human exits are in
+   `GIT.md` (integrity wedge and its human exits).
 
 `reports/_wip/` is intentionally used for this live progress artifact because it
 is already gitignored and reserved for in-flight run scratch state.
@@ -581,6 +588,16 @@ stashing, staging, or changing user files. CHANGELOG/version/release-handoff
 surfaces are parent-owned: workers provide relative-path intents, never direct
 edits. A rebase conflict receives one bounded packet containing only conflict
 paths and refs; its terminal result is durable and never left in progress.
+
+**Ledger reuse (SPEC-NS-KIT-002-002).** With `test_status_ledger.enabled`, `prepare-dispatch --ledger
+<path> --ledger-identity-file <json>` projects a trusted, identity-matching main ledger read-only into
+both verifier arms and records the match (`ledger_baseline` in the plan; `matched` or `not_matched`
+with a reason). The verifier may use it as the baseline arm, labelled `reused` with its digest; the
+head arm always gets at least one full independent run, and a reused sample never counts toward the
+3-sample rule. At fresh-main, `Coordinator.ledger_fresh_main_decision` reuses the verifier head run
+only when the merged tree's identity equals the verified head identity (the ledger update is staged
+under `reports/_wip/ledger-pending-<spec>.json` for the parent's ledger commit); otherwise the full
+fresh-main suite runs exactly as before.
 
 The queue records every main-merge command in the append-only
 `merge_attempt_events` ledger before Git mutation and again with its checked
@@ -1610,3 +1627,19 @@ The stack-aware routing additions (stack profile resolution, `## Stack Profile` 
 - **Knowledge:** Same `knowledge/` directory, same discovery logic (LOOP.md step 3)
 
 The orchestrator is a thin wrapper around LOOP.md, not a replacement.
+
+
+### Invalid old-run administrative recovery
+
+For the retained wrong-identity/duplicate-contradiction case, use GIT.md's
+SPEC-387-001 receipt-bound invalid-run abandonment contract. The parent alone
+injects `abandonment_provider` into `unblock_spec.abandon_invalid_run`,
+`Coordinator.abandon_invalid_run`, or the official instruction
+`abandon_instruction_run` API. It proves original A separately from exact sealed
+successor B and the original target-only supported rollout report. This records
+rejected-old-run and administrative blocked only. Existing prepare,
+record_attempt and finalize revalidate before every mutation/restart; verified
+controller recovery alone reaches ready. Preserve old evidence and candidate;
+never accept, merge, complete or clean the old run. A new run requires its own
+original admission. Ordinary installed, authoring, expiry and parallel callback
+gates remain strict.

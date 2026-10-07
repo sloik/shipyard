@@ -168,8 +168,16 @@ class ScopeExtractionResult:
     scope_split: bool = False
 
 
-def intrinsic_readiness(frontmatter: Mapping[str, Any], body: str) -> ReadinessResult:
-    """Return the deterministic per-dimension intrinsic readiness gate."""
+def intrinsic_readiness(
+    frontmatter: Mapping[str, Any], body: str, spec_metadata_policy: Any = None,
+) -> ReadinessResult:
+    """Return the deterministic per-dimension intrinsic readiness gate.
+
+    ``spec_metadata_policy`` (SPEC-419) is the project's ``SpecMetadataPolicy``; the
+    ``spec_metadata`` dimension is strict here (a spec being promoted or dispatched is
+    evaluated as planned/ready, whatever status it currently stores) and appears only when
+    the project opted in or a value is malformed, so a legacy install's dimensions are unchanged.
+    """
     dimensions: list[ReadinessDimension] = []
 
     schema_errors = [
@@ -243,6 +251,13 @@ def intrinsic_readiness(frontmatter: Mapping[str, Any], body: str) -> ReadinessR
         tuple(traceability_errors),
     ))
 
+    from spec_frontmatter import spec_metadata_problems
+    metadata_errors = spec_metadata_problems(frontmatter, spec_metadata_policy)
+    if metadata_errors or (spec_metadata_policy is not None and spec_metadata_policy.customised):
+        dimensions.append(ReadinessDimension(
+            "spec_metadata", Readiness.FAIL if metadata_errors else Readiness.PASS, tuple(metadata_errors)
+        ))
+
     findings = tuple(evidence for dimension in dimensions for evidence in dimension.evidence)
     if any(dimension.level is Readiness.FAIL for dimension in dimensions):
         level = Readiness.FAIL
@@ -258,9 +273,10 @@ def derive_admission(
     body: str,
     specs: Mapping[str, Mapping[str, Any]] | None = None,
     dependency_errors: Mapping[str, str] | None = None,
+    spec_metadata_policy: Any = None,
 ) -> AdmissionResult:
     """Derive an observable run state without changing ``frontmatter['status']``."""
-    readiness = intrinsic_readiness(frontmatter, body)
+    readiness = intrinsic_readiness(frontmatter, body, spec_metadata_policy)
     status = str(frontmatter.get("status", ""))
     if status == "draft":
         return AdmissionResult("specification_incomplete", "draft specification", readiness)

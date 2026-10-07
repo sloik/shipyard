@@ -30,6 +30,11 @@ AGENT_OUTCOME_FIELDS = (
     "candidate_preserved", "repair_route", "diagnostician_allowance",
     "repair_allowance", "operator_action", "delivery_phase",
 )
+# SPEC-NS-KIT-002-001 R4: optional additive tag naming the project that produced a row,
+# so fleet analysis never has to infer it from the file's location. Producers that
+# emit the closed field set above stay valid; the tag is added at encoding time.
+OPTIONAL_AGENT_FIELDS = ("project",)
+PROJECT_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 AGENT_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}")
 FORBIDDEN_AGENT_FIELD_RE = re.compile(
     r"(?:password|passwd|secret|credential|token|prompt|log|url|path|username|environment)",
@@ -42,11 +47,11 @@ def _agent_field_mapping(config: dict[str, Any]) -> dict[str, str]:
     raw = config.get("agent_fields", {})
     if not isinstance(raw, dict):
         raise TypeError("terminal_outcomes.agent_fields must be a mapping")
-    unknown = set(raw) - set(AGENT_OUTCOME_FIELDS)
+    unknown = set(raw) - set(AGENT_OUTCOME_FIELDS) - set(OPTIONAL_AGENT_FIELDS)
     if unknown:
         raise ValueError(f"unknown canonical agent fields: {sorted(unknown)}")
     mapping: dict[str, str] = {}
-    for canonical in AGENT_OUTCOME_FIELDS:
+    for canonical in (*AGENT_OUTCOME_FIELDS, *OPTIONAL_AGENT_FIELDS):
         output = raw.get(canonical, canonical)
         if (
             not isinstance(output, str)
@@ -99,23 +104,49 @@ def normalized(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]
     return {canonical: record.get(str(fields.get(canonical, canonical))) for canonical in FLEET_FIELDS}
 
 
-def configured_agent_outcome(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    """Map one closed SPEC-235 record through the existing adapter configuration."""
-    if set(record) != set(AGENT_OUTCOME_FIELDS):
+def _project_tag(value: Any) -> str:
+    if not isinstance(value, str) or not PROJECT_TAG_RE.fullmatch(value):
+        raise ValueError("project tag must be a short plain project name")
+    if FORBIDDEN_AGENT_FIELD_RE.search(value):
+        raise ValueError("project tag must be a short plain project name")
+    return value
+
+
+def configured_agent_outcome(
+    record: dict[str, Any], config: dict[str, Any], project: str | None = None
+) -> dict[str, Any]:
+    """Map one closed SPEC-235 record through the existing adapter configuration.
+
+    The closed field set is unchanged; an optional `project` tag (record value,
+    else `project` argument, else config `project`) is added when determinable
+    and never invented when it is not.
+    """
+    if set(record) - set(OPTIONAL_AGENT_FIELDS) != set(AGENT_OUTCOME_FIELDS):
         raise ValueError("agent outcome fields do not match the closed schema")
     fields = _agent_field_mapping(config)
-    return {fields[name]: record[name] for name in AGENT_OUTCOME_FIELDS}
+    mapped = {fields[name]: record[name] for name in AGENT_OUTCOME_FIELDS}
+    tag = record.get("project")
+    if tag is None:
+        tag = project if project is not None else config.get("project")
+    if tag is not None:
+        mapped[fields["project"]] = _project_tag(tag)
+    return mapped
 
 
 def normalized_agent_outcome(record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Normalize either configured adapter shape back to provider-neutral fields."""
     fields = _agent_field_mapping(config)
-    return {name: record.get(fields[name]) for name in AGENT_OUTCOME_FIELDS}
+    result = {name: record.get(fields[name]) for name in AGENT_OUTCOME_FIELDS}
+    if fields["project"] in record:
+        result["project"] = record[fields["project"]]
+    return result
 
 
-def encode_agent_outcomes(records: list[dict[str, Any]], config: dict[str, Any]) -> str:
+def encode_agent_outcomes(
+    records: list[dict[str, Any]], config: dict[str, Any], project: str | None = None
+) -> str:
     """Encode records with the configured SPEC-224 json-array or jsonl adapter."""
-    mapped = [configured_agent_outcome(record, config) for record in records]
+    mapped = [configured_agent_outcome(record, config, project) for record in records]
     adapter = str(config.get("adapter", "json-array"))
     if adapter == "json-array":
         return json.dumps(mapped, sort_keys=True, separators=(",", ":")) + "\n"

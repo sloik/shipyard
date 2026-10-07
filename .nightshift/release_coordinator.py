@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -68,6 +69,8 @@ class RepositoryPlan:
     committed_kit_policy: str | None
     policy_sources: tuple[str, ...]
     hook_policies: tuple[tuple[str, str], ...]
+    # BUG-NS-KIT-117: repo-relative registry copies this release untracks.
+    untrack_paths: set[str] = field(default_factory=set)
 
 
 MigrationRunner = Callable[[MigrationRequest], MigrationResult]
@@ -88,12 +91,23 @@ SuiteRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 # recorded a healthy suite run of 1701.715s -- 2400 - 1701.715 = 698.285,
 # far short of the required 2x margin -- tripping the same organic-growth
 # guard again (SPEC-377). Bumped to 4800 with real margin to spare.
-CANONICAL_SUITE_TIMEOUT_S = 4800
+# SPEC-NS-KIT-116 (2026-10-07): suite measured 2441-2731s, so 4800 < 2x; bumped to 6000.
+CANONICAL_SUITE_TIMEOUT_S = 6000
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+# BUG-NS-KIT-102: manifest guides are delivered beside the global SKILL.md.
+SKILL_GUIDES_SOURCE_PREFIX = "guides/"
+SKILL_GUIDES_TARGET_DIR = "Skills/nightshift/guides/"
 # SPEC-336: durable per-run canonical-suite duration measurements are written
 # as sibling artifacts to write_metrics()'s own reports/_wip/release-*.json
 # convention, using this glob to find the most recent one.
 CANONICAL_SUITE_DURATION_GLOB = "canonical-suite-duration-*.json"
+# SPEC-394 R3: the per-test durations of the same run are written as a JUnit XML
+# sibling of that record. The suite child writes to a unique pending path (via
+# PYTEST_ADDOPTS, so the pinned CANONICAL_SUITE.command argv is untouched) and
+# the recorder moves it beside the matching duration record. The name does not
+# match CANONICAL_SUITE_DURATION_GLOB.
+CANONICAL_SUITE_JUNIT_PENDING_PREFIX = "canonical-suite-junit-pending-"
+CANONICAL_SUITE_JUNIT_TEMPLATE = "canonical-suite-test-durations-{stamp}Z.junit.xml"
 # The line hooks/pre-commit identifies itself by; the write-scope installer
 # recognises the same string (BUG-329).
 KIT_HOOK_HEADER = "# Nightshift Kit \u2014 Pre-commit hook"
@@ -133,8 +147,36 @@ def _run_canonical_suite_step(
         )
 
 
+def _canonical_suite_junit_pending_path(canonical: Path) -> Path:
+    """Return a unique, not-yet-existing JUnit XML path for one suite run."""
+    return (
+        canonical
+        / "reports"
+        / "_wip"
+        / f"{CANONICAL_SUITE_JUNIT_PENDING_PREFIX}{uuid.uuid4().hex}.xml"
+    )
+
+
+def _suite_environment(junit_xml: Path | None) -> dict[str, str]:
+    """Build the suite child's environment (SPEC-394 R3).
+
+    ``NIGHTSHIFT_ESCALATION_SIGNOFF`` is dropped, and when ``junit_xml`` is
+    given ``--junitxml=<path>`` is appended to any existing ``PYTEST_ADDOPTS``
+    so pytest records per-test durations without changing the command argv.
+    """
+    environment = os.environ.copy()
+    environment.pop("NIGHTSHIFT_ESCALATION_SIGNOFF", None)
+    if junit_xml is not None:
+        junit_option = shlex.quote(f"--junitxml={junit_xml}")
+        existing = environment.get("PYTEST_ADDOPTS", "").strip()
+        environment["PYTEST_ADDOPTS"] = (
+            f"{existing} {junit_option}" if existing else junit_option
+        )
+    return environment
+
+
 def _run_canonical_suite(
-    argv: list[str], cwd: Path
+    argv: list[str], cwd: Path, *, junit_xml: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run release preflight without leaking an operator commit authorization.
 
@@ -143,8 +185,7 @@ def _run_canonical_suite(
     same release can pass or fail based on an operator decision unrelated to
     the kit under test.
     """
-    environment = os.environ.copy()
-    environment.pop("NIGHTSHIFT_ESCALATION_SIGNOFF", None)
+    environment = _suite_environment(junit_xml)
     return subprocess.run(
         argv,
         cwd=cwd,
@@ -157,7 +198,11 @@ def _run_canonical_suite(
 
 
 def _record_canonical_suite_duration(
-    canonical: Path, duration_s: float, *, suite_passed: bool
+    canonical: Path,
+    duration_s: float,
+    *,
+    suite_passed: bool,
+    junit_xml: Path | None = None,
 ) -> Path:
     """Persist a durable, timestamped measurement of one canonical-suite run.
 
@@ -169,20 +214,25 @@ def _record_canonical_suite_duration(
     duration produced by a failed or timed-out run, e.g. a run that hit
     CANONICAL_SUITE_TIMEOUT_S itself would otherwise poison every later
     headroom check with its own timeout as the "measured" runtime.
+
+    SPEC-394 R3: when ``junit_xml`` names a file the suite child actually wrote
+    (a timed-out or killed run writes none), it is moved beside this record as
+    ``canonical-suite-test-durations-<stamp>Z.junit.xml`` and the record gains
+    ``test_durations_artifact`` (its file name). Nothing is added otherwise.
     """
     recorded_at = datetime.now(UTC)
+    stamp = recorded_at.strftime("%Y%m%dT%H%M%S%f")
     record = {
         "duration_s": round(duration_s, 3),
         "recorded_at": recorded_at.isoformat(),
         "canonical_suite_timeout_s": CANONICAL_SUITE_TIMEOUT_S,
         "suite_passed": suite_passed,
     }
-    output = (
-        canonical
-        / "reports"
-        / "_wip"
-        / f"canonical-suite-duration-{recorded_at.strftime('%Y%m%dT%H%M%S%f')}Z.json"
-    )
+    output = canonical / "reports" / "_wip" / f"canonical-suite-duration-{stamp}Z.json"
+    if junit_xml is not None and junit_xml.is_file():
+        durations = output.with_name(CANONICAL_SUITE_JUNIT_TEMPLATE.format(stamp=stamp))
+        os.replace(junit_xml, durations)
+        record["test_durations_artifact"] = durations.name
     write_metrics(record, output)
     return output
 
@@ -374,6 +424,20 @@ def _install_allowlist(repo: Path, install: Path, manifest: dict) -> set[str]:
     return paths
 
 
+REGISTRY_FILENAME = "projects-registry.json"
+
+
+def _tracked_registry_paths(repo: Path, installs: Iterable[Path]) -> set[str]:
+    """BUG-NS-KIT-117: registry copies the repo still tracks (exact paths)."""
+    tracked: set[str] = set()
+    for install in installs:
+        relative = _relative(repo, install / REGISTRY_FILENAME)
+        probe = _run(["git", "ls-files", "--error-unmatch", "--", relative], cwd=repo)
+        if probe.returncode == 0:
+            tracked.add(relative)
+    return tracked
+
+
 def _suite_argv(metadata: dict, phase: str) -> list[str]:
     """Build the declared dependency-capable suite command without a shell."""
     if metadata.get("runner") != "uv":
@@ -517,6 +581,7 @@ def plan_repositories(
                 policy,
                 tuple(source for _value, source in declarations),
                 _commit_hook_policies(repo),
+                _tracked_registry_paths(repo, repo_installs),
             )
         )
     return plans, skipped
@@ -754,10 +819,21 @@ def _verify_staged(plan: RepositoryPlan, manifest: dict) -> tuple[set[str], list
     staged_result = _run(["git", "diff", "--cached", "--name-only"], cwd=plan.root)
     staged = set(staged_result.stdout.splitlines())
     errors = []
-    outside = sorted(staged - plan.allowed_paths)
+    outside = sorted(staged - plan.allowed_paths - plan.untrack_paths)
     if outside:
         errors.append("staged path outside release allowlist: " + ", ".join(outside))
-    if any(path.endswith("projects-registry.json") for path in staged):
+    # BUG-NS-KIT-117: the registry may appear in a release commit only as the
+    # planned removal of a tracked copy, never as added or modified content.
+    deleted = set(
+        _run(
+            ["git", "diff", "--cached", "--diff-filter=D", "--name-only"], cwd=plan.root
+        ).stdout.splitlines()
+    )
+    if any(
+        path.endswith(REGISTRY_FILENAME)
+        and not (path in plan.untrack_paths and path in deleted)
+        for path in staged
+    ):
         errors.append("generated registry entered release commit")
     for path in staged:
         relative = _managed_relative(plan, path)
@@ -818,6 +894,15 @@ def _commit_repository(
     )
     if add_result.returncode:
         return None, [add_result.stderr.strip() or "git add failed"]
+    # BUG-NS-KIT-117: untrack (index only; the file stays on disk) the exact
+    # registry paths planned for this repository, inside the same commit.
+    if plan.untrack_paths:
+        untrack = _run(
+            ["git", "rm", "--cached", "-q", "--", *sorted(plan.untrack_paths)],
+            cwd=plan.root,
+        )
+        if untrack.returncode:
+            return None, [untrack.stderr.strip() or "git rm --cached failed"]
     staged, errors = _verify_staged(plan, manifest)
     if errors:
         return None, errors
@@ -833,9 +918,15 @@ def _commit_repository(
         f"Nightshift-Release-Fingerprint: {manifest['fingerprint']}\n"
         f"Nightshift-Verified-Installs: {len(plan.installs)}"
     )
-    commit = _run(
-        ["git", "commit", "-m", message, "--", *sorted(staged)], cwd=plan.root
+    # BUG-NS-KIT-117: a pathspec commit snapshots the working tree, which would
+    # re-add the kept-on-disk registry. With an untrack in the set, commit the
+    # index instead; _verify_staged just proved it holds exactly the release set.
+    commit_args = (
+        ["git", "commit", "-m", message]
+        if plan.untrack_paths & staged
+        else ["git", "commit", "-m", message, "--", *sorted(staged)]
     )
+    commit = _run(commit_args, cwd=plan.root)
     if commit.returncode:
         return None, [
             commit.stderr.strip() or commit.stdout.strip() or "git commit failed"
@@ -846,7 +937,9 @@ def _commit_repository(
             ["git", "show", "--pretty=format:", "--name-only", sha], cwd=plan.root
         ).stdout.splitlines()
     )
-    if committed != staged or not committed.issubset(plan.allowed_paths):
+    if committed != staged or not committed.issubset(
+        plan.allowed_paths | plan.untrack_paths
+    ):
         return sha, ["post-commit path-set verification failed"]
     return sha, []
 
@@ -862,12 +955,40 @@ def _skill_manifest_entry(manifest: dict) -> dict | None:
     )
 
 
+def _skill_delivery_entries(manifest: dict) -> list[tuple[str, str, dict]]:
+    """(canonical source, release-root target, manifest entry): SKILL.md, then its guides.
+
+    BUG-NS-KIT-102: the slim skill's command bodies live in ``guides/``; the global
+    skill is only usable with those guides beside it, so they travel with SKILL.md.
+    """
+    skill = _skill_manifest_entry(manifest)
+    if skill is None:
+        return []
+    guides = sorted(
+        (
+            entry
+            for entry in manifest.get("files", [])
+            if str(entry.get("path", "")).startswith(SKILL_GUIDES_SOURCE_PREFIX)
+        ),
+        key=lambda entry: entry["path"],
+    )
+    return [(SKILL_MANAGED_PATH, SKILL_MANAGED_PATH, skill)] + [
+        (
+            entry["path"],
+            SKILL_GUIDES_TARGET_DIR
+            + entry["path"][len(SKILL_GUIDES_SOURCE_PREFIX):],
+            entry,
+        )
+        for entry in guides
+    ]
+
+
 def _skill_delivery_preflight(
     canonical: Path, release_root: Path | None, manifest: dict
 ) -> tuple[dict | None, list[str]]:
     """Resolve and preflight the separately installed active skill payload."""
-    entry = _skill_manifest_entry(manifest)
-    if entry is None:
+    entries = _skill_delivery_entries(manifest)
+    if not entries:
         return None, []
     if release_root is None:
         return None, ["managed canonical skill requires an explicit release root"]
@@ -875,30 +996,43 @@ def _skill_delivery_preflight(
     repo = _git_root(root)
     if repo is None or repo != root:
         return None, ["release root must be the owning git repository root"]
-    source = canonical / SKILL_MANAGED_PATH
-    target = root / SKILL_MANAGED_PATH
-    if not source.is_file() or source.is_symlink():
-        return None, ["canonical skill source is missing or unsafe"]
-    target_relative = _relative(repo, target)
-    if target_relative != SKILL_MANAGED_PATH:
-        return None, ["canonical skill target path is not exact"]
     staged, dirty = _porcelain_paths(repo)
-    errors = []
-    if target_relative in dirty:
-        errors.append("canonical skill target is dirty or pre-staged")
-    source_mode = stat.S_IMODE(source.stat().st_mode)
-    expected_mode = 0o755 if entry.get("executable") else 0o644
-    if source_mode != expected_mode:
-        errors.append("canonical skill source mode does not match manifest")
-    if release.sha256(source) != entry.get("sha256"):
-        errors.append("canonical skill source hash does not match manifest")
+    errors: list[str] = []
+    files: list[dict] = []
+    for source_relative, target_relative_expected, entry in entries:
+        source = canonical / source_relative
+        target = root / target_relative_expected
+        label = "skill" if source_relative == SKILL_MANAGED_PATH else "skill guide"
+        if not source.is_file() or source.is_symlink():
+            return None, [f"canonical {label} source is missing or unsafe: {source_relative}"]
+        target_relative = _relative(repo, target)
+        if target_relative != target_relative_expected:
+            return None, [f"canonical {label} target path is not exact: {source_relative}"]
+        if target_relative in dirty:
+            errors.append(f"canonical {label} target is dirty or pre-staged: {target_relative}")
+        expected_mode = 0o755 if entry.get("executable") else 0o644
+        if stat.S_IMODE(source.stat().st_mode) != expected_mode:
+            errors.append(f"canonical {label} source mode does not match manifest: {source_relative}")
+        if release.sha256(source) != entry.get("sha256"):
+            errors.append(f"canonical {label} source hash does not match manifest: {source_relative}")
+        files.append(
+            {
+                "source": source,
+                "target": target,
+                "target_relative": target_relative,
+                "sha256": entry.get("sha256"),
+                "mode": expected_mode,
+            }
+        )
+    head = files[0]
     return {
         "repo": repo,
-        "source": source,
-        "target": target,
-        "target_relative": target_relative,
-        "sha256": entry.get("sha256"),
-        "mode": expected_mode,
+        "source": head["source"],
+        "target": head["target"],
+        "target_relative": head["target_relative"],
+        "sha256": head["sha256"],
+        "mode": head["mode"],
+        "files": files,
         "preexisting_staged": staged,
     }, errors
 
@@ -927,16 +1061,16 @@ def _atomic_copy_skill(source: Path, target: Path, mode: int) -> None:
 
 def _commit_evidence(
     repo: Path,
-    target_relative: str,
-    expected_hash: str,
-    expected_mode: int,
+    files: list[dict],
     preexisting_staged: set[str],
 ) -> tuple[dict | None, list[str]]:
+    targets = {item["target_relative"] for item in files}
     staged = set(
         _run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.splitlines()
     )
-    created_exact_commit = target_relative in staged
-    if staged - {target_relative} != preexisting_staged:
+    staged_targets = staged & targets
+    created_exact_commit = bool(staged_targets)
+    if staged - targets != preexisting_staged:
         return None, ["canonical skill staging changed unrelated paths"]
     if created_exact_commit:
         commit = _run(
@@ -946,7 +1080,7 @@ def _commit_evidence(
                 "-m",
                 "[SPEC-230] chore: deliver managed Nightshift skill",
                 "--",
-                target_relative,
+                *sorted(staged_targets),
             ],
             cwd=repo,
         )
@@ -962,7 +1096,7 @@ def _commit_evidence(
         if remaining != preexisting_staged:
             return None, ["canonical skill commit consumed unrelated staging"]
     sha = _run(
-        ["git", "log", "-1", "--format=%H", "--", target_relative], cwd=repo
+        ["git", "log", "-1", "--format=%H", "--", *sorted(targets)], cwd=repo
     ).stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         return None, ["canonical skill has no owning commit"]
@@ -971,58 +1105,58 @@ def _commit_evidence(
             ["git", "show", "--pretty=format:", "--name-only", sha], cwd=repo
         ).stdout.splitlines()
     )
-    blob = _run(["git", "show", f"{sha}:{target_relative}"], cwd=repo)
-    tree = _run(["git", "ls-tree", sha, "--", target_relative], cwd=repo)
-    expected_git_mode = "100755" if expected_mode == 0o755 else "100644"
-    if (
-        (created_exact_commit and committed_paths != {target_relative})
-        or target_relative not in committed_paths
-        or blob.returncode
-        or hashlib.sha256(blob.stdout.encode()).hexdigest() != expected_hash
-        or tree.returncode
-        or not tree.stdout.startswith(expected_git_mode + " ")
-    ):
+    if created_exact_commit and committed_paths != staged_targets:
         return None, ["canonical skill commit evidence verification failed"]
+    for item in files:
+        relative = item["target_relative"]
+        blob = _run(["git", "show", f"HEAD:{relative}"], cwd=repo)
+        tree = _run(["git", "ls-tree", "HEAD", "--", relative], cwd=repo)
+        expected_git_mode = "100755" if item["mode"] == 0o755 else "100644"
+        if (
+            blob.returncode
+            or hashlib.sha256(blob.stdout.encode()).hexdigest() != item["sha256"]
+            or tree.returncode
+            or not tree.stdout.startswith(expected_git_mode + " ")
+        ):
+            return None, ["canonical skill commit evidence verification failed"]
     return {
         "sha": sha,
         "paths": sorted(committed_paths),
         "verified": True,
         "unrelated_staging_preserved": True,
-        "mode": expected_git_mode,
+        "mode": "100755" if files[0]["mode"] == 0o755 else "100644",
     }, []
 
 
 def _deliver_skill(plan: dict) -> tuple[dict | None, list[str]]:
     repo = plan["repo"]
-    target = plan["target"]
-    target_relative = plan["target_relative"]
-    _atomic_copy_skill(plan["source"], target, plan["mode"])
-    verification = {
-        "bytes": target.read_bytes() == plan["source"].read_bytes(),
-        "sha256": release.sha256(target) == plan["sha256"],
-        "mode": stat.S_IMODE(target.stat().st_mode) == plan["mode"],
-    }
+    files = plan["files"]
+    verification = {"bytes": True, "sha256": True, "mode": True}
+    for item in files:
+        _atomic_copy_skill(item["source"], item["target"], item["mode"])
+        verification["bytes"] &= item["target"].read_bytes() == item["source"].read_bytes()
+        verification["sha256"] &= release.sha256(item["target"]) == item["sha256"]
+        verification["mode"] &= (
+            stat.S_IMODE(item["target"].stat().st_mode) == item["mode"]
+        )
     if not all(verification.values()):
         return None, ["canonical skill target verification failed"]
-    add = _run(["git", "add", "-f", "--", target_relative], cwd=repo)
+    add = _run(
+        ["git", "add", "-f", "--", *(item["target_relative"] for item in files)],
+        cwd=repo,
+    )
     if add.returncode:
         return None, [add.stderr.strip() or "canonical skill git add failed"]
-    commit, errors = _commit_evidence(
-        repo,
-        target_relative,
-        plan["sha256"],
-        plan["mode"],
-        plan["preexisting_staged"],
-    )
+    commit, errors = _commit_evidence(repo, files, plan["preexisting_staged"])
     if errors:
         return None, errors
     return {
         "status": "verified",
         "source_relative_path": SKILL_MANAGED_PATH,
-        "target_relative_path": target_relative,
+        "target_relative_path": plan["target_relative"],
         "sha256": plan["sha256"],
         "mode": f"{plan['mode']:04o}",
-        "allowlist": [target_relative],
+        "allowlist": [item["target_relative"] for item in files],
         "verification": verification,
         "commit_evidence": commit,
     }, []
@@ -1091,6 +1225,7 @@ def coordinate_release(
         "release_handoffs_completed": [],
         "config_kit_version_updates": [],
         "hooks_wired": [],
+        "registry_untracks": [],
         "skill_delivery": (
             {
                 "status": "planned" if skill_plan else "not_required",
@@ -1098,7 +1233,11 @@ def coordinate_release(
                 "target_relative_path": SKILL_MANAGED_PATH,
                 "sha256": skill_plan["sha256"] if skill_plan else None,
                 "mode": f"{skill_plan['mode']:04o}" if skill_plan else None,
-                "allowlist": [SKILL_MANAGED_PATH] if skill_plan else [],
+                "allowlist": (
+                    [item["target_relative"] for item in skill_plan["files"]]
+                    if skill_plan
+                    else []
+                ),
                 "verification": {"bytes": False, "sha256": False, "mode": False},
                 "commit_evidence": None,
             }
@@ -1143,7 +1282,12 @@ def coordinate_release(
             probe_result = subprocess.CompletedProcess([], 2, "", str(exc))
             suite_argv = []
         else:
-            runner = canonical_suite_runner or _run_canonical_suite
+            suite_junit_xml = _canonical_suite_junit_pending_path(canonical)
+            runner = canonical_suite_runner or (
+                lambda argv, cwd: _run_canonical_suite(
+                    argv, cwd, junit_xml=suite_junit_xml
+                )
+            )
             probe_result = _run_canonical_suite_step(runner, probe_argv, canonical)
         result["canonical_suite_probe"] = (
             "passed" if probe_result.returncode == 0 else "failed"
@@ -1171,7 +1315,10 @@ def coordinate_release(
         result["canonical_suite_duration_s"] = round(suite_duration_s, 3)
         result["canonical_suite_duration_record"] = str(
             _record_canonical_suite_duration(
-                canonical, suite_duration_s, suite_passed=suite_passed
+                canonical,
+                suite_duration_s,
+                suite_passed=suite_passed,
+                junit_xml=suite_junit_xml,
             )
         )
         result["canonical_suite_runs"] = 1
@@ -1356,6 +1503,10 @@ def coordinate_release(
         if migration_failed:
             continue
 
+        result["registry_untracks"].extend(
+            {"repository": str(plan.root), "path": path}
+            for path in sorted(plan.untrack_paths)
+        )
         if dry_run:
             result["eligible_installs"].extend(str(item) for item in plan.installs)
             for install in plan.installs:

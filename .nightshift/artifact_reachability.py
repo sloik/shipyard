@@ -35,6 +35,8 @@ import re
 from collections.abc import Collection, Iterable
 from pathlib import Path
 
+import spec_id as spec_id_grammar
+
 REPORTS_DIR = "reports"
 RUNS_DIR = "runs"
 
@@ -47,7 +49,14 @@ REPORTS_EXCLUDED_NAMES = frozenset({"_wip", "failures"})
 # "SPEC-QUESTIONS-<NNN>" is a recognized non-numeric spec-ID shape (the
 # report open-question sweep convention; SPEC-QUESTIONS-001/002 predate this
 # module) and is matched explicitly rather than widened generically.
-_SPEC_TOKEN_RE = re.compile(r"(?:SPEC-QUESTIONS-\d+|(?:SPEC|BUG)-\d+(?:-\d+)*)")
+# A project-prefixed ID ("SPEC-NS-KIT-001", "BUG-NS-KIT-001-2") carries one or
+# more hyphen-separated uppercase segments between the SPEC/BUG word and the
+# numeric part; the lookahead keeps a following "SPEC-"/"BUG-" token from being
+# swallowed as a prefix segment. The prefix sits before the digits only, so a
+# trailing non-ID word is never absorbed. Tokens still count only when they
+# name an existing ID (see _spec_token_matches).
+# SPEC-416: the token grammar lives in the shared parser (legacy and R1 IDs).
+_SPEC_TOKEN_RE = spec_id_grammar.TOKEN_RE
 
 # Session-level dated report shape (Decision shape (a)): a bare or
 # suffixed nightshift report, or a versioned nightshift release note.

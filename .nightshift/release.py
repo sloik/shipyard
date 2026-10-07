@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import fnmatch
 import hashlib
@@ -10,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Optional
@@ -26,13 +28,20 @@ CANONICAL_SUITE = {
         "uvicorn[standard]",
         "httpx",
         "playwright",
+        "pytest-xdist",
     ],
     "probe": [
         "python",
         "-c",
-        "import fastapi,httpx,playwright,pytest,uvicorn,yaml",
+        "import fastapi,httpx,playwright,pytest,uvicorn,xdist,yaml",
     ],
-    "command": ["python", "-m", "pytest", "-q", "tests"],
+    # SPEC-395: per-test parallelism, default capped at 4 workers. The worker
+    # count can be lowered per run with PYTEST_XDIST_AUTO_NUM_WORKERS=<n>.
+    "command": [
+        "python", "-m", "pytest", "-q",
+        "-n", "auto", "--maxprocesses", "4", "--dist", "loadgroup",
+        "tests",
+    ],
 }
 
 
@@ -1024,3 +1033,104 @@ def apply_fleet(
             outcome["unexpected"].append({"install": str(install), "details": details})
             break  # unexpected failure stops later independent repositories
     return outcome
+
+
+SCAFFOLD_DIRS = (
+    "specs", "reports", "reports/_wip", "metrics", "metrics/_wip",
+    "knowledge", "red-proofs", "scenarios", "prompts", "checkpoints",
+)
+INSTALLED_HOOKS = ("pre-commit", "commit-msg")
+
+
+def _project_hooks_dir(project: Path) -> Optional[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(project), "rev-parse", "--git-path", "hooks"],
+        text=True, capture_output=True, check=False,
+    )
+    out = result.stdout.strip()
+    if result.returncode or not out:
+        return None
+    path = Path(out)
+    return path if path.is_absolute() else project / path
+
+
+def _seed_config(text: str, name: Optional[str], languages: list[str]) -> str:
+    """Fill the two identity placeholders the installed profile requires; nothing else."""
+    if name:
+        text = text.replace('  name: ""', f"  name: {json.dumps(name)}", 1)
+    if languages:
+        text = text.replace("  language: []", f"  language: {json.dumps(languages)}", 1)
+    return text
+
+
+def install_project(
+    canonical: Path, install: Path, *, dry_run: bool = False, force: bool = False,
+    name: Optional[str] = None, languages: Optional[list[str]] = None,
+) -> tuple[bool, list[str]]:
+    """Bootstrap a fresh project: managed set via apply_install, scaffold, hooks, verdict."""
+    canonical, install = canonical.resolve(), install.resolve()
+    manifest = json.loads((canonical / "release-manifest.json").read_text())
+    if (install / MARKER).exists() and not force:
+        return False, [f"{install / MARKER} exists; refusing without --force"]
+    hooks_dir = _project_hooks_dir(install.parent)
+    if hooks_dir is None:
+        return False, [f"{install.parent} is not a git repository (git init first)"]
+    ok, notes = apply_install(canonical, install, manifest, dry_run=dry_run)
+    if not ok:
+        return False, notes
+    lines = list(notes)
+    templates = sorted((canonical / "specs").glob("_TEMPLATE*.md"))
+    if dry_run:
+        lines.append(f"would create {len(SCAFFOLD_DIRS)} scaffold dirs, {len(templates)} spec templates")
+        lines += [f"would wire hooks {', '.join(INSTALLED_HOOKS)} into {hooks_dir}"]
+        return True, lines
+    for name in SCAFFOLD_DIRS:
+        (install / name).mkdir(parents=True, exist_ok=True)
+    for tpl in templates:
+        shutil.copyfile(tpl, install / "specs" / tpl.name)
+    config = install / "config.yaml"  # project-owned; seeded only when absent
+    if not config.exists():
+        config.write_text(_seed_config((canonical / "config.yaml").read_text(), name, languages or []))
+        lines.append("seeded config.yaml (fill it in)")
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in INSTALLED_HOOKS:
+        src, dst = install / "hooks" / name, hooks_dir / name
+        if dst.is_file() and dst.read_bytes() == src.read_bytes() and os.access(dst, os.X_OK):
+            lines.append(f"hook {name}: unchanged")
+            continue
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o755)
+        lines.append(f"hook {name}: wired at {dst}")
+    verdict = subprocess.run(
+        [sys.executable, str(install / "validate_install.py"), "--profile", "installed",
+         "--root", str(install.parent)],
+        text=True, capture_output=True, check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    lines += [ln for ln in verdict.stdout.splitlines() if ln.startswith(("ALLOW", "DENY", "  - "))]
+    if verdict.returncode:
+        lines.append(f"validate_install exit {verdict.returncode}: install not admitted")
+        return False, lines
+    return True, lines
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Nightshift release tooling")
+    sub = parser.add_subparsers(dest="command", required=True)
+    inst = sub.add_parser("install", help="bootstrap a project's .nightshift from the managed set")
+    inst.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    inst.add_argument("--install", type=Path, required=True)
+    inst.add_argument("--dry-run", action="store_true")
+    inst.add_argument("--force", action="store_true")
+    inst.add_argument("--name", help="project.name written into a newly seeded config.yaml")
+    inst.add_argument("--language", action="append", default=[], help="project.language entry (repeatable)")
+    args = parser.parse_args(argv)
+    ok, lines = install_project(args.canonical, args.install, dry_run=args.dry_run, force=args.force,
+        name=args.name, languages=args.language,
+    )
+    print("\n".join(lines), file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

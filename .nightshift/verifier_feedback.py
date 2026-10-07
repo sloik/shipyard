@@ -19,9 +19,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from verification_report import (
+    CONTAMINATION_CLASSES,
+    CONTAMINATION_TIMINGS,
     VERIFIER_IDENTITY_SCHEMA_VERSION,
+    GitFootprint,
+    contamination_exposures,
     validate_dispatch_identity,
     validate_verifier_verdict_dict,
+    verifier_footprint_errors_multi,
 )
 from lifecycle import attempt_requires_delivery_assessment
 from recovery_convergence import (
@@ -96,6 +101,7 @@ CONTROLLED_REASONS = frozenset(
         "budget_exhausted",
         "adapter_failure",
         "invalid_verdict",
+        "premise_dispute",
         "legacy_verdict_identity",
         "verifier_identity_mismatch",
         "dispatch_failure",
@@ -126,6 +132,7 @@ NEXT_ACTIONS = frozenset(
         "continue",
         "dispatch_replacement_verifier",
         "dispatch_remediation",
+        "parent_decision",
         "dispatch_read_only_diagnostician",
         "dispatch_repair",
         "dispatch_fresh_verifier",
@@ -212,9 +219,17 @@ class RemediationFeedback:
     causal_confidence: str
     remediation_ordinal: int
     signature: str
+    # SPEC-NS-KIT-002-005 R3: closed (class, timing, use) rows of a substantive exposure the
+    # admitted FAIL carried; leads only. Absent from the record when empty, so packets and
+    # signatures created without exposure are byte-identical to before.
+    exposure_provenance: tuple[Mapping[str, str], ...] = ()
 
     def record(self) -> dict[str, Any]:
         value = asdict(self)
+        if self.exposure_provenance:
+            value["exposure_provenance"] = [dict(row) for row in self.exposure_provenance]
+        else:
+            value.pop("exposure_provenance")
         value["failed_ac_ids"] = list(self.failed_ac_ids)
         value["evidence"] = [asdict(item) for item in self.evidence]
         for key in ("reproduction_commands", "verification_commands"):
@@ -560,6 +575,17 @@ def validate_remediation_feedback(
         for forbidden in packet.forbidden_surface
     ):
         raise FeedbackValidationError("allowed and forbidden surfaces overlap")
+    for row in packet.exposure_provenance:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"class", "timing", "use"}
+            or row["class"] not in CONTAMINATION_CLASSES
+            or row["timing"] not in CONTAMINATION_TIMINGS
+            or row["use"] != "lead_only"
+        ):
+            raise FeedbackValidationError("invalid exposure provenance")
+    if len(packet.exposure_provenance) > MAX_ITEMS:
+        raise FeedbackValidationError("invalid exposure provenance")
     if not packet.guardrails or len(packet.guardrails) > MAX_ITEMS:
         raise FeedbackValidationError("invalid guardrails")
     for guardrail in packet.guardrails:
@@ -578,7 +604,7 @@ def remediation_feedback_from_dict(data: Mapping[str, Any]) -> RemediationFeedba
     """Parse the closed packet schema; unknown and missing fields fail closed."""
     expected = set(RemediationFeedback.__dataclass_fields__)
     unknown = set(data) - expected
-    missing = expected - set(data)
+    missing = expected - set(data) - {"exposure_provenance"}
     if unknown or missing:
         raise FeedbackValidationError(
             f"packet fields mismatch (missing={sorted(missing)}, unknown={sorted(unknown)})"
@@ -610,6 +636,9 @@ def remediation_feedback_from_dict(data: Mapping[str, Any]) -> RemediationFeedba
             causal_confidence=data["causal_confidence"],
             remediation_ordinal=data["remediation_ordinal"],
             signature=data["signature"],
+            exposure_provenance=tuple(
+                dict(row) for row in data.get("exposure_provenance", ())
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise FeedbackValidationError("invalid packet field types") from exc
@@ -766,6 +795,90 @@ def _verdict_digest(verdict: Mapping[str, Any]) -> str:
     return _digest(dict(verdict))
 
 
+_FOOTPRINT_ARMS = ("baseline", "head")
+_FOOTPRINT_ARM_FIELDS = ("tree_before", "tree_after", "porcelain_before", "porcelain_after")
+
+
+def _two_arm_footprint_errors(footprint: Any) -> list[str]:
+    """Fail-closed check of the canonical two-arm verifier footprint (SPEC-282/284).
+
+    Arm presence and field shape are checked here; the cleanliness rules
+    (equal trees, porcelain set comparison per arm) are the shared
+    ``verifier_footprint_errors_multi`` so this admission cannot drift from the
+    embedded validator.  The legacy flat shape is refused, never passed.
+    """
+    if not isinstance(footprint, Mapping):
+        return ["footprint is not a mapping"]
+    present = [arm for arm in _FOOTPRINT_ARMS if arm in footprint]
+    if not present:
+        return ["legacy flat footprint (no baseline/head arms)"]
+    missing = [arm for arm in _FOOTPRINT_ARMS if arm not in footprint]
+    if missing:
+        return [f"missing arm '{arm}'" for arm in missing]
+    shape_errors: list[str] = []
+    for arm in _FOOTPRINT_ARMS:
+        body = footprint[arm]
+        if not isinstance(body, Mapping):
+            shape_errors.append(f"{arm}: arm is not a mapping")
+            continue
+        for field in _FOOTPRINT_ARM_FIELDS:
+            if not isinstance(body.get(field), str):
+                shape_errors.append(f"{arm}: {field} missing or not a string")
+    if shape_errors:
+        return shape_errors
+    before = {
+        arm: GitFootprint(
+            tree=footprint[arm]["tree_before"], porcelain=footprint[arm]["porcelain_before"]
+        )
+        for arm in _FOOTPRINT_ARMS
+    }
+    after = {
+        arm: GitFootprint(
+            tree=footprint[arm]["tree_after"], porcelain=footprint[arm]["porcelain_after"]
+        )
+        for arm in _FOOTPRINT_ARMS
+    }
+    return verifier_footprint_errors_multi(before, after)
+
+
+def _is_substantive(exposure: Mapping[str, Any]) -> bool:
+    """R2/R3: author conclusions, and a required deliverable read *before* deriving the result
+    (the spec leaves that case open; it is treated like an author conclusion, fail closed)."""
+    return exposure["class"] == "author_conclusion" or (
+        exposure["class"] == "required_deliverable" and exposure["timing"] == "before_derivation"
+    )
+
+
+def _reproduced_by_own_samples(verdict: Mapping[str, Any]) -> bool:
+    """True when the verifier's own samples reproduce a regression, recomputed from the samples.
+
+    A regressed name fails in every real (not reused, not skipped-as-unexecuted) head sample and
+    in no baseline sample; the recorded ``classification`` is never trusted.
+    """
+    if verdict.get("premise_dispute"):
+        return False
+    for suite in verdict.get("suites") or ():
+        samples = suite.get("samples") if isinstance(suite, Mapping) else None
+        if not isinstance(samples, Mapping):
+            continue
+        head, baseline = samples.get("head"), samples.get("baseline")
+        if not isinstance(head, list) or not head or not isinstance(baseline, list):
+            continue
+        if any(
+            not isinstance(item, Mapping) or item.get("executed") is False
+            or item.get("reused") or not isinstance(item.get("failing"), list)
+            for item in head
+        ):
+            continue
+        failing_everywhere = set.intersection(*(set(item["failing"]) for item in head))
+        failing_baseline = set().union(*(
+            set(item.get("failing") or ()) for item in baseline if isinstance(item, Mapping)
+        ))
+        if failing_everywhere - failing_baseline:
+            return True
+    return False
+
+
 def validate_verifier_verdict(
     verdict: Mapping[str, Any],
     *,
@@ -775,6 +888,7 @@ def validate_verifier_verdict(
     expected_ac_ids: Iterable[str],
     verifier_id: str,
     implementer_ids: Iterable[str] = (),
+    final_acceptance: bool = False,
 ) -> None:
     errors = validate_verifier_verdict_dict(dict(verdict))
     if errors:
@@ -788,17 +902,27 @@ def validate_verifier_verdict(
         or verdict.get("identity_schema_version") != VERIFIER_IDENTITY_SCHEMA_VERSION
     ):
         raise FeedbackValidationError("stale or mismatched verdict identity")
-    if verdict.get("contamination") is not None:
+    exposures = contamination_exposures(verdict.get("contamination"))
+    if exposures is None:
         raise FeedbackValidationError("contaminated verdict")
+    outcome = verdict.get("verdict")
+    for exposure in exposures:
+        before = exposure["timing"] == "before_derivation"
+        # A FAIL with substantive exposure is admitted here; create_remediation_feedback
+        # additionally requires the verifier's own reproduction (R3). A PASS is refused on a
+        # before-derivation exposure, and a fresh verifier accepting the remediated head on any.
+        blocked = outcome == "pass" and final_acceptance and before
+        if _is_substantive(exposure) and outcome != "fail":
+            blocked = blocked or before or outcome != "pass"
+        if blocked:
+            raise FeedbackValidationError("contaminated verdict")
     if not verifier_id or verifier_id in set(implementer_ids):
         raise FeedbackValidationError("verifier is not independent")
-    footprint = verdict.get("git_footprint")
-    if (
-        not isinstance(footprint, Mapping)
-        or footprint.get("tree_before") != footprint.get("tree_after")
-        or footprint.get("porcelain")
-    ):
-        raise FeedbackValidationError("verifier write footprint is not clean")
+    footprint_errors = _two_arm_footprint_errors(verdict.get("git_footprint"))
+    if footprint_errors:
+        raise FeedbackValidationError(
+            "verifier write footprint is not clean: " + "; ".join(footprint_errors)
+        )
     acs = verdict.get("acs")
     if not isinstance(acs, list) or not acs:
         raise FeedbackValidationError("verdict has no AC evidence")
@@ -900,6 +1024,15 @@ def create_remediation_feedback(
         verifier_id=verifier_id,
         implementer_ids=implementer_ids,
     )
+    provenance = tuple(sorted(
+        {
+            (item["class"], item["timing"])
+            for item in contamination_exposures(verdict.get("contamination")) or ()
+            if _is_substantive(item)
+        }
+    ))
+    if provenance and not _reproduced_by_own_samples(verdict):
+        raise FeedbackValidationError("exposed failure is not reproduced by the verifier's own samples")
     declared_surface = verdict.get("allowed_change_surface")
     if (
         not isinstance(declared_surface, list)
@@ -938,6 +1071,9 @@ def create_remediation_feedback(
         causal_confidence=causal_confidence,
         remediation_ordinal=1,
         signature="",
+        exposure_provenance=tuple(
+            {"class": cls, "timing": timing, "use": "lead_only"} for cls, timing in provenance
+        ),
     )
     packet = replace(
         unsigned, signature=sign_payload(_packet_unsigned(unsigned), parent_key)
@@ -1128,8 +1264,48 @@ def _append_effects(state: FeedbackState, *effects: FeedbackEffect) -> FeedbackS
     )
 
 
+def _validate_premise_dispute(verdict: Mapping[str, Any]) -> None:
+    """SPEC-411: a disputes_premise verdict must carry its claim, evidence and
+    the explicit spec_defect boolean the parent decision path routes on."""
+    dispute = verdict.get("premise_dispute")
+    if (
+        not isinstance(dispute, Mapping)
+        or not isinstance(dispute.get("claim"), str) or not dispute["claim"].strip()
+        or not isinstance(dispute.get("evidence"), str) or not dispute["evidence"].strip()
+        or not isinstance(dispute.get("spec_defect"), bool)
+    ):
+        raise FeedbackValidationError("disputes_premise without a complete premise_dispute")
+
+
+def _premise_dispute_terminal(
+    state: FeedbackState, event: NormalizedFeedbackEvent
+) -> FeedbackState:
+    """SPEC-411: hand a valid disputes_premise verdict to the parent decision path.
+
+    The dispute is evidence for the parent (guides/run-6.md Step 5c(e)), never a failed
+    verdict: no replacement verifier or remediation is spent and the reducer does
+    not decide.  ``spec_defect`` rides on the terminal resolution for the parent.
+    """
+    dispute = event.verdict["premise_dispute"]
+    handoff = replace(
+        event,
+        role="parent",
+        outcome="blocked",
+        reason="premise_dispute",
+        next_action="parent_decision",
+    )
+    return _terminal(
+        state, "premise_dispute", human=False, event=handoff,
+        extra={
+            "spec_defect": dispute["spec_defect"],
+            "premise_dispute_digest": _digest(_json_safe(dict(dispute))),
+        },
+    )
+
+
 def _terminal(
-    state: FeedbackState, reason: str, *, human: bool, event: NormalizedFeedbackEvent
+    state: FeedbackState, reason: str, *, human: bool, event: NormalizedFeedbackEvent,
+    extra: Mapping[str, Any] | None = None,
 ) -> FeedbackState:
     derived_human_action = _human_action_for(reason, event.next_action)
     if human is not derived_human_action:
@@ -1183,6 +1359,7 @@ def _terminal(
                     asdict(item) for item in (state.packet.evidence if state.packet else ())
                 ],
             },
+            **dict(extra or {}),
         ),
     )
 
@@ -1696,11 +1873,20 @@ def reduce_feedback_event(
             valid = False
             validation_error = "invalid_verdict"
         else:
+            # SPEC-410: bind the verdict to the state's current candidate in
+            # every phase, never to whatever head the event itself claims.
+            expected_head_digest = (
+                state.remediated_implementation_head_digest
+                if state.phase is FeedbackPhase.AWAITING_FRESH_VERDICT
+                else state.implementation_head_digest
+            )
             try:
+                if event.head and event.head != expected_head_digest:
+                    raise FeedbackValidationError("stale or mismatched verdict identity")
                 validate_verifier_verdict(
                     event.verdict,
                     spec_id=state.spec_id,
-                    implementation_head_digest=event.head or state.implementation_head_digest,
+                    implementation_head_digest=expected_head_digest,
                     verifier_head_commit=(
                         state.remediated_verifier_head_commit
                         if state.phase is FeedbackPhase.AWAITING_FRESH_VERDICT
@@ -1710,7 +1896,10 @@ def reduce_feedback_event(
                     expected_ac_ids=state.expected_ac_ids,
                     verifier_id=event.actor_id,
                     implementer_ids=state.implementer_ids,
+                    final_acceptance=state.phase is FeedbackPhase.AWAITING_FRESH_VERDICT,
                 )
+                if event.verdict.get("verdict") == "disputes_premise":
+                    _validate_premise_dispute(event.verdict)
                 valid = True
                 validation_error = "invalid_verdict"
             except FeedbackValidationError as exc:
@@ -1774,6 +1963,9 @@ def reduce_feedback_event(
                 return _terminal(
                     state, validation_error, human=True, event=blocked_event
                 )
+            if event.verdict.get("verdict") == "disputes_premise":
+                state = _record_actor_effect(state, verdict_event)
+                return _premise_dispute_terminal(state, event)
             if event.verdict.get("verdict") == "pass":
                 state = _record_actor_effect(state, verdict_event)
                 ready = replace(state, phase=FeedbackPhase.READY_FOR_INTEGRATION)
@@ -1883,6 +2075,14 @@ def reduce_feedback_event(
                 state.diagnostician_id,
                 state.repairer_id,
             }
+            if (
+                valid
+                and event.verdict.get("verdict") == "disputes_premise"
+                and event.head == state.remediated_implementation_head_digest
+                and event.actor_id not in disallowed_verifiers
+            ):
+                state = _record_actor_effect(state, verdict_event)
+                return _premise_dispute_terminal(state, event)
             if (
                 not valid
                 or event.verdict.get("verdict") not in {"pass", "fail"}

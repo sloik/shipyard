@@ -40,6 +40,7 @@ from spec_frontmatter import (
     parse_spec_file,
     promotion_gap_error,
     promotion_transition_error,
+    spec_metadata_policy_for_specs_dir,
     write_spec_frontmatter,
 )
 from status_store import StatusStore
@@ -47,6 +48,30 @@ from status_store import StatusStore
 
 class PromotionError(RuntimeError):
     """Raised when a promotion cannot be durably performed."""
+
+
+def readiness_refusal(
+    frontmatter: Mapping[str, Any], body: str, *, reviewed: str | None = None,
+    specs_dir: Path | None = None, spec_metadata_policy: Any = None,
+) -> tuple[str | None, "lifecycle.ReadinessResult"]:
+    """BUG-NS-KIT-100 R4: the intrinsic-readiness gate, shared with ``board_ctl.py rules check``.
+
+    Returns ``(refusal, result)``: ``FAIL`` is always refused; ``REVIEW`` is refused unless
+    a non-empty ``reviewed`` rationale is given. SPEC-419: the project's ``spec_metadata``
+    policy (read from ``specs_dir``'s config unless passed) is part of readiness, so an invalid
+    policy or a violating value refuses promotion with the config/metadata diagnostic.
+    """
+    if spec_metadata_policy is None and specs_dir is not None:
+        spec_metadata_policy = spec_metadata_policy_for_specs_dir(specs_dir)
+    result = lifecycle.intrinsic_readiness(frontmatter, body, spec_metadata_policy)
+    spec_id = str(frontmatter.get("id") or "")
+    findings = "; ".join(result.findings)
+    if result.level is lifecycle.Readiness.FAIL:
+        return f"promotion refused: {spec_id} intrinsic readiness FAIL: {findings}", result
+    if result.level is lifecycle.Readiness.REVIEW and not (isinstance(reviewed, str) and reviewed.strip()):
+        return (f"promotion refused: {spec_id} intrinsic readiness REVIEW: {findings}; "
+                "record a rationale with --readiness-reviewed"), result
+    return None, result
 
 
 def promote_to_ready(
@@ -61,6 +86,7 @@ def promote_to_ready(
     resolution_rationale: str | None = None,
     findings: Iterable[str] = (),
     evidence: Iterable[str] = (),
+    readiness_reviewed: str | None = None,
 ) -> dict[str, Any]:
     """Promote one spec from ``draft``/``planned`` to ``ready`` (or ``planned``).
 
@@ -88,6 +114,12 @@ def promote_to_ready(
             f"promotion refused: {spec_id} status is {current_status!r}, "
             "not draft or planned"
         )
+
+    # R4: refuse before any write (including the gap-resolution write below).
+    readiness_refused, readiness = readiness_refusal(
+        fm, parsed.body, reviewed=readiness_reviewed, specs_dir=path.parent)
+    if readiness_refused:
+        raise PromotionError(readiness_refused)
 
     declared_gap = fm.get("promotion_gap")
     gap_kind = declared_gap.get("kind") if isinstance(declared_gap, Mapping) else None
@@ -143,6 +175,18 @@ def promote_to_ready(
             content={"decision": decision, "gap_resolution": dict(gap_resolution or {})},
         ))
 
+    if readiness.level is lifecycle.Readiness.REVIEW:
+        review_rationale = str(readiness_reviewed).strip()
+        written.append(spec_artifacts.write_artifact(
+            reports_root, spec_id, type="decision", actor=actor,
+            summary=f"reviewed intrinsic readiness REVIEW: {review_rationale[:100]}",
+            content={"decision": lifecycle.decision_record(
+                trigger="intrinsic_readiness:REVIEW", current_state=current_status,
+                candidates=[target_status], reason="; ".join(readiness.findings),
+                findings=list(readiness.findings), resolution=review_rationale,
+                rationale=review_rationale, authority=actor)},
+        ))
+
     findings = list(findings)
     if findings:
         written.append(spec_artifacts.write_artifact(
@@ -172,6 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap-resolved", action="store_true")
     parser.add_argument("--gap-waived-reason")
     parser.add_argument("--resolution-rationale")
+    parser.add_argument("--readiness-reviewed", metavar="RATIONALE",
+                        help="accept an intrinsic-readiness REVIEW result, recording this rationale")
     parser.add_argument("--finding", action="append", default=[])
     parser.add_argument("--evidence", action="append", default=[])
     return parser
@@ -192,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             actor=ns.actor, target_status=ns.target_status,
             gap_resolution=gap_resolution, resolution_rationale=ns.resolution_rationale,
             findings=ns.finding, evidence=ns.evidence,
+            readiness_reviewed=ns.readiness_reviewed,
         )
     except PromotionError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2))

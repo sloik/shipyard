@@ -67,7 +67,7 @@ to the existing `StatusStore`. The durable local event supplies the stable run
 ID. Workers cannot transition state, and terminal transitions are idempotent.
 
 - When a spec is selected: set `status: in_progress` and commit
-  `[<spec-id>] chore: mark in_progress`.
+  `chore: mark <spec-id> in_progress` (no trailers; the hook accepts exactly this form).
 - When a spec completes: set `status: done` and commit
   `[<spec-id>] chore: mark done`.
 - In orchestrator mode, the parent marks `in_progress` on `main` before launching
@@ -185,7 +185,7 @@ Examples:
 ```text
 [SPEC-033] feat: handler registry with pluggable domains
 [SPEC-033] test: add handler isolation tests
-[SPEC-033] chore: mark in_progress
+chore: mark SPEC-033 in_progress
 ```
 
 Rules:
@@ -209,7 +209,10 @@ Nightshift ships two git hooks:
 - `hooks/commit-msg`: enforces the `[SPEC-ID]` prefix when
   `git.commit_prefix: "spec-id"`, subject to `git.unprefixed_paths` (below),
   and rejects `chore: mark <id> done|blocked` unless every required terminal
-  lifecycle trailer is present and non-empty.
+  lifecycle trailer is present and non-empty. The non-terminal
+  `chore: mark <id> in_progress` marker is accepted without trailers. This
+  canonical repository must wire the hook like any install
+  (`cp hooks/commit-msg .git/hooks/`) so the grammar is exercised here too.
 
 ### Staged spec validation (SPEC-358)
 
@@ -407,6 +410,17 @@ and the canonical spec plus whole-kit release remedy. Because Git permits
 compares the admitted receipt with disk at result acceptance. A deny or
 indeterminate result occurs before lifecycle, merge, post-merge validation, or
 cleanup and preserves HEAD, index, branch, worktree, and divergent payload.
+Only an `allow` fills the one-per-receipt acceptance slot; a deny, a mismatch and
+`NS-MPI-RELEASE-SUPERSEDED` (a sealed release landed after admission) are recorded
+once as attempts under `acceptance/attempts/` and never consume it. A stored allow
+is read back (`receipt_check.check="stored-result"`) unless the call does not bind
+the run or any payload drift is observed, which reports a mismatch or deny.
+
+Kickoff (SPEC-NS-KIT-007): the result receipt is admitted against and checked at the worker worktree's
+install; the control-plane receipt is admitted against the parent's. A control-plane
+`NS-MPI-RELEASE-SUPERSEDED` earns one fresh shared admission and one re-check; a result-receipt one
+ends the run `superseded` (branch and worktree preserved, spec returned to ready, re-admit and re-run);
+the old candidate is never accepted under a successor's receipt.
 
 Hooks are enforcement implementations. If this policy changes, update this file
 first, then update hooks and drift checks to match.
@@ -492,6 +506,15 @@ authorization refuses bootstrap. Changed candidate bytes require fresh independe
 verification and a new authorization ID. Normal scope/release metadata gates,
 independent verdict, full canonical suite, exact fresh-main suite and lifecycle
 gates remain mandatory; the versioned release handoff remains pending.
+
+### Main test-status ledger commits (SPEC-NS-KIT-002-002)
+
+The ledger is a tracked file written only by the serialized fresh-main step's parent: after a real
+fresh-main run, or a deduplicated one (`reports/_wip/ledger-pending-<spec>.json`), the parent
+commits the new ledger with explicit paths in its own bookkeeping commit. Spec- and report-only
+commits do not change the ledger identity; a test, resource, config, gate-script or toolchain
+change does. Every non-pass entry names a BUG spec and carries age and expiry; an expired entry
+excuses nothing.
 
 ### The kit's own detector fixtures (SPEC-197)
 
@@ -832,3 +855,186 @@ Human review should inspect commits as the durable audit trail:
 
 The review question is not only "did tests pass"; it is whether the history tells
 a coherent, reversible story for each spec.
+
+
+## Receipt-bound invalid-run abandonment (SPEC-387-001)
+
+This bounded installed-project recovery applies only to an original wrong-run
+identity rejection followed by an immutable corrected-retry contradiction. It
+never authorizes terminal acceptance, candidate merge, completion or cleanup.
+Canonical authoring remains the separate SPEC-365 contract above. Expired
+receipts may be inspected for this rejected administrative decision only;
+`verify_terminal_integrity` still rejects expired result acceptance.
+
+The parent injects `managed_payload_provenance.AbandonmentAnchor` through a
+callable `abandonment_provider(install, spec_id)`. Its positional inputs are an
+externally retained authority JSON path, exact SHA-256, frozen old candidate
+checkout, and, for successor B, canonical release source and release root.
+Authorization and independent-verifier validation are parent responsibilities;
+worker packets, environment variables and configuration cannot supply them.
+The authority must reside outside the project, candidate, source and consumer
+Git repositories and every linked checkout of them (fail closed if checkouts
+cannot be enumerated).
+
+Automatic-retry rule. It is implemented once, in
+`unblock_spec.automatic_attempt_decision`, whose docstring carries this exact
+text; `prepare`, `record_attempt` and the packet revalidation before every
+administrative mutation call it directly, and the ordinary `prepare`,
+`record_attempt` and `finalize` call it through `_ordinary_decision`:
+
+<!-- automatic-retry-rule -->
+Automatic recovery attempts are keyed by the current blocker fingerprint. This
+rule governs every automatic attempt, administrative and ordinary alike. Retry
+state is the durable status-store ledger alone: durably issued packets and
+recorded attempt outcomes with their digests, on both routes. An attempt file is
+evidence bound to its ledger digest. A ledger entry whose file is missing,
+unsafe, corrupted, digest-mismatched or not bound to a durable issuance fails
+closed with a named reason: it never reopens the fingerprint, never counts as no
+outcome and never permits a further automatic attempt. A file without a ledger
+entry is not an outcome. Any completed outcome (failed, skipped or succeeded)
+recorded in the ledger on the current fingerprint by any run closes that
+fingerprint to further automatic attempts; after a succeeded outcome only
+finalize is permitted. `retry_override` (human) is the only way to open a closed
+fingerprint. The sole exemption is a crash replay: the same run, on the same
+fingerprint, presenting the same durably issued packet, with no outcome yet
+recorded in the ledger for that packet; it may record exactly one outcome. A
+succeeded-but-unfinalized run may finalize idempotently and may not record
+again; an ordinary run whose own automatic succeeded attempt is on file may
+re-prepare finalize-only (the same packet, which can only finalize). A packet is
+bound to the run and fingerprint for which prepare durably issued it; a packet
+copied to another run, issued for another fingerprint, or superseded is refused
+at record_attempt.
+<!-- /automatic-retry-rule -->
+
+For both routes, `prepare` durably issues each packet (an append-only,
+per-fingerprint issuance sequence in the status store recording run, packet,
+fingerprint and `retry_override`, under the controller lock); the latest
+issuance on a fingerprint supersedes earlier ones, and a packet's
+`retry_override` counts only as its issuance recorded it. A same-run
+finalize-only re-prepare reuses its issuance. An administrative attempt is
+always automatic: a manual flag never bypasses the rule. Each outcome is
+recorded in the same durable ledger with its attempt id, run, fingerprint,
+outcome, evidence path and SHA-256; that ledger, never a directory listing of
+`knowledge/attempts/`, is what the rule reads. The named fail-closed reasons are
+`NS-UNBLOCK-ATTEMPT-EVIDENCE-MISSING`, `NS-UNBLOCK-ATTEMPT-EVIDENCE-UNSAFE`,
+`NS-UNBLOCK-ATTEMPT-EVIDENCE-MISMATCH` and `NS-UNBLOCK-ATTEMPT-LEDGER-ORPHANED`.
+Before writing an attempt file, `record_attempt` durably records a write intent
+(stamp and digest); only that ledgered intent lets a crash replay rebuild the
+identical bytes; the ledger entry follows the file. A file already at the target
+path without a ledger entry is refused as `NS-UNBLOCK-ATTEMPT-LEDGER-ORPHANED`
+and is never read, and `finalize` accepts only a succeeded attempt whose ledger
+entry is bound to the packet's issuance and whose file matches the entry's
+digest. A non-automatic, human-authorized outcome is ledgered as evidence but is
+not an automatic attempt and never closes a fingerprint. The SPEC-351
+repeated-failure gate reads the ledgered attempts of the spec and its parent; an
+entry whose file is not intact counts as a failed attempt and is listed by name
+as `integrity_failures` in the packet.
+
+An install that predates the ordinary ledger needs no operator step: the first
+ordinary `prepare` of a spec (and of its parent) adopts every parseable
+`unblock_attempt` file of that spec that has no ledger entry, once, recording
+its current digest as `legacy_adopted` (it has no issuance and stands as its
+own, so a closed fingerprint stays closed), reports unparsable files by name and
+emits `unblock_legacy_attempts_adopted`. A file that appears after adoption has
+no ledger entry and is not an outcome. `unblock_spec.py adopt-legacy-attempts
+--spec <ID>` runs the same idempotent adoption by hand.
+
+<!-- ledger-integrity-wedge -->
+**Integrity wedge and its human exits (both routes).** When a ledgered attempt
+file is missing, unsafe or corrupt, the fingerprint is closed to every run,
+including `retry_override`, with the `NS-UNBLOCK-ATTEMPT-EVIDENCE-*` reason
+above; this is by design and is the only way a fingerprint can be stuck. The
+exits are human: (a) re-evidence the blocker, which gives a new fingerprint (the
+decision record stays in the ledger); (b) restore the file's exact bytes, whose
+digest is in the ledger entry; (c) repair the status store outside the protocol,
+which is outside the threat model and must be recorded by hand. There is no
+protocol repair action by design (owner decision on SPEC-421 F6).
+<!-- /ledger-integrity-wedge -->
+
+`record_attempt` and `finalize` route by the presented packet alone: a packet
+carrying `invalid_run_abandonment` (stamped by administrative `prepare`) is
+verified against the durable decision and issuance ledger, and a forged marker
+is refused; any other packet runs the ordinary controller, whose `issuance_id`
+is its own durable issuance. A stripped administrative packet's attempt file
+has no ledger entry, so it is never an outcome, and ordinary `finalize` refuses
+to move an administrative blocker to ready; ordinary `record_attempt` refuses an
+administrative blocker the same way, before writing. The SPEC-351
+repeated-failure gate is re-evaluated at `record_attempt` from the ledgered
+attempts, not from the packet pinned at prepare; both refusals emit
+`unblock_decision_refused`.
+
+Abandonment fails closed over a live unrelated blocker: if the spec is already
+blocked for any reason other than this same rejected run's retained evidence, it
+refuses with a named reason and changes nothing; a human resolves that blocker
+first. The check runs inside the same controller lock as the administrative
+blocked write, and a related prior blocker's fields are moved into
+`unblock_history` as `superseded_blocker`, never silently overwritten. A failed write of the sanitized rejected-replay quarantine record never
+turns a rejection into success and is named in the rejection reason. The record uses schema `1.0.0` and policy
+`receipt-bound-invalid-run-abandonment-v1` with these exact fields:
+
+- `authorization_id`, `user_authorization_sha256`, `binding`, `spec_id`, `spec_path`;
+- `receipt_ref`, `receipt_sha256`, original `invocation_id`, rejected `wrong_run_id`;
+- original `baseline_revision`, frozen `candidate_commit`, `candidate_tree`,
+  `candidate_binding`, enumerated `control_paths`;
+- `retained_evidence`: exact `admission`, `acceptance`, `quarantine`,
+  `failed_verifier` references, each `{path, sha256}`;
+- `independent_verification`: the existing normalized AuthoringAnchor verifier
+  identity/verdict digest, candidate commit/tree and policy contract;
+- `active_release`: exact `fingerprint`, `inventory_sha256`, `marker_sha256`,
+  `installed_revision`, and `rollout` (null only for complete original A).
+
+Bindings are the existing `_git_binding` project/common-directory/checkout/install
+hashes, independently reconstructed by the parent. A lifecycle commit SHA is
+never the receipt invocation identity. Control paths are selected spec and
+explicit report files only; application changes and other evidence changes stop
+recovery. Every release proof reconstructs the complete inventory and modes from
+pinned Git blobs and checks current bytes, markers, manifests and unsafe aliases.
+
+For B, `rollout` contains `source_binding`, `source_relative`, `source_commit`,
+`source_tree`, `release_root_binding`, `report`, `invocation` and `lineage`.
+Lineage is exactly `{predecessor: A_fingerprint, successor: B_fingerprint,
+authorization_sha256: user_authorization_sha256}`. Retain the original successful,
+non-dry-run target-only `release_coordinator.coordinate_release(canonical,
+installs=[exact_install], manifest=manifest, dry_run=False, release_root=root)`
+report using official `release_coordinator.write_metrics`. Both report and actual
+invocation evidence live in ignored target-local `reports/_wip/` paths with
+externally pinned digests. The actual invocation record contains exactly `api`,
+`metrics_writer`, `canonical`, `installs`, `dry_run`, `release_root`,
+`manifest_sha256`, `source_observed_inventory`, `source_commit`, `source_tree`,
+`report_sha256`. The observed inventory has path, actual SHA-256 and executable
+mode for every source entry and must equal committed B. Independently pin it at
+the original invocation. A later replay, no-commit replay report, CLI fleet
+release, partial or replaced report cannot substitute for that proof. The report
+must establish one verified target, A's predecessor fingerprint, the exact
+committed installed B revision, passing real suite and smokes, and no conflict,
+rollback, skipped target or file patch. Central skill delivery is separately
+represented by the exact authorized release root.
+
+Supported parent APIs (no administrative CLI or worker-deserialized authority):
+
+1. `managed_payload_provenance.verify_invalid_run_abandonment(install,
+   spec_id=..., abandonment_provider=...)` performs read-only proof.
+2. `unblock_spec.abandon_invalid_run(spec_file, install,
+   abandonment_provider=...)` persists one distinct atomic rejection decision
+   (via `managed_payload_provenance.record_invalid_run_abandonment`)
+   and the existing durable administrative **blocked** projection.
+3. Only existing `unblock_spec.prepare`, `record_attempt` and `finalize`, each
+   with the same `abandonment_provider`, may verify recovery and reach ready.
+   Every mutation/restart revalidates all original A and exact active B proofs.
+4. `Coordinator(..., abandonment_provider=...).abandon_invalid_run(spec_id)`
+   and `nightshift-instructions.py::abandon_instruction_run(packet,
+   nightshift_dir=..., spec_file=..., official_path=...,
+   abandonment_provider=...)` route official coordinator, inline-run, kickoff,
+   board-copied-kickoff, direct-loop and direct-orchestrator recovery here.
+   Parallel terminal callbacks retain coordinator-owned strict acceptance.
+
+The distinct decision is `reports/_wip/managed-payload-integrity/abandonment/`
+plus the original invocation JSON filename; it declares `rejected-old-run`,
+reason `NS-MPI-INVALID-RUN-ABANDONED`, eligible controller, demonstrated causal
+confidence and no additional human action. Sanitized contradictory replays are
+quarantined in that separate namespace. Old receipt, admission, strict rejection,
+quarantine, verifier and frozen candidate bytes remain unchanged. Identical
+replay resumes matching ownership without a second successful outcome. After
+ready, admit a genuinely new worker/run from the fresh baseline and retain its
+own original receipt. The abandoned invocation, result and candidate remain
+permanently rejected.

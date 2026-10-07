@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "project_code": "FOCUS",
+  "ids": [
+    "SPEC-001",
+    "SPEC-002",
+    "SPEC-003",
+    "SPEC-004",
+    "SPEC-005"
+  ]
+}
