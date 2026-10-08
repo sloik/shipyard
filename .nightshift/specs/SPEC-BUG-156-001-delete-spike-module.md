@@ -1,0 +1,112 @@
+---
+id: SPEC-BUG-156-001
+template_version: 12
+priority: 2
+layer: 1
+type: bugfix
+status: in_progress
+parent: SPEC-BUG-156
+after:
+- SPEC-BUG-156
+violates:
+- SPEC-BUG-156
+nfrs: []
+nfr_waivers:
+- id: SPEC-NFR-001
+  reason: Deletes a separate, unbuilt Go module and two config references; no code in the main module changes.
+prior_attempts: []
+attachments: []
+created: 2026-10-03
+scope:
+  write:
+  - spike/**
+  - Makefile
+  - renovate.json
+---
+
+# Delete the stale spike module so Dependabot stops flagging its vulnerable dependencies
+
+## Problem
+
+`spike/wails-websocket/` is a throwaway SPEC-017 experiment with its own
+`go.mod`. SPEC-BUG-156 made Renovate ignore it and explicitly left deleting it
+out of scope. GitHub Dependabot security updates do not read `renovate.json`,
+so they still open PRs against it: #39 (`golang.org/x/crypto` 0.50.0 → 0.52.0)
+and #40 (`github.com/labstack/echo/v4` 4.13.3 → 4.15.3), both opened
+2026-10-03.
+
+Neither PR can pass CI's `dependency-review` check (`fail-on-severity:
+moderate`, `.github/workflows/ci.yml:74`):
+
+- #39 fixes two critical x/crypto advisories (GHSA-rm3j-f69w-wqmq,
+  GHSA-5cgq-3rg8-m6cv), but pulls in `golang.org/x/net` 0.54.0, which has a
+  moderate advisory (GHSA-5cv4-jp36-h3mw, fixed in 0.55.0).
+- #40 still uses the vulnerable x/crypto 0.50.0.
+
+The spike is not part of the shipped binary, is excluded from gosec
+(`Makefile:145`), and has not changed since SPEC-017. Keeping it brings only
+vulnerability noise and PRs that will never be merged.
+
+**Violated spec:** SPEC-BUG-156 (R1 intent: dependency bots should not keep
+proposing updates for the spike).
+
+## Root Cause
+
+Dependabot security updates are configured in the GitHub repository settings and
+do not read `renovate.json`, so SPEC-BUG-156's `ignorePaths` never reached them.
+Any vulnerable transitive dependency in the spike's separate `go.mod` produced a
+PR that the `dependency-review` gate correctly rejects.
+
+## Resolution — 2026-10-03
+
+- Deleted `spike/wails-websocket/` and its two dead references (PR #41).
+- PR #41 CI: test, release-build, dependency-review and make smoke all pass.
+- #39 closed as superseded by #41. #40 had already been merged by the repo
+  owner at 2026-10-03T15:42Z before it could be closed; the deletion PR was
+  rebased over that merge, so the bump it carried is removed with the module.
+
+## Requirements
+
+- [x] R1: Delete the `spike/wails-websocket/` directory and its `go.mod`/`go.sum`.
+- [x] R2: Remove the now-dead spike references: the `-exclude-dir=spike/wails-websocket`
+  gosec flag in `Makefile` and the `spike/**` entry in `renovate.json`'s
+  `ignorePaths`.
+- [x] R3: Leave SPEC-017 and SPEC-BUG-156 (both done) unchanged. Their findings
+  remain readable in git history at the deletion commit's parent.
+- [x] R4: Close Dependabot PRs #39 and #40 as obsolete once the deletion merges.
+
+## Acceptance Criteria
+
+- [x] AC1 (R1): `git ls-files spike` is empty and no `go.mod` remains under `spike/`.
+- [x] AC2 (R2): `git grep -n 'spike/'` finds matches only in `.nightshift/specs/`.
+- [x] AC3: `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`
+  pass, and `renovate.json` is valid JSON.
+- [x] AC4: The PR's `dependency-review` check passes.
+- [ ] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
+  (Not met as written: #39 closed linking #41; #40 was merged by the repo owner before it
+  could be closed. Pending the owner's decision on an AC amendment.)
+
+## Context
+
+- Spike: `spike/wails-websocket/` (go.mod, go.sum, main.go, frontend).
+- References: `Makefile:145` (gosec exclude), `renovate.json:8` (`ignorePaths`).
+- CI: `.github/workflows/ci.yml` dependency-review job.
+- Parent: `.nightshift/specs/SPEC-BUG-156-renovate-ignore-spike-module.md`.
+
+## Out of Scope
+
+- Changes to the main module's dependencies.
+- Configuring Dependabot (`.github/dependabot.yml`); once the spike is gone
+  there is nothing left for it to target.
+
+## State rationale
+
+```yaml
+schema_version: 1
+status: in_progress
+reason: 'AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owner''s AC-amendment decision.'
+reconsider_when: null
+evidence: []
+provenance: authored
+record: artifacts/20261003T174221Z-status-transition-done-in-progress-ac5-is-not-met-as-writt.json
+```

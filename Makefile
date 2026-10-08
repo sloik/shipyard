@@ -152,7 +152,7 @@ security-govulncheck-offline-fixture:
 # fail the gate even with zero findings. They are not part of the shipped
 # module (`go list ./...` excludes them), and the fixture has its own offline
 # govulncheck target above.
-GOSEC_EXCLUDE_DIRS := -exclude-dir=spike/wails-websocket -exclude-dir=test/security-fixtures/govulncheck-offline
+GOSEC_EXCLUDE_DIRS := -exclude-dir=test/security-fixtures/govulncheck-offline
 
 security-gosec:
 	"$(GOSEC)" -exclude-generated -severity high $(GOSEC_EXCLUDE_DIRS) ./...
