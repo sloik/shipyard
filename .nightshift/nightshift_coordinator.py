@@ -1607,6 +1607,8 @@ class Coordinator:
             report_bytes, report_path = self._completion_artifact_bytes(
                 handle, revision, artifacts.get('report'),
             )
+            if not report_bytes.strip():
+                raise ValueError('parent report evidence is empty')
             tests_bytes, tests_path = self._completion_artifact_bytes(
                 handle, revision, artifacts.get('tests'),
             )
@@ -1681,6 +1683,8 @@ class Coordinator:
             verifier_bytes = verifier_file.read_bytes()
             if hashlib.sha256(verifier_bytes).hexdigest() != verifier_descriptor.get('sha256'):
                 raise ValueError('verifier artifact hash mismatch')
+            if len(verifier_bytes) > 1024 * 1024:
+                raise ValueError('parent verifier evidence exceeds 1 MiB')
             verdict = json.loads(verifier_bytes)
             candidate_digest = candidate_revision_digest(revision)
             if (
@@ -1697,6 +1701,44 @@ class Coordinator:
                 verifier_id=str(receipt.get('verifier_id', '')),
                 implementer_ids=receipt.get('implementer_ids') or (),
             )
+            premise_acceptance = receipt.get('premise_acceptance')
+            accepted_dispute = False
+            if verdict.get('verdict') == 'disputes_premise' and premise_acceptance is not None:
+                def parent_proof(descriptor):
+                    if not isinstance(descriptor, dict) or set(descriptor) != {'path', 'sha256'}:
+                        raise ValueError('parent dispute proof descriptor is invalid')
+                    unresolved = self.project_root / descriptor['path']
+                    path = unresolved.resolve()
+                    if path.parent != evidence_root or not path.is_file() or unresolved.is_symlink():
+                        raise ValueError('parent dispute proof is outside parent evidence root')
+                    data = path.read_bytes()
+                    if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != descriptor['sha256']:
+                        raise ValueError('parent dispute proof hash mismatch')
+                    return json.loads(data)
+                parent_decision = parent_proof(premise_acceptance)
+                common = subprocess.run(['git', 'rev-parse', '--git-common-dir'],
+                    cwd=self.project_root, capture_output=True, text=True, check=True).stdout.strip()
+                repository_digest = hashlib.sha256((str((self.project_root / common).resolve())
+                    + '\0' + str(self.project_root.resolve())).encode()).hexdigest()
+                if (not isinstance(parent_decision, dict)
+                    or parent_decision.get('decision') != 'accepted'
+                    or parent_decision.get('spec_id') != handle.spec_id
+                    or parent_decision.get('run_id') != handle.integrity_run_id
+                    or parent_decision.get('candidate_revision') != revision
+                    or parent_decision.get('repository_sha256') != repository_digest
+                    or parent_decision.get('verifier_sha256') != verifier_descriptor['sha256']
+                    or parent_decision.get('spec_defect') is not False
+                    or not isinstance(verdict.get('premise_dispute'), dict)
+                    or verdict['premise_dispute'].get('spec_defect') is not False
+                    or any(not isinstance(verdict['premise_dispute'].get(key), str)
+                           or not verdict['premise_dispute'][key].strip() for key in ('claim', 'evidence'))):
+                    raise ValueError('parent accepted-premise decision binding mismatch')
+                followup = parent_proof(parent_decision.get('non_spec_followup'))
+                if (not isinstance(followup, dict) or followup.get('spec_id') != handle.spec_id
+                    or followup.get('run_id') != handle.integrity_run_id
+                    or not isinstance(followup.get('action'), str) or not followup['action'].strip()):
+                    raise ValueError('parent premise decision lacks recorded non-spec follow-up')
+                accepted_dispute = True
         except (ValueError, TypeError, KeyError, json.JSONDecodeError,
                 subprocess.CalledProcessError, FeedbackValidationError) as exc:
             return {
@@ -1711,7 +1753,7 @@ class Coordinator:
             failed.append('tests_passed')
         if not checklist.get('all_pass') or any(not item.get('passes') for item in ac_items):
             failed.append('acs_covered')
-        if verdict.get('verdict') != 'pass' or any(
+        if (verdict.get('verdict') != 'pass' and not accepted_dispute) or any(
             item.get('status') != 'pass' for item in verdict.get('acs') or ()
         ):
             failed.append('verifier')
@@ -1727,10 +1769,67 @@ class Coordinator:
             'reason_code': 'NS-COMP-EVIDENCE-ACCEPTED',
             'candidate_revision': revision,
             'changed_files': observed_files,
+            'evidence_values': {'report': 'pass', 'tests': 'pass', 'code': 'pass'},
+            'verifier': {
+                'verdict': verdict['verdict'], 'acs': verdict['acs'],
+                'sha256': verifier_descriptor['sha256'],
+            },
+            'parent_tool_calls': receipt.get('parent_tool_calls', 'unavailable'),
+            'le_evidence': receipt.get('le_evidence'),
+            'premise_acceptance': premise_acceptance if accepted_dispute else None,
             'artifacts': {
                 'report': report_path, 'tests': tests_path,
                 'ac_checklist': checklist_path, 'verifier': verifier_path,
             },
+        }
+
+    def _first_projection_inputs(self, handle, decision, base_head):
+        """Parent queue envelope from retained acceptance and immutable proof blobs."""
+        from validate_specs import _live_execution_items
+        from lifecycle import is_safe_relative_posix_path
+        root = Path(self.project_root).resolve()
+        completion = decision['payload']['completion_evidence']
+        source = next(path for path in self.spec_files
+                      if read_spec_frontmatter(path)[0].get('id') == handle.spec_id)
+        relative = source.resolve().relative_to(root)
+        def blob(path):
+            return subprocess.run(['git', 'show', f'{base_head}:{path}'], cwd=root,
+                                  capture_output=True, check=True).stdout
+        text = blob(relative.as_posix()).decode('utf-8')
+        checked, _, references = _live_execution_items(text.splitlines())
+        evidence = completion.get('le_evidence')
+        if evidence is None:
+            evidence = {}
+            for item in checked:
+                reference = references.get(item)
+                if not reference or not is_safe_relative_posix_path(reference):
+                    raise ValueError(f'checked {item} needs parent hash-bound LE evidence')
+                for prefix in (relative.parent, relative.parent.parent, relative.parent.parent.parent):
+                    name = (prefix / reference).as_posix()
+                    if not is_safe_relative_posix_path(name):
+                        continue
+                    try:
+                        content = blob(name)
+                    except subprocess.CalledProcessError:
+                        continue
+                    evidence[item] = {'path': name, 'sha256': hashlib.sha256(content).hexdigest()}
+                    break
+                else:
+                    raise ValueError(f'checked {item} evidence is absent from accepted base')
+        common = subprocess.run(['git', 'rev-parse', '--git-common-dir'], cwd=root,
+                                capture_output=True, text=True, check=True).stdout.strip()
+        created = datetime.fromisoformat(decision['created_at'].replace('Z', '+00:00'))
+        return {
+            'schema_version': 1, 'spec_id': handle.spec_id,
+            'run_id': handle.terminal_run_id or handle.integrity_run_id,
+            'decision_id': decision['decision_id'],
+            'repo_common_dir': str((root / common).resolve()), 'checkout_root': str(root),
+            'base_head': base_head, 'candidate_revision': completion['candidate_revision'],
+            'reason': decision.get('reason') or completion['reason_code'],
+            'created': created.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'le_evidence': evidence, 'evidence_values': completion['evidence_values'],
+            'verifier': completion['verifier'],
+            'parent_tool_calls': completion['parent_tool_calls'],
         }
 
     @staticmethod
@@ -2060,6 +2159,7 @@ class Coordinator:
             release_surface_lease=ReleaseSurfaceLease(self.project_root),
             terminal_frontmatter_projector=TrackedTerminalFrontmatterProjector(
                 repo_root, status_store,
+                completion_inputs_provider=self._first_projection_inputs,
             ),
             authorization_gate=main_freeze_gate(
                 repo_root, authorization_gate, probe=self._main_freeze_probe,

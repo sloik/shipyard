@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.25.0
+version: 3.25.1
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate', 'nightshift board', 'board api', 'spec status transition', 'search specs', 'check rules'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -512,7 +512,16 @@ to its `## Context`, then set the intent to `status: promoted` and
 
 ### Creating a new spec
 
-1. **Context check** — read `config.yaml`, existing specs (for next ID, current layers), and `knowledge/` files.
+1. **Context and identity check** — read `config.yaml`, existing specs and `knowledge/`.
+   Resolve the intended project from the live `projects-registry.json` and its watched
+   spec root **before** the supported duplicate/ID gate. Canonical kit work belongs
+   to the registered canonical project (observed code `NS-KIT`); Control is separate
+   (observed `NS-CTL`); installed application specs use that project's own code/root.
+   These are installation observations, not fixed defaults. Read the authoring
+   placement section of `.nightshift/guides/board-and-api.md` (kit:
+   `canonical/guides/board-and-api.md`) for registered-root minting, caller-only
+   worktree mapping and discovery. Refuse an unexpected generic ID; correct identity,
+   never invent a number, suppress conflicts or edit the global registry.
    - If `.nightshift/reports/GAP-ANALYTICS-STATUS.json` exists, read it and surface warnings before the interview.
    - If warning `AMBIGUOUS_REQUIREMENT` is present, explicitly ask for:
      - measurable constraints (numbers/thresholds)
@@ -607,6 +616,22 @@ to its `## Context`, then set the intent to `status: promoted` and
     `--gap-resolved`/`--gap-waived-reason` resolves a declared `promotion_gap`.
     A later agent should be able to answer "why is this spec ready?" by
     reading `reports/<SPEC-ID>/artifacts/index.json` alone.
+
+5b. **Retain and discover** — keep the spec, indexed author decision, evidence and
+    required handoff together on a durable branch. Branch commit, board-visible
+    working-tree placement and integration into MAIN are distinct. Follow GIT.md's
+    sole serialized integration authority and current MAIN freeze; disclose any
+    outstanding integration. Never dirty frozen MAIN, bypass the queue, remap a board
+    root or promote solely for display. Use the board guide's bounded health →
+    refresh → list/detail check at the registered port: each new ID once, intended
+    effective status, indexed artifacts available. HTTP 404 leaves discovery unresolved;
+    intrinsic readiness PASS does not change lifecycle `draft` or make it dispatchable.
+    Retain unique temporary findings with source paths and SHA-256 integrity in
+    persistent branch reports before cleanup; exclude credentials and app/build trees.
+    Authoring-only placement adds no native/full-kit implementation-suite obligation;
+    existing implementation, independent verification, integration and release gates stay.
+    Deliver skill changes from canonical source through the managed whole-kit release
+    path and pending handoff, never by patching installed skill copies.
 
 6. **Post-save for `type: nfr`** — after saving a new NFR spec, run the impact audit:
    ```bash
@@ -786,6 +811,7 @@ and presents its eligibility verdict, bounded task, pinned evidence paths and
 hashes, prior attempts, guardrails, and verification gate.
 `<spec-file>` may be project-relative even when `--root` is absolute; the
 controller resolves it against that root, never the caller's current directory.
+`--root` may be the project root or the install directory (`.nightshift`); unblock state (`runs/`, `knowledge/attempts/`, `reports/_wip/`) is kept under the install directory, and a directory with neither layout is refused (`NS-UNBLOCK-ROOT-NOT-INSTALL`).
 
 Read `.nightshift/guides/unblock.md` (kit repository: `canonical/guides/unblock.md`) before running any unblock step: the options, the rung ladder and the evidence rules are there.
 

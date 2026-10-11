@@ -349,6 +349,10 @@ run ID (or explicit user approval). Kinds are `loosened`, `covered-by`,
 `runtime-captured`, and `moved-to`. A loosened criterion requires an independent
 AC-review verdict; it is never deleted. `validate_specs.py` reports
 `ac_amendment_undocumented` when a changed criterion lacks a matching row.
+The AC line itself carries the new wording (optionally with an `Amended <date>` suffix);
+the row preserves the old wording and records approval. `validate_specs.py` warns
+`ac_amendment_unapplied` when a row dated on or after 2026-10-09 names new wording its AC
+line does not contain. The verifier's spec copy includes this table.
 
 **Agent's Task:** Extract concrete, testable criteria that prove the requirements work. This is the most critical phase.
 
@@ -445,6 +449,12 @@ changes or owns in its requirements: the ledger never excuses it, nor any AC, sa
 obligation. A spec whose evidence depends on such a test must name it in `## Context`.
 
 ## Phase 5: Context & Constraints
+
+If acceptance needs committed evidence from another repository, follow the
+[optional external asset setup and sharing workflow](guides/run-4.md#optional-external-asset-evidence-setup-and-sharing)
+and commit supported `context.required_inputs` declarations before ready
+promotion. The workflow explains containment, bounds and consumer approval
+checks; declaring evidence does not provision a source or authorize publication.
 
 **Agent's Task:** Gather background information, existing code/docs, and any limitations.
 

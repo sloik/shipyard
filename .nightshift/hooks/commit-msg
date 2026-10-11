@@ -3,7 +3,7 @@
 # Validates ordinary spec commits and parent lifecycle transitions.
 # Policy source of truth: .nightshift/GIT.md
 #
-# Ordinary format: [SPEC-ID] type: subject
+# Ordinary format: [SPEC-ID] type: subject  (other accepted forms: see GIT.md Coordinator subjects)
 # Lifecycle format: chore: mark SPEC-ID done|blocked (trailers) | in_progress (none)
 # Examples:
 #   [SPEC-033] feat: handler registry with pluggable domains
@@ -25,6 +25,18 @@ FIRST_LINE=$(head -1 "$COMMIT_MSG_FILE")
 # Allow merge commits and reverts without prefix
 if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
     exit 0
+fi
+
+# SPEC-NS-KIT-118 R4: record_metrics reads lifecycle marks only in the exact `chore: mark <ID> ...`
+# form, so a bracketed `[<ID>] chore: mark ...` commit (any status, trailers or not) would pass
+# this hook and then be silently skipped by metrics. Reject it before any other rule.
+if echo "$FIRST_LINE" | grep -qE '^\[(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+\] chore: mark '; then
+    echo ""
+    echo "[nightshift commit-msg] ERROR: bracketed lifecycle subject is not accepted; use \`chore: mark <ID> done|blocked|in_progress\`"
+    echo ""
+    echo "  Got:      $FIRST_LINE"
+    echo ""
+    exit 1
 fi
 
 # Terminal lifecycle commits are emitted by the parent and consumed by
@@ -67,10 +79,11 @@ if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9
     exit 0
 fi
 
-# BUG-NS-KIT-106: the non-terminal in_progress marker the run guide (Step 2b/2c) commits and
+# BUG-NS-KIT-106 / SPEC-NS-KIT-118: the non-terminal status marks (in_progress, draft, planned, ready,
+# superseded, retired) the run guide (Step 2b/2c) commits and
 # record_metrics.find_in_progress_sha reads. Anchored, so it cannot match done|blocked and
 # carries no terminal trailer requirement.
-if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+ in_progress$'; then
+if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+ (draft|planned|ready|in_progress|superseded|retired)$'; then
     exit 0
 fi
 
@@ -120,19 +133,58 @@ if [ -f "$CONFIG_FILE" ] && [ -f "$SCANNER" ] && command -v python3 >/dev/null 2
     fi
 fi
 
-# Ordinary commits require a spec prefix, separator, and non-empty subject.
-if ! echo "$FIRST_LINE" | grep -qE '^\[(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+\] .+'; then
+# SPEC-NS-KIT-118: the remaining subjects, in order.
+# B. A `chore: mark ` or `chore(scope): mark ` subject that is not an exact lifecycle form (done|blocked|in_progress
+#    with a valid ID, handled above) is a malformed lifecycle subject. Never let the
+#    maintenance rule (C) absorb it.
+if echo "$FIRST_LINE" | grep -qE '^chore(\([^)]*\))?!?: mark '; then
     echo ""
-    echo "[nightshift commit-msg] ERROR: Commit message must use a Nightshift subject."
+    echo "[nightshift commit-msg] ERROR: malformed lifecycle subject."
     echo ""
     echo "  Got:      $FIRST_LINE"
-    echo "  Ordinary: [SPEC-ID] type: description  (ID kinds: SPEC, BUG, NFR, QUESTIONS)"
-    echo "  Lifecycle: chore: mark SPEC-ID done|blocked|in_progress"
-    echo ""
-    echo "  This ensures every commit is traceable to its spec."
-    echo "  To bypass (not recommended): git commit --no-verify"
+    echo "  Expected: chore: mark <ID> done|blocked|in_progress   (<ID> like SPEC-123, BUG-NS-KIT-45)"
+    echo "            done|blocked also need the Nightshift-* lifecycle trailers."
     echo ""
     exit 1
 fi
 
-exit 0
+# Ordinary commits: spec prefix, separator, and non-empty subject.
+if echo "$FIRST_LINE" | grep -qE '^\[(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+\] .+'; then
+    exit 0
+fi
+
+# E. `<ID>: description`
+if echo "$FIRST_LINE" | grep -qE '^(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+: .+'; then
+    exit 0
+fi
+
+# C. Maintenance subjects need no ID.
+if echo "$FIRST_LINE" | grep -qE '^(chore|telemetry|release|merge): .+'; then
+    exit 0
+fi
+
+# D. Conventional subjects are accepted only when the subject line carries an ID
+#    (in the scope or the text, unanchored).
+if echo "$FIRST_LINE" | grep -qE '^(feat|fix|docs|test|refactor|perf|build|ci|style|chore|spec|evidence|audit|draft|formal|research|wip)(\([^)]*\))?!?: .+' && \
+   echo "$FIRST_LINE" | grep -qE '(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+'; then
+    exit 0
+fi
+
+echo ""
+echo "[nightshift commit-msg] ERROR: Commit message must use a Nightshift subject."
+echo ""
+echo "  Got:      $FIRST_LINE"
+echo "  Accepted forms:"
+echo "    [<ID>] type: description               (ordinary; ID kinds: SPEC, BUG, NFR, QUESTIONS)"
+echo "    <ID>: description"
+echo "    chore: mark <ID> done|blocked|in_progress|draft|planned|ready|superseded|retired   (done|blocked need lifecycle trailers)"
+echo "    chore|telemetry|release|merge: description  (maintenance, no ID needed)"
+echo "    type(scope): description                    (type: feat fix docs test refactor perf build ci chore"
+echo "                                                 style spec evidence audit draft formal research wip;"
+echo "                                                 the subject must contain an <ID>)"
+echo "    Merge ... / Revert ..                       (git-generated)"
+echo ""
+echo "  This ensures every commit is traceable to its spec."
+echo "  To bypass (not recommended): git commit --no-verify"
+echo ""
+exit 1

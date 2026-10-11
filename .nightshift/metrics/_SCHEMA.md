@@ -764,6 +764,14 @@ Constraints:
   from the install, never silently folded into `clean`; `absent` is the
   legacy case — a terminal commit with no `Nightshift-Scope-Check` trailer at
   all, not an error.
+- `evidence_source` (BUG-NS-KIT-139, optional): `verdict | none`. Present only
+  for a `done` commit with no `Nightshift-Evidence-*` trailer at all: `verdict`
+  means the five evidence fields were derived from the committed
+  `verifier-verdict.json`, `none` that no readable verdict existed and they are
+  `unknown` (`verifier: absent`). It is absent when the value is `trailers`, so
+  rows for commits that carry trailers keep their exact shape. A bracketed
+  `[<id>] chore: mark ...` commit is not a terminal transition and emits no row;
+  `--correct-commit` alone reads one to repair its existing row.
 - `unblock_attempts` and `unblock_limit` are non-negative integers, with
   attempts <= limit.
 - `automatic_unblock_succeeded` and `later_session_required` are booleans.

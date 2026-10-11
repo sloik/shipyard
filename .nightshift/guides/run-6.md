@@ -86,6 +86,8 @@ suite array is not a schema gap to work around:
 
 [Pinned in `.nightshift/guides/pinned-briefs.md`: the verdict-JSON template block and its sentence - byte-exact, not repeated here.]
 
+Sample forms accepted by `assemble-verdict`: `pytest -q` output, junit XML, `python -m unittest` output and `xcodebuild test` output. Any other output is refused (so is output matching two forms); for another runner give a structured sample `{"executed": true, "failing": [names], "failed": n, "passed": n, "skipped": n}`, where `failed` equals `len(failing)`. An arm window given as null, empty, `"None"` or `"null"` is absent; give both `started_at` and `ended_at` or neither.
+
 A sample is evidence of an actual run, never a placeholder (R3, SPEC-282). The
 validator (below) rejects a sample that declares `"executed": false`, an arm
 with no samples at all, and a "zero-count placeholder" — a sample reporting
@@ -256,3 +258,56 @@ Record the outcome in both the report and the lifecycle commit trailer
 fixed set of trailer keys and ignores unknown ones, so this trailer is durable and
 greppable in git today but is **not** yet consumed into metrics.
 
+
+**Runs resolved before this instruction existed have no recoverable count.** A future reader
+(including `SPEC-ARGO-038-001`) must report those as `unavailable` — never estimate, reconstruct, or
+backfill a number for them, no matter how plausible an estimate would be. Likewise, a pre-SPEC-ARGO-061
+`self-verified` commit is not retroactively relabeled `self-verified-experimental` — Out of Scope
+for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified resolutions.
+
+### Structured native failures and setup recovery (SPEC-NS-KIT-160)
+
+`suite-sample --output-dir <private>` persists full output and `.process.json`: arm, invocation identity, raw SHA-256, native exit, completed/unavailable state and independent count evidence.
+Pytest names come from the final outer summary; nested failures remain diagnostics. Unittest subtest and Xcode assertion-event counts remain distinct from named failed cases; ambiguous membership or mixed formats remain gaps.
+JUnit uses suite testcase members, never diagnostic elements. Missing/conflicting summaries, denied collection and native timeouts are unavailable, never completed samples or passes.
+Raw entries may bind `native: {exit_code, timed_out, denied}`, `arm` and `invocation_identity`; legacy raw-only intake retains its existing contract.
+Implementation/fixture/environment hypotheses require nonempty relative, hash-verified evidence under the evidence root; otherwise use inconclusive. Labels never establish causal controls or acceptance.
+Persist `persist_setup_recovery(directory, identity=..., prerequisite=..., next_action=..., responsible_actor=...)`; name `setup-recovery.json` as existing `blocker_evidence` and keep timestamped invocation logs separate.
+The first action/actor stays fixed for unchanged identity/prerequisite. Invalid prior evidence requires repair before retry; wording/log churn cannot reopen the fingerprint.
+Only changed recorded identity/prerequisite enters `unblock_spec.prepare` and its existing bounded attempt ledger. This helper schedules no launch, adds no budget and grants no override.
+Sampling is unchanged: normally one per arm; three for unexcused head failure, arm/sample disagreement, supported flakiness or unsupported launch failure. Diagnostic probes cannot replace samples, exits, controls or the independent verdict.
+
+### Predeclared baseline corrections (BUG-NS-KIT-170)
+
+Use `prepare_verifier_dispatch(..., expected_baseline_fix=...)` before execution for the exact declaration described in `pinned-briefs.md`; the public plan carries it under `sampling.expected_baseline_fix`. This adds no waiver, writer, lifecycle, integration or release authority.
+Use `suite_required_samples(suite, plan=original_plan, footprint=both_arm_footprints)` after the actual configured pair; operational tuples additionally require every ordered `suites` member and separate `sampling_anchor`. Assembly and embedded/public validation receive that same trusted context and independently recheck tuple-wide eligibility; missing/altered approval, clean-member failures or collection gaps preserve escalation.
+Eligibility requires complete collection/outcome proof and unchanged target Python test-file bytes with assertions. Trusted pytest observations support unchanged quiet/xdist commands; complete verbose native rows remain supported. Other runners or unverifiable edits retain the strict count; no silent suite narrowing is allowed.
+The earlier SPEC-NS-KIT-160 sampling paragraph describes legacy plans; this opt-in is its sole narrowly proved baseline-only exception. One pair observes a correction and establishes no statistical determinism, future reliability or measured savings. AC derivation, containment, original receipts, remediation, serial exact-head integration, fresh-main and whole-kit release gates stay in force.
+
+### Required authored deliverables: ordered intake (BUG-NS-KIT-166)
+
+Generated handoff and manually copied suite/no-suite pinned briefs use the same
+`NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE` block in `pinned-briefs.md`. Preserve it
+verbatim. Before accessing substantive required-deliverable conclusions, the
+verifier independently derives the relevant source behavior, test assertions
+and actual command results from the exact assigned arms, preserving observations
+outside the arms. Metadata/path existence and unrelated AC work do not establish
+that derivation; target reads rather than searching outcome-bearing documents.
+Then inspect the real contractual deliverable and its committed digest. This
+instruction order adds no staged-access capability or content-free substitution.
+
+Classify actual exposure honestly. Unavoidable/accidental early exposure remains
+`before_derivation` with any capability/evidence gap; it cannot become a final
+pass by relabelling. Supported late exposure is `required_deliverable /
+after_derivation`. Keep original rejected evidence, exact identity and both-arm
+read-only checks. Exposed failures still need independent native reproduction
+and lead-only remediation. Assembly and strict final admission remain unchanged.
+
+### Canonical hand-back packaging identity (SPEC-NS-KIT-162)
+
+Before an expensive configured canonical suite, retain the supported
+`release.py check-final-manifest` result for the final managed candidate. Treat
+its manifest, payload and handoff digests as one binding, never as permission to
+reuse a green result after edits. A mismatch stops launch until final edits and
+explicit regeneration are complete. The helper is a packaging check; existing
+whole-kit release validation and the sole serial integration owner remain in force.

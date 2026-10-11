@@ -837,6 +837,19 @@ def finding_family_regression_errors(canonical: Path, manifest: dict) -> list[st
     return errors
 
 
+def finding_floor_check(canonical: Path, manifest: dict) -> tuple[list[str], str | None]:
+    """SPEC-NS-KIT-124: the floor check shared by the coordinator and the CLI.
+
+    Returns ``(errors, skipped_reason)``. A canonical with no baseline declares
+    no floor, so there is nothing to enforce: no errors and a skip reason
+    (the same degrade-safe choice as BUG-334 R3).
+    """
+    baseline = canonical / "metrics" / "validation-error-floor-baseline.json"
+    if not baseline.is_file():
+        return [], f"no finding-family floor declared at {baseline}; nothing to enforce"
+    return finding_family_regression_errors(canonical, manifest), None
+
+
 def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
     """All SPEC-324 checks, in the order a reader would want to fix them.
 
@@ -921,6 +934,95 @@ def validate_manifest(
     errors.extend(payload_gate_errors(canonical, manifest))
     errors.extend(managed_local_resource_gaps(canonical, names))
     return not errors, errors, manifest
+
+
+
+def check_final_manifest(canonical: Path) -> dict:
+    """Read-only canonical packaging gate for one imminent configured launch.
+
+    Selection comes from the repository's release registry, never the manifest
+    being checked. No green record is cached: every caller observes final bytes.
+    """
+    canonical = canonical.resolve()
+    errors: list[str] = []
+    affected: set[str] = set()
+    names: list[str] = []
+    manifest = None
+    manifest_digest = None
+    payload_digest = None
+    handoffs: list[dict] = []
+    try:
+        selection = _load_module_from(
+            canonical.parent / "nightshift-sync.py", "_final_manifest_selection"
+        ).CANONICAL_PROTOCOL_FILES
+        if not isinstance(selection, list) or not selection or not all(
+            isinstance(name, str) and name and not PurePosixPath(name).is_absolute()
+            and ".." not in PurePosixPath(name).parts for name in selection
+        ) or len(selection) != len(set(selection)):
+            raise ValueError("invalid canonical managed selection")
+        names = list(selection)
+    except (OSError, ImportError, AttributeError, ValueError) as exc:
+        errors.append(f"canonical managed selection unavailable: {exc}")
+        affected.add("nightshift-sync.py")
+    path = canonical / "release-manifest.json"
+    try:
+        manifest_digest = sha256(path)
+        manifest = json.loads(path.read_text())
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+    except (OSError, ValueError) as exc:
+        errors.append(f"release manifest unavailable: {exc}")
+        affected.add("release-manifest.json")
+        manifest = None
+    if names:
+        missing = [name for name in names if not (canonical / name).is_file()]
+        affected.update(missing)
+        errors.extend(f"managed file missing: {name}" for name in missing)
+        if not missing:
+            try:
+                live_entries = manifest_files(canonical, names)
+                payload_digest = hashlib.sha256(json.dumps(
+                    live_entries, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest()
+                if manifest is not None:
+                    recorded = {entry["path"]: entry for entry in manifest.get("files", [])}
+                    current = {entry["path"]: entry for entry in live_entries}
+                    affected.update(name for name in recorded.keys() | current.keys()
+                                    if recorded.get(name) != current.get(name))
+                    valid, validation_errors, _ = validate_manifest(canonical, names)
+                    if not valid:
+                        errors.extend(validation_errors)
+                        affected.add("release-manifest.json")
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                errors.append(f"final managed payload validation unavailable: {exc}")
+                affected.add("release-manifest.json")
+    for record_path in sorted((canonical / "release-handoffs").glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text())
+            if not isinstance(record, dict):
+                raise ValueError("handoff must be an object")
+            if record.get("status") == "pending":
+                handoffs.append({"path": record_path.name, "sha256": sha256(record_path),
+                                 "target_version": record.get("target_version"),
+                                 "manifest_fingerprint": record.get("manifest_fingerprint"),
+                                 "changed_managed_paths": record.get("changed_managed_paths")})
+        except (OSError, ValueError) as exc:
+            errors.append(f"release handoff {record_path.name} unavailable: {exc}")
+            affected.add(f"release-handoffs/{record_path.name}")
+    for error in errors:
+        for record in handoffs:
+            if record["path"] in error:
+                affected.add(f"release-handoffs/{record['path']}")
+    handoff_digest = hashlib.sha256(json.dumps(
+        handoffs, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    binding = {"manifest_sha256": manifest_digest, "managed_payload_sha256": payload_digest,
+               "handoff_membership_sha256": handoff_digest}
+    identity = hashlib.sha256(json.dumps(
+        binding, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    return {"schema_version": 1, "ok": not errors, "identity": identity,
+            **binding, "affected_paths": sorted(affected), "errors": errors}
 
 
 def verify_install(install: Path, manifest: dict) -> tuple[bool, list[str]]:
@@ -1124,7 +1226,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     inst.add_argument("--force", action="store_true")
     inst.add_argument("--name", help="project.name written into a newly seeded config.yaml")
     inst.add_argument("--language", action="append", default=[], help="project.language entry (repeatable)")
+    floor = sub.add_parser("finding-floor", help="check the finding-family floor (exit 1 on regression)")
+    floor.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    final = sub.add_parser("check-final-manifest", help="read-only final canonical packaging gate before a configured suite")
+    final.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args(argv)
+    if args.command == "check-final-manifest":
+        result = check_final_manifest(args.canonical)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 1
+    if args.command == "finding-floor":
+        errors, skipped = finding_floor_check(args.canonical.resolve(), {})
+        if skipped:
+            print(f"SKIP: {skipped}")
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1 if errors else 0
     ok, lines = install_project(args.canonical, args.install, dry_run=args.dry_run, force=args.force,
         name=args.name, languages=args.language,
     )

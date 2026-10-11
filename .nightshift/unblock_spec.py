@@ -538,6 +538,23 @@ def _issue_packet(store: StatusStore, packet: dict[str, Any], *, finalize_only: 
     return payload
 
 
+def _install_root(root: Path) -> Path:
+    """Resolve a caller's ``--root`` / ``project_root`` to the install directory (BUG-NS-KIT-142).
+
+    Either spelling is accepted: the install directory itself (it has ``specs/``) or a project
+    root that holds ``.nightshift/specs``. A directory with ``specs/`` wins, so a tree that has
+    both (this repository's ``canonical/`` next to ``.nightshift/``) resolves to itself. Anything
+    else raises before any file or directory is created.
+    """
+    root = Path(root)
+    if (root / "specs").is_dir():
+        return root
+    if (root / ".nightshift" / "specs").is_dir():
+        return root / ".nightshift"
+    raise UnblockError(f"NS-UNBLOCK-ROOT-NOT-INSTALL: neither {root / 'specs'} nor "
+                       f"{root / '.nightshift' / 'specs'} exists; pass the project root or the install directory")
+
+
 @contextmanager
 def _administrative_lock(root: Path):
     """Serialize this bounded parent controller, including identical replay."""
@@ -592,10 +609,11 @@ def _revalidate_administrative(root: Path, spec_id: str, pointer: Mapping[str, s
 def abandon_invalid_run(spec_file: Path, project_root: Path, *, abandonment_provider) -> dict[str, Any]:
     """Parent-only rejected-old-run -> administrative blocked; never ready/accept.
 
-    ``project_root`` is the installed controller workspace (normally
-    ``.nightshift``), exactly as for prepare/record_attempt/finalize.
+    ``project_root`` may be the project root or the installed controller workspace (normally
+    ``.nightshift``), exactly as for prepare/record_attempt/finalize; state is kept under the
+    install directory.
     """
-    root, spec_file = Path(project_root).resolve(), Path(spec_file).resolve()
+    root, spec_file = _install_root(Path(project_root)).resolve(), Path(spec_file).resolve()
     fm = parse_spec_file(spec_file).frontmatter
     spec_id = str(fm.get("id", ""))
     try:
@@ -1479,10 +1497,13 @@ def _prepare_ordinary(selected: Path, root: Path, run_id: str, *, retry_override
 
 def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override: bool = False,
             allow_escalation: bool = False, abandonment_provider=None) -> dict[str, Any]:
-    root = Path(project_root).resolve()
+    given = Path(project_root).resolve()
+    root = _install_root(given).resolve()
     selected = Path(spec_file)
     if not selected.is_absolute():
-        selected = root / selected
+        # A path relative to the project root the caller named (e.g. `.nightshift/specs/X.md`) is
+        # honoured when it is not a file under the install itself.
+        selected = given / selected if root != given and not (root / selected).exists() and (given / selected).exists() else root / selected
     with _recovery_guard(selected, root, None, abandonment_provider) as (pointer, guard):
         if pointer is None:
             return _prepare_ordinary(selected, root, run_id, retry_override=retry_override,
@@ -1519,11 +1540,12 @@ def record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: st
     if not _is_administrative_packet(packet):
         # Ordinary controller, under the same controller lock as ordinary prepare and finalize;
         # the caller's own project_root spelling is kept (the returned path is built from it).
-        with _administrative_lock(Path(project_root)):
+        project_root = _install_root(Path(project_root))
+        with _administrative_lock(project_root):
             return _record_attempt(packet, project_root, outcome=outcome, intervention=intervention,
                 verification=verification, causal=causal, automatic=automatic, reason=reason,
                 authorization=authorization)
-    root = Path(project_root).resolve()
+    root = _install_root(Path(project_root)).resolve()
     in_flight = f"{packet.get('packet_id', '')}-{outcome}"
     with _recovery_guard(_relative(root, str(packet["spec_path"])), root, packet, abandonment_provider,
                          "record", in_flight) as (pointer, guard):
@@ -1538,9 +1560,10 @@ def finalize(packet: Mapping[str, Any], attempt_path: Path, project_root: Path, 
     if not _is_administrative_packet(packet):
         # Ordinary controller: its only addition to the SPEC-185 transition refuses to move an
         # administrative blocker to ready with a non-administrative packet.
-        with _administrative_lock(Path(project_root)):
+        project_root = _install_root(Path(project_root))
+        with _administrative_lock(project_root):
             return _finalize(packet, attempt_path, project_root)
-    root = Path(project_root).resolve()
+    root = _install_root(Path(project_root)).resolve()
     with _recovery_guard(_relative(root, str(packet["spec_path"])), root, packet, abandonment_provider,
                          "finalize") as (pointer, guard):
         if pointer is None:
@@ -1724,7 +1747,7 @@ def resume_recovery(root: Path, record_path: Path, current: Mapping[str, Any], *
     authorization; a proposal that skips a protected gate is refused, and a permitted skip is
     recorded as an exception, never as an ordinary pass.
     """
-    root = Path(root)
+    root = _install_root(Path(root))
     record = json.loads(Path(record_path).read_text(encoding="utf-8"))
     eligibility = recovery_eligibility(record, current, now=now or datetime.now(timezone.utc))
     auth: dict[str, Any] = {}
@@ -1803,7 +1826,7 @@ def main() -> int:
     if ns.operation == "adopt-legacy-attempts":
         if not ns.spec:
             parser.error("adopt-legacy-attempts requires --spec")
-        root = ns.root.resolve()
+        root = _install_root(ns.root).resolve()
         store = StatusStore.for_specs_dir(root / "specs")
         with _administrative_lock(root):
             print(json.dumps(adopt_legacy_attempts(root, store, ns.spec, run_id=ns.run_id or "adopt-legacy-attempts",

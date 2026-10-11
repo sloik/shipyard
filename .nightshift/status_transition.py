@@ -106,15 +106,25 @@ def clear_transfer_refusal_on_file(path: Path) -> None:
         pass
 
 
+class CompletionValidationError(ValueError):
+    """Blocking release findings with their separate advisory diagnostics."""
+
+    def __init__(self, errors: list[str], warnings: list[str]) -> None:
+        super().__init__("; ".join(errors))
+        self.errors = errors
+        self.warnings = warnings
+
+
 def gate_status_write(
     frontmatter: Mapping[str, Any], status: str, *, reason: str | None, specs_dir: Path,
-    canonical_dir: Path, record_refusal: Callable[[str], None] | None = None,
+    canonical_dir: Path, record_refusal: Callable[[str], None] | None = None, warnings: list[str] | None = None,
 ) -> str:
     """Run the board's write gates in the board's order; return the reason text to record.
 
     Raises ``ValueError`` with the refusal text (after calling ``record_refusal``
     for every refusal except an unknown status, which the board never recorded).
     A missing reason on a non-judgment transition yields the mechanical default.
+    Optional ``warnings`` collects advisory release diagnostics for the caller.
     """
     def refuse(message: str) -> None:
         if record_refusal is not None:
@@ -140,9 +150,33 @@ def gate_status_write(
                 if record_refusal is not None:
                     record_refusal(str(exc))
                 raise ValueError(f"release handoff validation unavailable: {exc}") from exc
-            errors = release_handoff.validate_spec_handoff(dict(frontmatter), Path(canonical_dir), manifest)
+            from validate_specs import split_findings
+            errors, advisory = split_findings(
+                release_handoff.validate_spec_handoff(dict(frontmatter), Path(canonical_dir), manifest)
+            )
+            if warnings is not None:
+                warnings.extend(advisory)
             if errors:
-                refuse("; ".join(errors))
+                message = "; ".join(errors)
+                if record_refusal is not None:
+                    record_refusal(message)
+                raise CompletionValidationError(errors, advisory)
+    if status == "done":
+        # BUG-NS-KIT-127 R2: referenced files outside the done commit must already be in git.
+        spec_id = str(frontmatter.get("id") or "")
+        matches = sorted(Path(specs_dir).glob(f"{spec_id}-*.md")) or sorted(Path(specs_dir).glob(f"{spec_id}.md"))
+        if spec_id and matches:
+            import spec_artifacts
+            try:
+                outside = spec_artifacts.untracked_references(matches[0])["outside"]
+            except Exception:  # advisory lookup must not turn a done flip into a crash
+                outside = []
+            if outside:
+                refuse(
+                    "done refused: referenced files are neither tracked nor staged: "
+                    + ", ".join(outside)
+                    + " (commit them before the done commit; see spec_artifacts.py untracked-refs)"
+                )
     current_status = str(frontmatter.get("status") or "")
     reason_text = reason.strip() if isinstance(reason, str) else ""
     if lifecycle.is_judgment_transition(current_status, status) and not reason_text:

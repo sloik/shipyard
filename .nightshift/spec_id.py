@@ -195,6 +195,7 @@ PROJECT_CODES: Mapping[str, str] = {
     # Owner-authority additions (2026-10-05) for projects registered after the table was locked.
     "CRAFTJOBQUOTE": "CJQ",
     "GAMENIGHTLEDGER": "GNL",
+    "WORKSHOPFRACTIONSHEET": "WFS",
 }
 
 

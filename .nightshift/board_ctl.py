@@ -228,10 +228,13 @@ def _offline_specs(specs_dir: Path) -> dict[str, dict]:
         records[str(fm["id"])] = {"fm": fm, "body": body, "title": title, "mtime": mtime, "path": path}
     states = status_store.read_durable_states_readonly(
         status_store.default_db_path_for_specs_dir(specs_dir), list(records))
+    projections = status_store.read_terminal_projection_diagnostics_readonly(
+        status_store.default_db_path_for_specs_dir(specs_dir), list(records))
     for spec_id, rec in records.items():
         file_status = str(rec["fm"].get("status", "draft"))
         view = status_store.effective_status_view(file_status, states.get(spec_id), rec["mtime"], rec["path"])
         rec["view"], rec["status"] = view, view["effective"]
+        rec['terminal_projection'] = projections.get(spec_id)
     return records
 
 
@@ -319,6 +322,7 @@ def cmd_show(ctx: Ctx, args) -> int:
         payload = {"id": args.id, "source": "board", "status": data["frontmatter"].get("status"),
                    "title": data.get("title"), "frontmatter": fm, "run_state": data.get("run_state_explanation"),
                    "artifacts": data.get("artifacts", []), "artifact_index_state": data.get("artifact_index_state")}
+        payload['terminal_projection'] = data['frontmatter'].get('terminal_projection')
         body = data.get("body_md", "")
     else:
         rec = _offline_specs(ctx.specs_dir).get(args.id)
@@ -331,12 +335,15 @@ def cmd_show(ctx: Ctx, args) -> int:
         payload = {"id": args.id, "source": "offline", "status": rec["status"], "title": rec["title"] or args.id,
                    "frontmatter": fm, "run_state": _explain_offline(rec), "artifacts": entries,
                    "artifact_index_state": state}
+        payload['terminal_projection'] = rec.get('terminal_projection')
         body = rec["body"]
     if args.body:
         payload["body"] = body
     lines = [f"# source: {source}", f"{args.id}  [{payload['status']}]  {payload['title']}"]
     lines += [f"{k}: {json.dumps(v, default=str)}" for k, v in fm.items() if k != "scope"]
     lines.append(f"run_state: {json.dumps(payload['run_state'], default=str)}")
+    if payload.get('terminal_projection'):
+        lines.append(f"terminal_projection: {json.dumps(payload['terminal_projection'], default=str)}")
     lines.append(f"artifacts: {len(payload['artifacts'])} ({payload['artifact_index_state']})")
     if args.body:
         lines += ["", body]
@@ -700,15 +707,26 @@ def _sync_findings(ctx: Ctx, up: bool, port: int) -> list[dict]:
         status, data = _http_json(f"http://127.0.0.1:{port}/api/status-sync", timeout=30.0)
         if status == 200 and isinstance(data, dict):
             rows = list(data.get("mismatches") or [])
+            for spec_id, projection in (data.get('terminal_projections') or {}).items():
+                if projection.get('projection') == 'pending':
+                    rows.append({'id': spec_id, 'reason': 'terminal-projection-pending',
+                                 'detail': projection.get('reason'),
+                                 'recovery_action': projection.get('recovery_action')})
     else:
         for spec_id, rec in _offline_specs(ctx.specs_dir).items():
+            projection = rec.get('terminal_projection')
+            if projection and projection.get('projection') == 'pending':
+                rows.append({'id': spec_id, 'reason': 'terminal-projection-pending',
+                             'detail': projection.get('reason'),
+                             'recovery_action': projection.get('recovery_action')})
             sync = rec["view"]["sync"]
             if not sync["in_sync"]:
                 rows.append({"id": spec_id, "frontmatter": rec["view"]["declared"], "durable": sync["durable"],
                              "reason": sync["reason"]})
     return [_finding("status_sync_mismatch", "warn",
-                     f"{r['id']}: frontmatter {r.get('frontmatter')!r} vs store {r.get('durable')!r} ({r.get('reason')})",
-                     _SYNC_FIX.get(str(r.get("reason")), "`board_ctl.py show {id}`").format(id=r["id"]))
+                     f"{r['id']}: tracked terminal projection pending: {r.get('detail')}" if r.get('reason') == 'terminal-projection-pending'
+                     else f"{r['id']}: frontmatter {r.get('frontmatter')!r} vs store {r.get('durable')!r} ({r.get('reason')})",
+                     r.get('recovery_action') or _SYNC_FIX.get(str(r.get("reason")), "`board_ctl.py show {id}`").format(id=r["id"]))
             for r in rows]
 
 
@@ -1034,7 +1052,8 @@ RULE_ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
       "artifact-*", "untracked-*")),
     ("state-rationale", "SPEC-GUIDE.md#state-rationale-why-a-spec-has-its-current-status-spec-357",
      ("state_rationale_*",)),
-    ("lifecycle", "SPEC-GUIDE.md#draft-promotion-gaps-spec-210", ("promotion-gap-*", "status-sync-mismatch", "unknown-dependency", "spec-metadata-*")),
+    ("lifecycle", "SPEC-GUIDE.md#draft-promotion-gaps-spec-210", ("promotion-gap-*", "status-sync-mismatch", "unknown-dependency", "spec-metadata-*",
+                  "blocker-evidence-unresolved")),
     ("scope", "SPEC-GUIDE.md#write-scope", ()),
     ("release-handoff", "ORCHESTRATOR.md#versioned-release-handoff-spec-189",
      ("release-handoff-*", "*release*handoff*")),

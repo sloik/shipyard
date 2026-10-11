@@ -309,6 +309,51 @@ def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
     return findings
 
 
+# BUG-NS-KIT-140 R3/D2(i): only rows dated on or after this day are checked (warning only).
+AC_AMENDMENT_UNAPPLIED_SINCE = "2026-10-09"
+
+
+def validate_ac_amendment_unapplied(content: str) -> list[str]:
+    """Warn when an AC Amendments row's new wording never reached its AC line.
+
+    The latest eligible row per AC id is checked: its Change cell's new side (after the
+    first ``->`` or arrow character) must appear, whitespace-normalised, in the AC item.
+    Rows whose AC cell is not a single ``AC<n>`` id, rows with no arrow or an empty new
+    side, and rows dated before the cutoff are skipped.
+    """
+    def squash(text: str) -> str:
+        return " ".join(text.split())
+
+    block = re.search(r"^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
+    table = re.search(r"^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
+    if not block or not table:
+        return []
+    lines: dict[str, str] = {}
+    for item in re.split(r"(?m)^(?=- \[[ xX]\])", block.group(1)):
+        found = re.match(r"- \[[ xX]\]\s*(AC\d+)\b", item)
+        if found:
+            lines[found.group(1)] = squash(item)
+    latest: dict[str, tuple[str, str]] = {}
+    for row in table.group(1).splitlines():
+        row = row.strip()
+        if not row.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if len(cells) < 3 or not re.fullmatch(r"AC\d+", cells[1]):
+            continue
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cells[0]) or cells[0] < AC_AMENDMENT_UNAPPLIED_SINCE:
+            continue
+        parts = re.split(r"\s*(?:->|\u2192)\s*", cells[2], maxsplit=1)
+        new_side = squash(parts[1]) if len(parts) == 2 else ""
+        if new_side:
+            latest[cells[1]] = (new_side, cells[0])
+    return [
+        f"WARNING: ac_amendment_unapplied: {ac} row dated {date} names new wording that its AC line does not carry"
+        for ac, (new_side, date) in sorted(latest.items())
+        if ac in lines and new_side not in lines[ac]
+    ]
+
+
 def _historical_checkbox_disposition(
     spec_file: Path, findings: list[dict]
 ) -> str | None:
@@ -789,6 +834,8 @@ _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
     ("artifact-orphan-unindexed", "orphan artifact file not listed in index.json"),  # SPEC-291
     ("artifact-index-missing", "exists with no index.json"),  # SPEC-291
     ("ac-amendment-deleted", "ac_amendment_deleted:"),  # SPEC-260
+    ("ac-amendment-unapplied", "ac_amendment_unapplied:"),  # BUG-NS-KIT-140
+    ("blocker-evidence-unresolved", "blocker_evidence_unresolved:"),  # BUG-NS-KIT-142
     ("spec-id-not-fleet-unique", "not fleet-unique"),  # fleet ID uniqueness (warning only)
     ("untracked-report-artifact", "untracked report artifact:"),  # artifact_reachability.py
     ("untracked-run", "untracked run:"),  # artifact_reachability.py
@@ -1181,19 +1228,19 @@ def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str], di
 
 def _evidence_reference_exists(reference: str, spec_file: Path) -> bool:
     """Resolve an evidence reference relative to the spec file, kit dir or project root."""
-    if not reference or reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
+    if not lifecycle.is_safe_relative_posix_path(reference):
         return False
-    roots = [spec_file.parent, spec_file.parent.parent]
-    if any((root / reference).is_file() for root in roots):
-        return True
     # SPEC-NS-KIT-004 R4: a committed project file outside the kit directory
     # (the kit dir's parent is the project root); symlinks may not escape it.
     project_root = spec_file.parent.parent.parent
-    candidate = project_root / reference
-    try:
-        return candidate.is_file() and candidate.resolve().is_relative_to(project_root.resolve())
-    except OSError:
-        return False
+    for root in (spec_file.parent, spec_file.parent.parent, project_root):
+        candidate = root / reference
+        try:
+            if candidate.is_file() and candidate.resolve().is_relative_to(project_root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def validate_real_use_evidence(
@@ -1263,6 +1310,42 @@ def validate_real_use_evidence(
                         f"evidence reference (expected inline `(evidence: <path>)` pointing "
                         f"to an existing file); found: {reference!r}"
                     )
+            try:
+                section = lifecycle.parse_state_rationale('\n'.join(body_lines))
+            except lifecycle.StateRationaleError:
+                # The ordinary rationale validator reports malformed sections;
+                # proof binding must not abort whole-corpus validation.
+                section = None
+            record = section.get('record') if isinstance(section, dict) else None
+            if isinstance(record, str) and lifecycle.is_safe_relative_posix_path(record):
+                artifact = spec_file.parent.parent / 'reports' / str(fm.get('id')) / record
+                try:
+                    content = json.loads(artifact.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    content = {}
+                binding = content.get('completion_binding') if isinstance(content, dict) else None
+                if binding is not None:
+                    proofs = binding.get('le_evidence') if isinstance(binding, dict) else None
+                    root = spec_file.parent.parent.parent.resolve()
+                    if not isinstance(proofs, dict) or set(proofs) != checked:
+                        errors.append('real_use_evidence: completion binding must cover every checked LE item')
+                    else:
+                        import hashlib
+                        for le_id, proof in proofs.items():
+                            name = proof.get('path') if isinstance(proof, dict) else None
+                            reference = evidence_refs.get(le_id)
+                            valid = isinstance(name, str) and lifecycle.is_safe_relative_posix_path(name)
+                            target = (root / name).resolve() if valid else None
+                            candidates = [(prefix / reference).resolve() for prefix in
+                                          (spec_file.parent, spec_file.parent.parent, root)] if reference else []
+                            try:
+                                valid = (valid and target.is_relative_to(root) and target in candidates
+                                         and target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest()
+                                         == proof.get('sha256'))
+                            except OSError:
+                                valid = False
+                            if not valid:
+                                errors.append(f'real_use_evidence: checked {le_id} hash-bound evidence disagrees with captured proof: {name!r}')
         return errors
     if not isinstance(deferred, list) or not deferred:
         return errors + ["delegated_experiment requires a non-empty deferred list"]
@@ -2151,6 +2234,19 @@ def state_rationale_adoption_findings(
     return findings
 
 
+def _blocker_evidence_warnings(fm: dict, spec_file: Path) -> list[str]:
+    """BUG-NS-KIT-142 R7: warn (never fail) when a blocked spec's evidence is not a retained file."""
+    raw = fm.get("blocker_evidence")
+    if not isinstance(raw, str) or not raw.strip():
+        return []  # validate_blocked already reports a missing field
+    ref = Path(raw.strip())
+    if not ref.is_absolute() and ".." not in ref.parts:
+        if (Path(spec_file).resolve().parent.parent / ref).is_file():
+            return []
+    return [f"WARNING: blocker_evidence_unresolved: blocker_evidence {raw.strip()!r} is not an existing "
+            "install-relative file; unblock_spec prepare will refuse it"]
+
+
 def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None, *, check_adoption: bool = True, base_revision: str = "HEAD", git_root: Path | None = None) -> list:
     """Return a list of error/warning strings for spec_file, or [] if valid.
 
@@ -2201,6 +2297,7 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     errors.extend(validate_report_action_log(body))
     errors.extend(validate_reuse_gate(body))
     errors.extend(validate_ac_amendments(content, spec_file))
+    errors.extend(validate_ac_amendment_unapplied(content))
     errors.extend(validate_scope(fm))
     errors.extend(validate_scope_amendments(body))
     errors.extend(validate_resolved_blocker_fields(fm))
@@ -2250,6 +2347,8 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                         "legacy status 'planning' requires REVIEW: " + "; ".join(result.findings)
                     )
             errors.extend(validate_blocked(fm))
+            if status == "blocked":
+                errors.extend(_blocker_evidence_warnings(fm, spec_file))
 
     canonical = Path(__file__).resolve().parent
     manifest_path = canonical / "release-manifest.json"
@@ -2829,6 +2928,12 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None, *
     return results
 
 
+def split_findings(findings: list[str]) -> tuple[list[str], list[str]]:
+    """Separate blocking errors and advisory warnings without changing diagnostics."""
+    return ([f for f in findings if not _is_warning(f)],
+            [f for f in findings if _is_warning(f)])
+
+
 def _is_warning(msg: str) -> bool:
     return msg.startswith("WARNING: ")
 
@@ -3058,7 +3163,7 @@ def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[
     """
     links = []
     for path, entry in entries.items():
-        if not path.startswith(kit + "/") or not lifecycle.is_safe_relative_posix_path(path):
+        if not lifecycle.is_safe_relative_posix_path(path):
             continue
         target = snapshot / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3068,7 +3173,8 @@ def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[
             target.write_bytes(blobs[entry["sha"]])
     for target, destination in links:
         resolved = (target.parent / destination).resolve()
-        if not Path(destination).is_absolute() and resolved.is_relative_to(snapshot / kit):
+        permitted_root = snapshot / kit if target.is_relative_to(snapshot / kit) else snapshot
+        if not Path(destination).is_absolute() and resolved.is_relative_to(permitted_root):
             target.symlink_to(destination)
 
 
@@ -3086,16 +3192,18 @@ def _untouched_spec_skip_tokens(
     """
     if baseline_revision is None:
         return None
-    base_entries = _git_tree_entries(repo_root, baseline_revision, kit + "/")
+    base_entries = _git_tree_entries(repo_root, baseline_revision, ".")
     changed = [path for path in set(entries) | set(base_entries)
-               if path.startswith(kit + "/") and entries.get(path) != base_entries.get(path)]
+               if entries.get(path) != base_entries.get(path)]
     spec_prefix = kit + "/specs/"
     reports_prefix = kit + "/reports/"
     tokens: set[str] = set()
     base_spec_paths: dict[str, dict[str, str]] = {}
     for path in changed:
         name = path.rsplit("/", 1)[-1]
-        if path.startswith(spec_prefix) and path.endswith(".md") and "/" not in path[len(spec_prefix):] \
+        if not path.startswith(kit + "/"):
+            tokens.add(path)
+        elif path.startswith(spec_prefix) and path.endswith(".md") and "/" not in path[len(spec_prefix):] \
                 and not name.startswith("_"):
             tokens.add(name[:-3])
             if path in base_entries:
@@ -3124,6 +3232,57 @@ def _untouched_spec_skip_tokens(
             tokens.add(str(parsed["id"]))
     tokens.discard("")
     return sorted(tokens)
+
+
+def _referenced_index_closure(repo_root: Path, entries: dict, blobs: dict, kit: str,
+                              specs_relative_dir: str) -> dict:
+    """Select only captured tracked blobs cited by checked LE items.
+
+    No working-tree path is consulted. Symlink targets are included only after
+    normalization within the repository, with a bounded chain and byte budget.
+    """
+    import posixpath
+
+    selected = {path: entry for path, entry in entries.items() if path.startswith(kit + "/")}
+    references = set()
+    for path, entry in selected.items():
+        if not path.startswith(specs_relative_dir + "/") or not path.endswith(".md"):
+            continue
+        if entry["mode"] not in {"100644", "100755"}:
+            continue
+        text = blobs[entry["sha"]].decode("utf-8", "replace")
+        _, _, refs = _live_execution_items(text.splitlines())
+        for reference in refs.values():
+            if not reference or not lifecycle.is_safe_relative_posix_path(reference):
+                continue
+            for prefix in (str(Path(path).parent), kit, str(Path(kit).parent)):
+                candidate = f"{prefix}/{reference}" if prefix != "." else reference
+                if candidate in entries:
+                    references.add(candidate)
+                    break
+    if len(references) > 256:
+        raise StagedValidationError("project evidence index closure exceeds 256 references")
+    pending = list(references)
+    seen = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        if len(seen) > 512:
+            raise StagedValidationError("project evidence index closure exceeds 512 paths")
+        entry = entries.get(path)
+        if entry is None:
+            continue
+        selected[path] = entry
+        if entry["mode"] == "120000":
+            data = _snapshot_blobs(repo_root, {path: entry})
+            blobs.update(data)
+            destination = data[entry["sha"]].decode("utf-8")
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), destination))
+            if not destination.startswith("/") and lifecycle.is_safe_relative_posix_path(target):
+                pending.append(target)
+    return selected
 
 
 def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
@@ -3158,12 +3317,16 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             _mode, _obj_type, sha = meta.split(" ")
             baseline_shas[tree_path] = sha
     blobs = _snapshot_blobs(repo_root, {path: entry for path, entry in entries.items() if path.startswith(kit + "/")})
+    selected_entries = _referenced_index_closure(repo_root, entries, blobs, kit, specs_relative_dir)
+    external_entries = {path: entry for path, entry in selected_entries.items() if not path.startswith(kit + "/")}
+    external_blobs = _snapshot_blobs(repo_root, external_entries)
+    if sum(len(data) for data in external_blobs.values()) > 8 * 1024 * 1024:
+        raise StagedValidationError("project evidence index closure exceeds 8 MiB")
+    blobs.update(external_blobs)
     with tempfile.TemporaryDirectory(prefix="nightshift-index-") as scratch:
         snapshot = Path(scratch).resolve()
         links = []
-        for path, entry in entries.items():
-            if not path.startswith(kit + "/"):
-                continue
+        for path, entry in selected_entries.items():
             if not lifecycle.is_safe_relative_posix_path(path):
                 raise StagedValidationError(f"unsafe index path: {path!r}")
             target = snapshot / path
@@ -3174,7 +3337,8 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 target.write_bytes(blobs[entry["sha"]])
         for target, destination in links:
             resolved = (target.parent / destination).resolve()
-            if Path(destination).is_absolute() or not resolved.is_relative_to(snapshot / kit):
+            permitted_root = snapshot / kit if target.is_relative_to(snapshot / kit) else snapshot
+            if Path(destination).is_absolute() or not resolved.is_relative_to(permitted_root):
                 results[target.relative_to(snapshot).as_posix()] = [
                     "state_rationale_evidence_path_escape: staged symlink escapes owning kit"]
             else:
@@ -3224,8 +3388,13 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             if not has_head:
                 return []
             if not _baseline_snapshot_holder:
-                baseline_kit_entries = _git_tree_entries(repo_root, baseline_revision, kit + "/")
+                baseline_entries = _git_tree_entries(repo_root, baseline_revision, ".")
+                baseline_kit_entries = {name: entry for name, entry in baseline_entries.items()
+                                        if name.startswith(kit + "/")}
                 baseline_blobs = _snapshot_blobs(repo_root, baseline_kit_entries)
+                baseline_kit_entries = _referenced_index_closure(
+                    repo_root, baseline_entries, baseline_blobs, kit, specs_relative_dir)
+                baseline_blobs.update(_snapshot_blobs(repo_root, baseline_kit_entries))
                 base_dir = Path(tempfile.mkdtemp(prefix="nightshift-index-baseline-"))
                 _materialize_kit_snapshot(base_dir, kit, baseline_kit_entries, baseline_blobs)
                 _baseline_snapshot_holder.append(base_dir)

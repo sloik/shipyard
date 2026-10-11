@@ -24,6 +24,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 import yaml
 
+from record_metrics import render_terminal_trailers
+
 from status_store import (
     StatusStore,
     StatusStoreError,
@@ -1133,6 +1135,7 @@ class TrackedTerminalFrontmatterProjector:
         after_write: Optional[Callable[[WorktreeHandle, Dict[str, Any]], None]] = None,
         after_commit: Optional[Callable[[WorktreeHandle, Dict[str, Any]], None]] = None,
         commit_runner: Optional[Callable[[List[str]], subprocess.CompletedProcess[str]]] = None,
+        completion_inputs_provider: Optional[Callable[[WorktreeHandle, Dict[str, Any], str], Dict[str, Any]]] = None,
     ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.status_store = status_store
@@ -1140,6 +1143,7 @@ class TrackedTerminalFrontmatterProjector:
         self.after_write = after_write
         self.after_commit = after_commit
         self.commit_runner = commit_runner
+        self.completion_inputs_provider = completion_inputs_provider
 
     def _base_projection_contract(
         self, *, base_head: str, relative: str, terminal: str, spec_id: str,
@@ -1174,7 +1178,7 @@ class TrackedTerminalFrontmatterProjector:
     def _record_projection(
         self, handle: WorktreeHandle, run_id: str, decision: Dict[str, Any], *,
         phase: str, relative: str, before_sha256: str, expected_sha256: str,
-        base_head: str,
+        base_head: str, trailers: str | None = None,
     ) -> Dict[str, Any]:
         return self.status_store.record_terminal_projection_event(
             handle.spec_id, run_id, repo_root=self.repo_root, payload={
@@ -1186,6 +1190,7 @@ class TrackedTerminalFrontmatterProjector:
                 "base_head": base_head,
                 "before_sha256": before_sha256,
                 "expected_sha256": expected_sha256,
+                **({'terminal_trailers': trailers} if trailers is not None else {}),
             },
         )
 
@@ -1252,11 +1257,235 @@ class TrackedTerminalFrontmatterProjector:
             raise ValueError("canonical spec path is not tracked")
         return path
 
+    def recover_metadata(
+        self, handle: WorktreeHandle, decision: Dict[str, Any], request: Dict[str, Any],
+    ) -> None:
+        """Resume one explicit, receipt-bound completion metadata closure."""
+        from spec_artifacts import derive_terminal_metadata_recovery
+
+        self.validate(handle)
+        run_id = handle.terminal_run_id or handle.integrity_run_id
+        durable = self.status_store.get_terminal_decision(handle.spec_id, run_id)
+        state = self.status_store.get_state(handle.spec_id)
+        if (durable != decision or state is None or state.get("run_id") != run_id
+            or state.get("status") != "done"
+            or state.get("payload", {}).get("terminal_decision_id") != decision.get("decision_id")):
+            raise StatusStoreError("metadata recovery lacks matching durable terminal state")
+        history = self.status_store.get_terminal_projection_history(handle.spec_id, run_id)
+        original = next((item for item in history
+                         if item["event_id"] == request.get("original_event_id")), None)
+        if original is None:
+            raise StatusStoreError("metadata recovery original receipt unavailable")
+        receipt = original["payload"]
+        if any(receipt.get(key) != self.repository_identity[key]
+               for key in ("repo_common_dir", "checkout_root")):
+            raise StatusStoreError("metadata recovery repository mismatch")
+        closure = derive_terminal_metadata_recovery(self.repo_root, handle.spec_id,
+                                                   run_id, decision, original, request)
+        recovery_base = request.get("recovery_base_head", receipt["base_head"])
+        links = [item for item in history if item["payload"].get("event") == "terminal_frontmatter_metadata_recovery"]
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+        if not links and history[-1]["event_id"] != original["event_id"]:
+            raise StatusStoreError("metadata recovery original receipt is no longer pending")
+        if links and any(item["payload"].get("request") != request
+                         or item["payload"].get("closure_sha256") != hashes for item in links):
+            raise StatusStoreError("competing metadata recovery target refused")
+        subject = f"chore: mark {handle.spec_id} done"
+        trailers = "\n".join(render_terminal_trailers(
+            report="pass", tests="pass", code="pass", acs="pass", verifier="pass",
+            blocker_class="none", blocker_scope="none", unblock_attempts=0,
+            unblock_limit=1, parent_tool_calls=1, resolution_kind="verifier-dispatched",
+            model="coordinator",
+        ))
+        if 'terminal_trailers' in receipt:
+            trailers = receipt['terminal_trailers']
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if head != recovery_base:
+            if not links:
+                raise StatusStoreError("metadata recovery base HEAD moved")
+            self._validate_projection_commit(relative=receipt["spec_path"],
+                expected_sha256=hashes[receipt["spec_path"]], base_head=recovery_base,
+                subject=subject, trailers=trailers)
+            if links[-1]["payload"]["phase"] != "metadata_completed":
+                self.status_store.record_terminal_metadata_recovery_event(
+                    handle.spec_id, run_id, repo_root=self.repo_root, request=request,
+                    phase="metadata_completed")
+            else:
+                # Repeated recovery still proves all closure blobs, not only the spec.
+                for name, data in closure.items():
+                    actual = subprocess.run(["git", "show", f"HEAD:{name}"], cwd=self.repo_root,
+                                            capture_output=True, check=True).stdout
+                    dirty = subprocess.run(["git", "status", "--porcelain", "--", name],
+                                           cwd=self.repo_root, capture_output=True, text=True, check=True).stdout
+                    if actual != data or (self.repo_root / name).read_bytes() != data or dirty.strip():
+                        raise StatusStoreError("completed metadata closure changed")
+            return
+        # Every writable file and its index entry must be the immutable base or
+        # the selected recovery bytes. Unrelated index entries are retained.
+        for name, data in closure.items():
+            path = self.repo_root / name
+            base = subprocess.run(["git", "show", f"{recovery_base}:{name}"],
+                                  cwd=self.repo_root, capture_output=True)
+            before = base.stdout if base.returncode == 0 else None
+            permitted = [before, data] if links else [before]
+            if name == receipt["spec_path"]:
+                if not links and hashlib.sha256(path.read_bytes()).hexdigest() != receipt["expected_sha256"]:
+                    raise StatusStoreError("metadata recovery pending spec bytes edited")
+                if links:
+                    permitted.append(path.read_bytes() if hashlib.sha256(path.read_bytes()).hexdigest() == receipt["expected_sha256"] else None)
+                else:
+                    permitted.append(path.read_bytes())
+            current = path.read_bytes() if path.exists() else None
+            indexed = subprocess.run(["git", "show", f":{name}"], cwd=self.repo_root, capture_output=True)
+            index_bytes = indexed.stdout if indexed.returncode == 0 else None
+            if current not in permitted or index_bytes not in permitted:
+                raise StatusStoreError("metadata recovery closure has unrelated bytes or index content")
+        if not links:
+            self.status_store.record_terminal_metadata_recovery_event(
+                handle.spec_id, run_id, repo_root=self.repo_root, request=request,
+                phase="metadata_started")
+        # Re-check the base immediately before the first tree mutation.
+        if subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_root,
+                          capture_output=True, text=True, check=True).stdout.strip() != recovery_base:
+            raise StatusStoreError("metadata recovery base HEAD moved before write")
+        for name, data in closure.items():
+            path = self.repo_root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        if self.after_write is not None:
+            self.after_write(handle, decision)
+        if (derive_terminal_metadata_recovery(self.repo_root, handle.spec_id, run_id,
+                                             decision, original, request) != closure
+            or any((self.repo_root / name).read_bytes() != data for name, data in closure.items())):
+            raise StatusStoreError("metadata recovery closure changed before commit")
+        subprocess.run(["git", "add", "--", *closure], cwd=self.repo_root,
+                       capture_output=True, text=True, check=True)
+        command = ["git", "commit", "--only", "-m", subject, "-m", trailers, "--", *closure]
+        if subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_root,
+                          capture_output=True, text=True, check=True).stdout.strip() != recovery_base:
+            raise StatusStoreError("metadata recovery base HEAD moved before commit")
+        commit = self.commit_runner(command) if self.commit_runner else subprocess.run(
+            command, cwd=self.repo_root, capture_output=True, text=True)
+        if commit.returncode:
+            raise RuntimeError("terminal metadata commit failed: " + (commit.stderr or commit.stdout).strip())
+        self._validate_projection_commit(relative=receipt["spec_path"],
+            expected_sha256=hashes[receipt["spec_path"]], base_head=recovery_base,
+            subject=subject, trailers=trailers)
+        if self.after_commit is not None:
+            self.after_commit(handle, decision)
+        self.status_store.record_terminal_metadata_recovery_event(
+            handle.spec_id, run_id, repo_root=self.repo_root, request=request,
+            phase="metadata_completed")
+
+    def _project_complete(self, handle: WorktreeHandle, decision: Dict[str, Any],
+                          path: Path, history: List[Dict[str, Any]]) -> None:
+        from spec_artifacts import derive_terminal_first_projection
+
+        run_id = handle.terminal_run_id or handle.integrity_run_id
+        relative = path.relative_to(self.repo_root).as_posix()
+        original = next((event for event in history
+                         if event['payload'].get('phase') == 'started'
+                         and 'completion_inputs' in event['payload']), None)
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo_root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        base_head = original['payload']['base_head'] if original else head
+        accepted_candidate = (decision.get('payload', {}).get('completion_evidence') or {}).get('candidate_revision')
+        if handle.verified_revision and handle.verified_revision != accepted_candidate:
+            raise StatusStoreError('first projection accepted candidate binding changed')
+        if original:
+            inputs = original['payload']['completion_inputs']
+        elif self.completion_inputs_provider is not None:
+            inputs = self.completion_inputs_provider(handle, decision, base_head)
+        else:
+            raise StatusStoreError('pending terminal projection: parent completion inputs missing; '
+                                   'supply bounded parent inputs and retry queue.recover_terminal_projection(handle)')
+        closure, trailer_lines = derive_terminal_first_projection(
+            self.repo_root, handle.spec_id, run_id, decision, relative, base_head, inputs)
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+        before = subprocess.run(['git', 'show', f'{base_head}:{relative}'], cwd=self.repo_root,
+                                capture_output=True, check=True).stdout
+        receipt = {'event': 'terminal_frontmatter_projection', 'phase': 'started',
+                   'decision_id': decision['decision_id'], 'terminal': 'done',
+                   'spec_path': relative, **self.repository_identity,
+                   'base_head': base_head, 'before_sha256': hashlib.sha256(before).hexdigest(),
+                   'expected_sha256': hashes[relative], 'completion_inputs': inputs,
+                   'closure_sha256': hashes}
+        if original and original['payload'] != receipt:
+            raise StatusStoreError('first projection immutable closure/input mismatch')
+        subject = f'chore: mark {handle.spec_id} done'
+        trailers = '\n'.join(trailer_lines)
+        if head != base_head:
+            if original is None:
+                raise StatusStoreError('first projection base HEAD changed')
+            self._validate_projection_commit(relative=relative, expected_sha256=hashes[relative],
+                base_head=base_head, subject=subject, trailers=trailers)
+            self.status_store.record_terminal_projection_event(
+                handle.spec_id, run_id, repo_root=self.repo_root,
+                payload={**receipt, 'phase': 'completed'})
+            return
+        for name, data in closure.items():
+            target = self.repo_root / name
+            current_path = self.repo_root
+            for member in PurePosixPath(name).parts:
+                current_path /= member
+                if current_path.is_symlink():
+                    raise StatusStoreError(f'first projection symlinked closure path: {name}')
+            if target.is_file() and target.stat().st_nlink != 1:
+                raise StatusStoreError(f'first projection hardlinked closure path: {name}')
+            base = subprocess.run(['git', 'show', f'{base_head}:{name}'], cwd=self.repo_root,
+                                  capture_output=True)
+            base_bytes = base.stdout if base.returncode == 0 else None
+            current = target.read_bytes() if target.is_file() else None
+            indexed = subprocess.run(['git', 'show', f':{name}'], cwd=self.repo_root, capture_output=True)
+            index_bytes = indexed.stdout if indexed.returncode == 0 else None
+            allowed = [base_bytes, data] if original else [base_bytes]
+            if target.is_symlink() or current not in allowed or index_bytes not in allowed:
+                raise StatusStoreError(f'first projection closure has unowned bytes or index: {name}')
+        if original is None:
+            original = self.status_store.record_terminal_projection_event(
+                handle.spec_id, run_id, repo_root=self.repo_root, payload=receipt)
+        try:
+            for name, data in closure.items():
+                target = self.repo_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            if self.after_write is not None:
+                self.after_write(handle, decision)
+            if any((self.repo_root / name).read_bytes() != data for name, data in closure.items()):
+                raise StatusStoreError('first projection closure changed before commit')
+            if subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo_root,
+                              capture_output=True, text=True, check=True).stdout.strip() != base_head:
+                raise StatusStoreError('first projection base HEAD moved before commit')
+            subprocess.run(['git', 'add', '--', *closure], cwd=self.repo_root,
+                           capture_output=True, text=True, check=True)
+            command = ['git', 'commit', '--only', '-m', subject, '-m', trailers, '--', *closure]
+            commit = self.commit_runner(command) if self.commit_runner else subprocess.run(
+                command, cwd=self.repo_root, capture_output=True, text=True)
+            if commit.returncode:
+                raise RuntimeError('terminal projection ordinary commit failed: ' +
+                                   (commit.stderr or commit.stdout).strip())
+            self._validate_projection_commit(relative=relative, expected_sha256=hashes[relative],
+                base_head=base_head, subject=subject, trailers=trailers)
+            if self.after_commit is not None:
+                self.after_commit(handle, decision)
+            self.status_store.record_terminal_projection_event(handle.spec_id, run_id,
+                repo_root=self.repo_root, payload={**receipt, 'phase': 'completed'})
+        except Exception as exc:
+            self.status_store.record_terminal_projection_failure(handle.spec_id, run_id,
+                original_event_id=original['event_id'], reason=str(exc))
+            raise
+
     def project(self, handle: WorktreeHandle, decision: Dict[str, Any]) -> None:
         from spec_frontmatter import parse_spec_file, write_spec_frontmatter
 
         path = self.validate(handle)
         run_id = handle.terminal_run_id or handle.integrity_run_id
+        metadata_links = [item for item in self.status_store.get_terminal_projection_history(handle.spec_id, run_id)
+                          if item["payload"].get("event") == "terminal_frontmatter_metadata_recovery"]
+        if metadata_links:
+            self.recover_metadata(handle, decision, metadata_links[0]["payload"]["request"])
+            return
         durable = self.status_store.get_terminal_decision(handle.spec_id, run_id)
         state = self.status_store.get_state(handle.spec_id)
         if (
@@ -1268,6 +1497,24 @@ class TrackedTerminalFrontmatterProjector:
         ):
             raise StatusStoreError("frontmatter projection lacks matching durable terminal state")
         terminal = str(decision["decision"])
+        history = self.status_store.get_terminal_projection_history(handle.spec_id, run_id)
+        complete = any('completion_inputs' in item['payload'] for item in history)
+        legacy = any(item['payload'].get('phase') == 'started'
+                     and 'completion_inputs' not in item['payload'] for item in history)
+        version = parse_spec_file(path).frontmatter.get('template_version', 0)
+        if terminal == 'done' and (complete or (not legacy and
+            isinstance(version, int) and version >= 12)):
+            try:
+                self._project_complete(handle, decision, path, history)
+            except Exception as exc:
+                retained = self.status_store.get_terminal_projection_history(handle.spec_id, run_id)
+                last = retained[-1]['payload'] if retained else {}
+                if last.get('event') != 'terminal_frontmatter_projection_failure' or last.get('reason') != str(exc):
+                    original = next((event for event in retained if event['payload'].get('phase') == 'started'), None)
+                    self.status_store.record_terminal_projection_failure(handle.spec_id, run_id,
+                        original_event_id=original['event_id'] if original else None, reason=str(exc))
+                raise
+            return
         if terminal == "done":
             completion = (decision.get("payload") or {}).get("completion_evidence")
             if (
@@ -1282,24 +1529,20 @@ class TrackedTerminalFrontmatterProjector:
                 raise StatusStoreError(
                     "done frontmatter projection lacks parent-accepted completion evidence"
                 )
-            evidence = ("pass", "pass", "pass", "pass", "pass")
+            actual = completion.get('evidence_values') or {}
+            from record_metrics import verdict_evidence
+            verifier, acs = verdict_evidence(completion.get('verifier'))
+            evidence = (actual.get('report', 'unknown'), actual.get('tests', 'unknown'),
+                        actual.get('code', 'unknown'), acs, verifier)
             blocker_class, blocker_scope, resolution = "none", "none", "verifier-dispatched"
         else:
             evidence = ("unknown", "unknown", "unknown", "unknown", "unknown")
             blocker_class, blocker_scope, resolution = "integration", "spec", "blocked"
-        trailers = "\n".join((
-            f"Nightshift-Evidence-Report: {evidence[0]}",
-            f"Nightshift-Evidence-Tests: {evidence[1]}",
-            f"Nightshift-Evidence-Code: {evidence[2]}",
-            f"Nightshift-Evidence-ACs: {evidence[3]}",
-            f"Nightshift-Evidence-Verifier: {evidence[4]}",
-            f"Nightshift-Blocker-Class: {blocker_class}",
-            f"Nightshift-Blocker-Scope: {blocker_scope}",
-            "Nightshift-Unblock-Attempts: 0",
-            "Nightshift-Unblock-Limit: 1",
-            "Nightshift-Parent-Tool-Calls: 1",
-            f"Nightshift-Resolution-Kind: {resolution}",
-            "Nightshift-Model: coordinator",
+        trailers = "\n".join(render_terminal_trailers(
+            report=evidence[0], tests=evidence[1], code=evidence[2], acs=evidence[3],
+            verifier=evidence[4], blocker_class=blocker_class, blocker_scope=blocker_scope,
+            unblock_attempts=0, unblock_limit=1, parent_tool_calls='unavailable',
+            resolution_kind=resolution, model="coordinator",
         ))
         subject = f"chore: mark {handle.spec_id} {terminal}"
         current = parse_spec_file(path).frontmatter.get("status")
@@ -1318,6 +1561,17 @@ class TrackedTerminalFrontmatterProjector:
             handle.spec_id, run_id,
         )
         latest_payload = history[-1]["payload"] if history else None
+        if isinstance(latest_payload, dict):
+            if 'terminal_trailers' in latest_payload:
+                trailers = latest_payload['terminal_trailers']
+            else:
+                # Preserve the exact historical message contract on replay.
+                old = ('pass',) * 5 if terminal == 'done' else ('unknown',) * 5
+                trailers = '\n'.join(render_terminal_trailers(
+                    report=old[0], tests=old[1], code=old[2], acs=old[3], verifier=old[4],
+                    blocker_class=blocker_class, blocker_scope=blocker_scope,
+                    unblock_attempts=0, unblock_limit=1, parent_tool_calls=1,
+                    resolution_kind=resolution, model='coordinator'))
         active_receipt = (
             latest_payload
             if isinstance(latest_payload, dict) and latest_payload.get("phase") == "started"
@@ -1367,13 +1621,14 @@ class TrackedTerminalFrontmatterProjector:
                     before_sha256=str(latest_payload.get("before_sha256") or ""),
                     expected_sha256=current_sha256,
                     base_head=str(latest_payload.get("base_head") or ""),
+                    trailers=trailers,
                 )
             return
         if not owned_dirty:
             self._record_projection(
                 handle, run_id, decision, phase="started", relative=relative,
                 before_sha256=before_sha256, expected_sha256=expected_sha256,
-                base_head=base_head,
+                base_head=base_head, trailers=trailers,
             )
         if current != decision["decision"]:
             write_spec_frontmatter(
@@ -1417,7 +1672,7 @@ class TrackedTerminalFrontmatterProjector:
                 else current_sha256
             ),
             expected_sha256=expected_sha256,
-            base_head=base_head,
+            base_head=base_head, trailers=trailers,
         )
 
 
@@ -2033,7 +2288,10 @@ class SerializedIntegrationQueue:
                 self._project_terminal_status(
                     handle, "done",
                     "accepted by recovered serialized integration queue",
+                    output,
                     observed=observed, declared=handle.declared_touches,
+                    merge_attempt=latest_merge,
+                    fresh_main={'ok': True, 'revision': self._head(), 'output': output},
                 )
                 cleanup = self.cleanup_terminal_resources(handle)
                 self.release(handle.spec_id)
@@ -2638,7 +2896,10 @@ class SerializedIntegrationQueue:
                     self._project_terminal_status(
                         handle, "done",
                         "accepted by recovered serialized integration queue",
+                        output,
                         observed=observed_success, declared=handle.declared_touches,
+                        merge_attempt=attempt,
+                        fresh_main={'ok': True, 'revision': self._head(), 'output': output},
                     )
                     cleanup = self.cleanup_terminal_resources(handle)
                     self.release(handle.spec_id)
@@ -2950,7 +3211,10 @@ class SerializedIntegrationQueue:
                 handle.status = "accepted"
                 self._project_terminal_status(
                     handle, "done", "accepted by serialized integration queue",
+                    output,
                     observed=observed, declared=handle.declared_touches,
+                    merge_attempt=merge,
+                    fresh_main={'ok': True, 'revision': self._head(), 'output': output},
                 )
                 cleanup = self.cleanup_terminal_resources(handle)
                 after = self._head()
@@ -3058,6 +3322,7 @@ class SerializedIntegrationQueue:
         declared: Optional[Iterable[str]] = None,
         revert_attempt: Optional[Dict[str, Any]] = None,
         merge_attempt: Optional[Dict[str, Any]] = None,
+        fresh_main: Optional[Dict[str, Any]] = None,
         invoke_crash_hook: bool = True,
     ) -> None:
         """Persist the immutable coordinator choice before status projection."""
@@ -3073,6 +3338,7 @@ class SerializedIntegrationQueue:
                 "completion_evidence": handle.completion_evidence_acceptance,
                 "revert_attempt": revert_attempt,
                 "merge_attempt": merge_attempt,
+                **({'fresh_main': fresh_main} if fresh_main is not None else {}),
             },
         )
         if invoke_crash_hook and self.after_terminal_decision is not None:
@@ -3099,6 +3365,7 @@ class SerializedIntegrationQueue:
 
     def recover_terminal_projection(
         self, handle: WorktreeHandle, *, record_evidence: bool = True,
+        metadata_recovery: Dict[str, Any] | None = None,
     ) -> str | None:
         """Resume a persisted choice without allowing recovery to choose anew."""
         if self.status_store is None:
@@ -3117,11 +3384,14 @@ class SerializedIntegrationQueue:
             or not all(isinstance(path, str) for path in declared)
         ):
             raise ValueError("terminal decision surface evidence is missing or invalid")
-        self._project_terminal_status(
-            handle, decision["decision"], decision.get("reason") or "terminal recovery",
-            str(payload.get("validation_output") or ""),
-            observed=observed, declared=declared, invoke_crash_hook=False,
-        )
+        if metadata_recovery is not None:
+            self.terminal_frontmatter_projector.recover_metadata(handle, decision, metadata_recovery)
+        else:
+            self._project_terminal_status(
+                handle, decision["decision"], decision.get("reason") or "terminal recovery",
+                str(payload.get("validation_output") or ""),
+                observed=observed, declared=declared, invoke_crash_hook=False,
+            )
         cleanup: CleanupResult | None = None
         if decision["decision"] == "done":
             self._accepted_files.update(observed)

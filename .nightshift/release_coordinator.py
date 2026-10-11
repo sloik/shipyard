@@ -29,6 +29,7 @@ from pathlib import Path
 import config_migrations
 import release
 import release_handoff
+from observability_enroll import classify_path as observability_classify
 from observability_enroll import release_disposition
 
 
@@ -108,9 +109,56 @@ CANONICAL_SUITE_DURATION_GLOB = "canonical-suite-duration-*.json"
 # match CANONICAL_SUITE_DURATION_GLOB.
 CANONICAL_SUITE_JUNIT_PENDING_PREFIX = "canonical-suite-junit-pending-"
 CANONICAL_SUITE_JUNIT_TEMPLATE = "canonical-suite-test-durations-{stamp}Z.junit.xml"
+# BUG-NS-KIT-130 R2: a committable summary of the same JUnit file (totals and summed
+# duration per test file; no test ids, parameters, messages or captured output).
+CANONICAL_SUITE_SUMMARY_TEMPLATE = "canonical-suite-test-summary-{stamp}Z.json"
+_JUNIT_MODULE_RE = re.compile(r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$")
+# SPEC-NS-KIT-126: a recent green suite record may stand in for the --apply
+# preflight's full run when the cut changed only release-mechanical paths
+# (relative to canonical/). "dir/**" entries are prefixes.
+SUITE_REUSE_MAX_AGE_S = 24 * 3600
+RELEASE_MECHANICAL_PATHS = (
+    "config.yaml",  # kit version source
+    "config-reference.yaml",
+    "LOOP.md",
+    "Skills/nightshift/SKILL.md",
+    "CHANGELOG.md",
+    "release-manifest.json",
+    "release-handoffs/**",
+    "tests/fixtures/spec-229-006/**",
+    "spec-id-legacy/**",  # legacy spec-id lists the cut re-freezes
+)
+# Files that carry the version string among other content: reuse only when
+# every changed line in them holds a version number.
+RELEASE_VERSION_LINE_PATHS = (
+    "config.yaml",
+    "config-reference.yaml",
+    "LOOP.md",
+    "Skills/nightshift/SKILL.md",
+)
+# Tests that read the mechanical paths (manifest, CHANGELOG, version strings,
+# fixtures, legacy lists, handoffs); run instead of the full suite on reuse.
+RELEASE_MECHANICAL_TESTS = (
+    "tests/test_release.py",
+    "tests/test_release_handoff.py",
+    "tests/test_spec_229_006_live_e2e.py",
+    "tests/test_spec_417_005_slim_skill.py",
+    "tests/test_spec_id_validation.py",
+    "tests/test_spec_id_docs.py",
+    "tests/test_managed_payload_provenance.py",
+    "tests/test_managed_payload_acceptance.py",
+)
+SUITE_GROWTH_WARNING_RATIO_X10 = 16  # 1.6x, integer-compared
+_VERSION_TOKEN = re.compile(r"\d+\.\d+\.\d+")
 # The line hooks/pre-commit identifies itself by; the write-scope installer
 # recognises the same string (BUG-329).
 KIT_HOOK_HEADER = "# Nightshift Kit \u2014 Pre-commit hook"
+# SPEC-NS-KIT-143: the line hooks/commit-msg identifies itself by, and the replay window.
+COMMIT_MSG_HOOK_HEADER = "Nightshift Kit \u2014 Commit message hook"
+COMMIT_MSG_REPLAY_DAYS = 30
+COMMIT_MSG_REPLAY_CAP = 500
+COMMIT_MSG_REPLAY_WALK = 5000
+COMMIT_MSG_REFRESH_MODES = ("auto", "force", "never")
 
 
 def _run(
@@ -197,12 +245,67 @@ def _run_canonical_suite(
     )
 
 
+def _junit_test_file(classname: str) -> str:
+    """Map a pytest JUnit ``classname`` to its test file path, or a fixed placeholder.
+
+    Only the module part (up to the ``test_*`` component) is kept, so a class name or
+    anything unexpected in the attribute never reaches the summary.
+    """
+    if not _JUNIT_MODULE_RE.match(classname):
+        return "<unattributed>"
+    parts = classname.split(".")
+    for index, part in enumerate(parts):
+        if part.startswith("test_"):
+            return "/".join(parts[: index + 1]) + ".py"
+    return "<unattributed>"
+
+
+def summarize_junit(junit_xml: Path) -> dict | None:
+    """Return totals and summed duration per test file for a JUnit file (BUG-NS-KIT-130 R2).
+
+    The result holds no test ids, parameters, failure messages or captured output, so it
+    can be committed where the raw XML (intentional fixture secrets and PII) cannot.
+    ``None`` when the file does not parse.
+    """
+    import xml.etree.ElementTree as ElementTree
+
+    try:
+        root = ElementTree.parse(junit_xml).getroot()
+    except (ElementTree.ParseError, OSError):
+        return None
+    totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    per_file: dict[str, float] = {}
+    total_s = 0.0
+    for case in root.iter("testcase"):
+        try:
+            seconds = float(case.get("time", "0") or 0)
+        except ValueError:
+            seconds = 0.0
+        totals["tests"] += 1
+        totals["failures"] += 1 if case.find("failure") is not None else 0
+        totals["errors"] += 1 if case.find("error") is not None else 0
+        totals["skipped"] += 1 if case.find("skipped") is not None else 0
+        path = _junit_test_file(case.get("classname", ""))
+        per_file[path] = per_file.get(path, 0.0) + seconds
+        total_s += seconds
+    return {
+        "schema_version": 1,
+        **totals,
+        "duration_s": round(total_s, 3),
+        "files": {path: round(per_file[path], 3) for path in sorted(per_file)},
+    }
+
+
 def _record_canonical_suite_duration(
     canonical: Path,
     duration_s: float,
     *,
     suite_passed: bool,
     junit_xml: Path | None = None,
+    commit: str | None = None,
+    tree_clean_start: bool = False,
+    tree_clean_end: bool = False,
+    phase: str = "release_apply",
 ) -> Path:
     """Persist a durable, timestamped measurement of one canonical-suite run.
 
@@ -219,6 +322,9 @@ def _record_canonical_suite_duration(
     (a timed-out or killed run writes none), it is moved beside this record as
     ``canonical-suite-test-durations-<stamp>Z.junit.xml`` and the record gains
     ``test_durations_artifact`` (its file name). Nothing is added otherwise.
+    BUG-NS-KIT-130 R2: beside it, ``canonical-suite-test-summary-<stamp>Z.json`` holds
+    the committable summary (``test_summary_artifact``); release evidence cites that
+    file, never the raw XML.
     """
     recorded_at = datetime.now(UTC)
     stamp = recorded_at.strftime("%Y%m%dT%H%M%S%f")
@@ -227,12 +333,22 @@ def _record_canonical_suite_duration(
         "recorded_at": recorded_at.isoformat(),
         "canonical_suite_timeout_s": CANONICAL_SUITE_TIMEOUT_S,
         "suite_passed": suite_passed,
+        # SPEC-NS-KIT-126 R1: bind the record to the exact commit and tree state.
+        "canonical_commit": commit,
+        "tree_clean_start": tree_clean_start,
+        "tree_clean_end": tree_clean_end,
+        "phase": phase,
     }
     output = canonical / "reports" / "_wip" / f"canonical-suite-duration-{stamp}Z.json"
     if junit_xml is not None and junit_xml.is_file():
         durations = output.with_name(CANONICAL_SUITE_JUNIT_TEMPLATE.format(stamp=stamp))
         os.replace(junit_xml, durations)
         record["test_durations_artifact"] = durations.name
+        summary = summarize_junit(durations)
+        if summary is not None:
+            summary_path = output.with_name(CANONICAL_SUITE_SUMMARY_TEMPLATE.format(stamp=stamp))
+            write_metrics(summary, summary_path)
+            record["test_summary_artifact"] = summary_path.name
     write_metrics(record, output)
     return output
 
@@ -258,6 +374,167 @@ def latest_canonical_suite_duration(canonical: Path) -> dict | None:
         if record.get("suite_passed"):
             return record
     return None
+
+
+def _canonical_tree_state(canonical: Path) -> tuple[str | None, bool]:
+    """Return (HEAD commit, tree clean) for canonical/ (SPEC-NS-KIT-126).
+
+    Clean means ``git status --porcelain`` is empty for canonical/ (tracked
+    changes and untracked, non-ignored files); outside a git work tree the
+    commit is ``None`` and the tree is never clean.
+    """
+    head = _run(["git", "rev-parse", "HEAD"], cwd=canonical)
+    if head.returncode:
+        return None, False
+    status = _run(["git", "status", "--porcelain", "--", "."], cwd=canonical)
+    return head.stdout.strip(), status.returncode == 0 and not status.stdout.strip()
+
+
+def _mechanical_path(path: str) -> bool:
+    return any(
+        path.startswith(rule[:-2]) if rule.endswith("/**") else path == rule
+        for rule in RELEASE_MECHANICAL_PATHS
+    )
+
+
+def _version_lines_only(canonical: Path, commit: str, path: str) -> bool:
+    diff = _run(
+        ["git", "diff", "-U0", "--no-renames", "--relative", commit, "HEAD", "--", path],
+        cwd=canonical,
+    )
+    if diff.returncode:
+        return False
+    lines = [
+        line
+        for line in diff.stdout.splitlines()
+        if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    ]
+    return bool(lines) and all(_VERSION_TOKEN.search(line) for line in lines)
+
+
+def _newest_suite_record(canonical: Path) -> tuple[str, dict] | None:
+    directory = canonical / "reports" / "_wip"
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob(CANONICAL_SUITE_DURATION_GLOB), reverse=True):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict):
+            return path.name, record
+    return None
+
+
+def evaluate_suite_reuse(canonical: Path, *, now: datetime | None = None) -> dict:
+    """Decide whether the newest suite record can stand in for the full run.
+
+    SPEC-NS-KIT-126 R2: reuse only when the newest record passed, is at most
+    24 hours old, was clean at both ends, the current tree is clean, and every
+    path changed since its commit is release-mechanical. Any doubt means the
+    full suite runs. Returns ``reusable`` plus ``reason`` (and, when reusable,
+    ``record``, ``commit`` and ``changed_paths``).
+    """
+    def refuse(reason: str) -> dict:
+        return {"reusable": False, "reason": reason}
+
+    found = _newest_suite_record(canonical)
+    if found is None:
+        return refuse("no canonical-suite record")
+    name, record = found
+    commit = record.get("canonical_commit")
+    if not record.get("suite_passed") or not commit:
+        return refuse(f"newest record {name} did not pass or has no commit")
+    try:
+        recorded = datetime.fromisoformat(record["recorded_at"])
+        age = ((now or datetime.now(UTC)) - recorded).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return refuse(f"record {name} has no usable recorded_at")
+    if not 0 <= age <= SUITE_REUSE_MAX_AGE_S:
+        return refuse(f"record {name} is outside the 24 hour window")
+    if record.get("tree_clean_start") is not True or record.get("tree_clean_end") is not True:
+        return refuse(f"record {name} tree was not clean at both ends")
+    head, clean = _canonical_tree_state(canonical)
+    if head is None or not clean:
+        return refuse("current canonical tree is not clean")
+    diff = _run(
+        ["git", "diff", "--name-only", "--no-renames", "--relative", commit, "HEAD", "--", "."],
+        cwd=canonical,
+    )
+    if diff.returncode:
+        return refuse(f"cannot diff record commit {commit} against HEAD")
+    changed = sorted(line for line in diff.stdout.splitlines() if line)
+    outside = [path for path in changed if not _mechanical_path(path)]
+    if outside:
+        return refuse("non-mechanical paths changed: " + ", ".join(outside[:5]))
+    for path in changed:
+        if path in RELEASE_VERSION_LINE_PATHS and not _version_lines_only(
+            canonical, commit, path
+        ):
+            return refuse(f"{path} changed beyond version lines")
+    return {
+        "reusable": True,
+        "reason": "release-mechanical changes only",
+        "record": name,
+        "commit": commit,
+        "changed_paths": changed,
+    }
+
+
+def canonical_suite_growth_warning(canonical: Path) -> str | None:
+    """SPEC-NS-KIT-126 R4: warn when the suite grew 1.6x past the apply baseline.
+
+    Compares the newest healthy record of any phase with the newest healthy
+    ``release_apply`` record (records without a phase predate the field and are
+    apply records). Never blocks.
+    """
+    directory = canonical / "reports" / "_wip"
+    if not directory.is_dir():
+        return None
+    latest: float | None = None
+    baseline: float | None = None
+    for path in sorted(directory.glob(CANONICAL_SUITE_DURATION_GLOB), reverse=True):
+        try:
+            record = json.loads(path.read_text())
+            duration = float(record["duration_s"])
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not record.get("suite_passed"):
+            continue
+        if latest is None:
+            latest = duration
+        if record.get("phase", "release_apply") == "release_apply":
+            baseline = duration
+            break
+    if latest is None or baseline is None or latest * 10 < baseline * SUITE_GROWTH_WARNING_RATIO_X10:
+        return None
+    return (
+        f"WARNING: latest healthy canonical-suite duration {round(latest, 3)}s is at least "
+        f"1.6x the newest healthy release_apply record {round(baseline, 3)}s "
+        f"(CANONICAL_SUITE_TIMEOUT_S={CANONICAL_SUITE_TIMEOUT_S}s)"
+    )
+
+
+def record_suite_run(canonical: Path, duration_s: float, *, passed: bool) -> dict:
+    """SPEC-NS-KIT-126 R4: write a ``merge``-phase record; touches no install."""
+    commit, clean = _canonical_tree_state(canonical)
+    path = _record_canonical_suite_duration(
+        canonical,
+        duration_s,
+        suite_passed=passed,
+        commit=commit,
+        tree_clean_start=clean,
+        tree_clean_end=clean,
+        phase="merge",
+    )
+    return {
+        "record": str(path),
+        "phase": "merge",
+        "suite_passed": passed,
+        "canonical_commit": commit,
+        "tree_clean": clean,
+        "warning": canonical_suite_growth_warning(canonical),
+    }
 
 
 def check_canonical_suite_headroom(canonical: Path) -> tuple[bool, str]:
@@ -883,6 +1160,148 @@ def _refresh_recognized_nightshift_precommit_hooks(plan: RepositoryPlan) -> list
     return errors
 
 
+def _commit_msg_hook_target(root: Path) -> Path | None:
+    hooks = _run(["git", "rev-parse", "--git-path", "hooks"], cwd=root)
+    if hooks.returncode:
+        return None
+    directory = Path(hooks.stdout.strip())
+    if not directory.is_absolute():
+        directory = root / directory
+    return directory / "commit-msg"
+
+
+def _hook_verdict(hook: Path, message_file: Path, scratch: Path) -> tuple[bool, str]:
+    """Run one hook on one message file from an empty directory (SPEC-NS-KIT-143 R2).
+
+    The working directory holds no ``.nightshift`` tree and is not a git
+    repository, so the hook's SPEC-183 path and terminal-outcome check are inert
+    and nothing in any project can be written. The environment is minimal.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(scratch), "LC_ALL": "C"}
+    try:
+        proc = subprocess.run(
+            ["bash", str(hook), str(message_file)],
+            cwd=scratch, env=env, text=True, capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"hook did not run: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    output = proc.stdout + proc.stderr
+    reason = next((ln.strip() for ln in output.splitlines() if "ERROR" in ln), output.strip())
+    return False, re.sub(r"^\[nightshift commit-msg\] ERROR:\s*", "", reason)[:200]
+
+
+def _replay_commit_msg_history(root: Path, new_hook: Path, old_hook: Path) -> dict:
+    """SPEC-NS-KIT-143 R2: replay recent commit messages through the new and current hooks.
+
+    Window: reachable from HEAD, authored in the last 30 days, merges excluded, at most 500.
+    Reads git history only; messages go to files in a private temp directory.
+    """
+    cutoff = time.time() - COMMIT_MSG_REPLAY_DAYS * 86400
+    # No --since: git stops walking at the first commit older than the bound, which
+    # truncates a history with out-of-order dates. Filter on the author date here;
+    # the walk itself is bounded so a very large history stays cheap.
+    log = _run(
+        ["git", "log", "--no-merges", f"-n{COMMIT_MSG_REPLAY_WALK}", "--format=%H %at"],
+        cwd=root,
+    )
+    shas = []
+    for line in log.stdout.splitlines() if not log.returncode else []:
+        sha, _, authored = line.partition(" ")
+        if authored.isdigit() and int(authored) >= cutoff:
+            shas.append(sha)
+        if len(shas) >= COMMIT_MSG_REPLAY_CAP:
+            break
+    would_reject = already_rejected = 0
+    reasons: dict[str, int] = {}
+    examples: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="ns-commit-msg-replay-") as tmp:
+        scratch = Path(tmp)
+        message_file = scratch / "COMMIT_EDITMSG"
+        for sha in shas:
+            body = _run(["git", "log", "-1", "--format=%B", sha], cwd=root).stdout
+            message_file.write_text(body)
+            new_ok, reason = _hook_verdict(new_hook, message_file, scratch)
+            if new_ok:
+                continue
+            old_ok, _old_reason = _hook_verdict(old_hook, message_file, scratch)
+            if not old_ok:
+                already_rejected += 1
+                continue
+            would_reject += 1
+            reasons[reason] = reasons.get(reason, 0) + 1
+            if len(examples) < 5:
+                examples.append(body.splitlines()[0] if body.strip() else "")
+    return {
+        "replayed": len(shas),
+        "would_reject": would_reject,
+        "already_rejected": already_rejected,
+        "reasons": [f"{text} (x{count})" if count > 1 else text for text, count in reasons.items()],
+        "examples": examples,
+    }
+
+
+def plan_commit_msg_refresh(
+    plan: RepositoryPlan, source: Path, *, mode: str, dry_run: bool
+) -> dict | None:
+    """SPEC-NS-KIT-143: refresh a recognised kit ``commit-msg`` hook, but only after the replay.
+
+    Never creates a hook (D1). Defers when the replay finds commits the new hook
+    would reject (D2) unless ``mode == "force"`` (D3). ``dry_run`` writes nothing.
+    """
+    if mode == "never" or not source.is_file():
+        return None
+    record: dict = {"repository": str(plan.root)}
+    target = _commit_msg_hook_target(plan.root)
+    if target is None or not target.is_file():
+        return {**record, "commit_msg_hook": "absent", "summary": "absent"}
+    try:
+        existing = target.read_bytes()
+    except OSError:
+        return {**record, "commit_msg_hook": "absent", "summary": "absent"}
+    if COMMIT_MSG_HOOK_HEADER not in existing[:300].decode("utf-8", errors="replace"):
+        return {**record, "commit_msg_hook": "project_owned", "summary": "project_owned"}
+    if existing == source.read_bytes():
+        return {**record, "commit_msg_hook": "unchanged", "summary": "unchanged"}
+    replay = _replay_commit_msg_history(plan.root, source, target)
+    record.update(replay)
+    rejects = replay["would_reject"]
+    if rejects and mode != "force":
+        detail = f"{rejects} would be rejected: {'; '.join(replay['reasons'])}"
+        record["commit_msg_hook"] = "would_defer" if dry_run else "deferred"
+        record["summary"] = f"would defer ({detail})"
+        return record
+    forced = bool(rejects)
+    if dry_run:
+        record["commit_msg_hook"] = "would_refresh_forced" if forced else "would_refresh"
+        record["summary"] = "would refresh (forced)" if forced else "would refresh"
+        return record
+    try:
+        shutil.copy2(target, target.with_name("commit-msg.nightshift-prev"))
+        shutil.copy2(source, target)
+        target.chmod(target.stat().st_mode | 0o111)
+    except OSError as exc:
+        record["commit_msg_hook"] = "failed"
+        record["summary"] = f"failed ({exc})"
+        return record
+    record["commit_msg_hook"] = "refreshed_forced" if forced else "refreshed"
+    record["summary"] = record["commit_msg_hook"]
+    return record
+
+
+def commit_msg_hook_table(entries: list[dict]) -> str:
+    """Operator-facing per-repository commit-msg hook table (text twin of the JSON field)."""
+    if not entries:
+        return "commit-msg hook: no recognised repositories"
+    lines = ["commit-msg hook refresh", "repository  ->  outcome"]
+    for entry in entries:
+        lines.append(f"{entry['repository']}  ->  {entry['summary']}")
+        for example in entry.get("examples", []):
+            lines.append(f"    e.g. {example}")
+    return "\n".join(lines)
+
+
 def _commit_repository(
     plan: RepositoryPlan, manifest: dict
 ) -> tuple[str | None, list[str]]:
@@ -1162,6 +1581,255 @@ def _deliver_skill(plan: dict) -> tuple[dict | None, list[str]]:
     }, []
 
 
+# SPEC-NS-KIT-123: installed-profile validation of the fleet, in process.
+# The invariants a release itself rewrites (marker, payload bytes, and the
+# project-owned kit_version) fail on every pre-sync install by construction, so
+# they are classed apart from failures the release cannot clear.
+FIXED_BY_RELEASE_INVARIANTS = frozenset({"KIT.MARKER", "KIT.PAYLOAD", "CFG.PARSE_VERSION"})
+
+
+def _validate_install_entry(install: Path) -> dict:
+    """Validate one install with the in-process validator; never write into it.
+
+    ``validate_install.main`` also writes an artifact and receipt into the
+    install, so only ``run_validation`` + ``build_artifact`` are used. Any
+    failure, including a failed import, is recorded as INDETERMINATE.
+    """
+    started = time.monotonic()
+    entry: dict = {"install": str(install), "verdict": "INDETERMINATE"}
+    try:
+        import validate_install
+
+        ctx, _findings, _config, config_sha = validate_install.run_validation(
+            install.parent, "installed", "coordinator", None
+        )
+        artifact = validate_install.build_artifact(ctx, config_sha)
+        entry["verdict"] = str(artifact["admission"]).upper()
+        entry["failed_invariants"] = [
+            {
+                "id": item["id"],
+                "classification": (
+                    "fixed_by_release"
+                    if item["id"] in FIXED_BY_RELEASE_INVARIANTS
+                    else "pre_existing"
+                ),
+                "status": item["status"],
+                "remediation_code": item["remediation_code"],
+                "codes": list(item.get("evidence") or []),
+            }
+            for item in artifact["invariants"]
+            if item["status"] in ("fail", "unknown")
+        ]
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - R4: record, keep going
+        entry["exception"] = exc.__class__.__name__
+        entry["failed_invariants"] = []
+    entry["duration_s"] = round(time.monotonic() - started, 3)
+    return entry
+
+
+def fleet_validation_table(entries: list[dict]) -> str:
+    """Render fleet validation entries as the operator-facing table."""
+    if not entries:
+        return "fleet validation: no installs"
+    lines = ["fleet validation (installed profile)", "verdict         seconds  install"]
+    for entry in entries:
+        lines.append(
+            f"{entry['verdict']:<15} {entry['duration_s']:>7.3f}  {entry['install']}"
+        )
+        if entry.get("exception"):
+            lines.append(f"    validator error: {entry['exception']}")
+        for item in entry["failed_invariants"]:
+            codes = ",".join(item.get("codes") or []) or item.get("remediation_code", "")
+            lines.append(f"    {item['id']}  {item['classification']}  {codes}")
+    return "\n".join(lines)
+
+
+def _record_cheap_preflight(result: dict, canonical: Path, manifest: dict) -> list[str]:
+    """SPEC-NS-KIT-124: the seconds-long floor and last-run headroom checks.
+
+    Records both outcomes in ``result`` and returns the failure messages. The
+    floor skip (no baseline declared) is BUG-334 R3's; the headroom reads the
+    last recorded healthy suite run, so it can run before the suite.
+    """
+    failures: list[str] = []
+    family_errors, skipped = release.finding_floor_check(canonical, manifest)
+    result["finding_family_regression_healthy"] = not family_errors
+    if skipped:
+        result["finding_family_regression_skipped"] = skipped
+    if family_errors:
+        result["finding_family_regression_errors"] = family_errors
+        failures.extend(family_errors)
+    healthy, reason = check_canonical_suite_headroom(canonical)
+    result["canonical_suite_headroom_healthy"] = healthy
+    result["canonical_suite_headroom_reason"] = reason
+    if not healthy:
+        failures.append(reason)
+    warning = canonical_suite_growth_warning(canonical)
+    if warning:
+        result["canonical_suite_growth_warning"] = warning
+        print(warning, file=sys.stderr)
+    return failures
+
+
+def _uncommitted_handoff_files(canonical: Path, spec_ids: list[str]) -> list[str]:
+    """BUG-NS-KIT-127 R4: handoff files this run changed that git does not show clean."""
+    names = sorted({f"{release_handoff.HANDOFF_DIR}/{spec_id}.json" for spec_id in spec_ids})
+    if not names:
+        return []
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(canonical), "status", "--porcelain", "--", *names],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return names
+    if done.returncode != 0:
+        return names
+    dirty = {line[3:].strip().strip('"') for line in done.stdout.splitlines() if len(line) > 3}
+    return [name for name in names if any(item.endswith(name) for item in dirty)]
+
+
+def _repository_refusal(
+    plan: RepositoryPlan, manifest: dict, *, include_opt_out: bool = False
+) -> tuple[dict, bool] | None:
+    """The skip entry the dry-run gives ``plan`` before any migration, or None.
+
+    Shared by ``coordinate_release`` and the SPEC-NS-KIT-128 checkpoint plan so
+    the two cannot disagree. The bool is True when the entry is also a conflict.
+    """
+    base = {
+        "repository": str(plan.root),
+        "installs": [str(item) for item in plan.installs],
+    }
+    policy_errors = _release_policy_errors(plan)
+    if policy_errors:
+        return {
+            **base,
+            "classification": "release_policy_conflict",
+            "reason": "; ".join(policy_errors),
+        }, True
+    if plan.committed_kit_policy == "opt_out" and not include_opt_out:
+        return {
+            **base,
+            "classification": "committed_kit_opt_out",
+            "reason": "project release policy opts out of committed managed-kit payloads",
+            "policy_sources": list(plan.policy_sources),
+        }, False
+    migration_skips = [
+        disposition
+        for install in plan.installs
+        if (disposition := release_disposition(install)) is not None
+    ]
+    if migration_skips:
+        return {
+            **base,
+            "classification": "tracked_private_artifacts_unresolved",
+            "reason": migration_skips[0]["reason"],
+            "migration_reference": migration_skips[0]["migration_reference"],
+        }, False
+    preflight_errors = preflight_repository(plan, manifest)
+    if preflight_errors:
+        return {
+            **base,
+            "classification": "known_project_local",
+            "reason": "; ".join(preflight_errors),
+        }, True
+    return None
+
+
+def checkpoint_plan(
+    installs: Iterable[Path], manifest: dict, *, include_opt_out: bool = False
+) -> dict:
+    """SPEC-NS-KIT-128: read-only pre-release checkpoint plan per repository.
+
+    Lists the dirty paths a checkpoint commit may take and the excluded ones
+    with a reason, plus the classification the dry-run gives the repository.
+    Writes nothing: git runs with optional locks off and no file is created.
+    """
+    import scope_guard
+
+    previous = os.environ.get("GIT_OPTIONAL_LOCKS")
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        plans, initial_skips = plan_repositories(installs, manifest)
+        repositories = []
+        for plan in plans:
+            _staged, dirty = _porcelain_paths(plan.root)
+            enrolled = {
+                install: "sink: private-dropbox"
+                in (install / "config.yaml").read_text(errors="replace")
+                for install in plan.installs
+                if (install / "config.yaml").is_file()
+            }
+            specs_dirs = {install / "specs" for install in plan.installs}
+            if (plan.root / "canonical" / "specs").is_dir():
+                specs_dirs.add(plan.root / "canonical" / "specs")
+            commit: list[str] = []
+            excluded: list[dict] = []
+            for path in sorted(dirty):
+                reason = None
+                for install in plan.installs:
+                    prefix = _relative(plan.root, install).rstrip("/") + "/"
+                    if enrolled.get(install) and path.startswith(prefix):
+                        kind = observability_classify(
+                            ".nightshift/" + path[len(prefix):]
+                        )
+                        if kind == "private_artifact":
+                            reason = "private_artifact"
+                            break
+                if reason is None and path.rsplit("/", 1)[-1] == "projects-registry.json":
+                    reason = "generated_registry"
+                if (
+                    reason is None
+                    and scope_guard._SPEC_HOME_RE.match(path.rsplit("/", 1)[-1])
+                    and scope_guard._is_spec_home_violation(
+                        path, plan.root, specs_dirs, plan.installs[0]
+                    )[0]
+                ):
+                    reason = "spec_wrong_home"
+                if reason is None:
+                    commit.append(path)
+                else:
+                    excluded.append({"path": path, "reason": reason})
+            refusal = _repository_refusal(
+                plan, manifest, include_opt_out=include_opt_out
+            )
+            repositories.append(
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                    "dirty_path_count": len(dirty),
+                    "commit_paths": commit,
+                    "excluded_paths": excluded,
+                    "dry_run_classification": (
+                        "eligible" if refusal is None else refusal[0]["classification"]
+                    ),
+                    "dry_run_reason": None if refusal is None else refusal[0]["reason"],
+                }
+            )
+    finally:
+        if previous is None:
+            os.environ.pop("GIT_OPTIONAL_LOCKS", None)
+        else:
+            os.environ["GIT_OPTIONAL_LOCKS"] = previous
+    return {
+        "mode": "checkpoint-plan",
+        "release_version": manifest["kit_version"],
+        "repositories": repositories,
+        "skipped_installs": initial_skips,
+    }
+
+
+def _set_outcome(result: dict) -> None:
+    """BUG-NS-KIT-131: one exit mapping. 0 completed, 3 skips only, 1 failed (2 is main's invalid manifest)."""
+    if result["failure_class"] or result["unexpected_failure"]:
+        result["outcome"], result["exit_code"] = "failed", 1
+    elif result["skipped"]:
+        result["outcome"], result["exit_code"] = "completed_with_skips", 3
+    else:
+        result["outcome"], result["exit_code"] = "completed", 0
+
+
 def coordinate_release(
     canonical: Path,
     installs: Iterable[Path],
@@ -1174,6 +1842,7 @@ def coordinate_release(
     smoke_timeout_s: int = 60,
     include_opt_out: bool = False,
     release_root: Path | None = None,
+    refresh_commit_msg_hooks: str = "auto",
 ) -> dict:
     """Coordinate one exact release with known-failure isolation and stop semantics."""
     started = time.monotonic()
@@ -1217,15 +1886,22 @@ def coordinate_release(
         "canonical_suite_result": "not_run",
         "canonical_suite_duration_s": None,
         "canonical_suite_duration_record": None,
+        "canonical_suite_reuse_decision": None,
         "smoke_checks_run": 0,
         "producer_session_evidence": {},
         "old_fingerprints": {},
         "post_commit_rebuild_time_s": None,
         "release_handoffs_repinned": [],
         "release_handoffs_completed": [],
+        "release_handoffs_not_completed": [],
+        "release_handoffs_uncommitted": [],
         "config_kit_version_updates": [],
         "hooks_wired": [],
+        "commit_msg_refresh_mode": refresh_commit_msg_hooks,
+        "commit_msg_hooks": [],
         "registry_untracks": [],
+        "fleet_validation": [],
+        "post_sync_validation": [],
         "skill_delivery": (
             {
                 "status": "planned" if skill_plan else "not_required",
@@ -1257,6 +1933,18 @@ def coordinate_release(
                 old = None
             result["old_fingerprints"][str(install)] = old
 
+    if dry_run:
+        # SPEC-NS-KIT-123 R1/R2: every discovered install, read-only,
+        # reported even when a later preflight stops the run.
+        result["fleet_validation"] = [
+            _validate_install_entry(install)
+            for plan in plans
+            for install in plan.installs
+        ]
+
+    # R1: reported, never a stop, in the dry-run; R2 enforces it in the apply.
+    cheap_failures = _record_cheap_preflight(result, canonical, manifest)
+
     ownership_errors = validate_release_ownership(plans, manifest)
     ownership_errors.extend(skill_preflight_errors)
     if ownership_errors:
@@ -1271,10 +1959,24 @@ def coordinate_release(
         ]
         result["duration_s"] = round(time.monotonic() - started, 3)
         result["completed_at"] = datetime.now(UTC).isoformat()
-        result["exit_code"] = 1
+        _set_outcome(result)
         return result
 
     if not dry_run:
+        if cheap_failures:
+            result["failure_class"] = "canonical_preflight"
+            result["unexpected_failure"] = "; ".join(cheap_failures)
+            result["untouched"] = [
+                {
+                    "repository": str(plan.root),
+                    "installs": [str(item) for item in plan.installs],
+                }
+                for plan in plans
+            ]
+            result["duration_s"] = round(time.monotonic() - started, 3)
+            result["completed_at"] = datetime.now(UTC).isoformat()
+            _set_outcome(result)
+            return result
         try:
             probe_argv = _suite_argv(manifest["canonical_suite"], "probe")
             suite_argv = _suite_argv(manifest["canonical_suite"], "command")
@@ -1306,94 +2008,105 @@ def coordinate_release(
             ]
             result["duration_s"] = round(time.monotonic() - started, 3)
             result["completed_at"] = datetime.now(UTC).isoformat()
-            result["exit_code"] = 1
+            _set_outcome(result)
             return result
-        suite_started = time.monotonic()
-        suite_result = _run_canonical_suite_step(runner, suite_argv, canonical)
-        suite_duration_s = time.monotonic() - suite_started
-        suite_passed = suite_result.returncode == 0
-        result["canonical_suite_duration_s"] = round(suite_duration_s, 3)
-        result["canonical_suite_duration_record"] = str(
-            _record_canonical_suite_duration(
-                canonical,
-                suite_duration_s,
-                suite_passed=suite_passed,
-                junit_xml=suite_junit_xml,
-            )
-        )
-        result["canonical_suite_runs"] = 1
-        result["canonical_suite_result"] = "passed" if suite_passed else "failed"
-        if suite_result.returncode:
-            result["failure_class"] = "canonical_preflight"
-            result["unexpected_failure"] = (
-                suite_result.stdout + "\n" + suite_result.stderr
-            ).strip()[-2000:]
-            result["untouched"] = [
+        reuse = evaluate_suite_reuse(canonical)
+        result["canonical_suite_reuse_decision"] = reuse["reason"]
+        if reuse["reusable"]:
+            subset_argv = _suite_argv(
                 {
-                    "repository": str(plan.root),
-                    "installs": [str(item) for item in plan.installs],
-                }
-                for plan in plans
-            ]
-            result["duration_s"] = round(time.monotonic() - started, 3)
-            result["completed_at"] = datetime.now(UTC).isoformat()
-            result["exit_code"] = 1
-            return result
-
-        headroom_healthy, headroom_reason = check_canonical_suite_headroom(canonical)
-        result["canonical_suite_headroom_healthy"] = headroom_healthy
-        result["canonical_suite_headroom_reason"] = headroom_reason
-        if not headroom_healthy:
-            result["failure_class"] = "canonical_preflight"
-            result["unexpected_failure"] = headroom_reason
-            result["untouched"] = [
-                {
-                    "repository": str(plan.root),
-                    "installs": [str(item) for item in plan.installs],
-                }
-                for plan in plans
-            ]
-            result["duration_s"] = round(time.monotonic() - started, 3)
-            result["completed_at"] = datetime.now(UTC).isoformat()
-            result["exit_code"] = 1
-            return result
-
-        # BUG-334 R2: SPEC-337's finding-family regression diff runs here, not
-        # from release.payload_gate_errors. It is canonical-only and costs a
-        # whole-corpus walk, so the per-install payload gate is the wrong host.
-        #
-        # Enforced only when this canonical actually declares a floor. A
-        # canonical with no baseline artifact has nothing to regress against,
-        # so there is nothing to enforce -- the same degrade-safe choice
-        # SPEC-336 R4 made for "no prior suite measurement recorded yet".
-        # `finding_family_regression_errors` keeps its own loud-on-missing
-        # contract for direct callers; the skip is recorded in the result
-        # rather than being silent.
-        floor_baseline = canonical / "metrics" / "validation-error-floor-baseline.json"
-        if not floor_baseline.is_file():
-            result["finding_family_regression_healthy"] = True
-            result["finding_family_regression_skipped"] = (
-                f"no finding-family floor declared at {floor_baseline}; nothing to enforce"
+                    **manifest["canonical_suite"],
+                    "subset": [
+                        *manifest["canonical_suite"]["command"][:-1],
+                        *RELEASE_MECHANICAL_TESTS,
+                    ],
+                },
+                "subset",
             )
-            family_errors = []
+            subset_runner = canonical_suite_runner or (
+                lambda argv, cwd: _run_canonical_suite(argv, cwd)
+            )
+            subset_result = _run_canonical_suite_step(subset_runner, subset_argv, canonical)
+            subset_passed = subset_result.returncode == 0
+            result["canonical_suite_reused_from"] = {
+                "record": reuse["record"],
+                "commit": reuse["commit"],
+            }
+            result["canonical_suite_reused_changed_paths"] = reuse["changed_paths"]
+            result["canonical_suite_subset_result"] = "passed" if subset_passed else "failed"
+            result["canonical_suite_result"] = "reused" if subset_passed else "failed"
+            if not subset_passed:
+                result["failure_class"] = "canonical_preflight"
+                result["unexpected_failure"] = (
+                    subset_result.stdout + "\n" + subset_result.stderr
+                ).strip()[-2000:]
+                result["untouched"] = [
+                    {
+                        "repository": str(plan.root),
+                        "installs": [str(item) for item in plan.installs],
+                    }
+                    for plan in plans
+                ]
+                result["duration_s"] = round(time.monotonic() - started, 3)
+                result["completed_at"] = datetime.now(UTC).isoformat()
+                _set_outcome(result)
+                return result
         else:
-            family_errors = release.finding_family_regression_errors(canonical, manifest)
-            result["finding_family_regression_healthy"] = not family_errors
-        if family_errors:
-            result["finding_family_regression_errors"] = family_errors
-            result["failure_class"] = "canonical_preflight"
-            result["unexpected_failure"] = "; ".join(family_errors)
-            result["untouched"] = [
-                {
-                    "repository": str(plan.root),
-                    "installs": [str(item) for item in plan.installs],
-                }
-                for plan in plans
-            ]
-            result["duration_s"] = round(time.monotonic() - started, 3)
-            result["completed_at"] = datetime.now(UTC).isoformat()
-            result["exit_code"] = 1
-            return result
+            start_commit, start_clean = _canonical_tree_state(canonical)
+            suite_started = time.monotonic()
+            suite_result = _run_canonical_suite_step(runner, suite_argv, canonical)
+            suite_duration_s = time.monotonic() - suite_started
+            suite_passed = suite_result.returncode == 0
+            end_commit, end_clean = _canonical_tree_state(canonical)
+            result["canonical_suite_duration_s"] = round(suite_duration_s, 3)
+            result["canonical_suite_duration_record"] = str(
+                _record_canonical_suite_duration(
+                    canonical,
+                    suite_duration_s,
+                    suite_passed=suite_passed,
+                    junit_xml=suite_junit_xml,
+                    commit=start_commit,
+                    tree_clean_start=start_clean,
+                    tree_clean_end=end_clean and end_commit == start_commit,
+                    phase="release_apply",
+                )
+            )
+            result["canonical_suite_runs"] = 1
+            result["canonical_suite_result"] = "passed" if suite_passed else "failed"
+            if suite_result.returncode:
+                result["failure_class"] = "canonical_preflight"
+                result["unexpected_failure"] = (
+                    suite_result.stdout + "\n" + suite_result.stderr
+                ).strip()[-2000:]
+                result["untouched"] = [
+                    {
+                        "repository": str(plan.root),
+                        "installs": [str(item) for item in plan.installs],
+                    }
+                    for plan in plans
+                ]
+                result["duration_s"] = round(time.monotonic() - started, 3)
+                result["completed_at"] = datetime.now(UTC).isoformat()
+                _set_outcome(result)
+                return result
+
+            headroom_healthy, headroom_reason = check_canonical_suite_headroom(canonical)
+            result["canonical_suite_headroom_healthy"] = headroom_healthy
+            result["canonical_suite_headroom_reason"] = headroom_reason
+            if not headroom_healthy:
+                result["failure_class"] = "canonical_preflight"
+                result["unexpected_failure"] = headroom_reason
+                result["untouched"] = [
+                    {
+                        "repository": str(plan.root),
+                        "installs": [str(item) for item in plan.installs],
+                    }
+                    for plan in plans
+                ]
+                result["duration_s"] = round(time.monotonic() - started, 3)
+                result["completed_at"] = datetime.now(UTC).isoformat()
+                _set_outcome(result)
+                return result
 
     committed_repositories = 0
     for plan_index, plan in enumerate(plans):
@@ -1412,59 +2125,14 @@ def coordinate_release(
                 )
             break
 
-        policy_errors = _release_policy_errors(plan)
-        if policy_errors:
-            entry = {
-                "repository": str(plan.root),
-                "installs": [str(item) for item in plan.installs],
-                "classification": "release_policy_conflict",
-                "reason": "; ".join(policy_errors),
-            }
-            result["skipped"].append(entry)
-            result["conflicts"].append(entry)
-            continue
-        if plan.committed_kit_policy == "opt_out" and not include_opt_out:
-            result["skipped"].append(
-                {
-                    "repository": str(plan.root),
-                    "installs": [str(item) for item in plan.installs],
-                    "classification": "committed_kit_opt_out",
-                    "reason": "project release policy opts out of committed managed-kit payloads",
-                    "policy_sources": list(plan.policy_sources),
-                }
-            )
-            continue
-
-        migration_skips = [
-            disposition
-            for install in plan.installs
-            if (disposition := release_disposition(install)) is not None
-        ]
-        if migration_skips:
-            result["skipped"].append(
-                {
-                    "repository": str(plan.root),
-                    "installs": [str(item) for item in plan.installs],
-                    "classification": "tracked_private_artifacts_unresolved",
-                    "reason": migration_skips[0]["reason"],
-                    "migration_reference": migration_skips[0]["migration_reference"],
-                }
-            )
-            continue
-
-        preflight_errors = preflight_repository(
-            plan,
-            manifest,
+        refusal = _repository_refusal(
+            plan, manifest, include_opt_out=include_opt_out
         )
-        if preflight_errors:
-            entry = {
-                "repository": str(plan.root),
-                "installs": [str(item) for item in plan.installs],
-                "classification": "known_project_local",
-                "reason": "; ".join(preflight_errors),
-            }
+        if refusal is not None:
+            entry, is_conflict = refusal
             result["skipped"].append(entry)
-            result["conflicts"].append(entry)
+            if is_conflict:
+                result["conflicts"].append(entry)
             continue
 
         migrations: list[tuple[Path, MigrationResult]] = []
@@ -1516,6 +2184,14 @@ def coordinate_release(
                 hook = wire_pre_commit_hook(install, dry_run=True)
                 if hook:
                     result["hooks_wired"].append(hook)
+            refreshed = plan_commit_msg_refresh(
+                plan,
+                canonical / "hooks" / "commit-msg",
+                mode=refresh_commit_msg_hooks,
+                dry_run=True,
+            )
+            if refreshed:
+                result["commit_msg_hooks"].append(refreshed)
             continue
 
         repository_errors = []
@@ -1556,6 +2232,20 @@ def coordinate_release(
                 )
             break
 
+        # SPEC-NS-KIT-143: refresh the wired commit-msg hook (replay-gated) so the
+        # release commit below runs the new grammar; first install is the shared source.
+        refreshed = plan_commit_msg_refresh(
+            plan,
+            next(
+                (i / "hooks" / "commit-msg" for i in plan.installs if (i / "hooks" / "commit-msg").is_file()),
+                plan.installs[0] / "hooks" / "commit-msg",
+            ),
+            mode=refresh_commit_msg_hooks,
+            dry_run=False,
+        )
+        if refreshed:
+            result["commit_msg_hooks"].append(refreshed)
+
         sha, commit_errors = _commit_repository(plan, manifest)
         if commit_errors:
             result["failure_class"] = "unexpected_mid_rollout"
@@ -1569,6 +2259,10 @@ def coordinate_release(
                 )
             break
         result["verified_installs"].extend(str(item) for item in plan.installs)
+        # SPEC-NS-KIT-123 R3: recorded, never a stop or exit-code input.
+        result["post_sync_validation"].extend(
+            _validate_install_entry(install) for install in plan.installs
+        )
         if sha:
             result["repository_commits"].append(
                 {
@@ -1617,8 +2311,17 @@ def coordinate_release(
     if (
         not dry_run
         and result["canonical_suite_probe"] == "passed"
-        and result["canonical_suite_runs"] == 1
-        and result["canonical_suite_result"] == "passed"
+        and (
+            (
+                result["canonical_suite_runs"] == 1
+                and result["canonical_suite_result"] == "passed"
+            )
+            or (
+                result["canonical_suite_runs"] == 0
+                and result["canonical_suite_result"] == "reused"
+                and result.get("canonical_suite_subset_result") == "passed"
+            )
+        )
         and result["managed_payload_mode"] == "canonical_replace"
         and result["file_level_patch_attempted"] is False
         and len(result["verified_installs"]) >= 1
@@ -1629,8 +2332,18 @@ def coordinate_release(
         result["release_handoffs_repinned"] = release_handoff.repin_pending_handoffs(
             canonical, manifest
         )
+        result["release_handoffs_repinned"].extend(
+            release_handoff.repin_folded_handoffs(canonical, manifest)
+        )
         result["release_handoffs_completed"] = (
             release_handoff.complete_pending_handoffs(canonical, manifest, result)
+        )
+        result["release_handoffs_not_completed"] = (
+            release_handoff.pending_handoffs_not_completed(canonical, manifest, result)
+        )
+        result["release_handoffs_uncommitted"] = _uncommitted_handoff_files(
+            canonical,
+            [*result["release_handoffs_repinned"], *result["release_handoffs_completed"]],
         )
         # SPEC-334 R5: records skipped because their source spec is not
         # status: done -- observable in the same serialized result dict
@@ -1640,7 +2353,7 @@ def coordinate_release(
         )
     result["duration_s"] = round(time.monotonic() - started, 3)
     result["completed_at"] = datetime.now(UTC).isoformat()
-    result["exit_code"] = 1 if result["skipped"] or result["unexpected_failure"] else 0
+    _set_outcome(result)
     return result
 
 
@@ -1649,12 +2362,55 @@ def write_metrics(result: dict, output: Path) -> None:
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
 
+def discover_installs(
+    sync, root: Path, canonical: Path, *, isolated: bool
+) -> tuple[list[Path], list[str]]:
+    """BUG-NS-KIT-133: installs plus the roots scanned; ``isolated`` scans ``root`` alone.
+
+    ``find_nightshift_dirs`` always appends ``EXTRA_SCAN_ROOTS`` (the real fleet), so
+    ``--root`` alone never isolates a rehearsal. Isolation empties that list only for
+    the duration of the scan.
+    """
+    extras = list(getattr(sync, "EXTRA_SCAN_ROOTS", []))
+    if isolated:
+        roots = [root]
+        sync.EXTRA_SCAN_ROOTS = []
+    else:
+        roots = [root] + [r for r in extras if r.exists() and r != root]
+    try:
+        found = sync.find_nightshift_dirs(root)
+    finally:
+        if isolated:
+            sync.EXTRA_SCAN_ROOTS = extras
+    installs = [path for path in found if path.resolve() != canonical.resolve()]
+    return installs, [str(r) for r in roots]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True, help="Argo/discovery root")
-    mode = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--root", type=Path, help="Argo/discovery root")
+    parser.add_argument(
+        "--isolated-root",
+        action="store_true",
+        help="BUG-NS-KIT-133: discover installs under --root only, never the extra fleet scan roots (rehearsals, tests)",
+    )
+    mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    mode.add_argument(
+        "--checkpoint-plan",
+        action="store_true",
+        help="SPEC-NS-KIT-128: read-only per-repository checkpoint commit list and dry-run classification",
+    )
+    mode.add_argument(
+        "--record-suite-run",
+        action="store_true",
+        help="SPEC-NS-KIT-126: record a merge-phase suite duration; touches no install",
+    )
+    parser.add_argument("--duration-s", type=float, help="with --record-suite-run")
+    outcome = parser.add_mutually_exclusive_group()
+    outcome.add_argument("--passed", action="store_true", help="with --record-suite-run")
+    outcome.add_argument("--failed", action="store_true", help="with --record-suite-run")
     parser.add_argument("--metrics-out", type=Path)
     parser.add_argument(
         "--migration-runner",
@@ -1673,9 +2429,29 @@ def main() -> int:
         action="store_true",
         help="operator-authorized one-release override of committed_kit: opt_out",
     )
+    parser.add_argument(
+        "--refresh-commit-msg-hooks",
+        choices=COMMIT_MSG_REFRESH_MODES,
+        default="auto",
+        help=(
+            "SPEC-NS-KIT-143: auto (default) refreshes a recognised kit commit-msg hook unless "
+            "a 30-day history replay finds commits the new hook would reject (then defers); "
+            "force refreshes anyway; never skips the step"
+        ),
+    )
     args = parser.parse_args()
 
     canonical = Path(__file__).resolve().parent
+    if args.record_suite_run:
+        if args.duration_s is None or args.duration_s < 0 or not (args.passed or args.failed):
+            parser.error("--record-suite-run needs --duration-s <seconds> and --passed or --failed")
+        recorded = record_suite_run(canonical, args.duration_s, passed=args.passed)
+        if recorded["warning"]:
+            print(recorded["warning"], file=sys.stderr)
+        print(json.dumps(recorded, indent=2))
+        return 0
+    if args.root is None or not (args.dry_run or args.apply or args.checkpoint_plan):
+        parser.error("--root and one of --dry-run/--apply/--checkpoint-plan are required")
     sys.path.insert(0, str(canonical.parent))
     import importlib.util
 
@@ -1693,11 +2469,19 @@ def main() -> int:
         print(json.dumps({"preflight": "failed", "errors": errors}, indent=2))
         return 2
 
-    installs = [
-        path
-        for path in sync.find_nightshift_dirs(args.root.resolve())
-        if path.resolve() != canonical.resolve()
-    ]
+    installs, scanned_roots = discover_installs(
+        sync, args.root.resolve(), canonical, isolated=args.isolated_root
+    )
+    discovery = {"isolated": args.isolated_root, "roots": scanned_roots}
+    if args.checkpoint_plan:
+        plan = checkpoint_plan(
+            installs, manifest, include_opt_out=args.include_opt_out
+        )
+        plan["discovery"] = discovery
+        if args.metrics_out:
+            write_metrics(plan, args.metrics_out)
+        print(json.dumps(plan, indent=2))
+        return 0
     result = coordinate_release(
         canonical,
         installs,
@@ -1708,17 +2492,30 @@ def main() -> int:
         ),
         include_opt_out=args.include_opt_out,
         release_root=args.root.resolve(),
+        refresh_commit_msg_hooks=args.refresh_commit_msg_hooks,
     )
+    result["discovery"] = discovery
     result["rerun_command"] = (
         f"python3 {canonical / 'release_coordinator.py'}"
         f" --root {args.root.resolve()} --apply"
+        + (" --isolated-root" if args.isolated_root else "")
         + (" --include-opt-out" if args.include_opt_out else "")
         + (" --migration-runner reference" if args.migration_runner == "reference" else "")
+        + (
+            f" --refresh-commit-msg-hooks {args.refresh_commit_msg_hooks}"
+            if args.refresh_commit_msg_hooks != "auto"
+            else ""
+        )
     )
     output = args.metrics_out or canonical / "reports" / "_wip" / (
         f"release-{manifest['kit_version']}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
     write_metrics(result, output)
+    if result["fleet_validation"]:
+        # stderr keeps stdout a single JSON document for existing consumers.
+        print(fleet_validation_table(result["fleet_validation"]), file=sys.stderr)
+    if result["commit_msg_hooks"]:
+        print(commit_msg_hook_table(result["commit_msg_hooks"]), file=sys.stderr)
     print(json.dumps({**result, "metrics_path": str(output)}, indent=2))
     return result["exit_code"]
 

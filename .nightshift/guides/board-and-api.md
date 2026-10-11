@@ -1,6 +1,6 @@
-Load when: you must find, list, show or search specs, move a spec's status, or say why a board card did not move.
-Covers: launching the board and finding its port, the status authority model, every board HTTP route with curl recipes, which CLI answers which question.
-Not here: writing a spec (`/nightshift spec`), the kickoff procedure, validator rules (`/nightshift validate`).
+Load when: authoring identity/placement, spec discovery, status moves or stale board cards.
+Covers: registry/retention, board launch/port, status authority, HTTP routes/recipes and CLI selection.
+Not here: spec interview (`/nightshift spec`), kickoff or validator rules (`/nightshift validate`).
 Requires: an installed `.nightshift/` with `board.py`, `status_store.py`, `lifecycle.py`; a running board for the curl recipes.
 
 # Board and API guide
@@ -12,51 +12,77 @@ kit repository, `nightshift-master.py` (Control). Paths below are install-relati
 
 ## 1. Launch, port, runtime
 
-- **Control** (`nightshift-master.py`, port 7799) lists projects from every
-  `projects-registry.json` it finds. `POST /api/projects/{name}/start` runs
-  `board.py --port <registry port>` detached (log: `board.restart.log` next to
-  `board.py`) and returns `{"status": "starting", ...}`. It writes **no `board.pid`**.
-  `POST /api/projects/{name}/stop` finds the listener on the port and signals it.
-- **`board.sh`** (`.nightshift/board.sh [--no-open] [--port N] [extra board.py args]`): starts
-  `board.py --open` in the background, probes `GET /api/health`, then writes `board.pid`
-  (next to `board.sh`; `--no-open` skips the browser). Log: `board.restart.log`. `board.sh stop` stops the PID in
-  `board.pid`, refusing a PID that is not this board.
-  Python runtime: `$NIGHTSHIFT_BOARD_PYTHON`, else `.nightshift/.board-venv/bin/python`,
-  else `python3`; it must import `fastapi`, `uvicorn`, `yaml` or the script exits 1.
-- **Port.** Explicit `--port` always wins. Otherwise `board.py` uses
-  `7800 + sum(ord(c) for c in NAME) % 200` where `NAME` is the project-root directory
-  name, upper-cased, leading dots stripped. `python3 .nightshift/board.py --print-port`
-  prints it without starting. `board.sh` asks `board.py --print-port` for its probe
-  (BUG-342 fixed the old mismatch where it hashed its own directory name). Control
-  does **not** use the hash: it passes the registry's `port`, which can differ
-  (a board started by `board.sh` without `--port` may sit on another port than the
-  registry lists). Trust whatever answers `GET /api/health`.
-- **Find the port:**
-  `python3 -c "import json;[print(p['name'],p['port']) for p in json.load(open('.nightshift/projects-registry.json'))['projects']]"`
-- The board binds `127.0.0.1` only. Every recipe below uses `B=http://127.0.0.1:$PORT`.
-- `board.py --summary` prints reconciled frontmatter as JSON and exits (no server);
-  `--export PATH.html` writes a static snapshot.
+- **Control** (`nightshift-master.py`, port 7799) loads discovered project registries.
+  `POST /api/projects/{name}/start` detaches `board.py --port <registry port>`;
+  returns `{"status":"starting",...}`, logs beside `board.py` in `board.restart.log`,
+  writes no `board.pid`. `/stop` finds and signals the port's listener.
+- **`board.sh`** (`.nightshift/board.sh [--no-open] [--port N] [board.py args]`)
+  backgrounds `board.py --open`, probes `/api/health`, then writes adjacent `board.pid`.
+  `--no-open` skips the browser; `stop` refuses a PID that is not this board.
+  Log: `board.restart.log`. Runtime: `$NIGHTSHIFT_BOARD_PYTHON`, then
+  `.nightshift/.board-venv/bin/python`, then `python3`; missing fastapi/uvicorn/yaml exits 1.
+- **Port:** explicit `--port` wins; otherwise `board.py` hashes the project-root name
+  (upper-case, leading dots stripped): `7800 + sum(ord(c) for c in NAME) % 200`.
+  `python3 .nightshift/board.py --print-port` prints without starting. `board.sh` uses
+  that probe (BUG-342), while Control passes the registry port; these may differ.
+  Find registered name/port in `projects-registry.json`; confirm `/api/health` answers.
+- Binds `127.0.0.1` only; recipes use `B=http://127.0.0.1:$PORT`.
+  `board.py --summary` prints reconciled JSON without serving; `--export PATH.html`
+  writes a static snapshot.
+
+### Authoring identity, placement and retention
+
+Read the live registry's name, path, code and port; resolve the intended watched
+spec directory, not the shell cwd. Observed canonical kit identity is
+`NIGHTSHIFT-CANONICAL`/`NS-KIT`, flat `canonical/specs`; Control uses `NS-CTL`;
+installed applications use their own registered code and `.nightshift/specs`.
+Recheck these observations on the current installation.
+
+Run `check_followup_spec.py --specs-dir <registered-specs> --suggestion-title <title>
+--suggestion-body <requirements-and-ACs> --kind <kind>`; retain the actual result.
+Conflicts stop authoring. An unexpected generic proposal from an unregistered
+worktree is refused even if the gate returns clean. Prefer the registered-root gate;
+if needed, supported Python `check(..., registry_path=...)` takes a caller-only
+registry copy mapping existing entries to the isolated roots while preserving codes.
+Retain the mapping/result; never mutate the global registry or invent an ID.
+
+A durable branch commit does not place files in a running board's watched tree;
+board-visible working-tree files do not establish MAIN integration. Retain the
+spec, indexed author decision (`spec_artifacts.py author-decision`), evidence and
+required handoff as one set. Placement into MAIN follows GIT.md's sole serialized
+integration authority and current freeze. Disclose incomplete integration and any
+uncommitted placement. Never dirty frozen MAIN, commit directly to MAIN, remap the
+board root or promote solely for visibility.
+
+At the registered port, bound discovery to `GET /api/health`, `POST /api/refresh`,
+`GET /api/specs`, then `GET /api/spec/<ID>` for each new ID. Require one list entry,
+intended effective status and `artifact_index_state: available` with the indexed
+decision. HTTP 404 means unresolved placement/discovery. Intrinsic readiness PASS
+with lifecycle `draft` is still non-dispatchable; later promotion uses the supported
+entrypoint. Authoring placement alone adds no native/full-kit suite gate; existing
+implementation, ownership, integration and release gates remain required.
+
+Before temporary cleanup, retain bounded unique findings in persistent
+`reports/<ID>/` and commit on the durable branch: readable summary, source paths,
+SHA-256 hashes, and archive member/source mapping plus integrity when archiving.
+Temporary paths are provenance, not required live inputs. Exclude credentials,
+copied app trees and derived builds; board-visible untracked files alone are not
+retention. Do not claim implementation or release from these checks.
 
 ## 2. Status authority model
 
-A spec's status lives in two places that can disagree: the `status:` frontmatter line
-and the **durable status store** (SQLite, `StatusStore`; one file per git repository in
-the git common directory, `nightshift-status.db`, shared by all worktrees; a project
-that is a strict subdirectory of the checkout gets a namespaced path).
+Status combines frontmatter and a durable SQLite checkpoint (`StatusStore`):
+`nightshift-status.db` in the Git common directory, shared across worktrees;
+strict checkout subdirectories get namespaced stores.
 
-- **The board shows the effective status**, not the frontmatter. For each spec it reads
-  the newest store checkpoint. If that checkpoint is **`done` or `blocked` (terminal),
-  it is authoritative and immutable via frontmatter**: editing `status:` by hand does not
-  move the card. For any other checkpoint, a frontmatter status whose file mtime is at or
-  after the checkpoint's time overwrites the store (a `frontmatter-reconcile`
-  checkpoint) and the card follows the file.
-- **Why a hand edit "did not work":** the store says `blocked` or `done`, so the file is
-  behind it. Check with `GET /api/status-sync` (section 4): `mismatches` lists
-  `{id, frontmatter, durable, effective, reason, ...}` with reason
-  `durable-terminal-ahead-of-file` (store is terminal; file lags) or
-  `durable-stale-behind-file` (non-terminal store row the repair refused, for example
-  a different spec path or an older file). `GET /api/health` carries the count as
-  `status_sync_mismatches`. The fix is a real transition (below), not another edit.
+- **Effective status:** newest `done`/`blocked` checkpoint wins immutably over
+  frontmatter. Otherwise frontmatter at least as new as the checkpoint creates
+  a `frontmatter-reconcile` checkpoint and moves the card.
+- **Mismatch:** `GET /api/status-sync` lists `{id, frontmatter, durable, effective,
+  reason,...}`. `durable-terminal-ahead-of-file` means terminal store/file lag;
+  `durable-stale-behind-file` means refused non-terminal repair (e.g. different
+  path or older file). `/api/health` counts `status_sync_mismatches`.
+  Use a supported transition, not another hand edit.
 - **Write paths** (all of them write the store checkpoint, then a `status-transition`
   artifact, then the frontmatter; **none of them commits to git**, so commit the spec and its
   `reports/<ID>/artifacts/` files yourself, with explicit paths; the store DB is not in git):
@@ -77,35 +103,25 @@ that is a strict subdirectory of the checkout gets a namespaced path).
   `ready` move must pass the promotion-gap check (`promotion_transition_error`); a move
   to `done` must pass the **release-handoff gate**; a **judgment transition** must carry
   a non-empty `reason`. Refusals are 400 with the message in `detail`.
-- **Lifecycle edges.** `lifecycle.LIFECYCLE_TRANSITIONS` is the intended map:
-  `draft` to planned, ready, blocked, superseded; `planned` to ready, blocked,
-  superseded; `ready` to planned, in_progress, blocked, superseded; `in_progress` to
-  ready, done, blocked; `blocked` to draft, planned, ready, superseded; `done` and
-  `superseded` have no outgoing edge. It is consulted by `unblock_spec.py` and
-  `release_handoff.py`; **neither the board `PUT` nor `transition_commit_backed`
-  enforces it**, so the gate above is what actually stops a move.
-- **Judgment-transition reason rule.** Among the seven lifecycle statuses (`draft planned
-  ready in_progress blocked done superseded`), every pair needs a non-empty prose
-  `reason` except the mechanical `ready` to `in_progress`, `in_progress` to `done`,
-  `blocked` to `ready` (`lifecycle.is_judgment_transition`); those get a synthesized
-  reason. Statuses outside the seven (`active`, `retired`) never need one.
-- **`reconsider_when` and `## State rationale`.** Every transition upserts the spec's
-  `## State rationale` section (YAML block: status, reason, `reconsider_when`,
-  evidence, `record` pointing at the new artifact). `reconsider_when` (the concrete
-  condition or date to revisit) is required for targets `draft`, `planned`, `blocked`.
-  If the `PUT` omits it for those targets, the artifact is still written but the section
-  is left untouched and reads as stale. `state_evidence` is a list of typed locators
-  such as `{"kind": "file", "path": "..."}`. Also fills `GET /api/spec/{id}` field
-  `run_state_explanation`.
-- **`done` gate.** A move to `done` validates the spec's `release_handoff:` declaration
-  against `release-manifest.json` **only when that manifest sits next to `board.py`**,
-  which is true in the kit repository and false on fleet installs (BUG-337: the manifest
-  is never distributed). With no manifest the check is skipped, not failed.
-- **Transfer-refusal record.** Each gate refusal is written into the spec's frontmatter
-  as `transfer_refusal: <message>` (sanitized, best effort) so the card shows why a drag
-  failed; the next successful `PUT` clears it. `POST` and `DELETE`
-  `/api/spec/{id}/transfer-refusal` set and dismiss it from the UI. It is a frontmatter
-  edit, so it appears in `git status`.
+- **Lifecycle map** (`lifecycle.LIFECYCLE_TRANSITIONS`): draft → planned/ready/blocked/
+  superseded; planned → ready/blocked/superseded; ready → planned/in_progress/blocked/
+  superseded; in_progress → ready/done/blocked; blocked → draft/planned/ready/superseded;
+  done/superseded → none. `unblock_spec.py` and `release_handoff.py` consult it;
+  board PUT and `transition_commit_backed` do not, so their actual gate governs writes.
+- **Reasons:** every pair among draft/planned/ready/in_progress/blocked/done/superseded
+  requires non-empty prose except mechanical ready → in_progress, in_progress → done,
+  blocked → ready (synthesized reason). `active`/`retired` never require one;
+  source: `lifecycle.is_judgment_transition`.
+- **Rationale:** transitions upsert `## State rationale` YAML (status, reason,
+  `reconsider_when`, evidence, `record` artifact pointer), also exposed in detail's
+  `run_state_explanation`. Targets draft/planned/blocked require a concrete revisit
+  condition/date; omitted PUT values still write an artifact but leave stale rationale.
+  `state_evidence` holds typed locators, e.g. `{"kind":"file","path":"..."}`.
+- **Done:** validates `release_handoff:` against a manifest next to `board.py`.
+  Kit has it; fleet installs do not (BUG-337), so without it the gate is skipped.
+- **Transfer refusals:** best-effort sanitized `transfer_refusal:` frontmatter
+  records gate failures; successful PUT clears it. UI POST/DELETE
+  `/api/spec/{id}/transfer-refusal` sets/dismisses it. This edit appears in Git status.
 - **Single writer.** While a board runs, send status writes through its `PUT`. The board
   caches the corpus (a `PUT` updates its cache; `POST /api/refresh` rebuilds it after
   out-of-band edits).
@@ -159,7 +175,16 @@ Rows marked **UI-only** exist for the board page; agents should not call them.
 
 ### Graph view: reduced and full dependency arrows
 
-The live and exported graph draw a **reduced** projection by default: a declared prerequisite arrow is hidden only when another directed path between the same two specs remains among the arrows currently displayed (gate -> planning -> child hides gate -> child). Reachability is unchanged. The legend's **Show all dependencies** switch (also in the inspector's "not drawn" row) draws every declared arrow; the note under it counts the hidden ones, and the spec inspector lists each omitted arrow with its alternate path. The reduction is recomputed whenever a status/type filter or the data changes, so hiding the middle spec brings the gate -> child arrow back; dashed parent/grouping lines never count as a path. Self-loops, arrows to missing specs and anything touching a cycle are never hidden; external prerequisites are keyed `project::id`. It is view-only: spec files, `after:`, `/api/graph`, `board_ctl.py deps`, exports, validation and scheduling still carry every declared edge, and redundant `after:` entries are not an error. Reference implementation: `dependency_graph_view.py` (`reduce_dependency_edges`); `board.py` mirrors it in `reduceDependencyEdges`, and a test runs both on the same graphs.
+Live/exported graphs default to a reduced view: hide a prerequisite arrow only
+while an alternate directed path remains among displayed arrows. Reachability is
+unchanged. **Show all dependencies** (legend/inspector) restores declared arrows;
+the note counts hidden ones and the inspector names their alternate paths.
+Filters/data changes recompute reduction: hiding a middle spec restores its direct
+arrow. Dashed parent/grouping lines never count; self-loops, missing specs and
+cycle-touching edges stay visible. External keys are `project::id`. This is view-only:
+files, `after:`, `/api/graph`, `board_ctl.py deps`, exports, validation and scheduling
+retain every edge; redundant `after:` is valid. `dependency_graph_view.py`
+(`reduce_dependency_edges`) and board JS `reduceDependencyEdges` share tested graphs.
 
 ### Recipes
 
@@ -226,11 +251,9 @@ Errors: 400 `{"detail": "<refusal>"}` (invalid status, gate, missing reason), 40
 | Why is an install invisible or stale? | `doctor.py` in the kit repository, `/nightshift doctor` |
 | Project overview | `/nightshift status` (spec queue, layers, last run) |
 
-Relation to the slash commands: `/nightshift status` is the human dashboard and reads the
-spec files; the board API answers the same questions from the durable store and is the
-one to trust for status. `/nightshift validate` checks install and spec structure and
-does not look at the store. `/nightshift doctor` diagnoses install provenance and
-reachability, not individual specs. None of them replaces the other.
+`/nightshift status` reads spec files for a human overview; trust the board's
+effective status. `/nightshift validate` checks install/spec structure, not the
+store; `/nightshift doctor` checks install provenance/reachability, not specs.
 
 ## 5. `board_ctl.py` (read side)
 
@@ -311,3 +334,18 @@ gate) and 5 (operation failed, or `board-doctor` found a problem). `--control-po
 Recipes: park a draft: `board_ctl.py transition SPEC-X planned --reason "waiting for design"
 --reconsider-when "design lands"`; retire a spec: `... superseded --reason "replaced by SPEC-Y"`;
 why a card did not move: `board_ctl.py board-doctor`, then `show <id>`.
+
+### Completion warnings and release delivery
+
+Done uses validator severity: only `WARNING: ` diagnostics
+are advisory. A valid handoff pending coordinator re-pin permits Done and remains pending. The status API returns `warnings`, displayed by drag and status dropdown controls. Blocking handoff findings return HTTP 400 with separate
+`detail`, `errors` and `warnings`. Malformed manifests and missing or invalid
+required handoffs refuse before the durable checkpoint.
+
+Done records implementation evidence, not a shipped release. Only the whole-kit
+release flow can re-pin and deliver the handoff. Installed projects without
+canonical release bookkeeping retain the BUG-337 exemption. The board/CLI gate shares the rule; `board_ctl transition` still refuses Done and moves
+into or out of `in_progress`: parent and verifier own these decisions.
+Persistence failure after the durable checkpoint retains an explicit recovery
+diagnostic; reconcile the artifact/file and retry through the supported writer,
+never edit state manually.

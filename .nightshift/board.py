@@ -564,6 +564,10 @@ class SpecCache:
             performance_registry.measure("cache.admission_derivation", _derive_and_explain)
         # SPEC-303 R6: memoize the finished projection against the signature of
         # the inputs it came from, so a single-spec fetch can reuse it.
+        progress = getattr(states, 'terminal_projections', {})
+        for item in public:
+            if str(item.get('id')) in progress:
+                item['terminal_projection'] = progress[str(item['id'])]
         self._projection = {
             str(item.get("id")): item for item in public if item.get("id")
         }
@@ -676,7 +680,7 @@ class SpecCache:
         """Batch-read durable status, or None when there is no store."""
         if self._status_store is None or not spec_ids:
             return None
-        batch = getattr(self._status_store, "get_states", None)
+        batch = getattr(self._status_store, "get_board_states", None) or getattr(self._status_store, "get_states", None)
         if batch is None:  # a store predating SPEC-303 still works, just slower
             return None
         return batch(spec_ids)
@@ -758,7 +762,7 @@ class SpecCache:
         self, spec_id: str, status: str, *, reason: str | None = None,
         reconsider_when: str | None = None,
         state_evidence: list[dict] | None = None,
-    ) -> None:
+    ) -> list[str]:
         """Write new status to spec frontmatter and the durable checkpoint store.
 
         SPEC-291 R3: this is a board-manual move, so a judgment transition
@@ -778,7 +782,7 @@ class SpecCache:
         endpoint to supply the field.
         """
         with self._lock:
-            self._update_status_locked(
+            return self._update_status_locked(
                 spec_id, status, reason=reason, reconsider_when=reconsider_when,
                 state_evidence=state_evidence,
             )
@@ -787,14 +791,15 @@ class SpecCache:
         self, spec_id: str, status: str, *, reason: str | None = None,
         reconsider_when: str | None = None,
         state_evidence: list[dict] | None = None,
-    ) -> None:
+    ) -> list[str]:
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
         current_status = str(entry.frontmatter.get("status") or "")
+        warnings: list[str] = []
         reason_text = status_transition.gate_status_write(
             entry.frontmatter, status, reason=reason, specs_dir=self._specs_dir,
-            canonical_dir=Path(__file__).resolve().parent,
+            canonical_dir=Path(__file__).resolve().parent, warnings=warnings,
             record_refusal=lambda message: self._record_transfer_refusal(entry, message),
         )
 
@@ -808,7 +813,7 @@ class SpecCache:
             entry.mtime = os.stat(entry.path).st_mtime
             entry.frontmatter["status"] = status
             self._clear_transfer_refusal(entry)
-            return
+            return warnings
 
         spec_artifacts.write_status_transition_artifact(
             spec_artifacts.reports_root_for_spec_path(entry.path), spec_id,
@@ -820,6 +825,7 @@ class SpecCache:
         )
         self._update_status_file(entry, status)
         self._clear_transfer_refusal(entry)
+        return warnings
 
     def get_artifacts(self, spec_id: str) -> list[dict]:
         """Return the SPEC-291 artifact index entries for one spec (R5)."""
@@ -1075,6 +1081,7 @@ class SpecCache:
         states = self._durable_states(
             [str(e.frontmatter.get("id")) for e in entries if e.frontmatter.get("id")]
         )
+        projections = getattr(states, 'terminal_projections', {})
         mismatches = []
         for entry in entries:
             spec_id = entry.frontmatter.get("id")
@@ -1095,7 +1102,8 @@ class SpecCache:
                     "reason": (found or {}).get("reason", status_store_module.SYNC_DURABLE_STALE_BEHIND),
                     "spec_path": str(entry.path),
                 })
-        return {"checked": len(entries), "mismatches": mismatches}
+        return {"checked": len(entries), "mismatches": mismatches,
+                **({'terminal_projections': projections} if projections else {})}
 
     def _effective_status(
         self, fm: dict, file_mtime: float = 0.0, *, states: Optional[dict] = None
@@ -2222,17 +2230,19 @@ def update_status(spec_id: str, payload: dict) -> dict:
     reconsider_when = payload.get("reconsider_when")
     state_evidence = payload.get("state_evidence")
     try:
-        cache.update_status(
+        warnings = cache.update_status(
             spec_id, status, reason=reason, reconsider_when=reconsider_when,
             state_evidence=state_evidence,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    except status_transition.CompletionValidationError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e), "errors": e.errors, "warnings": e.warnings})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True}
+    return {"ok": True, "warnings": warnings} if warnings else {"ok": True}
 
 
 @app.post("/api/spec/{spec_id}/transfer-refusal")
@@ -5990,6 +6000,11 @@ async function statusWriteErrorDetail(r) {
   return null;
 }
 
+function showStatusWriteWarnings(result) {
+  const warnings = (result.warnings || []).join('; ');
+  if (warnings) showToast(`⚠ ${warnings}`);
+}
+
 function statusWriteFailureToastText(specId, detail) {
   return detail ? `⚠ ${specId}: ${detail}` : `⚠ ${specId}: status write failed`;
 }
@@ -6129,6 +6144,7 @@ function onCardDrop(evt) {
       showToast(statusWriteFailureToastText(specId, detail));
       return;
     }
+    showStatusWriteWarnings(await r.json());
     // SPEC-348 R4: the write committed — clear in-flight tracking for every
     // transition, not just the 'done' bump handled below.
     delete pendingMoves[specId];
@@ -6310,6 +6326,9 @@ function renderPanelMeta(specId, fm) {
 
   const metaEl = document.getElementById('panel-meta');
   const statusRow = `<tr><td ${helpTargetAttrs(fm, 'status', 'status')}>status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  const projection = fm.terminal_projection;
+  const projectionRow = projection && projection.projection === 'pending'
+    ? `<tr><td>tracked projection</td><td>pending · ${_escHtml(projection.reason || '')}<br>${_escHtml(projection.recovery_action || '')}</td></tr>` : '';
   // SPEC-360 R1/R6: the run-state control stays above the fold and moves focus to "Why this state?".
   const runStateText = fm.run_state ? String(fm.run_state).replaceAll('_', ' ') : 'not applicable';
   const runStateValueHelp = fm.run_state_summary ? runStateSummaryText(fm.run_state_summary) : '';
@@ -6353,7 +6372,7 @@ function renderPanelMeta(specId, fm) {
   const hiddenCount = collapsibleFields.length;
   const toggleLabel = metaCollapsed ? `▸ details (${hiddenCount})` : `▾ details`;
   const toggleRow = `<tr><td colspan="2"><button type="button" id="panel-meta-toggle" class="meta-toggle-btn" aria-expanded="${!metaCollapsed}" onclick="toggleMetaCollapsed()">${_escHtml(toggleLabel)}</button></td></tr>`;
-  metaEl.innerHTML = statusRow + modelRows + runStateRow + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
+  metaEl.innerHTML = statusRow + projectionRow + modelRows + runStateRow + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
 
   // SPEC-294-001: render (or hide) the deployment-authorization approve/
   // reject control in the same panel the run_state row already renders.
@@ -7089,6 +7108,7 @@ async function changeSpecStatus(specId, newStatus) {
     expandColumnForStatus(newStatus);
     if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
     showToast(`✓ ${specId} → ${newStatus}`);
+    showStatusWriteWarnings(await r.json());
   } catch {
     // Network error / thrown before a response existed — no body to read, so
     // fall back to the generic message (R2), and still persist a refusal
@@ -7447,8 +7467,8 @@ async function showGraph(selectId) {
     }
     if (params.nodes.length > 0) {
       const nodeId = params.nodes[0];
-      highlightNode(nodeId);
       const graphNode = (graphData.nodes || []).find(node => node.id === nodeId);
+      highlightNode(nodeId, { panelOpening: !(graphNode && graphNode.external) });
       if (graphNode && graphNode.external && graphNode.port) {
         window.open(`http://127.0.0.1:${graphNode.port}/?spec=${encodeURIComponent(nodeId)}`, '_blank');
       } else {
@@ -7524,7 +7544,73 @@ async function showGraph(selectId) {
   });
 }
 
-function highlightNode(nodeId) {
+// SPEC-NS-KIT-134: the details panel overlays the graph, so a selected node is placed in the part of the
+// canvas the panel does not cover. Geometry comes from the panel's size and dock side (its target position),
+// never from its mid-transition rect, so the first selection that opens the panel and later switches agree.
+const GRAPH_FOCUS_SCALE = 1.2;       // today's focus zoom; applied only when the view is zoomed out further
+const GRAPH_MIN_VISIBLE_PX = 240;    // narrower/shorter visible areas use the edge fallback
+const GRAPH_EDGE_INSET_PX = 120;     // fallback: node sits this far inside the edge nearest the panel
+const GRAPH_VISIBLE_MARGIN_PX = 48;  // node already this far inside the visible area: camera stays put
+
+function graphVisibleArea(panelOpening) {
+  const panel = document.getElementById('panel');
+  const cont = document.getElementById('graph-container');
+  if (!panel || !cont) return null;
+  const present = panel.classList.contains('open') || panel.dataset.loading || panelOpening;
+  const cr = cont.getBoundingClientRect();
+  const area = { left: 0, top: 0, right: cr.width, bottom: cr.height, side: null };
+  if (!present || cr.width <= 0 || cr.height <= 0) return area;
+  const pr = panel.getBoundingClientRect();  // size only: the position may still be sliding in
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  if (panel.classList.contains('side-bottom')) {
+    const barH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--recent-bar-h')) || 0;
+    area.bottom = Math.max(0, Math.min(area.bottom, vh - barH - pr.height - cr.top));
+    area.side = 'bottom';
+  } else if (panel.classList.contains('side-left')) {
+    area.left = Math.min(area.right, Math.max(0, pr.width - cr.left));
+    area.side = 'left';
+  } else {
+    area.right = Math.max(0, Math.min(area.right, vw - pr.width - cr.left));
+    area.side = 'right';
+  }
+  return area;
+}
+
+// Selects the camera placement for nodeId; with no panel it is the unchanged full-canvas focus.
+function graphFocusNode(nodeId, panelOpening) {
+  const area = graphVisibleArea(panelOpening);
+  if (!area || !area.side) {
+    network.focus(nodeId, { scale: GRAPH_FOCUS_SCALE, animation: true });
+    return;
+  }
+  const pos = network.getPositions([nodeId])[nodeId];
+  if (!pos) return;
+  const bb = network.getBoundingBox(nodeId);
+  const tl = network.canvasToDOM({ x: bb.left, y: bb.top });
+  const br = network.canvasToDOM({ x: bb.right, y: bb.bottom });
+  const m = GRAPH_VISIBLE_MARGIN_PX;
+  if (tl.x >= area.left + m && br.x <= area.right - m && tl.y >= area.top + m && br.y <= area.bottom - m) return;
+  const mid = (lo, hi) => (lo + hi) / 2;
+  let tx = mid(area.left, area.right);
+  let ty = mid(area.top, area.bottom);
+  if (area.side === 'right' && area.right - area.left < GRAPH_MIN_VISIBLE_PX) {
+    tx = Math.max(area.right - GRAPH_EDGE_INSET_PX, area.left);
+  } else if (area.side === 'left' && area.right - area.left < GRAPH_MIN_VISIBLE_PX) {
+    tx = Math.min(area.left + GRAPH_EDGE_INSET_PX, area.right);
+  } else if (area.side === 'bottom' && area.bottom - area.top < GRAPH_MIN_VISIBLE_PX) {
+    ty = Math.max(area.bottom - GRAPH_EDGE_INSET_PX, area.top);
+  }
+  const cont = document.getElementById('graph-container');
+  network.moveTo({
+    position: pos,
+    scale: Math.max(network.getScale(), GRAPH_FOCUS_SCALE),
+    offset: { x: tx - cont.clientWidth / 2, y: ty - cont.clientHeight / 2 },
+    animation: true,
+  });
+}
+
+function highlightNode(nodeId, { panelOpening = false } = {}) {
   const allEdges = graphEdgesDataset.get();
 
   // Build per-node adjacency from live edge set
@@ -7569,7 +7655,7 @@ function highlightNode(nodeId) {
   graphEdgesDataset.update(edgeUpdates);
 
   // Focus and select the node
-  network.focus(nodeId, { scale: 1.2, animation: true });
+  graphFocusNode(nodeId, panelOpening);
   network.selectNodes([nodeId]);
 
   // Update info bar

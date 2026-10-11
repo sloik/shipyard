@@ -25,6 +25,9 @@ Inputs (the only five you get):
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-BEGIN -->
 {acceptance_criteria_verbatim}
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-END -->
+A row in your spec copy's `## AC Amendments` names the criterion text in force: judge the new
+side of the latest row for that AC (an AC line already carrying the new wording is the same text).
+A dispute that rests only on the superseded wording is not a defect of the implementation.
 
 Your job: decide, from evidence you gather yourself inside the assigned verifier
 surface, whether each AC holds at `verifier-head` relative to `verifier-baseline`.
@@ -70,7 +73,32 @@ the classification lists and the footprint). Write one JSON object of exactly th
 sequential plan run one fixed command (e.g. `python3 -c "import sys;print(sys.version)"`) in each arm
 directory and copy its output; under a `devices` plan also set `device` to that arm's assigned device
 (omit `device` otherwise). `started_at`/`ended_at` (ISO-8601) are optional for each arm. A sample is the raw `pytest -q` (or junit) output of one run, as `{"path": <file>}` or `{"output": <text>}`.
+Accepted sample forms: `pytest -q` output, junit XML, `python -m unittest` output (`Ran N tests`, then `OK` or `FAILED (...)` with `FAIL:`/`ERROR:` headers) and `xcodebuild test` output (`Test Case ... passed|failed` lines plus `Executed N tests, with F failures`). Any other output is refused, and so is output that matches two forms. For another runner give a structured sample instead of `{"path": ...}`: `{"executed": true, "failing": [names], "failed": n, "passed": n, "skipped": n}`, where `failed` equals `len(failing)`.
+A `started_at`/`ended_at` that is null, empty, `"None"` or `"null"` counts as absent: give both fields of an arm or neither (one alone is refused).
 In the canonical verdict-JSON template shape, a full verdict JSON stays valid.
+
+<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-BEGIN -->
+Required-deliverable intake order (both assigned arms, exact dispatch identity):
+1. Derive independently first: inspect each relevant production behavior and
+   test assertions and obtain actual command results from the assigned read-only
+   arms; finish both arms and preserve your observations outside them before
+   reading either arm's authored conclusions. Metadata/path existence is not derivation,
+   and deriving an unrelated AC does not authorize reading underived conclusions.
+   Use targeted source/test reads; broad searches and whole-diff reads must not
+   incidentally open outcome-bearing documents before this derivation.
+2. Inspect required deliverables afterward: read the real AC-required authored
+   document from its assigned arm and verify its content and digest against that
+   arm's committed bytes. Keep the exact candidate binding and both-arm footprint
+   checks. A content-free placeholder cannot replace a contractual deliverable.
+   Record actual substantive exposure as `required_deliverable / after_derivation`
+   only for subjects independently derived before that read.
+3. This is an instruction ordering contract, not OS-enforced staged access. If
+   early exposure is unavoidable or happens accidentally, record its real class
+   and `before_derivation` timing and any evidence/capability gap; never invent
+   prior derivation. Unsafe before-derivation final acceptance remains refused.
+   Exposed failures require your own native reproduction; conclusions remain
+   lead-only for remediation. Preserve original rejected evidence unchanged.
+<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-END -->
 
 Rules:
 1. READ-ONLY. Run tests and read files. Never edit, create, delete, stage, commit,
@@ -150,6 +178,9 @@ Inputs (the only five you get):
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-BEGIN -->
 {acceptance_criteria_verbatim}
 <!-- NIGHTSHIFT-BRIEF-SPEC-QUOTE-END -->
+A row in your spec copy's `## AC Amendments` names the criterion text in force: judge the new
+side of the latest row for that AC (an AC line already carrying the new wording is the same text).
+A dispute that rests only on the superseded wording is not a defect of the implementation.
 
 Your job: decide, from evidence you gather yourself inside the assigned verifier
 surface, whether each AC holds at `verifier-head` relative to `verifier-baseline`. There is nothing to run — the evidence is
@@ -191,6 +222,29 @@ and the footprint). Write one JSON object of exactly this shape:
 sequential plan run one fixed command (e.g. `python3 -c "import sys;print(sys.version)"`) in each arm
 directory and copy its output; under a `devices` plan also set `device` to that arm's assigned device
 (omit `device` otherwise). `started_at`/`ended_at` (ISO-8601) are optional for each arm. In the canonical verdict-JSON template shape, a full verdict JSON stays valid.
+
+<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-BEGIN -->
+Required-deliverable intake order (both assigned arms, exact dispatch identity):
+1. Derive independently first: inspect each relevant production behavior and
+   test assertions and obtain actual command results from the assigned read-only
+   arms; finish both arms and preserve your observations outside them before
+   reading either arm's authored conclusions. Metadata/path existence is not derivation,
+   and deriving an unrelated AC does not authorize reading underived conclusions.
+   Use targeted source/test reads; broad searches and whole-diff reads must not
+   incidentally open outcome-bearing documents before this derivation.
+2. Inspect required deliverables afterward: read the real AC-required authored
+   document from its assigned arm and verify its content and digest against that
+   arm's committed bytes. Keep the exact candidate binding and both-arm footprint
+   checks. A content-free placeholder cannot replace a contractual deliverable.
+   Record actual substantive exposure as `required_deliverable / after_derivation`
+   only for subjects independently derived before that read.
+3. This is an instruction ordering contract, not OS-enforced staged access. If
+   early exposure is unavoidable or happens accidentally, record its real class
+   and `before_derivation` timing and any evidence/capability gap; never invent
+   prior derivation. Unsafe before-derivation final acceptance remains refused.
+   Exposed failures require your own native reproduction; conclusions remain
+   lead-only for remediation. Preserve original rejected evidence unchanged.
+<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-END -->
 
 Rules:
 1. READ-ONLY. Read files and run `git diff`/`git show`; never edit, create,
@@ -289,3 +343,10 @@ Rules:
 ```
 
 This is the canonical verdict-JSON template block.
+
+### Predeclared baseline corrections (BUG-NS-KIT-170)
+
+Before any suite execution, the trusted dispatch caller may supply `expected_baseline_fix` with `schema_version: 1.0.0`, current `spec_id`, exact `source: {baseline_commit, head_commit, spec_sha256}`, unchanged complete configured `command`, and `targets: [{test_id, ac_id}]`.
+Legacy nodes require literal AC bindings. Operational tuples use a parent `SamplingAnchor`/`sampling_provider`: retain approval bytes, expected digest and pinned contract outside author/verifier surfaces; freeze reviewed mappings and full ordered collections before dispatch. Plan, environment, rationale or human-labelled rows cannot authenticate themselves.
+Use `run_expected_baseline_fix_sample` in both arms with unique invocation IDs, private external output and configured timeout. Operational members receive exact `command` and separate `sampling_anchor=dispatch.sampling_anchor`. Run every member in order with plugins/options, raw exits, closure and full collection; no masked shell tuple.
+Ask the trusted shared eligibility/count helper for the independently reproduced decision using the original plan and both footprints before resampling. Only an eligible baseline-only correction may use one complete actual sample per arm; head/unexpected failures, changed tests/assertions, skips/xfails, flakes, launch gaps, missing proof and legacy plans keep the strict rule.

@@ -86,6 +86,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/guides/run-2.md",
     ".nightshift/guides/run-3.md",
     ".nightshift/guides/run-4.md",
+    ".nightshift/guides/external-evidence.md",
     ".nightshift/guides/run-5.md",
     ".nightshift/guides/run-6.md",
     ".nightshift/guides/run-7.md",

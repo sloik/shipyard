@@ -413,7 +413,7 @@ class StatusStore:
         )
         return _checkpoint_from_row(row).to_dict() if row else None
 
-    def get_states(self, spec_ids: Iterable[str]) -> dict[str, dict[str, Any] | None]:
+    def get_states(self, spec_ids: Iterable[str], *, include_terminal_projection: bool = False) -> dict[str, dict[str, Any] | None]:
         """Return the latest state for many specs over one connection (SPEC-303).
 
         Equivalent to calling ``get_state`` per id — same value, including
@@ -427,6 +427,7 @@ class StatusStore:
         if not states:
             return states
         unique = list(states)
+        projections = {}
         with closing(self._connect()) as conn:
             # Chunked to stay clear of SQLite's bound-parameter limit; the
             # connection is still opened exactly once.
@@ -446,7 +447,13 @@ class StatusStore:
                 ).fetchall()
                 for row in rows:
                     states[str(row["spec_id"])] = _checkpoint_from_row(row).to_dict()
-        return states
+                if include_terminal_projection:
+                    projections.update(_terminal_projection_diagnostics(conn, chunk))
+        return _BoardStateBatch(states, projections) if include_terminal_projection else states
+
+    def get_board_states(self, spec_ids: Iterable[str]) -> dict:
+        """Read status and projection diagnostics over the same bounded connection."""
+        return self.get_states(spec_ids, include_terminal_projection=True)
 
     def assert_durable_ready(self) -> None:
         """Fail unless the configured SQLite store is current and writable."""
@@ -929,6 +936,23 @@ class StatusStore:
         )
         recomputed_before = hashlib.sha256(base_blob.stdout).hexdigest()
         recomputed_expected = hashlib.sha256(target_text.encode("utf-8")).hexdigest()
+        closure = None
+        if 'completion_inputs' in payload:
+            from spec_artifacts import derive_terminal_first_projection
+            closure, trailers = derive_terminal_first_projection(
+                repository, spec_id, run_id, decision, relative.as_posix(),
+                payload['base_head'], payload['completion_inputs'])
+            hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+            if payload.get('closure_sha256') != hashes:
+                raise ValueError('terminal first projection closure binding mismatch')
+            recomputed_expected = hashes[relative.as_posix()]
+            history = self.get_terminal_projection_history(spec_id, run_id)
+            original = next((event['payload'] for event in history
+                             if event['payload'].get('phase') == 'started'), None)
+            if original is not None and original != {**payload, 'phase': 'started'}:
+                raise ValueError('terminal first projection cannot replace a started receipt')
+            if payload['phase'] == 'completed' and original is None:
+                raise ValueError('terminal first projection completed receipt lacks started closure')
         if (
             payload["before_sha256"] != recomputed_before
             or payload["expected_sha256"] != recomputed_expected
@@ -945,6 +969,33 @@ class StatusStore:
             raise ValueError("terminal projection completed receipt requires clean projected path")
         if payload["phase"] == "started" and head.stdout.strip() != payload["base_head"]:
             raise ValueError("terminal projection started receipt base is not current HEAD")
+        if closure is not None:
+            for name, data in closure.items():
+                target = repository / name
+                current_path = repository
+                for member in PurePosixPath(name).parts:
+                    current_path /= member
+                    if current_path.is_symlink():
+                        raise ValueError(f'terminal first projection symlinked closure path: {name}')
+                if target.is_file() and target.stat().st_nlink != 1:
+                    raise ValueError(f'terminal first projection hardlinked closure path: {name}')
+                dirty = subprocess.run(['git', 'status', '--porcelain', '--', name],
+                                       cwd=repository, capture_output=True, text=True, check=True).stdout
+                if target.is_symlink() or dirty.strip():
+                    raise ValueError(f'terminal first projection requires clean closure path: {name}')
+                if payload['phase'] == 'completed':
+                    observed = subprocess.run(['git', 'show', f'HEAD:{name}'], cwd=repository,
+                                              capture_output=True)
+                    if observed.returncode or observed.stdout != data or target.read_bytes() != data:
+                        raise ValueError(f'terminal first projection committed closure differs: {name}')
+            if payload['phase'] == 'completed':
+                changed = subprocess.run(['git', 'diff', '--name-only', 'HEAD^1', 'HEAD'],
+                                         cwd=repository, capture_output=True, text=True, check=True).stdout.splitlines()
+                message = subprocess.run(['git', 'log', '-1', '--pretty=%B'], cwd=repository,
+                                         capture_output=True, text=True, check=True).stdout.splitlines()
+                if set(changed) != set(closure) or message[:1] != [f'chore: mark {spec_id} done'] \
+                    or any(line not in message for line in trailers):
+                    raise ValueError('terminal first projection commit paths/subject/trailers differ')
         if payload["phase"] == "completed":
             parent = subprocess.run(
                 ["git", "rev-parse", "HEAD^1^{commit}"], cwd=repository,
@@ -964,6 +1015,16 @@ class StatusStore:
         created_at = _utc_now()
         with closing(self._connect()) as conn:
             with conn:
+                if closure is not None:
+                    rows = conn.execute('SELECT id, created_at, payload_json FROM terminal_projection_events '
+                                        'WHERE spec_id = ? AND run_id = ? ORDER BY id', (spec_id, run_id)).fetchall()
+                    for row in rows:
+                        previous = _json_loads(row['payload_json'])
+                        if previous.get('phase') == 'started' and previous != {**payload, 'phase': 'started'}:
+                            raise ValueError('terminal first projection cannot replace a started receipt')
+                        if previous == payload:
+                            return {'event_id': int(row['id']), 'spec_id': spec_id, 'run_id': run_id,
+                                    'created_at': row['created_at'], 'payload': payload}
                 cursor = conn.execute(
                     """
                     INSERT INTO terminal_projection_events
@@ -977,6 +1038,125 @@ class StatusStore:
             "event_id": event_id, "spec_id": spec_id, "run_id": run_id,
             "created_at": created_at, "payload": payload,
         }
+
+    def record_terminal_projection_failure(self, spec_id: str, run_id: str, *,
+                                           original_event_id: int | None = None, reason: str) -> dict[str, Any]:
+        """Retain actual projection failure separately from immutable done."""
+        original = next((event for event in self.get_terminal_projection_history(spec_id, run_id)
+                         if event['event_id'] == original_event_id), None)
+        decision = self.get_terminal_decision(spec_id, run_id)
+        state = self.get_state(spec_id)
+        if (decision is None or state is None or state.get('run_id') != run_id
+            or (state.get('payload') or {}).get('terminal_decision_id') != decision['decision_id']
+            or state.get('status') != decision['decision']
+            or (original_event_id is not None and
+                (original is None or original['payload'].get('phase') != 'started'))):
+            raise StatusStoreError('terminal projection failure lacks matching immutable decision/receipt')
+        payload = {'event': 'terminal_frontmatter_projection_failure', 'phase': 'pending',
+                   'original_event_id': original_event_id,
+                   'decision_id': decision['decision_id'],
+                   'reason': str(reason)[:16384],
+                   'recovery_action': 'queue.recover_terminal_projection(handle)'}
+        created_at = _utc_now()
+        with closing(self._connect()) as conn:
+            with conn:
+                cursor = conn.execute('INSERT INTO terminal_projection_events '
+                    '(spec_id, run_id, created_at, payload_json) VALUES (?, ?, ?, ?)',
+                    (spec_id, run_id, created_at, _json_dumps(payload)))
+        return {'event_id': int(cursor.lastrowid), 'spec_id': spec_id, 'run_id': run_id,
+                'created_at': created_at, 'payload': payload}
+
+    def terminal_projection_diagnostics(self, spec_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read projection progress separately from the accepted terminal decision."""
+        if not spec_ids:
+            return {}
+        with closing(self._connect()) as conn:
+            return _terminal_projection_diagnostics(conn, spec_ids)
+
+    def record_terminal_metadata_recovery_event(
+        self, spec_id: str, run_id: str, *, repo_root: Path,
+        request: dict[str, Any], phase: str,
+    ) -> dict[str, Any]:
+        """Append a canonical metadata link; never replace the original receipt."""
+        from spec_artifacts import derive_terminal_metadata_recovery
+
+        if phase not in {"metadata_started", "metadata_completed"}:
+            raise ValueError("metadata recovery phase invalid")
+        identity = self.require_repository(repo_root)
+        history = self.get_terminal_projection_history(spec_id, run_id)
+        originals = [item for item in history
+                     if item["event_id"] == request.get("original_event_id")]
+        if len(originals) != 1:
+            raise StatusStoreError("metadata recovery original receipt unavailable")
+        original = originals[0]
+        receipt = original["payload"]
+        decision = self.get_terminal_decision(spec_id, run_id)
+        state = self.get_state(spec_id)
+        completion = (decision or {}).get("payload", {}).get("completion_evidence", {})
+        if (decision is None or state is None or state.get("run_id") != run_id
+            or state.get("status") != "done"
+            or state.get("payload", {}).get("terminal_decision_id") != decision["decision_id"]
+            or completion.get("ok") is not True or completion.get("outcome") != "accepted"
+            or not {"report", "tests", "ac_checklist", "verifier"}.issubset(completion.get("artifacts", {}))
+            or any(receipt.get(key) != identity[key] for key in ("repo_common_dir", "checkout_root"))):
+            raise StatusStoreError("metadata recovery decision/repository binding invalid")
+        closure = derive_terminal_metadata_recovery(repo_root, spec_id, run_id,
+                                                   decision, original, request)
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+        recovery_base = request.get("recovery_base_head", receipt["base_head"])
+        payload = {"event": "terminal_frontmatter_metadata_recovery", "phase": phase,
+                   "original_event_id": original["event_id"], "request": request,
+                   "closure_sha256": hashes, "recovery_base_head": recovery_base}
+        links = [item for item in history if item["payload"].get("event") == payload["event"]]
+        if links and any(item["payload"].get("request") != request
+                         or item["payload"].get("closure_sha256") != hashes for item in links):
+            raise StatusStoreError("competing metadata recovery target refused")
+        root = Path(repo_root).resolve()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if phase == "metadata_started":
+            if links or head != recovery_base:
+                raise StatusStoreError("metadata recovery requires pending original base HEAD")
+            if hashlib.sha256((root / receipt["spec_path"]).read_bytes()).hexdigest() != receipt["expected_sha256"]:
+                raise StatusStoreError("metadata recovery requires exact parent-owned pending bytes")
+        else:
+            if not links or links[0]["payload"].get("phase") != "metadata_started":
+                raise StatusStoreError("metadata completion lacks started link")
+            parent = subprocess.run(["git", "rev-parse", "HEAD^1"], cwd=root,
+                                    capture_output=True, text=True, check=True).stdout.strip()
+            subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=root,
+                                     capture_output=True, text=True, check=True).stdout.strip()
+            changed = subprocess.run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+                                     cwd=root, capture_output=True, text=True, check=True).stdout.splitlines()
+            if parent != recovery_base or subject != f"chore: mark {spec_id} done" or set(changed) != set(closure):
+                raise StatusStoreError("metadata completion commit binding invalid")
+            for name, digest in hashes.items():
+                committed = subprocess.run(["git", "show", f"HEAD:{name}"], cwd=root, capture_output=True, check=True).stdout
+                dirty = subprocess.run(["git", "status", "--porcelain", "--", name], cwd=root,
+                                       capture_output=True, text=True, check=True).stdout
+                if hashlib.sha256(committed).hexdigest() != digest or dirty.strip():
+                    raise StatusStoreError("metadata completion closure differs from committed bytes")
+        created_at = _utc_now()
+        with closing(self._connect()) as conn:
+            with conn:
+                # Serialize the choice and detect a concurrent competing parent.
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute("SELECT id, payload_json FROM terminal_projection_events WHERE spec_id = ? AND run_id = ? ORDER BY id",
+                                    (spec_id, run_id)).fetchall()
+                existing = [_json_loads(row["payload_json"]) for row in rows
+                            if _json_loads(row["payload_json"]).get("event") == payload["event"]]
+                if any(item.get("request") != request or item.get("closure_sha256") != hashes for item in existing):
+                    raise StatusStoreError("competing metadata recovery target refused")
+                for row in rows:
+                    if _json_loads(row["payload_json"]) == payload:
+                        return {"event_id": int(row["id"]), "spec_id": spec_id,
+                                "run_id": run_id, "payload": payload}
+                if phase == "metadata_started" and existing:
+                    raise StatusStoreError("metadata recovery already chosen")
+                cursor = conn.execute("INSERT INTO terminal_projection_events (spec_id, run_id, created_at, payload_json) VALUES (?, ?, ?, ?)",
+                                      (spec_id, run_id, created_at, _json_dumps(payload)))
+        return {"event_id": int(cursor.lastrowid), "spec_id": spec_id, "run_id": run_id,
+                "created_at": created_at, "payload": payload}
 
     def get_terminal_projection_history(
         self, spec_id: str, run_id: str,
@@ -1750,3 +1930,60 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(main())
+
+
+def _terminal_projection_diagnostics(conn, spec_ids):
+    placeholders = ','.join('?' for _ in spec_ids)
+    decisions = conn.execute(
+            f'SELECT * FROM terminal_decisions WHERE id IN (SELECT MAX(id) FROM terminal_decisions '
+            f'WHERE spec_id IN ({placeholders}) GROUP BY spec_id) ORDER BY id',
+            spec_ids).fetchall()
+    events = conn.execute(
+            f'SELECT * FROM terminal_projection_events WHERE id IN (SELECT MAX(id) '
+            f'FROM terminal_projection_events WHERE spec_id IN ({placeholders}) GROUP BY spec_id, run_id)',
+            spec_ids).fetchall()
+    cleanup_rows = conn.execute(
+        f'SELECT * FROM cleanup_events WHERE id IN (SELECT MAX(id) FROM cleanup_events '
+        f'WHERE spec_id IN ({placeholders}) GROUP BY spec_id, run_id)',
+        spec_ids).fetchall()
+    cleanups = {(row['spec_id'], row['run_id']): _json_loads(row['payload_json'])
+                for row in cleanup_rows}
+    histories = {}
+    for row in events:
+        histories.setdefault((row['spec_id'], row['run_id']), []).append(_json_loads(row['payload_json']))
+    result = {}
+    for row in decisions:
+        history = histories.get((row['spec_id'], row['run_id']), [])
+        last = history[-1] if history else {}
+        completed = last.get('phase') in {'completed', 'metadata_completed'}
+        result[row['spec_id']] = {
+            'decision': row['decision'], 'run_id': row['run_id'],
+            'projection': 'completed' if completed else 'pending',
+            'cleanup_eligible': completed,
+            'cleanup': cleanups.get((row['spec_id'], row['run_id']), {}).get('phase', 'pending'),
+            'reason': None if completed else last.get('reason') or
+                ('sealed tracked closure awaits ordinary commit' if history else
+                 'accepted decision awaits bounded parent completion inputs and tracked closure'),
+            'findings': [] if completed else [last.get('reason')] if last.get('reason') else [],
+            'recovery_action': None if completed else 'queue.recover_terminal_projection(handle)',
+        }
+    return result
+
+
+
+def read_terminal_projection_diagnostics_readonly(db_path: Path, spec_ids: list[str]) -> dict:
+    """Offline diagnostics never initialize, migrate or write a status store."""
+    if not spec_ids or not Path(db_path).is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            return _terminal_projection_diagnostics(conn, spec_ids)
+    except (sqlite3.Error, OSError):
+        return {}
+
+
+class _BoardStateBatch(dict):
+    def __init__(self, states, projections):
+        super().__init__(states)
+        self.terminal_projections = projections

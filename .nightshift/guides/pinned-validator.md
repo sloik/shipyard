@@ -309,6 +309,13 @@ for s in v["suites"]:
         if lf.get("counts_as_pass") is not False: die("%s: launch failure: counted as a pass" % s.get("name"))
     launch_unsupported = any(lf.get("classification") != "launch_infrastructure_supported" or not isinstance(lf.get("control_probe"), dict) or not str(lf["control_probe"].get("run", "")).strip() for lf in (s.get("launch_failures") or []))
     need = 3 if (s.get("flaky_suspected") or launch_unsupported or b_any != h_any or b_any != b_all or h_any != h_all) else 1
+    _p = globals().get("_nightshift_dispatch_plan")
+    _c = globals().get("_nightshift_sampling_checker")
+    if _c is not None and isinstance(_p, dict) and (_p.get("sampling") or {}).get("expected_baseline_fix") is not None:
+        try: _f = _c(s, plan=_p, footprint=gf, verdict=v)
+        except ValueError as e: die(str(e))
+        lines.append("  SAMPLING: eligible=%s reason=%s; observed correction only, determinism and future flakes unestablished" % (_f["eligible"], _f["reason"]))
+        if _f["eligible"]: need = 1  # operational eligibility proves every ordered suite through separate trusted context
     # SPEC-NS-KIT-002-002 R7 — a reused sample may stand in as the single baseline draw but never
     # counts toward the 3-sample rule; the head arm always needs a real, independent run.
     b_have = b_n if need == 1 else b_real

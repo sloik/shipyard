@@ -51,6 +51,8 @@ verification evidence. The parent calls `record_attempt`, then `finalize`, remai
 the sole lifecycle and merge owner, and only a verified success can transition
 `blocked -> ready`. A new ordinary kickoff (or `unblock_spec.py resume`) may begin only after that transition.
 
+`--root` may be the project root or the install directory (`.nightshift`). A project root is resolved to `<root>/.nightshift`; a directory that has `specs/` itself (this repository's `canonical/` next to `.nightshift/`) is used as is. Events, attempts and locks are kept under the install directory; a directory with neither layout is refused with `NS-UNBLOCK-ROOT-NOT-INSTALL` before anything is written.
+
 The operator result and run report list eligibility, attempt result, causal
 confidence, evidence references, and whether human action is needed. Do not expose
 raw logs, secrets, or private-local paths. Explain “why it worked” only from the

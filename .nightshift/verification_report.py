@@ -9,16 +9,20 @@ import copy
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -166,6 +170,8 @@ class PreparedVerifierDispatch:
     trusted_tooling: dict[str, Any] | None = None
     # SPEC-NS-KIT-008 R2: true when a spec path was given and projection was declined.
     spec_projection_declined: bool = False
+    expected_baseline_fix: dict[str, Any] | None = None
+    sampling_anchor: SamplingAnchor | None = None
 
     def public_plan(self) -> dict[str, Any]:
         commits = self.evidence["surface_commits"]
@@ -194,11 +200,15 @@ class PreparedVerifierDispatch:
             "sampling": sampling_plan(flaky_suspected=self.flaky_suspected),
             "arm_isolation": self.arm_isolation or build_arm_isolation(),
         }
+        if self.expected_baseline_fix is not None:
+            plan["sampling"]["expected_baseline_fix"] = copy.deepcopy(self.expected_baseline_fix)
         normalisation = self.evidence.get("spec_normalisation")
         if isinstance(normalisation, dict) and normalisation.get("scope_summary"):
             # SPEC-NS-KIT-002-005 R1a: the brief's `{scope_summary}`, with withheld
             # earlier-attempt names already neutral; the exact scope stays with the gate.
             plan["scope_summary"] = normalisation["scope_summary"]
+        if self.evidence.get("spec_contract"):
+            plan["spec_contract"] = dict(self.evidence["spec_contract"])  # BUG-NS-KIT-140 R5
         if self.spec_projection_declined:
             plan["spec_projection"] = "declined"
         if self.footprint_before is not None:
@@ -2082,6 +2092,11 @@ def _placeholder_intact(repository: Path, ref: str, path: str) -> bool:
 SPEC_PROJECTION_MARKER = "<!-- nightshift-verifier-projection: contractual sections only -->"
 SPEC_PROOF_SECTIONS = ("Requirements", "Acceptance Criteria")
 SPEC_CONTRACT_SECTIONS = (*SPEC_PROOF_SECTIONS, "Out of Scope")
+# BUG-NS-KIT-140 R1: the AC Amendments table follows Acceptance Criteria verbatim; it names the
+# criterion text in force, so withholding it left the verifier judging a superseded line.
+SPEC_PROJECTED_SECTIONS = (
+    "Requirements", "Acceptance Criteria", "AC Amendments", "Out of Scope", "Scope Amendments",
+)
 _CHECKBOX_LINE_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[([xX ])\]((?:\s.*)?)$")
 
 
@@ -2119,7 +2134,35 @@ def _same_apart_from_checkbox_state(original: str, projected: str) -> bool:
     return True
 
 
+def _spec_release_handoff(spec_text: str) -> str | None:
+    """Canonical YAML for the exact declared value; absent is distinct from null.
+
+    Parse the original frontmatter before serializing just this contractual key,
+    so multiline values and aliases do not inherit missing lifecycle fields.
+    Ordinary specs without the key retain the dependency-free projection path.
+    """
+    frontmatter = _spec_frontmatter(spec_text)
+    if "release_handoff" not in frontmatter and "\\" not in frontmatter and not re.search(r"(?m)^\s*<<\s*:", frontmatter):
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(frontmatter)
+        if not isinstance(data, dict):
+            raise SpecProjectionError("release_handoff frontmatter is not a mapping")
+        if "release_handoff" not in data:
+            return None
+        return yaml.safe_dump(
+            {"release_handoff": data["release_handoff"]}, sort_keys=True, allow_unicode=True,
+        )
+    except (ImportError, ValueError) as exc:
+        raise SpecProjectionError("release_handoff cannot be parsed") from exc
+    except yaml.YAMLError as exc:
+        raise SpecProjectionError("release_handoff cannot be parsed") from exc
+
+
 def _prove_contract_unchanged(original: str, projected: str) -> None:
+    if _spec_release_handoff(original) != _spec_release_handoff(projected):
+        raise SpecProjectionError("projection alters the release_handoff declaration")
     for heading in SPEC_PROOF_SECTIONS:
         before, after = _spec_section(original, heading), _spec_section(projected, heading)
         if before is None:
@@ -2201,7 +2244,7 @@ def project_spec_for_verifier(
 ) -> tuple[str, dict[str, Any]]:
     """The verifier's spec copy: contractual sections only, checkboxes neutralised.
 
-    Keeps the frontmatter ``id`` and ``scope:`` block (a missing ``scope:`` would
+    Keeps the frontmatter ``id``, exact semantic ``release_handoff`` value and ``scope:`` block (a missing ``scope:`` would
     resolve to the permissive default), the exact Requirements / Acceptance Criteria /
     Out of Scope sections and the ``## Scope Amendments`` table (so a hand-written
     verdict's ``amended`` classification still recomputes without ``--main-root``), and
@@ -2221,11 +2264,14 @@ def project_spec_for_verifier(
     names = _AttemptNames(withheld_names)
     frontmatter = _spec_frontmatter(spec_text).split("\n")
     spec_id = next((line for line in frontmatter if re.match(r"^id:\s*\S", line)), None)
+    release_contract = _spec_release_handoff(spec_text)
+    if release_contract is not None and names.mentions(release_contract):
+        raise SpecProjectionError("release_handoff mentions a withheld author artifact")
     block = _spec_scope_block(frontmatter)
     kept_block = [names.replace(line) for line in block]
     mentions: list[str] = []
     sections: list[str] = []
-    for heading in (*SPEC_CONTRACT_SECTIONS, "Scope Amendments"):
+    for heading in SPEC_PROJECTED_SECTIONS:
         section = _spec_section(spec_text, heading)
         if section is None:
             continue
@@ -2234,7 +2280,8 @@ def project_spec_for_verifier(
         else:
             section = names.replace(section)
         sections.append(_neutralise_checkboxes(section) + "\n")
-    head = ["---", *([spec_id] if spec_id else []), *kept_block, "---"]
+    head = ["---", *([spec_id] if spec_id else []),
+            *(release_contract.splitlines() if release_contract is not None else []), *kept_block, "---"]
     projected = "\n".join(head) + "\n" + SPEC_PROJECTION_MARKER + "\n\n" + "\n".join(sections)
     _prove_contract_unchanged(spec_text, projected)
     return projected, {
@@ -2243,8 +2290,67 @@ def project_spec_for_verifier(
         "projected_sha256": hashlib.sha256(projected.encode("utf-8", "surrogateescape")).hexdigest(),
         "withheld_names": names.records(),
         "contract_mentions_withheld": sorted(set(mentions)),
+        "release_handoff": {
+            "present": release_contract is not None,
+            "sha256": hashlib.sha256(release_contract.encode("utf-8")).hexdigest()
+            if release_contract is not None else None,
+        },
         "scope_summary": _scope_summary(kept_block),
+        "ac_amendment_rows": _ac_amendment_row_count(spec_text),
     }
+
+
+def _ac_amendment_row_count(spec_text: str) -> int:
+    section = _spec_section(spec_text, "AC Amendments") or ""
+    rows = [line for line in section.split("\n") if line.lstrip().startswith("|")]
+    return max(0, len(rows) - 2)  # header and separator
+
+
+class ContractRefRefusal(ValueError):
+    """``--contract-ref`` cannot be admitted (BUG-NS-KIT-140 R5); nothing is prepared."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason, self.detail = reason, detail
+        super().__init__(f"contract ref refused [{reason}] {detail}")
+
+
+def resolve_contract_ref(
+    source_repository: Path, contract_ref: str, spec_path: str, main_branch: str = "main",
+) -> tuple[str, str]:
+    """``(commit, spec text)`` at *contract_ref*, which must be main or one of its ancestors."""
+    def commit_of(ref: str) -> str | None:
+        probe = subprocess.run(
+            ["git", "-C", str(source_repository), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True, check=False, env=_git_environment(),
+        )
+        return probe.stdout.decode("ascii", "replace").strip() if probe.returncode == 0 else None
+
+    commit, main_commit = commit_of(contract_ref), commit_of(main_branch)
+    ancestor = commit is not None and main_commit is not None and subprocess.run(
+        ["git", "-C", str(source_repository), "merge-base", "--is-ancestor", commit, main_commit],
+        capture_output=True, check=False, env=_git_environment(),
+    ).returncode == 0
+    if not ancestor or commit is None:
+        raise ContractRefRefusal(
+            "contract_ref_not_main", f"--contract-ref must be {main_branch} or one of its ancestors",
+        )
+    text = _blob_text_at_ref(source_repository, commit, _normalise_repo_path(spec_path))
+    if text is None:
+        raise ContractRefRefusal("contract_ref_spec_missing", "the spec is absent at --contract-ref")
+    return commit, text
+
+
+def _contract_projection(
+    source_repository: Path, contract_ref: str, spec_path: str, main_branch: str,
+    withheld_names: Iterable[str],
+) -> tuple[bytes, dict[str, Any], dict[str, str]]:
+    commit, text = resolve_contract_ref(source_repository, contract_ref, spec_path, main_branch)
+    projected, record = project_spec_for_verifier(text, withheld_names=withheld_names)
+    contract = {
+        "ref": contract_ref, "commit": commit,
+        "original_sha256": record["original_sha256"], "projected_sha256": record["projected_sha256"],
+    }
+    return projected.encode("utf-8", "surrogateescape"), {"present": True, **record}, contract
 
 
 def _spec_projection_for_ref(
@@ -2317,6 +2423,8 @@ def prepare_verifier_surface(
     spec_path: str | None = None,
     preflight_proof_sha256: str | None = None,
     project_spec: bool = False,
+    contract_ref: str | None = None,
+    main_branch: str = "main",
 ) -> dict[str, Any]:
     """Build a standalone Git repo with candidate conclusions removed.
 
@@ -2442,8 +2550,18 @@ def prepare_verifier_surface(
         raise
     # R1: proven before any surface exists, so an unprovable projection leaves nothing behind.
     spec_projections: dict[str, tuple[bytes | None, dict[str, Any]]] = {}
+    spec_contract: dict[str, str] | None = None
+    if contract_ref is not None and not (spec_path and project_spec):
+        raise ContractRefRefusal("contract_ref_needs_projection", "--contract-ref needs --spec-path and spec projection")
     if spec_path and project_spec:
         withheld_spec_names = sorted({*report_paths, *same_spec_reports, *same_spec_metrics})
+        if contract_ref is not None:
+            # BUG-NS-KIT-140 R5: one contract, projected from main, for both arms.
+            body, arm_record, spec_contract = _contract_projection(
+                source_repository, contract_ref, spec_path, main_branch, withheld_spec_names,
+            )
+            spec_projections = {label: (body, dict(arm_record)) for label in ARM_LABELS}
+    if spec_path and project_spec and contract_ref is None:
         spec_projections = {
             label: _spec_projection_for_ref(
                 source_repository, ref, _normalise_repo_path(spec_path), withheld_spec_names,
@@ -2625,6 +2743,8 @@ def prepare_verifier_surface(
         evidence["spec_normalisation"] = spec_normalisation_evidence(
             spec_arms, _normalise_repo_path(spec_path),
         )
+        if spec_contract is not None:
+            evidence["spec_contract"] = spec_contract
     if proof_record is not None:
         # SPEC-390-002: absent, not empty, when no proof was declared, for the same
         # byte-identity reason as the external-input rows above.
@@ -2705,6 +2825,10 @@ def prepare_verifier_dispatch(
     arm_isolation: dict[str, Any] | None = None,
     trusted_tooling: dict[str, Any] | None = None,
     project_spec: bool = False,
+    contract_ref: str | None = None,
+    main_branch: str = "main",
+    expected_baseline_fix: Mapping[str, Any] | None = None,
+    sampling_provider: Any = None,
 ) -> PreparedVerifierDispatch:
     """Prepare the sole verifier surface and emit a sanitized launch plan.
 
@@ -2717,6 +2841,11 @@ def prepare_verifier_dispatch(
     arm_isolation = build_arm_isolation(
         (arm_isolation or {}).get("devices"), (arm_isolation or {}).get("runtime"),
     )
+    if contract_ref is not None:
+        # BUG-NS-KIT-140 R5: refused before any surface exists, with its own reason.
+        if not (spec_path and project_spec):
+            raise ContractRefRefusal("contract_ref_needs_projection", "--contract-ref needs --spec-path and spec projection")
+        resolve_contract_ref(source_repository.resolve(), contract_ref, spec_path, main_branch)
     try:
         source_repository = source_repository.resolve()
         destination = destination.resolve()
@@ -2748,6 +2877,8 @@ def prepare_verifier_dispatch(
             spec_path=spec_path,
             preflight_proof_sha256=preflight_proof_sha256,
             project_spec=project_spec,
+            contract_ref=contract_ref,
+            main_branch=main_branch,
         )
         exact_candidate_revision = _run_git(
             source_repository, "rev-parse", "--verify", f"{head_ref}^{{commit}}"
@@ -2997,10 +3128,24 @@ def prepare_verifier_dispatch(
             withheld_now = sorted({*normalized_reports, *observed_same_spec, *observed_same_spec_metrics})
             observed_arms: dict[str, dict[str, Any]] = {}
             spec_ready = True
-            for label, ref in (("baseline", baseline_ref), ("head", head_ref)):
-                body, observed_arms[label] = _spec_projection_for_ref(
-                    source_repository, ref, spec_rel, withheld_now,
+            observed_contract: dict[str, str] | None = None
+            contract_body: bytes | None = None
+            contract_arm: dict[str, Any] = {}
+            if contract_ref is not None:
+                contract_body, contract_arm, observed_contract = _contract_projection(
+                    source_repository, contract_ref, spec_rel, main_branch, withheld_now,
                 )
+            spec_ready = spec_ready and durable_evidence.get("spec_contract") == observed_contract
+            for label, ref in (("baseline", baseline_ref), ("head", head_ref)):
+                if contract_ref is not None:
+                    body, observed_arms[label] = contract_body, dict(contract_arm)
+                    arm_target = Path(durable_evidence["surface_repositories"][label]) / spec_rel
+                    if not arm_target.is_file() or arm_target.is_symlink():
+                        observed_arms[label] = {"present": False, "projection": "skipped_not_a_regular_file"}
+                else:
+                    body, observed_arms[label] = _spec_projection_for_ref(
+                        source_repository, ref, spec_rel, withheld_now,
+                    )
                 if body is None:
                     continue
                 arm_dir = Path(durable_evidence["surface_repositories"][label])
@@ -3101,6 +3246,24 @@ def prepare_verifier_dispatch(
         flaky = flaky_suspected_from_evidence(
             load_ledger(Path(ledger_path)), now=ledger_now,
         )
+    bound_fix = None
+    sampling_anchor = None
+    if sampling_provider is not None:
+        if expected_baseline_fix is not None:
+            raise ValueError("conflicting sampling authority")
+        sampling_anchor = sampling_provider({"spec_id": spec_id, "run_id": run_id})
+        bound_fix = bind_operational_sampling(source_repository, sampling_anchor,
+            spec_path=spec_path, spec_id=spec_id, run_id=run_id,
+            baseline_ref=baseline_ref, head_ref=head_ref, suite_commands=suites,
+            evidence=durable_evidence, destination=destination)
+        sampling_anchor = replace(sampling_anchor,
+            dispatch_sha256=hashlib.sha256(canonical_json(bound_fix)).hexdigest())
+    if expected_baseline_fix is not None:
+        bound_fix = bind_expected_baseline_fix(
+            source_repository, expected_baseline_fix, spec_path=spec_path,
+            spec_id=spec_id, run_id=run_id, baseline_ref=baseline_ref,
+            head_ref=head_ref, suite_commands=suites, evidence=durable_evidence,
+        )
     return PreparedVerifierDispatch(
         repository=destination,
         evidence_path=evidence_path.resolve(),
@@ -3110,6 +3273,8 @@ def prepare_verifier_dispatch(
         spec_id=spec_id,
         run_id=run_id,
         ledger_baseline=ledger_baseline,
+        expected_baseline_fix=bound_fix,
+        sampling_anchor=sampling_anchor,
         spec_projection_declined=bool(spec_path and not project_spec),
         flaky_suspected=flaky,
         arm_isolation=arm_isolation,
@@ -3924,7 +4089,10 @@ def run_suite_sample(
                                    poll_s=float(config["poll_s"])) as lease:
                 code = _run_suite_sample(command, spec_id=spec_id, arm=arm, suite=suite, sample=sample,
                                          metrics_dir=metrics_dir, xcode=xcode, output_dir=output_dir)
-            _record_gate_wait(metrics_dir, spec_id, lease["gate_wait_s"])
+            try:
+                _record_gate_wait(metrics_dir, spec_id, lease["gate_wait_s"])
+            except (ValueError, OSError, TimeoutError) as exc:
+                print(f"suite-sample: gate-wait metrics: {exc}; native exit retained: {code}", file=sys.stderr)
             return code
     return _run_suite_sample(command, spec_id=spec_id, arm=arm, suite=suite, sample=sample,
                              metrics_dir=metrics_dir, xcode=xcode, output_dir=output_dir)
@@ -3943,13 +4111,120 @@ def _record_gate_wait(metrics_dir: Path, spec_id: str, waited_s: float) -> None:
         print(f"suite-sample: could not record gate wait: {exc}", file=sys.stderr)
 
 
+class _SuiteSampleSpool:
+    """Preopened raw/native records survive failure of optional final projections."""
+
+    def __init__(self, root: Path, stem: str):
+        self.root, self.stem = root, stem
+        self.directory = Path(tempfile.mkdtemp(prefix=".suite-sample-", dir=root))
+        self.raw = None
+        self.journal = None
+        try:
+            self.raw = open(self.directory / "raw.log", "xb")
+            self.journal = open(self.directory / "native.jsonl", "xb")
+            # An actual write/fsync probe, not a permission-bit guess.
+            self.raw.flush()
+            os.fsync(self.raw.fileno())
+            self.journal.write(b"preflight\n")
+            self.journal.flush()
+            os.fsync(self.journal.fileno())
+            self.journal.seek(0)
+            self.journal.truncate()
+            self.journal.flush()
+            os.fsync(self.journal.fileno())
+        except BaseException:
+            self.close()
+            raise
+
+    def write_raw(self, data: bytes) -> None:
+        assert self.raw is not None
+        self.raw.write(data)
+
+    def sync_raw(self) -> None:
+        assert self.raw is not None
+        self.raw.flush()
+        os.fsync(self.raw.fileno())
+
+    def append(self, record: Mapping[str, Any]) -> None:
+        assert self.journal is not None
+        self.journal.write((json.dumps(record, sort_keys=True) + "\n").encode())
+        self.journal.flush()
+        os.fsync(self.journal.fileno())
+
+    def publish(self, suffix: str, text: str | None = None) -> dict[str, Any]:
+        name = f"{self.stem}.{suffix}"
+        if suffix == "log":
+            # persist_private's text conversion cannot represent arbitrary native bytes.
+            # Keep its final-projection seam while publishing the original binary spool.
+            record = persist_private(self.directory, name, "")
+            source = self.directory / name
+            with open(source, "wb") as destination, open(self.directory / "raw.log", "rb") as raw:
+                import shutil
+                shutil.copyfileobj(raw, destination)
+                destination.flush()
+                os.fsync(destination.fileno())
+            data = source.read_bytes()
+            record.update(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
+        else:
+            record = persist_private(self.directory, name, text or "")
+            source = self.directory / name
+        # Atomic replacement replaces a late symlink entry, never its external target.
+        target = self.root / name
+        os.replace(source, target)
+        return {**record, "path": str(target)}
+
+    def close(self) -> None:
+        for handle in (self.raw, self.journal):
+            if handle is not None and not handle.closed:
+                try:
+                    handle.close()
+                except OSError as exc:
+                    print(f"suite-sample: evidence handle close failure: {exc}", file=sys.stderr)
+
+
+def _prepare_suite_sample_spool(root: Path, stem: str) -> _SuiteSampleSpool:
+    if root.is_symlink():
+        raise ValueError("output root must not be a symlink")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("output root is not a directory")
+    for suffix in ("log", "process.json"):
+        member = root / f"{stem}.{suffix}"
+        if member.is_symlink() or member.exists() and not member.is_file():
+            raise ValueError(f"unsafe existing output member: {member.name}")
+    return _SuiteSampleSpool(root, stem)
+
+
+def _suite_sample_stem(spec_id: str, arm: str, suite: str, sample: int) -> str:
+    for field, value in (("spec_id", spec_id), ("arm", arm), ("suite", suite)):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
+            raise ValueError(f"invalid {field}: expected an ASCII filename identifier of 1..64 characters")
+    if not isinstance(sample, int) or isinstance(sample, bool) or sample < 1:
+        raise ValueError("invalid sample: expected a positive integer")
+    return f"{spec_id}-{arm}-{suite}-{sample}"
+
+
 def _run_suite_sample(
     command: list[str], *, spec_id: str, arm: str, suite: str, sample: int,
     metrics_dir: Path, xcode: bool, output_dir: Path | None,
 ) -> int:
+    import codecs
     import time
 
     import record_metrics
+
+    try:
+        stem = _suite_sample_stem(spec_id, arm, suite, sample)
+    except ValueError as exc:
+        print(f"suite-sample: {exc}", file=sys.stderr)
+        return 64
+    try:
+        spool = _prepare_suite_sample_spool(
+            output_dir if output_dir is not None else metrics_dir / "suite-sample", stem)
+    except (ValueError, OSError) as exc:
+        print(f"suite-sample: preflight storage failure: {exc}; child not launched", file=sys.stderr)
+        return 74
 
     def load() -> Any:
         try:
@@ -3958,37 +4233,120 @@ def _run_suite_sample(
             return "unavailable"
 
     load_start, started = load(), time.monotonic()
-    try:
-        proc = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-        )
-    except OSError as exc:
-        print(f"suite-sample: cannot launch command: {exc}", file=sys.stderr)
-        return 127
-    captured: list[str] = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
+    identity = {"command": command, "cwd": str(Path.cwd()), "spec_id": spec_id,
+                "arm": arm, "suite": suite, "sample": sample,
+                "run_id": os.environ.get("NIGHTSHIFT_RUN_ID") or None}
+    invocation_identity = hashlib.sha256(json.dumps({**identity, "started": started}, sort_keys=True).encode()).hexdigest()
+    errors: list[dict[str, str]] = []
+    captured: list[bytes] = []
+    digest = hashlib.sha256()
+    raw_complete, native_retained, denied = True, False, False
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def error(stage: str, exc: Exception) -> None:
+        errors.append({"stage": stage, "error": str(exc)})
+        print(f"suite-sample: {stage}: {exc}", file=sys.stderr)
+
+    def retain(chunk: bytes) -> None:
+        nonlocal raw_complete
+        captured.append(chunk)
+        digest.update(chunk)
+        if raw_complete:
+            try:
+                spool.write_raw(chunk)
+            except OSError as exc:
+                raw_complete = False
+                error("raw_storage", exc)
         if output_dir is None:
-            sys.stdout.write(line)
-        captured.append(line)
-    code = proc.wait()
-    wall, load_end = round(time.monotonic() - started, 3), load()
-    if output_dir is not None:
-        # R6: the full output reaches a durable private file before anything is printed.
-        text = "".join(captured)
-        stem = f"{spec_id}-{arm}-{suite}-{sample}"
-        record_file = persist_private(output_dir, f"{stem}.log", text)
-        print(bounded_summary({**record_file, "exit_code": code, "command_exit_marker": f"NS-EXIT={code}"}, text))
-    record = {
-        "suite": suite, "arm": arm, "sample": sample, "wall_s": wall,
-        "load_start": load_start, "load_end": load_end,
-        **parse_suite_output("".join(captured), xcode=xcode),
-    }
+            try:
+                sys.stdout.write(decoder.decode(chunk))
+            except (OSError, ValueError) as exc:
+                error("live_presentation", exc)
+
     try:
-        record_metrics.append_timing_record(metrics_dir, spec_id, "sample", record)
-    except (ValueError, OSError, TimeoutError) as exc:
-        print(f"suite-sample: could not record sample: {exc}", file=sys.stderr)
-    return code
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            denied = True
+            code = None
+            retain(f"cannot launch command: {exc}".encode())
+        else:
+            assert proc.stdout is not None
+            with proc.stdout:
+                while chunk := proc.stdout.read1(65536):
+                    retain(chunk)
+            code = proc.wait()
+        wall, load_end = round(time.monotonic() - started, 3), load()
+        text = b"".join(captured).decode("utf-8", errors="replace")
+        try:
+            spool.sync_raw()
+        except OSError as exc:
+            raw_complete = False
+            error("raw_storage", exc)
+        native = {"kind": "native", **identity, "invocation_identity": invocation_identity,
+                  "native_exit_code": code, "launch_denied": denied, "raw_complete": raw_complete,
+                  "raw_path": str(spool.directory / "raw.log"), "raw_sha256": digest.hexdigest(),
+                  "raw_bytes": sum(map(len, captured)), "wall_s": wall}
+        try:
+            spool.append(native)
+            native_retained = True
+        except OSError as exc:
+            error("native_storage", exc)
+        # Everything below is secondary to the fsynced exact-byte/native record.
+        process = suite_process_record(text, arm=arm, invocation_identity=invocation_identity,
+                                       exit_code=code, denied=denied)
+        process.update(raw_sha256=digest.hexdigest(), raw_encoding="binary", retained_native=native)
+        if not raw_complete or not native_retained:
+            process.update(state="unavailable", evidence_gap="native_storage_unavailable")
+        if output_dir is not None:
+            record_file = None
+            if raw_complete:
+                try:
+                    record_file = spool.publish("log")
+                except (ValueError, OSError) as exc:
+                    error("final_log_storage", exc)
+            try:
+                spool.publish("process.json", json.dumps(process, sort_keys=True))
+            except (ValueError, OSError) as exc:
+                error("final_process_storage", exc)
+            if record_file is not None:
+                try:
+                    print(bounded_summary({**record_file, "exit_code": code,
+                        "command_exit_marker": f"NS-EXIT={code}" if code is not None else "NS-EXIT=unavailable"}, text))
+                except (ValueError, OSError, TypeError) as exc:
+                    error("summary_presentation", exc)
+        elif not denied:
+            try:
+                sys.stdout.write(decoder.decode(b"", final=True))
+            except (ValueError, OSError) as exc:
+                error("live_presentation", exc)
+        try:
+            record = {"suite": suite, "arm": arm, "sample": sample, "wall_s": wall,
+                      "load_start": load_start, "load_end": load_end,
+                      **parse_suite_output(text, xcode=xcode), "process": process}
+            if denied or code == 124 or not raw_complete or not native_retained:
+                record.update(executed_tests="unavailable", skipped_tests="unavailable")
+            record_metrics.append_timing_record(metrics_dir, spec_id, "sample", record)
+        except (ValueError, OSError, TimeoutError) as exc:
+            error("metrics", exc)
+        wrapper = {"kind": "wrapper", "invocation_identity": invocation_identity,
+                   "native_exit_code": code, "wrapper_outcome": "failed" if errors else "completed",
+                   "errors": errors, "raw_complete": raw_complete, "native_retained": native_retained}
+        try:
+            spool.append(wrapper)
+        except OSError as exc:
+            error("wrapper_storage", exc)
+        if errors:
+            print(json.dumps({"suite_sample": "evidence_gap" if not raw_complete or not native_retained else "wrapper_failure",
+                              **native, "native_journal": str(spool.directory / "native.jsonl"), "errors": errors}, sort_keys=True), file=sys.stderr)
+        if denied:
+            print(f"suite-sample: {text}", file=sys.stderr)
+            return 127
+        # Metrics alone never relabels a healthy native execution; storage/presentation
+        # failures cannot masquerade as a successful wrapper when the child exited zero.
+        return code if code or not any(e["stage"] != "metrics" for e in errors) else 74
+    finally:
+        spool.close()
 
 
 def _distribution(values: list[float]) -> dict[str, Any] | str:
@@ -5102,6 +5460,723 @@ LAUNCH_FAILURE = "launch_failure"
 LAUNCH_CONTROL_ARMS = ("baseline", "alternate_device")
 
 
+def _expected_fix_targets(spec_text: str, targets: Any) -> list[dict[str, str]]:
+    """Exact existing pytest identifiers must occur in their already-declared AC."""
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("expected fix requires exact targets")
+    section = _spec_section(spec_text, "Acceptance Criteria") or ""
+    result = []
+    for row in targets:
+        if not isinstance(row, Mapping) or set(row) != {"test_id", "ac_id"}:
+            raise ValueError("malformed expected fix target")
+        test_id, ac_id = row["test_id"], row["ac_id"]
+        if not isinstance(test_id, str) or not isinstance(ac_id, str) or not re.fullmatch(r"AC[1-9][0-9]*", ac_id):
+            raise ValueError("malformed exact test/AC identity")
+        path, sep, test = test_id.partition("::")
+        if not sep or not path.endswith(".py") or not test or _normalise_repo_path(path) != path:
+            raise ValueError("unsupported or unsafe exact test identity")
+        line = next((line for line in section.splitlines() if re.match(
+            r"^- \[.\] " + re.escape(ac_id) + r"\b", line)), "")
+        if test_id not in re.findall(r"`([^`]+)`", line):
+            raise ValueError("test is unrelated to the declared AC")
+        result.append({"test_id": test_id, "ac_id": ac_id})
+    if len({row["test_id"] for row in result}) != len(result):
+        raise ValueError("duplicate expected test identity")
+    return result
+
+
+def _configured_test_at_ref(repository: Path, ref: str, config_path: str) -> str | None:
+    import yaml
+    config = {}
+    try:
+        for doc in yaml.safe_load_all(_git_bytes(repository, "show", f"{ref}:{config_path}")):
+            if isinstance(doc, dict):
+                config.update(doc)
+    except yaml.YAMLError as error:
+        raise ValueError("malformed configured complete suite") from error
+    command = (config.get("commands") or {}).get("test")
+    return command.strip() if isinstance(command, str) else None
+
+
+_EXPECTED_FIX_PYTEST_OBSERVER = r'''import json, os
+from pathlib import Path
+import pytest
+_binding = json.loads(os.environ["NIGHTSHIFT_PYTEST_BINDING"])
+_collections, _reports, _workers, _errors = {}, [], set(), []
+_config = None
+def pytest_configure(config):
+    global _config
+    _config = config
+def pytest_collection_finish(session):
+    if not hasattr(session.config, "workerinput") and not session.config.getoption("numprocesses", default=0):
+        _collections["serial"] = [item.nodeid for item in session.items]
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(node, ids):
+    worker = node.gateway.id
+    if worker in _collections:
+        _errors.append("duplicate worker collection")
+    _collections[worker] = list(ids)
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodeready(node):
+    _workers.add(node.gateway.id)
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    if error:
+        _errors.append("worker terminated: " + str(error))
+def pytest_collectreport(report):
+    if report.failed:
+        _errors.append("collection error")
+def pytest_runtest_logreport(report):
+    if _config is not None and not hasattr(_config, "workerinput"):
+        _reports.append({"nodeid": report.nodeid, "when": report.when,
+            "outcome": report.outcome, "wasxfail": hasattr(report, "wasxfail") or str(report.longrepr).startswith("[XPASS(strict)]"),
+            "rerun": hasattr(report, "rerun") or report.outcome == "rerun"})
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    if hasattr(session.config, "workerinput"):
+        return
+    data = {"schema_version": "1.0.0", "binding": _binding,
+        "collections": _collections, "workers": sorted(_workers),
+        "reports": _reports, "errors": _errors,
+        "session_exitstatus": int(exitstatus), "completed": True}
+    target = Path(os.environ["NIGHTSHIFT_PYTEST_OBSERVATION"])
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, sort_keys=True))
+    temporary.replace(target)
+'''
+
+
+def _expected_fix_observer_digest() -> str:
+    return hashlib.sha256(_EXPECTED_FIX_PYTEST_OBSERVER.encode()).hexdigest()
+
+
+def _expected_fix_observer_binding(plan: Mapping[str, Any], arm: str,
+                                   invocation: str) -> dict[str, Any]:
+    declaration = plan["sampling"]["expected_baseline_fix"]
+    return {**{key: declaration[key] for key in (
+        "spec_id", "run_id", "command", "issued_at", "source_identity",
+        "baseline_commit", "head_commit", "implementation_head_digest", "spec_sha256")},
+        "arm": arm, "invocation_identity": invocation,
+        "observer_sha256": _expected_fix_observer_digest()}
+
+
+def run_expected_baseline_fix_sample(plan: Mapping[str, Any], *, arm: str,
+                                    invocation_identity: str, output_dir: Path,
+                                    native_timeout_s: float, command: str | None = None,
+                                    sampling_anchor: SamplingAnchor | None = None) -> dict[str, Any]:
+    """Execute the unchanged configured command; retain trusted pytest observations.
+
+    The observer adds no selection/pytest option. Inherited plugins, options and
+    import paths survive; its random module lives last on an external path.
+    Native output/terminal metadata persist before any transport is interpreted.
+    """
+    if (arm not in ARM_LABELS or not isinstance(invocation_identity, str) or not invocation_identity.strip()
+        or type(native_timeout_s) not in {int, float} or not math.isfinite(native_timeout_s) or native_timeout_s <= 0):
+        raise ValueError("invalid bounded native invocation")
+    declaration = plan["sampling"]["expected_baseline_fix"]
+    if declaration.get("pytest_observer_sha256") != _expected_fix_observer_digest():
+        raise ValueError("untrusted pytest observer identity")
+    if declaration.get("schema_version") == "2.0.0":
+        _authenticate_sampling_plan(plan, sampling_anchor)
+        if command not in declaration["commands"]:
+            raise ValueError("unapproved operational command")
+        plan = _operational_member_plan(plan, command)
+        declaration = plan["sampling"]["expected_baseline_fix"]
+    command = declaration["command"]
+    if command not in plan["suite_commands"]:
+        raise ValueError("configured suite mismatch")
+    root = Path(plan["arm_working_directories"][arm]).resolve()
+    output_dir = output_dir.resolve()
+    if any(output_dir.is_relative_to(Path(path).resolve())
+           for path in plan["arm_working_directories"].values()):
+        raise ValueError("native artifacts require private external scratch")
+    output_dir.mkdir(parents=True, exist_ok=False)
+    observer_dir = output_dir / "observer"
+    observer_dir.mkdir()
+    module = "_nightshift_pytest_observer_" + uuid.uuid4().hex
+    observer_path = observer_dir / (module + ".py")
+    observer_path.write_text(_EXPECTED_FIX_PYTEST_OBSERVER)
+    observation_path = output_dir / "pytest-observation.json"
+    binding = _expected_fix_observer_binding(plan, arm, invocation_identity)
+    env = dict(os.environ)
+    env["PYTEST_PLUGINS"] = ",".join(filter(None, (env.get("PYTEST_PLUGINS", ""), module)))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (env.get("PYTHONPATH", ""), str(observer_dir))))
+    env["NIGHTSHIFT_PYTEST_BINDING"] = json.dumps(binding, sort_keys=True)
+    env["NIGHTSHIFT_PYTEST_OBSERVATION"] = str(observation_path)
+    started = datetime.now(timezone.utc).isoformat()
+    moment = time.monotonic()
+    timed_out, denied, code = False, False, None
+    process_group_id = None
+    log = output_dir / "native-output.log"
+    with log.open("w") as sink:
+        try:
+            process = subprocess.Popen(["/bin/sh", "-c", command], cwd=root,
+                env=env, stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
+            process_group_id = process.pid
+            try:
+                code = process.wait(timeout=native_timeout_s)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        except OSError as error:
+            denied = True
+            sink.write(str(error))
+    ended = datetime.now(timezone.utc).isoformat()
+    process_group_closed = True
+    if process_group_id is not None:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            process_group_closed = False
+            os.killpg(process_group_id, signal.SIGKILL)
+    native = {"exit_code": code, "timed_out": timed_out, "denied": denied,
+              "process_group_id": process_group_id, "process_group_closed": process_group_closed}
+    terminal = {"arm": arm, "invocation_identity": invocation_identity,
+        "command": command, "started_at": started, "ended_at": ended,
+        "duration_s": round(time.monotonic() - moment, 3),
+        "native_timeout_s": native_timeout_s, **native}
+    (output_dir / "native-terminal.json").write_text(json.dumps(terminal, indent=2) + "\n")
+    observation = {"command": command, "started_at": started, "ended_at": ended}
+    try:
+        if hashlib.sha256(observer_path.read_bytes()).hexdigest() != binding["observer_sha256"]:
+            raise ValueError("observer bytes changed")
+        payload = observation_path.read_bytes()
+        observation["pytest_observation"] = json.loads(payload)
+        observation["pytest_observation_sha256"] = hashlib.sha256(payload).hexdigest()
+    except (OSError, ValueError) as error:
+        observation["pytest_observation_error"] = str(error)
+    entry = {"path": str(log), "arm": arm, "invocation_identity": invocation_identity,
+        "native": native, "sampling_observation": observation}
+    (output_dir / "sample-entry.json").write_text(json.dumps(entry, indent=2) + "\n")
+    return entry
+
+
+def _expected_fix_pytest_inventory(obs: Mapping[str, Any], plan: Mapping[str, Any],
+                                   arm: str) -> dict[str, str] | None:
+    """Read complete phase/collection proof; never infer omitted pytest events."""
+    data = obs.get("pytest_observation")
+    if not isinstance(data, Mapping):
+        return None
+    if (set(data) != {"schema_version", "binding", "collections", "workers", "reports", "errors", "session_exitstatus", "completed"}
+        or data.get("schema_version") != "1.0.0"
+        or hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest() != obs.get("pytest_observation_sha256")):
+        return None
+    if data.get("binding") != _expected_fix_observer_binding(plan, arm, obs["invocation_identity"]):
+        return None
+    if (data.get("completed") is not True or data.get("errors") != []
+        or type(data.get("session_exitstatus")) is not int
+        or data["session_exitstatus"] != obs["native"].get("exit_code")):
+        return None
+    collections = data.get("collections")
+    workers = data.get("workers")
+    if not isinstance(collections, dict) or not collections or not isinstance(workers, list):
+        return None
+    if any(not isinstance(worker, str) or not worker for worker in workers) or len(set(workers)) != len(workers) or set(collections) != (set(workers) if workers else {"serial"}):
+        return None
+    groups = list(collections.values())
+    if any(not isinstance(ids, list) or not ids or len(set(ids)) != len(ids)
+           or any(not isinstance(name, str) or "::" not in name for name in ids)
+           or set(ids) != set(groups[0]) for ids in groups):
+        return None
+    reports = data.get("reports")
+    if not isinstance(reports, list):
+        return None
+    phases: dict[str, dict[str, str]] = {name: {} for name in groups[0]}
+    for row in reports:
+        if (not isinstance(row, dict) or set(row) != {"nodeid", "when", "outcome", "wasxfail", "rerun"} or row.get("nodeid") not in phases
+            or row.get("when") not in {"setup", "call", "teardown"}
+            or row.get("outcome") not in {"passed", "failed"}
+            or row.get("wasxfail") is not False or row.get("rerun") is not False):
+            return None
+        bucket = phases[row["nodeid"]]
+        if row["when"] in bucket:
+            return None
+        bucket[row["when"]] = row["outcome"]
+    if any(set(row) != {"setup", "call", "teardown"} or row["setup"] != "passed"
+           or row["teardown"] != "passed" for row in phases.values()):
+        return None
+    return {name: row["call"].upper() for name, row in phases.items()}
+
+
+@dataclass(frozen=True)
+class SamplingAnchor:
+    """Parent-injected trust context; never loaded from a plan or environment.
+
+    The parent retains approval bytes and expected digest outside author and
+    verifier surfaces. The returned dispatch context also seals the exact neutral
+    binding before any observation. This is distinct from terminal authoring proof.
+    """
+    approval_path: Path
+    expected_sha256: str
+    pinned_contract_ref: str
+    frozen_at: str
+    source_repository: Path
+    dispatch_sha256: str | None = None
+
+
+def _sampling_anchor_payload(anchor: SamplingAnchor | None) -> dict[str, Any] | None:
+    if anchor is None:
+        return None
+    if type(anchor) is not SamplingAnchor:
+        raise ValueError("untrusted sampling anchor type")
+    return {**asdict(anchor), "approval_path": str(anchor.approval_path),
+            "source_repository": str(anchor.source_repository)}
+
+
+def _sampling_anchor_from_payload(payload: Mapping[str, Any] | None) -> SamplingAnchor | None:
+    # Only the trusted validator launcher supplies this separate private payload.
+    if payload is None:
+        return None
+    return SamplingAnchor(**{**payload, "approval_path": Path(payload["approval_path"]),
+                             "source_repository": Path(payload["source_repository"])})
+
+
+def _sampling_authority(anchor: SamplingAnchor | None, *, excluded: Iterable[Path] = ()) -> dict[str, Any]:
+    if type(anchor) is not SamplingAnchor:
+        raise ValueError("missing trusted sampling anchor")
+    source = anchor.source_repository.resolve()
+    path = anchor.approval_path
+    if (not path.is_file() or path.is_symlink()
+        or any(path.resolve().is_relative_to(root.resolve()) for root in (source, *excluded))):
+        raise ValueError("candidate-controlled sampling anchor")
+    body = path.read_bytes()
+    if len(body) > 131072 or not SHA256_HEX_RE.fullmatch(anchor.expected_sha256) or hashlib.sha256(body).hexdigest() != anchor.expected_sha256:
+        raise ValueError("sampling approval digest mismatch")
+    document = json.loads(body)
+    keys = {"schema_version", "spec_id", "run_id", "issued_at", "source", "contract_ref", "spec_path", "commands", "members", "targets"}
+    if not isinstance(document, dict) or set(document) != keys or document["schema_version"] != "2.0.0":
+        raise ValueError("malformed operational sampling authority")
+    if document["contract_ref"] != anchor.pinned_contract_ref or not GIT_OBJECT_ID_RE.fullmatch(anchor.pinned_contract_ref):
+        raise ValueError("wrong pinned sampling contract")
+    issued, frozen = _parse_iso(document["issued_at"]), _parse_iso(anchor.frozen_at)
+    if issued > frozen or frozen > datetime.now(timezone.utc):
+        raise ValueError("invalid sampling issue/freeze chronology")
+    commands = document["commands"]
+    if not isinstance(commands, list) or not commands or any(not isinstance(cmd, str) or not cmd.strip() for cmd in commands) or len(set(commands)) != len(commands):
+        raise ValueError("invalid approved command tuple")
+    import shlex
+    for command in commands:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        if any(token in {";", "&&", "||", "|", "&", ">", ">>", "<", "(", ")"} for token in lexer):
+            raise ValueError("operational members must have separate unmasked native exits")
+    members = document["members"]
+    if not isinstance(members, list) or len(members) != len(commands):
+        raise ValueError("incomplete reviewed tuple")
+    for command, member in zip(commands, members):
+        if not isinstance(member, dict) or set(member) != {"command", "collection"} or member["command"] != command:
+            raise ValueError("changed reviewed command order")
+        nodes = member["collection"]
+        if not isinstance(nodes, list) or not nodes or len(set(nodes)) != len(nodes):
+            raise ValueError("missing complete reviewed collection")
+        for node in nodes:
+            _sampling_test_source(source, document["source"]["baseline_commit"], node, require_assertion=False)
+            _sampling_test_source(source, document["source"]["head_commit"], node, require_assertion=False)
+    spec_path = _normalise_repo_path(document["spec_path"])
+    contract = _git_bytes(source, "show", f"{anchor.pinned_contract_ref}:{spec_path}").decode()
+    import yaml
+    if (yaml.safe_load(_spec_frontmatter(contract)) or {}).get("id") != document["spec_id"]:
+        raise ValueError("wrong sampling contract spec")
+    targets = document["targets"]
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("no approved sampling targets")
+    seen = set()
+    for target in targets:
+        if not isinstance(target, dict) or set(target) != {"test_id", "command", "section", "contract_text", "artifact", "test_sha256", "rationale"}:
+            raise ValueError("malformed source-reviewed target")
+        node, command = target["test_id"], target["command"]
+        if (node in seen or command not in commands
+            or node not in members[commands.index(command)]["collection"]):
+            raise ValueError("unapproved target mapping")
+        seen.add(node)
+        section = target["section"]
+        if section not in {"Requirements", "Acceptance Criteria", "Scope Amendments"}:
+            raise ValueError("unsupported target relevance")
+        text = target["contract_text"]
+        if not isinstance(text, str) or not text.strip() or text not in (_spec_section(contract, section) or "").splitlines():
+            raise ValueError("changed target contract reference")
+        if section == "Scope Amendments" and not re.search(r"\|\s*human:[^|]+\|\s*$", text):
+            raise ValueError("unapproved scope amendment")
+        for revision in document["source"]["baseline_commit"], document["source"]["head_commit"]:
+            arm_spec = _git_bytes(source, "show", f"{revision}:{spec_path}").decode()
+            if _neutralise_checkboxes(text) not in _neutralise_checkboxes(_spec_section(arm_spec, section) or "").splitlines():
+                raise ValueError("source contract mapping changed")
+        artifact = _normalise_repo_path(target["artifact"])
+        for revision in document["source"]["baseline_commit"], document["source"]["head_commit"]:
+            _git_bytes(source, "show", f"{revision}:{artifact}")
+        scope = ((yaml.safe_load(_spec_frontmatter(contract)) or {}).get("scope") or {}).get("write") or []
+        if section != "Scope Amendments" and scope and not any(fnmatch.fnmatchcase(artifact, glob) for glob in scope):
+            raise ValueError("reviewed target artifact outside approved scope")
+        if artifact not in text or not isinstance(target["rationale"], str) or not 1 <= len(target["rationale"]) <= 1000:
+            raise ValueError("unsupported target relevance")
+        baseline_source, _baseline_node = _sampling_test_source(source, document["source"]["baseline_commit"], node)
+        head_source, head_node = _sampling_test_source(source, document["source"]["head_commit"], node)
+        if baseline_source != head_source or hashlib.sha256(head_source).hexdigest() != target["test_sha256"]:
+            raise ValueError("changed reviewed test assertions/source")
+        # Check the bounded source relationship as well as the trusted review.
+        # Python module imports or literal artifact references must actually occur.
+        import ast
+        tree = ast.parse(head_source)
+        module = artifact.removesuffix(".py").replace("/", ".")
+        imported_names = {alias.asname or alias.name for item in ast.walk(tree)
+            if isinstance(item, ast.ImportFrom) and item.module == module for alias in item.names}
+        imported_names.update(alias.asname or alias.name.split(".")[0] for item in ast.walk(tree)
+            if isinstance(item, ast.Import) for alias in item.names if alias.name == module)
+        used_names = {item.id for item in ast.walk(head_node) if isinstance(item, ast.Name)}
+        literals = {item.value for item in ast.walk(tree) if isinstance(item, ast.Constant) and isinstance(item.value, str)}
+        artifact_parts = set(PurePosixPath(artifact).parts)
+        if not (imported_names & used_names) and artifact not in literals and not artifact_parts <= literals:
+            raise ValueError("unsupported source-to-artifact relevance")
+    return document
+
+
+def _sampling_test_source(repository: Path, revision: str, node: str, *, require_assertion: bool = True) -> tuple[bytes, Any]:
+    import ast
+    if not isinstance(node, str):
+        raise ValueError("invalid reviewed node")
+    path, separator, name = node.partition("::")
+    if not separator or not path.endswith(".py") or _normalise_repo_path(path) != path:
+        raise ValueError("unsafe reviewed test node")
+    body = _git_bytes(repository, "show", f"{revision}:{path}")
+    tree = ast.parse(body)
+    current = tree
+    for component in name.split("::"):
+        component = component.split("[", 1)[0]
+        matches = [item for item in current.body if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == component]
+        if len(matches) != 1:
+            raise ValueError("reviewed node does not exist")
+        current = matches[0]
+    # Target mappings retain an assertion proof; clean collection nodes only need
+    # source existence, since pytest.raises is a valid independent passing test.
+    if require_assertion and not any(isinstance(item, ast.Assert) for item in ast.walk(current)):
+        raise ValueError("reviewed assertion proof missing")
+    return body, current
+
+
+def bind_operational_sampling(repository: Path, anchor: SamplingAnchor, *, spec_path: str | None,
+    spec_id: str, run_id: str, baseline_ref: str, head_ref: str, suite_commands: Iterable[str],
+    evidence: Mapping[str, Any], destination: Path) -> dict[str, Any]:
+    """Bind the externally authenticated reviewed tuple before native execution."""
+    document = _sampling_authority(anchor, excluded=(destination,))
+    baseline = _run_git(repository, "rev-parse", f"{baseline_ref}^{{commit}}").strip()
+    head = _run_git(repository, "rev-parse", f"{head_ref}^{{commit}}").strip()
+    if (anchor.source_repository.resolve() != repository.resolve() or document["spec_id"] != spec_id
+        or document["run_id"] != run_id or document["spec_path"] != spec_path
+        or document["commands"] != list(suite_commands)
+        or document["source"] != {"baseline_commit": baseline, "head_commit": head,
+            "spec_sha256": hashlib.sha256(_git_bytes(repository, "show", f"{head}:{spec_path}")).hexdigest()}):
+        raise ValueError("operational sampling identity/tuple mismatch")
+    return {"schema_version": "2.0.0", "spec_id": spec_id, "run_id": run_id,
+        "issued_at": anchor.frozen_at, "approval_sha256": anchor.expected_sha256,
+        "commands": list(document["commands"]), "members": copy.deepcopy(document["members"]),
+        "spec_path": spec_path, "spec_sha256": document["source"]["spec_sha256"],
+        "source_identity": {"baseline_revision_digest": candidate_revision_digest(baseline),
+                            "candidate_revision_digest": candidate_revision_digest(head)},
+        "baseline_commit": evidence["surface_commits"]["baseline"],
+        "head_commit": evidence["surface_commits"]["head"],
+        "implementation_head_digest": evidence["implementation_head_digest"],
+        "targets": [{"test_id": row["test_id"], "command": row["command"]} for row in document["targets"]],
+        "pytest_observer_sha256": _expected_fix_observer_digest()}
+
+
+def _authenticate_sampling_plan(plan: Mapping[str, Any], anchor: SamplingAnchor | None) -> dict[str, Any]:
+    declaration = plan["sampling"]["expected_baseline_fix"]
+    roots = [Path(plan["repository"]), *map(Path, plan["arm_working_directories"].values())]
+    document = _sampling_authority(anchor, excluded=roots)
+    if not anchor.dispatch_sha256 or hashlib.sha256(canonical_json(declaration)).hexdigest() != anchor.dispatch_sha256:
+        raise ValueError("changed or unfrozen operational dispatch")
+    expected = bind_operational_sampling(anchor.source_repository, anchor,
+        spec_path=document["spec_path"], spec_id=plan["spec_id"], run_id=plan["run_id"],
+        baseline_ref=document["source"]["baseline_commit"], head_ref=document["source"]["head_commit"],
+        suite_commands=plan["suite_commands"], evidence={"surface_commits": {
+            arm: plan[arm + "_commit"] for arm in ARM_LABELS},
+            "implementation_head_digest": plan["implementation_head_digest"]}, destination=Path(plan["repository"]))
+    if declaration != expected:
+        raise ValueError("operational sampling binding mismatch")
+    for arm in ARM_LABELS:
+        root = Path(plan["arm_working_directories"][arm])
+        if _run_git(root, "rev-parse", "HEAD").strip() != plan[arm + "_commit"]:
+            raise ValueError("changed assigned operational identity")
+        for member in document["members"]:
+            for node in member["collection"]:
+                path = node.split("::", 1)[0]
+                committed = _git_bytes(Path(plan["repository"]), "show", f"{plan[arm + '_commit']}:{path}")
+                file = root / path
+                if not file.is_file() or file.is_symlink() or file.read_bytes() != committed:
+                    raise ValueError("changed operational collection source")
+    return document
+
+
+def _operational_member_plan(plan: Mapping[str, Any], command: str) -> dict[str, Any]:
+    member = copy.deepcopy(plan)
+    declaration = member["sampling"]["expected_baseline_fix"]
+    declaration.pop("approval_sha256"); declaration.pop("commands"); declaration.pop("members")
+    declaration.update(schema_version="1.0.0", command=command, config_path="")
+    declaration["targets"] = [{"test_id": row["test_id"], "ac_id": "AC1"}
+        for row in declaration["targets"] if row["command"] == command]
+    return member
+
+
+def expected_baseline_fix_eligibility(suite: Mapping[str, Any], *, plan: Mapping[str, Any] | None = None,
+    footprint: Mapping[str, Any] | None = None, suites: Iterable[Mapping[str, Any]] | None = None,
+    sampling_anchor: SamplingAnchor | None = None) -> dict[str, Any]:
+    declaration = ((plan or {}).get("sampling") or {}).get("expected_baseline_fix")
+    if not isinstance(declaration, Mapping) or declaration.get("schema_version") != "2.0.0":
+        return _legacy_expected_baseline_fix_eligibility(suite, plan=plan, footprint=footprint)
+    def refused(reason: str) -> dict[str, Any]:
+        return {"eligible": False, "reason": reason,
+                "claim": "observed correction; determinism and future flakes unestablished"}
+    try:
+        document = _authenticate_sampling_plan(plan, sampling_anchor)
+        rows = list(suites or [])
+        if [row.get("command") for row in rows] != document["commands"] or suite not in rows:
+            return refused("incomplete_or_changed_operational_tuple")
+        invocations = set()
+        expected_failures = {row["test_id"] for row in document["targets"]}
+        actual_failures = set()
+        for row, member in zip(rows, document["members"]):
+            command = row["command"]
+            member_plan = _operational_member_plan(plan, command)
+            proof = _legacy_expected_baseline_fix_eligibility(row, plan=member_plan,
+                footprint=footprint, _operational=True)
+            if not proof["eligible"]:
+                return proof
+            for arm in ARM_LABELS:
+                for sample in row["samples"][arm]:
+                    observation = sample["sampling_observation"]
+                    if observation["native"].get("process_group_closed") is not True:
+                        return refused("native_process_group_not_closed")
+                    invocation = observation["invocation_identity"]
+                    if invocation in invocations:
+                        return refused("reused_or_unknown_invocation")
+                    invocations.add(invocation)
+                    inventory = _expected_fix_pytest_inventory(observation, member_plan, arm)
+                    if inventory is None or list(inventory) != member["collection"]:
+                        return refused("incomplete_reviewed_collection")
+                    if arm == "baseline":
+                        actual_failures.update(sample["failing"])
+                    # Independently preserve every reviewed collection source.
+                    for node in member["collection"]:
+                        path = node.split("::", 1)[0]
+                        bodies = [_git_bytes(Path(plan["repository"]), "show", f"{plan[a + '_commit']}:{path}") for a in ARM_LABELS]
+                        if bodies[0] != bodies[1]:
+                            return refused("assertions_or_test_source_changed")
+                        for label, body in zip(ARM_LABELS, bodies):
+                            file = Path(plan["arm_working_directories"][label]) / path
+                            if not file.is_file() or file.is_symlink() or file.read_bytes() != body:
+                                return refused("test_source_proof_unknown")
+        for arm in ARM_LABELS:
+            counts = [len(row["samples"][arm]) for row in rows]
+            if len(set(counts)) != 1:
+                return refused("incomplete_operational_draw")
+            ended = None
+            for draw in range(counts[0]):
+                for row in rows:
+                    observation = row["samples"][arm][draw]["sampling_observation"]
+                    if ended is not None and _parse_iso(observation["started_at"]) < ended:
+                        return refused("changed_operational_execution_order")
+                    ended = _parse_iso(observation["ended_at"])
+        if not actual_failures or not actual_failures <= expected_failures:
+            return refused("unexpected_baseline_or_head_failure")
+        return {"eligible": True, "reason": "approved_complete_operational_observed_correction",
+                "claim": "observed correction; determinism and future flakes unestablished"}
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, AttributeError, SyntaxError):
+        return refused("untrusted_or_invalid_operational_authority")
+
+
+def bind_expected_baseline_fix(
+    repository: Path, declaration: Mapping[str, Any], *, spec_path: str | None,
+    spec_id: str, run_id: str, baseline_ref: str, head_ref: str,
+    suite_commands: Iterable[str], evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Opt-in dispatch input, bound before execution; never an author result."""
+    if not isinstance(declaration, Mapping) or set(declaration) != {
+        "schema_version", "spec_id", "source", "command", "targets"
+    } or declaration.get("schema_version") != "1.0.0" or declaration.get("spec_id") != spec_id or not spec_path:
+        raise ValueError("malformed expected baseline fix declaration")
+    spec_path = _normalise_repo_path(spec_path)
+    baseline = _run_git(repository, "rev-parse", f"{baseline_ref}^{{commit}}").strip()
+    head = _run_git(repository, "rev-parse", f"{head_ref}^{{commit}}").strip()
+    spec_blob = _git_bytes(repository, "show", f"{head}:{spec_path}")
+    source = {"baseline_commit": baseline, "head_commit": head,
+              "spec_sha256": hashlib.sha256(spec_blob).hexdigest()}
+    if declaration["source"] != source:
+        raise ValueError("expected baseline fix source identity mismatch")
+    text = spec_blob.decode("utf-8")
+    import yaml
+    if (yaml.safe_load(_spec_frontmatter(text)) or {}).get("id") != spec_id:
+        raise ValueError("expected baseline fix spec identity mismatch")
+    targets = _expected_fix_targets(text, declaration["targets"])
+    if resolve_kit_root is None:
+        raise ValueError("configured complete suite unavailable")
+    config_path = (resolve_kit_root(repository) / "config.yaml").relative_to(repository).as_posix()
+    command = declaration["command"]
+    if not isinstance(command, str) or command not in tuple(suite_commands) or any(
+        _configured_test_at_ref(repository, ref, config_path) != command for ref in (baseline, head)
+    ):
+        raise ValueError("expected baseline fix requires the unchanged complete configured suite")
+    return {"schema_version": "1.0.0", "spec_id": spec_id, "run_id": run_id,
+            "issued_at": now_iso(), "command": command, "config_path": config_path,
+            "spec_path": spec_path, "spec_sha256": source["spec_sha256"],
+            "source_identity": {"baseline_revision_digest": candidate_revision_digest(baseline),
+                                "candidate_revision_digest": candidate_revision_digest(head)},
+            "baseline_commit": evidence["surface_commits"]["baseline"],
+            "head_commit": evidence["surface_commits"]["head"],
+            "implementation_head_digest": evidence["implementation_head_digest"],
+            "targets": targets, "pytest_observer_sha256": _expected_fix_observer_digest()}
+
+
+def validate_expected_baseline_fix(
+    suite: Mapping[str, Any], *, plan: Mapping[str, Any],
+    footprint: Mapping[str, Any], verdict: Mapping[str, Any],
+    sampling_anchor: SamplingAnchor | None = None,
+) -> dict[str, Any]:
+    """Trusted validator seam; preserve identity and independently reproduced proof checks."""
+    if any(verdict.get(k) != plan.get(k) for k in ("spec_id","baseline_commit","head_commit","implementation_head_digest")):
+        raise ValueError("expected baseline fix: verdict identity mismatch")
+    fix = expected_baseline_fix_eligibility(suite, plan=plan, footprint=footprint,
+        suites=verdict.get("suites"), sampling_anchor=sampling_anchor)
+    if suite.get("sampling_eligibility") != fix:
+        raise ValueError("expected baseline fix: eligibility disagrees with independently reproduced proof")
+    return fix
+
+
+def _legacy_expected_baseline_fix_eligibility(
+    suite: Mapping[str, Any], *, plan: Mapping[str, Any] | None = None,
+    footprint: Mapping[str, Any] | None = None,
+    _operational: bool = False,
+) -> dict[str, Any]:
+    """Independently reproduce proof, fail closed; one pair observes a correction."""
+    def result(reason: str, eligible: bool = False) -> dict[str, Any]:
+        return {"eligible": eligible, "reason": reason,
+                "claim": "observed correction; determinism and future flakes unestablished"}
+    declaration = ((plan or {}).get("sampling") or {}).get("expected_baseline_fix")
+    if declaration is None:
+        return result("no_preexecution_declaration")
+    try:
+        if set(declaration) != {"schema_version", "spec_id", "run_id", "issued_at", "command",
+            "config_path", "spec_path", "spec_sha256", "source_identity", "baseline_commit",
+            "head_commit", "implementation_head_digest", "targets", "pytest_observer_sha256"} or declaration["schema_version"] != "1.0.0":
+            return result("malformed_declaration")
+        if declaration["pytest_observer_sha256"] != _expected_fix_observer_digest():
+            return result("untrusted_pytest_observer")
+        if any(declaration[key] != plan.get(key) for key in (
+            "spec_id", "run_id", "baseline_commit", "head_commit", "implementation_head_digest")):
+            return result("declaration_identity_mismatch")
+        if suite.get("command") != declaration["command"] or declaration["command"] not in plan.get("suite_commands", []):
+            return result("configured_suite_mismatch")
+        if suite.get("flaky_suspected") or (plan.get("sampling") or {}).get("flaky_suspected") or suite.get("launch_failures") or "baseline_unavailable" in suite:
+            return result("observed_instability_or_launch_gap")
+        if not isinstance(footprint, Mapping):
+            return result("missing_footprint_proof")
+        source_identity = declaration["source_identity"]
+        if not isinstance(source_identity, Mapping) or set(source_identity) != {
+            "baseline_revision_digest", "candidate_revision_digest"
+        } or not all(SHA256_HEX_RE.fullmatch(str(value)) for value in source_identity.values()) or not SHA256_HEX_RE.fullmatch(str(declaration["spec_sha256"])):
+            return result("malformed_source_identity")
+        issued = _parse_iso(declaration["issued_at"])
+        surface = Path(plan["repository"])
+        targets = declaration["targets"]
+        expected = {row["test_id"] for row in targets}
+        samples = suite.get("samples") or {}
+        sets = {arm: [set(sample.get("failing", [])) for sample in samples.get(arm, [])]
+                for arm in ARM_LABELS}
+        if any(not rows for rows in sets.values()):
+            return result("missing_actual_sample")
+        if any(any(row != rows[0] for row in rows) for rows in sets.values()):
+            return result("observed_intra_arm_disagreement")
+        if (not _operational and not sets["baseline"][0]) or not sets["baseline"][0] <= expected or sets["head"][0]:
+            return result("unexpected_baseline_or_head_failure")
+        blobs = {}
+        inventories = {}
+        invocations = set()
+        for arm in ARM_LABELS:
+            root = Path(plan["arm_working_directories"][arm])
+            revision = plan[arm + "_commit"]
+            if _run_git(surface, "rev-parse", "verifier-" + arm).strip() != revision or _run_git(root, "rev-parse", "HEAD").strip() != revision:
+                return result("assigned_identity_mismatch")
+            fp = footprint[arm]
+            if not fp.get("tree_before") or fp["tree_before"] != fp.get("tree_after") or fp["tree_after"] != _run_git(root, "rev-parse", "HEAD^{tree}").strip():
+                return result("footprint_violation")
+            before = {line for line in fp["porcelain_before"].splitlines() if line.strip()}
+            after = {line for line in fp["porcelain_after"].splitlines() if line.strip()}
+            actual = {line for line in _run_git(root, "status", "--porcelain=v1", "--untracked-files=all").splitlines() if line.strip()}
+            if before != after or after != actual:
+                return result("footprint_violation")
+            if not _operational and _configured_test_at_ref(surface, revision, declaration["config_path"]) != declaration["command"]:
+                return result("configured_suite_mismatch")
+            spec = _git_bytes(surface, "show", f"{revision}:{declaration['spec_path']}").decode()
+            # Surface specs may have neutralised bookkeeping; exact AC bindings must remain.
+            if not _operational and _expected_fix_targets(spec, targets) != targets:
+                return result("ac_binding_mismatch")
+            blobs[arm] = {}
+            for target in targets:
+                path = target["test_id"].split("::", 1)[0]
+                blob = _git_bytes(surface, "show", f"{revision}:{path}")
+                file = root / path
+                if not file.is_file() or file.is_symlink() or not file.resolve().is_relative_to(root.resolve()) or file.read_bytes() != blob:
+                    return result("test_source_proof_unknown")
+                import ast
+                tree = ast.parse(blob)
+                # Whole-file byte preservation covers assertions, fixtures and decorators.
+                if not any(isinstance(node, ast.Assert) for node in ast.walk(tree)):
+                    return result("assertion_proof_unknown")
+                blobs[arm][path] = hashlib.sha256(blob).hexdigest()
+            for sample in samples[arm]:
+                obs = sample.get("sampling_observation")
+                if (not isinstance(obs, Mapping) or sample.get("executed") is False
+                    or "reused" in sample or "ledger_digest" in sample
+                    or sample.get("diagnostic_probe") or obs.get("diagnostic_probe")
+                    or obs.get("arm") != arm or obs.get("command") != declaration["command"]):
+                    return result("missing_actual_native_proof")
+                invocation = obs.get("invocation_identity")
+                if not isinstance(invocation, str) or not invocation.strip() or invocation in invocations:
+                    return result("reused_or_unknown_invocation")
+                invocations.add(invocation)
+                if _parse_iso(obs["started_at"]) <= issued or _parse_iso(obs["ended_at"]) < _parse_iso(obs["started_at"]):
+                    return result("post_result_declaration")
+                native = obs["native"]
+                observed = suite_process_record(obs["output"], arm=arm,
+                    invocation_identity=invocation, exit_code=native.get("exit_code"),
+                    timed_out=native.get("timed_out", False), denied=native.get("denied", False))
+                if observed["state"] != "completed" or any(sample.get(key) != observed["summary"].get(key) for key in ("failing", "failed", "passed", "skipped")):
+                    return result("native_membership_or_count_gap")
+                if "pytest_observation" in obs or "pytest_observation_error" in obs:
+                    inventory = _expected_fix_pytest_inventory(obs, plan, arm)
+                    if inventory is None:
+                        return result("collection_proof_unknown")
+                    rows = list(inventory.items())
+                else:
+                    outer = re.split(r"^=+ (?:FAILURES|ERRORS|short test summary info) =+", obs["output"], maxsplit=1, flags=re.M)[0]
+                    rows = re.findall(r"^(\S+::\S+)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b", outer, re.M)
+                    collection = re.findall(r"collected (\d+) items?", outer)
+                    if len(collection) != 1 or len(rows) != int(collection[0]) or len(dict(rows)) != len(rows):
+                        return result("collection_proof_unknown")
+                    inventory = dict(rows)
+                if len(rows) != sample["passed"] + sample["failed"] + sample["skipped"] or sum(status == "PASSED" for status in inventory.values()) != sample["passed"]:
+                    return result("native_membership_or_count_gap")
+                if not expected <= inventory.keys() or any(status not in {"PASSED", "FAILED"} for status in inventory.values()):
+                    return result("target_removed_skipped_xfailed_or_unknown")
+                if {name for name, status in rows if status == "FAILED"} != set(sample["failing"]):
+                    return result("native_membership_or_count_gap")
+                if arm in inventories and inventories[arm] != inventory:
+                    return result("observed_intra_arm_disagreement")
+                inventories[arm] = inventory
+        if blobs["baseline"] != blobs["head"]:
+            return result("assertions_or_test_source_changed")
+        if inventories["baseline"].keys() != inventories["head"].keys():
+            return result("collection_changed")
+        return result("predeclared_baseline_only_observed_correction", True)
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, AttributeError, SyntaxError):
+        return result("incomplete_or_invalid_proof")
+
+
 def required_samples_per_arm(
     *,
     flaky_suspected: bool = False,
@@ -5155,7 +6230,11 @@ def launch_failure_unsupported(failure: Any) -> bool:
     return not (isinstance(probe, Mapping) and str(probe.get("run", "")).strip())
 
 
-def suite_required_samples(suite: Mapping[str, Any], *, head_failure_unexcused: bool = False) -> int:
+def suite_required_samples(
+    suite: Mapping[str, Any], *, head_failure_unexcused: bool = False,
+    plan: Mapping[str, Any] | None = None, footprint: Mapping[str, Any] | None = None,
+    suites: Iterable[Mapping[str, Any]] | None = None, sampling_anchor: SamplingAnchor | None = None,
+) -> int:
     """Required samples per arm for one verdict suite entry; mirrors the pinned-validator.md validator."""
     samples = suite.get("samples") or {}
     sets = {
@@ -5167,7 +6246,9 @@ def suite_required_samples(suite: Mapping[str, Any], *, head_failure_unexcused: 
     return required_samples_per_arm(
         flaky_suspected=bool(suite.get("flaky_suspected")),
         head_failure_unexcused=head_failure_unexcused,
-        arms_disagree=any_["baseline"] != any_["head"],
+        arms_disagree=any_["baseline"] != any_["head"] and not (
+            not head_failure_unexcused and expected_baseline_fix_eligibility(
+                suite, plan=plan, footprint=footprint, suites=suites, sampling_anchor=sampling_anchor)["eligible"]),
         samples_disagree=any_["baseline"] != all_["baseline"] or any_["head"] != all_["head"],
         unsupported_launch_failure=any(
             launch_failure_unsupported(f) for f in suite.get("launch_failures") or []
@@ -5392,6 +6473,29 @@ def build_arm_isolation(
     return {"mode": mode, "devices": assigned, "runtime": runtime, "interpreter": interpreter}
 
 
+_ABSENT_WINDOW_TEXT = {"", "none", "null"}
+
+
+def _window_value(value: Any) -> str | None:
+    """A window end as text, or None when it is absent (None, empty, or a stringified null)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return None if text.lower() in _ABSENT_WINDOW_TEXT else text
+
+
+def _recorded_arm_isolation(observed: Mapping[str, Any]) -> dict[str, Any]:
+    """R6: the arm_isolation as recorded in the verdict, without absent-equivalent window fields."""
+    out = {key: value for key, value in observed.items() if key not in ARM_LABELS}
+    for arm in ARM_LABELS:
+        entry = dict(observed[arm])
+        for key in ("started_at", "ended_at"):
+            if key in entry and _window_value(entry[key]) is None:
+                del entry[key]
+        out[arm] = entry
+    return out
+
+
 def check_observed_arm_isolation(plan_isolation: Mapping[str, Any], observed: Any) -> None:
     """R3: reject a verdict whose arms overlapped or used a runtime unlike the plan, before any judgment."""
     if not isinstance(observed, Mapping) or not all(isinstance(observed.get(a), Mapping) for a in ARM_LABELS):
@@ -5426,11 +6530,13 @@ def check_observed_arm_isolation(plan_isolation: Mapping[str, Any], observed: An
         return
     spans = {}
     for arm in ARM_LABELS:
-        start, end = observed[arm].get("started_at"), observed[arm].get("ended_at")
+        start, end = (_window_value(observed[arm].get(k)) for k in ("started_at", "ended_at"))
         if start is None and end is None:
             continue
+        if start is None or end is None:
+            raise ArmIsolationError("arm_isolation_invalid", f"{arm} window needs both started_at and ended_at")
         try:
-            spans[arm] = (datetime.fromisoformat(str(start)), datetime.fromisoformat(str(end)))
+            spans[arm] = (datetime.fromisoformat(start), datetime.fromisoformat(end))
         except ValueError as exc:
             raise ArmIsolationError("arm_isolation_invalid", f"{arm} window is not ISO-8601: {exc}") from exc
     if len(spans) == 2 and spans["baseline"][0] < spans["head"][1] and spans["head"][0] < spans["baseline"][1]:
@@ -5577,27 +6683,144 @@ def ensure_trusted_kit(source: Path, argv: list[str], *, main_branch: str = "mai
 _PYTEST_FAIL_LINE_RE = re.compile(r"^(?:FAILED|ERROR) (\S+?)(?: - .*)?$", re.M)
 
 
+_UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests? in [\d.]+s\s*$", re.M)
+_UNITTEST_RESULT_RE = re.compile(r"^(OK|FAILED) ?(?:\((.*)\))?\s*$", re.M)
+_UNITTEST_HEADER_RE = re.compile(r"^(?:FAIL|ERROR): (\S+) \(([\w.]+)\)(?: .*)?$", re.M)
+_XCODE_CASE_RE = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped)\b", re.M)
+_XCODE_SUMMARY_RE = re.compile(
+    r"^\s*Executed (\d+) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures?\b", re.M)
+_SAMPLE_FORMATS_MESSAGE = (
+    "the raw output matches no accepted sample format. Accepted: pytest -q (a summary line such as '3 passed in 0.1s'), "
+    "junit XML, python -m unittest ('Ran N tests in Xs' then OK or FAILED (...) with FAIL:/ERROR: headers), "
+    "xcodebuild test ('Test Case ... passed|failed' lines and 'Executed N tests, with F failures'). "
+    'Any other runner: supply a structured sample {"executed": true, "failing": [names], "failed": n, '
+    '"passed": n, "skipped": n} with failed == len(failing)'
+)
+
+
+def _parse_pytest_text(text: str, summary: list[str]) -> dict[str, Any]:
+    # Pytest captures child runner output inside failure diagnostics. Only the
+    # final outer short-summary section owns top-level failure membership.
+    headers = list(re.finditer(r"^=+ short test summary info =+\s*$", text, re.M))
+    outer = text[headers[-1].end():] if headers else text
+    outer_summaries = [ln for ln in outer.splitlines() if _PYTEST_COUNT_RE.search(ln) and " in " in ln]
+    counts: dict[str, int] = {}
+    for number, word in _PYTEST_COUNT_RE.findall(summary[-1]):
+        counts["error" if word.startswith("error") else word] = int(number)
+    if headers and not outer_summaries:
+        raise VerdictAssemblyError("missing final top-level summary after outer short-summary header")
+    if len(outer_summaries) > 1:
+        raise VerdictAssemblyError("conflicting or unbounded top-level summaries; supply one native invocation")
+    expected = counts.get("failed", 0) + counts.get("error", 0)
+    names = sorted(set(_PYTEST_FAIL_LINE_RE.findall(outer)))
+    failing = names if expected else []
+    if expected and not failing:
+        raise VerdictAssemblyError(f"summary reports {expected} failing but no FAILED/ERROR names were found (use -rfE)")
+    if expected != len(failing):
+        raise VerdictAssemblyError(f"summary reports {expected} failing but only {len(failing)} top-level names were found")
+    if headers and not expected and names:
+        raise VerdictAssemblyError("top-level FAILED/ERROR names conflict with passing summary")
+    nested = text[:headers[-1].start()] if headers else text if not expected else ""
+    return {
+        "executed": True, "failing": failing, "failed": expected,
+        "passed": counts.get("passed", 0), "skipped": counts.get("skipped", 0),
+        "nested_diagnostics": sorted(set(_PYTEST_FAIL_LINE_RE.findall(nested))),
+    }
+
+
+def _parse_unittest_text(text: str) -> dict[str, Any]:
+    ran = int(_UNITTEST_RAN_RE.findall(text)[-1])
+    result = _UNITTEST_RESULT_RE.findall(text)
+    if not result:
+        raise VerdictAssemblyError("unittest output has a 'Ran N tests' line but no OK / FAILED (...) result line")
+    if len(result) != 1 or len(_UNITTEST_RAN_RE.findall(text)) != 1:
+        raise VerdictAssemblyError("multiple unittest summaries leave ambiguous outer membership")
+    verdict, detail = result[-1]
+    fields = {key.strip(): int(num) for key, num in re.findall(r"([a-z ]+)=(\d+)", detail)}
+    headers = _UNITTEST_HEADER_RE.findall(text)
+    failing = sorted({
+        dotted if dotted.rsplit(".", 1)[-1] == test else f"{dotted}.{test}" for test, dotted in headers
+    })
+    skipped = fields.get("skipped", 0)
+    expected = fields.get("failures", 0) + fields.get("errors", 0) + fields.get("unexpected successes", 0)
+    if verdict == "OK" and headers:
+        raise VerdictAssemblyError("unittest output says OK but also holds FAIL:/ERROR: headers; refusing to pick one")
+    if verdict == "FAILED" and not expected:
+        raise VerdictAssemblyError("unittest FAILED line reports no failures= / errors= count")
+    if expected and not headers:
+        raise VerdictAssemblyError(f"summary reports {expected} failing but no FAIL:/ERROR: names were found")
+    if len(failing) + skipped > ran:
+        raise VerdictAssemblyError("unittest summary outcomes exceed executed tests")
+    if expected > len(headers):
+        raise VerdictAssemblyError(f"summary reports {expected} failing but only {len(headers)} FAIL:/ERROR: names were found")
+    if expected != len(headers):
+        raise VerdictAssemblyError(f"summary reports {expected} failing but {len(headers)} FAIL:/ERROR: headers and {len(failing)} names were found; ambiguous outer membership")
+    header_lines = [match.group(0).strip() for match in _UNITTEST_HEADER_RE.finditer(text)]
+    repeated = {name for name in headers if headers.count(name) > 1}
+    if (len(set(header_lines)) != len(header_lines)
+            or any(not re.search(r"\) \([^()\n]+\)\s*$", line)
+                   for name, line in zip(headers, header_lines) if name in repeated)):
+        raise VerdictAssemblyError("duplicate unittest headers without distinct subtests leave ambiguous outer membership")
+    return {
+        "executed": True, "failing": failing, "failed": len(failing),
+        "passed": max(ran - len(failing) - skipped, 0), "skipped": skipped,
+    }
+
+
+def _parse_xcodebuild_text(text: str) -> dict[str, Any]:
+    summaries = _XCODE_SUMMARY_RE.findall(text)
+    total, skipped_text, failures = summaries[-1] if summaries else ("0", "", "0")
+    if not summaries:
+        raise VerdictAssemblyError("xcodebuild output has Test Case lines but no 'Executed N tests, with F failures' summary")
+    outcomes: dict[str, str] = {}
+    for klass, method, state in _XCODE_CASE_RE.findall(text):
+        key = f"{klass}.{method}"
+        outcomes[key] = "failed" if "failed" in (state, outcomes.get(key)) else state
+    failing = sorted(k for k, v in outcomes.items() if v == "failed")
+    if int(failures) and not failing:
+        raise VerdictAssemblyError(
+            f"summary reports {failures} failures but no failed Test Case names were found (names, never totals alone)")
+    if "** TEST FAILED **" in text and not failing:
+        raise VerdictAssemblyError("xcodebuild reports TEST FAILED but no failed Test Case names were found")
+    if (len(failing) > int(failures)
+            or (len(failing) < int(failures)
+                and (len(outcomes) != int(total) or len(_XCODE_CASE_RE.findall(text)) != int(total)))):
+        raise VerdictAssemblyError(f"summary reports {failures} failing but {len(failing)} Test Case names were found; ambiguous outer membership")
+    skipped = int(skipped_text or 0)
+    if len(failing) + skipped > int(total):
+        raise VerdictAssemblyError("xcodebuild summary outcomes exceed executed tests")
+    return {
+        "executed": True, "failing": failing, "failed": len(failing),
+        "passed": max(int(total) - len(failing) - skipped, 0), "skipped": skipped,
+    }
+
+
 def parse_raw_sample(text: str) -> dict[str, Any]:
-    """Parse one raw per-sample output (pytest -q text or junit xml) into a verdict sample."""
+    """Parse one raw per-sample output (junit xml, pytest -q, unittest or xcodebuild text) into a verdict sample.
+
+    Detection is by evidence, not order: a text that matches more than one recogniser is refused.
+    """
     stripped = text.lstrip()
     if stripped.startswith("<"):
         return _parse_junit(stripped)
-    counts: dict[str, int] = {}
     summary = [ln for ln in text.splitlines() if _PYTEST_COUNT_RE.search(ln) and " in " in ln]
-    if not summary:
-        raise VerdictAssemblyError("no pytest summary line (e.g. '3 passed in 0.1s') in the raw output")
-    for number, word in _PYTEST_COUNT_RE.findall(summary[-1]):
-        counts["error" if word.startswith("error") else word] = int(number)
-    failing = sorted(set(_PYTEST_FAIL_LINE_RE.findall(text)))
-    expected = counts.get("failed", 0) + counts.get("error", 0)
-    if expected and not failing:
-        raise VerdictAssemblyError(f"summary reports {expected} failing but no FAILED/ERROR names were found (use -rfE)")
-    if expected > len(failing):
-        raise VerdictAssemblyError(f"summary reports {expected} failing but only {len(failing)} names were found")
-    return {
-        "executed": True, "failing": failing, "failed": len(failing),
-        "passed": counts.get("passed", 0), "skipped": counts.get("skipped", 0),
-    }
+    matched = [
+        name for name, hit in (
+            ("pytest", bool(summary)),
+            ("unittest", bool(_UNITTEST_RAN_RE.search(text))),
+            ("xcodebuild", bool(_XCODE_SUMMARY_RE.search(text) or _XCODE_CASE_RE.search(text))),
+        ) if hit
+    ]
+    if len(matched) > 1:
+        raise VerdictAssemblyError(
+            f"the raw output matches more than one sample format ({', '.join(matched)}); supply one runner's output per sample")
+    if not matched:
+        raise VerdictAssemblyError(_SAMPLE_FORMATS_MESSAGE)
+    if matched[0] == "unittest":
+        return _parse_unittest_text(text)
+    if matched[0] == "xcodebuild":
+        return _parse_xcodebuild_text(text)
+    return _parse_pytest_text(text, summary)
 
 
 def _parse_junit(text: str) -> dict[str, Any]:
@@ -5605,19 +6828,54 @@ def _parse_junit(text: str) -> dict[str, Any]:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise VerdictAssemblyError(f"junit xml does not parse: {exc}") from exc
-    cases = list(root.iter("testcase"))
+    if root.tag not in {"testsuite", "testsuites"}:
+        raise VerdictAssemblyError("junit root must be testsuite or testsuites")
+    cases: list[Any] = []
+    containers: list[tuple[Any, list[Any]]] = []
+
+    def collect(node: Any) -> list[Any]:
+        own = [child for child in node if child.tag == "testcase"]
+        for child in node:
+            if child.tag in {"testsuite", "testsuites"}:
+                own.extend(collect(child))
+        containers.append((node, own))
+        return own
+
+    cases = collect(root)
     if not cases:
         raise VerdictAssemblyError("junit xml holds no testcase elements")
+    for node, members in containers:
+        observed = {"tests": len(members),
+            "failures": sum(case.find("failure") is not None for case in members),
+            "errors": sum(case.find("error") is not None for case in members),
+            "skipped": sum(case.find("skipped") is not None for case in members)}
+        for key, count in observed.items():
+            if key in node.attrib:
+                try:
+                    declared = int(node.get(key))
+                except (TypeError, ValueError) as exc:
+                    raise VerdictAssemblyError(f"junit {key} summary is not an integer") from exc
+                if declared != count:
+                    raise VerdictAssemblyError(f"junit {key} summary conflicts with testcase membership")
     failing, skipped = set(), 0
+    failure_count = 0
     for case in cases:
         name = f"{case.get('classname')}::{case.get('name')}" if case.get("classname") else str(case.get("name"))
+        if sum(case.find(tag) is not None for tag in ("failure", "error", "skipped")) > 1:
+            raise VerdictAssemblyError("junit testcase has conflicting outcomes")
         if case.find("failure") is not None or case.find("error") is not None:
             failing.add(name)
+            failure_count += 1
         elif case.find("skipped") is not None:
             skipped += 1
+    if failure_count != len(failing):
+        raise VerdictAssemblyError("junit duplicate failing testcase identities leave ambiguous membership")
+    diagnostics = sorted({name for node in root.iter("system-out")
+                          for name in _PYTEST_FAIL_LINE_RE.findall("".join(node.itertext()))})
     return {
-        "executed": True, "failing": sorted(failing), "failed": len(failing),
-        "passed": len(cases) - len(failing) - skipped, "skipped": skipped,
+        "executed": True, "failing": sorted(failing), "failed": failure_count,
+        "passed": len(cases) - failure_count - skipped, "skipped": skipped,
+        "nested_diagnostics": diagnostics,
     }
 
 
@@ -5788,7 +7046,8 @@ def locate_skill(explicit: Path | None = None) -> Path:
 
 def run_embedded_validator(
     verdict_path: Path, spec_file: Path, surface: Path, main_root: Path | None, main_branch: str,
-    skill_path: Path,
+    skill_path: Path, *, dispatch_plan: Mapping[str, Any] | None = None,
+    sampling_anchor: SamplingAnchor | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the embedded validator with this (trusted) kit's scope_guard pinned in sys.modules.
 
@@ -5803,13 +7062,20 @@ def run_embedded_validator(
         argv = [str(verdict_path), str(spec_file), str(surface)]
         if main_root is not None:
             argv += [str(main_root), main_branch]
+        plan_path = Path(scratch) / "dispatch-plan.json"
+        plan_path.write_text(json.dumps(dispatch_plan), encoding="utf-8")
+        anchor_path = Path(scratch) / "trusted-sampling-context.json"
+        anchor_path.write_text(json.dumps(_sampling_anchor_payload(sampling_anchor)))
         bootstrap = (
-            "import runpy, sys; sys.path.insert(0, sys.argv[1]); import verification_report as v; "
-            "v.harden_scope_guard(); sys.argv = sys.argv[2:]; "
-            "runpy.run_path(sys.argv[0], run_name='__main__')"
+            "import runpy, sys, json; sys.path.insert(0, sys.argv[1]); import verification_report as v; "
+            "v.harden_scope_guard(); plan=json.load(open(sys.argv[2])); "
+            "anchor=v._sampling_anchor_from_payload(json.load(open(sys.argv[3]))); sys.argv = sys.argv[4:]; "
+            "runpy.run_path(sys.argv[0], run_name='__main__', init_globals={"
+            "'_nightshift_sampling_checker':lambda *a,**kw:v.validate_expected_baseline_fix(*a,sampling_anchor=anchor,**kw),"
+            "'_nightshift_dispatch_plan':plan})"
         )
         return subprocess.run(
-            [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent), str(script), *argv],
+            [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent), str(plan_path), str(anchor_path), str(script), *argv],
             capture_output=True, text=True, check=False,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
@@ -5820,6 +7086,28 @@ def _read_sample(entry: Any, base: Path) -> dict[str, Any]:
         raise VerdictAssemblyError("a sample must be an object")
     if "path" in entry or "output" in entry:
         text = entry["output"] if "output" in entry else (base / str(entry["path"])).read_text(encoding="utf-8", errors="replace")
+        if "native" in entry:
+            native = entry["native"]
+            if not isinstance(native, Mapping):
+                raise VerdictAssemblyError("native observation must be an object")
+            record = suite_process_record(text, arm=str(entry.get("arm", "unknown")),
+                invocation_identity=str(entry.get("invocation_identity", "unknown")),
+                exit_code=native.get("exit_code"), timed_out=native.get("timed_out", False),
+                denied=native.get("denied", False), diagnostic=entry.get("diagnostic"), evidence_root=base)
+            if record["state"] != "completed":
+                raise VerdictAssemblyError("native sample unavailable: " + str(record["evidence_gap"]))
+            sample = {**record["summary"], "process": record}
+            if "sampling_observation" in entry:
+                observation = entry["sampling_observation"]
+                if not isinstance(observation, Mapping):
+                    raise VerdictAssemblyError("sampling observation must be an object")
+                sample["sampling_observation"] = {**observation, "output": text,
+                    "native": dict(native), "arm": entry.get("arm"),
+                    "invocation_identity": entry.get("invocation_identity")}
+                for marker in ("executed", "reused", "ledger_digest", "diagnostic_probe"):
+                    if marker in entry:
+                        sample[marker] = entry[marker]
+            return sample
         return parse_raw_sample(text)
     return dict(entry)  # structured sample (reused ledger baseline, first-scaffold attempt)
 
@@ -5827,6 +7115,7 @@ def _read_sample(entry: Any, base: Path) -> dict[str, Any]:
 def assemble_verdict(
     plan: Mapping[str, Any], supplied: Mapping[str, Any], *, input_dir: Path, spec_file: Path,
     main_root: Path | None = None, main_branch: str = "main",
+    sampling_anchor: SamplingAnchor | None = None,
 ) -> dict[str, Any]:
     """Build the verdict dict from the plan and the verifier's small input; no validation here."""
     check_observed_arm_isolation(plan.get("arm_isolation") or build_arm_isolation(), supplied.get("arm_isolation"))
@@ -5897,6 +7186,10 @@ def assemble_verdict(
             }
             for a in ARM_LABELS
         }
+    if (plan.get("sampling") or {}).get("expected_baseline_fix") is not None:
+        for suite in suites:
+            suite["sampling_eligibility"] = expected_baseline_fix_eligibility(
+                suite, plan=plan, footprint=footprint, suites=suites, sampling_anchor=sampling_anchor)
     return {
         "spec_id": plan["spec_id"],
         "branch": supplied.get("branch") or f"nightshift/{plan['spec_id']}-{plan['run_id']}",
@@ -5911,26 +7204,27 @@ def assemble_verdict(
         "scope": derive_verdict_scope(surface, spec_file, main_root=main_root, main_branch=main_branch),
         "premise_dispute": dispute,
         "contamination": supplied.get("contamination"),
-        "arm_isolation": supplied["arm_isolation"],
+        "arm_isolation": _recorded_arm_isolation(supplied["arm_isolation"]),
     }
 
 
 def assemble_and_validate(
     plan: Mapping[str, Any], supplied: Mapping[str, Any], *, input_dir: Path, spec_file: Path,
     main_root: Path | None = None, main_branch: str = "main", skill_path: Path | None = None,
+    sampling_anchor: SamplingAnchor | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """R1/R2: assemble, run the embedded validator, and return (verdict or None, validator report).
 
     ``None`` means refused; the report then names the exact defect.
     """
     verdict = assemble_verdict(
-        plan, supplied, input_dir=input_dir, spec_file=spec_file, main_root=main_root, main_branch=main_branch,
+        plan, supplied, input_dir=input_dir, spec_file=spec_file, main_root=main_root, main_branch=main_branch, sampling_anchor=sampling_anchor,
     )
     with tempfile.TemporaryDirectory(prefix="ns-verdict-") as scratch:
         draft = Path(scratch) / "verdict.json"
         draft.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
         result = run_embedded_validator(
-            draft, spec_file, Path(plan["repository"]), main_root, main_branch, locate_skill(skill_path),
+            draft, spec_file, Path(plan["repository"]), main_root, main_branch, locate_skill(skill_path), dispatch_plan=plan, sampling_anchor=sampling_anchor,
         )
     report = (result.stdout + result.stderr).strip()
     return (verdict if result.returncode == 0 else None), report
@@ -6023,7 +7317,7 @@ def validate_verdict_main(args: argparse.Namespace) -> int:
         spec_file = args.spec_file or Path(plan["arm_working_directories"]["head"]) / args.spec_path
         result = run_embedded_validator(
             args.verdict, spec_file, Path(plan["repository"]), args.main_root, args.main_branch,
-            locate_skill(args.skill),
+            locate_skill(args.skill), dispatch_plan=plan,
         )
     except (VerdictAssemblyError, KeyError, ValueError, OSError, TypeError) as refusal:
         print(f"validate-verdict refused: {refusal}", file=sys.stderr)
@@ -6501,6 +7795,132 @@ def native_record(exit_code: Any, *, timed_out: bool = False, output: str = "") 
     return {"state": "captured", "exit_code": exit_code, "suite_marker_seen": marker}
 
 
+def top_level_summary_counts(output: str) -> dict[str, Any] | None:
+    """Count evidence independent of named membership, never a completed sample."""
+    if output.lstrip().startswith("<"):
+        try:
+            root = ET.fromstring(output)
+            if root.tag not in {"testsuite", "testsuites"}:
+                return None
+            return {"runner": "junit", "declared": {k: root.get(k) for k in
+                ("tests", "failures", "errors", "skipped") if k in root.attrib}}
+        except ET.ParseError:
+            return None
+    runner_hits = sum((
+        any(_PYTEST_COUNT_RE.search(line) and " in " in line for line in output.splitlines()),
+        bool(_UNITTEST_RAN_RE.search(output)),
+        bool(_XCODE_SUMMARY_RE.search(output) or _XCODE_CASE_RE.search(output)),
+    ))
+    if runner_hits > 1:
+        return None  # conflicting formats do not establish which count is outer
+    headers = list(re.finditer(r"^=+ short test summary info =+\s*$", output, re.M))
+    outer = output[headers[-1].end():] if headers else output
+    summaries = [ln for ln in outer.splitlines() if _PYTEST_COUNT_RE.search(ln) and " in " in ln]
+    if len(summaries) == 1:
+        return {"runner": "pytest", "counts": {"error" if w.startswith("error") else w: int(n)
+            for n, w in _PYTEST_COUNT_RE.findall(summaries[0])}}
+    results = _UNITTEST_RESULT_RE.findall(output)
+    if len(results) == 1 and len(_UNITTEST_RAN_RE.findall(output)) == 1:
+        verdict, detail = results[-1]
+        return {"runner": "unittest", "result": verdict,
+                "counts": {k.strip(): int(n) for k, n in re.findall(r"([a-z ]+)=(\d+)", detail)}}
+    xcode = _XCODE_SUMMARY_RE.findall(output)
+    if xcode:
+        total, skipped, failed = xcode[-1]
+        return {"runner": "xcodebuild", "counts": {"tests": int(total), "skipped": int(skipped or 0), "failed": int(failed)}}
+    return None
+
+
+def suite_process_record(
+    output: str, *, arm: str, invocation_identity: str, exit_code: Any,
+    timed_out: bool = False, denied: bool = False, diagnostic: Any = None,
+    evidence_root: Path | None = None,
+) -> dict[str, Any]:
+    """Native observation and diagnostic hypothesis never confer acceptance."""
+    native = native_record(exit_code, timed_out=bool(timed_out), output=output)
+    record: dict[str, Any] = {
+        "arm": arm, "invocation_identity": invocation_identity,
+        "raw_sha256": hashlib.sha256(output.encode()).hexdigest(),
+        "native_exit_code": exit_code, "native": native, "state": "unavailable",
+        "summary": None, "top_level_summary": top_level_summary_counts(output), "evidence_gap": None,
+        "diagnostic_inventory": {
+            "pytest_names": sorted(set(_PYTEST_FAIL_LINE_RE.findall(output))),
+            "unittest_headers": [list(row) for row in _UNITTEST_HEADER_RE.findall(output)],
+            "xcode_cases": [list(row) for row in _XCODE_CASE_RE.findall(output)],
+            "membership": "unassigned; only parsed outer summary establishes failing membership",
+        },
+        "diagnostic": {"classification": "inconclusive", "evidence": [], "causal_confidence": "not_established"},
+    }
+    if denied or native["state"] != "captured" or exit_code == 124:
+        record["evidence_gap"] = "launch_denied" if denied else native.get("reason", "native_exit_124_unavailable")
+        return record
+    try:
+        summary = parse_raw_sample(output)
+    except VerdictAssemblyError as exc:
+        record["evidence_gap"] = str(exc)
+        return record
+    if exit_code == 0 and summary["failed"] or exit_code != 0 and not summary["failed"]:
+        record["evidence_gap"] = "native exit conflicts with top-level summary"
+        return record
+    record.update(state="completed", summary=summary)
+    if isinstance(diagnostic, Mapping) and diagnostic.get("classification") in {"implementation", "fixture", "environment"}:
+        evidence = diagnostic.get("evidence")
+        valid = isinstance(evidence, list) and bool(evidence) and evidence_root is not None
+        for item in evidence if isinstance(evidence, list) else []:
+            if not isinstance(item, Mapping):
+                valid = False
+                break
+            rel = Path(str(item.get("path", "")))
+            if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+                valid = False
+                break
+            target = (evidence_root / rel).resolve() if evidence_root else rel
+            if (not evidence_root or not target.is_relative_to(evidence_root.resolve()) or not target.is_file()
+                    or hashlib.sha256(target.read_bytes()).hexdigest() != item.get("sha256")):
+                valid = False
+                break
+        if valid:
+            record["diagnostic"] = {"classification": diagnostic["classification"], "evidence": evidence,
+                                    "causal_confidence": "supported_hypothesis"}
+    return record
+
+
+def persist_setup_recovery(
+    directory: Path, *, identity: Mapping[str, Any], prerequisite: Mapping[str, Any],
+    next_action: str, responsible_actor: str,
+) -> dict[str, Any]:
+    """Stable blocker evidence for the existing controller's fingerprint guard.
+
+    Invocation timestamps and repeated raw logs belong in separate process records:
+    putting them here would spuriously reopen an unchanged prerequisite fingerprint.
+    This function schedules nothing; prepare/record/finalize retain sole retry authority.
+    """
+    if not identity or not prerequisite or not next_action.strip() or not responsible_actor.strip():
+        raise ValueError("setup recovery requires identity, prerequisite, next action and responsible actor")
+    payload = {"schema_version": 1, "identity": dict(identity), "prerequisite": dict(prerequisite),
+               "next_action": next_action, "responsible_actor": responsible_actor,
+               "automatic_relaunch": False, "retry_route": "unblock_spec.prepare"}
+    target = directory / "setup-recovery.json"
+    if target.exists():
+        previous = json.loads(target.read_text())
+        if (not isinstance(previous, dict) or set(previous) != set(payload)
+                or previous.get("schema_version") != 1 or previous.get("automatic_relaunch") is not False
+                or previous.get("retry_route") != "unblock_spec.prepare"
+                or not all(isinstance(previous.get(key), dict) and previous[key]
+                           for key in ("identity", "prerequisite"))
+                or not all(isinstance(previous.get(key), str) and previous[key].strip()
+                           for key in ("next_action", "responsible_actor"))):
+            actor = previous.get("responsible_actor") if isinstance(previous, dict) else None
+            actor = actor if isinstance(actor, str) and actor.strip() else responsible_actor
+            raise ValueError(f"existing setup recovery evidence is invalid; {actor}: repair recorded identity/prerequisite before retry")
+        if previous.get("identity") == payload["identity"] and previous.get("prerequisite") == payload["prerequisite"]:
+            # Action/actor wording is not a changed prerequisite. Retain the
+            # first responsible action so editorial churn cannot reopen retries.
+            payload = previous
+    evidence = persist_private(directory, "setup-recovery.json", json.dumps(payload, sort_keys=True))
+    return {**payload, **evidence}
+
+
 def run_native_observed(
     argv: list[str], *, out_dir: Path, inventory_fn: Any, native_timeout_s: float, inventory_timeout_s: float = 5.0,
     popen: Any = subprocess.Popen, transport: str = "ok", cleanup: Mapping[str, Any] | None = None,
@@ -6606,6 +8026,14 @@ def compose_handoff_brief(skill: Path, spec_text: str, plan: Mapping[str, Any], 
     suites = list(plan.get("suite_commands") or [])
     tag = "VERIFIER-BRIEF" if suites else "VERIFIER-BRIEF-NOSUITE"
     block = _skill_block(skill, f"<!-- NIGHTSHIFT-{tag}-BEGIN -->", f"<!-- NIGHTSHIFT-{tag}-END -->")
+    # BUG-NS-KIT-166: a stale/manual template must not silently dispatch without
+    # the same ordered intake contract as the canonical generated route.
+    intake_begin = "<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-BEGIN -->"
+    intake_end = "<!-- NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE-END -->"
+    if (intake_begin not in block or intake_end not in block
+            or block.index(intake_end) <= block.index(intake_begin) + len(intake_begin)
+            or not block[block.index(intake_begin) + len(intake_begin):block.index(intake_end)].strip()):
+        raise HandoffRefused("required_deliverable_intake_missing", tag)
     front = yaml.safe_load(spec_text.split("---")[1]) or {}
     scope = plan.get("scope_summary") or ("scope.write = " + ", ".join((front.get("scope") or {}).get("write") or []))
     sampling = plan.get("sampling") or {}
@@ -6634,12 +8062,20 @@ def compose_handoff_brief(skill: Path, spec_text: str, plan: Mapping[str, Any], 
         f"head_commit={plan['head_commit']}, branch=\"{plan['head_ref']}\", "
         f"implementation_head_digest={plan['implementation_head_digest']}, identity_schema_version=\"1.0.0\".\n"
         f"scope.checked must equal exactly the output of `git -C {plan['repository']} diff --name-only "
-        "--diff-filter=ACDMR verifier-baseline verifier-head` (rename-aware). scope.amended holds paths only.\n"
+        "--diff-filter=ACDMR verifier-baseline verifier-head --` (rename-aware). scope.amended holds paths only.\n"
         "git_footprint: record `git -C <arm> rev-parse HEAD^{tree}` and `git -C <arm> status --porcelain` "
         "before and after your work, per arm.\n"
         "A test file that exists only at head is NOT a suite entry: cite its head result in the AC evidence strings.\n"
         f"Canonical verdict JSON template (copy shape exactly):\n```json\n{verdict_block}\n```\n\n"
     )
+    declaration = sampling.get("expected_baseline_fix")
+    if isinstance(declaration, Mapping) and declaration.get("schema_version") == "2.0.0":
+        header += (
+            "Operational sampling: execute every approved command separately, in the declared order, on both arms. "
+            "One complete observed pair qualifies only through the trusted parent sampling context and tuple-wide checker; "
+            "the public plan does not authenticate approval. Retain raw exits and complete collection for the clean members too.\n"
+            + "Neutral expected targets: " + json.dumps(declaration["targets"], sort_keys=True) + "\n"
+        )
     out = header + block
     if HANDOFF_PLACEHOLDER_RE.search(out):
         raise HandoffRefused("brief_placeholder_unfilled", HANDOFF_PLACEHOLDER_RE.search(out).group(0))
@@ -6900,6 +8336,8 @@ def main(argv: list[str] | None = None) -> int:
     # SPEC-NS-KIT-008: default-on; --project-spec is an accepted no-op, --no-project-spec opts out.
     dispatch.add_argument("--project-spec", dest="project_spec", action="store_true", default=True)
     dispatch.add_argument("--no-project-spec", dest="project_spec", action="store_false")
+    # BUG-NS-KIT-140 R5: project both arms' spec from main (or an ancestor), not from each arm.
+    dispatch.add_argument("--contract-ref", default=None)
     # SPEC-390-002: the coordinator's own SHA-256 of the retained preflight result a
     # `preflight-proof:` declaration names. Never taken from the spec or the report.
     prepare.add_argument("--preflight-proof-sha256", default=None)
@@ -7120,6 +8558,7 @@ def main(argv: list[str] | None = None) -> int:
                 spec_id=args.spec_id, run_id=args.run_id, spec_path=args.spec_path,
                 preflight_proof_sha256=proof_digest,
                 project_spec=args.project_spec,
+                contract_ref=args.contract_ref, main_branch=args.main_branch,
                 ledger_path=args.ledger,
                 arm_isolation={
                     "devices": dict(item.split("=", 1) for item in args.arm_device) or None,
@@ -7131,7 +8570,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.ledger is not None and args.ledger_identity_file is not None else None
                 ),
             )
-        except ArmIsolationError as refusal:
+        except (ArmIsolationError, ContractRefRefusal) as refusal:
             print(json.dumps({
                 "status": "evidence_gap", "controller_reason": refusal.reason,
                 "detail": refusal.detail,

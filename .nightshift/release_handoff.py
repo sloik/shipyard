@@ -397,16 +397,21 @@ def build_delivery_receipt(
     """
     hashes = _manifest_sha256(manifest, canonical)
     changed = artifact.get("changed_managed_paths", [])
+    suite_receipt = {
+        "probe": release_result.get("canonical_suite_probe"),
+        "runs": release_result.get("canonical_suite_runs"),
+        "result": release_result.get("canonical_suite_result"),
+    }
+    if suite_receipt["result"] == "reused":
+        # SPEC-NS-KIT-126 R3: a reuse names its source record and subset outcome.
+        suite_receipt["reused_from"] = release_result.get("canonical_suite_reused_from")
+        suite_receipt["subset_result"] = release_result.get("canonical_suite_subset_result")
     receipt = {
         "schema_version": DELIVERY_RECEIPT_SCHEMA_VERSION,
         "producer": "release_coordinator",
         "kit_version": manifest.get("kit_version"),
         "manifest_fingerprint": fingerprint(manifest),
-        "canonical_suite": {
-            "probe": release_result.get("canonical_suite_probe"),
-            "runs": release_result.get("canonical_suite_runs"),
-            "result": release_result.get("canonical_suite_result"),
-        },
+        "canonical_suite": suite_receipt,
         "delivery": {
             "managed_payload_mode": release_result.get("managed_payload_mode"),
             "file_level_patch": release_result.get("file_level_patch_attempted"),
@@ -519,6 +524,44 @@ def validate_artifact(
     return errors
 
 
+def _suite_receipt_accepted(suite: Mapping) -> bool:
+    """One passing run, or a reuse (SPEC-NS-KIT-126) naming its record and commit
+    whose release-mechanical test subset passed."""
+    suite = dict(suite)
+    if suite == {"probe": "passed", "runs": 1, "result": "passed"}:
+        return True
+    source = suite.get("reused_from")
+    return (
+        suite.get("probe") == "passed"
+        and suite.get("runs") == 0
+        and suite.get("result") == "reused"
+        and suite.get("subset_result") == "passed"
+        and isinstance(source, Mapping)
+        and bool(source.get("record"))
+        and bool(source.get("commit"))
+        and set(suite) == {"probe", "runs", "result", "reused_from", "subset_result"}
+    )
+
+
+def _skill_allowlist(manifest: Mapping[str, Any]) -> set[str]:
+    """Skill surfaces the release delivers, derived from the judged manifest."""
+    allowed = {SKILL_MANAGED_PATH}
+    for entry in manifest.get("files", []):
+        path = str(entry.get("path", "")) if isinstance(entry, Mapping) else ""
+        if path.startswith("guides/"):
+            allowed.add(f"Skills/nightshift/{path}")
+    return allowed
+
+
+def _skill_commit_paths_accepted(paths: Any, manifest: Mapping[str, Any]) -> bool:
+    """BUG-NS-KIT-132 R1: SKILL.md plus only manifest-derived skill/guide paths."""
+    if not isinstance(paths, list) or not paths:
+        return False
+    if not all(isinstance(path, str) for path in paths) or len(set(paths)) != len(paths):
+        return False
+    return SKILL_MANAGED_PATH in paths and set(paths) <= _skill_allowlist(manifest)
+
+
 def validate_positive_delivery(
     artifact: Mapping[str, Any],
     *,
@@ -552,13 +595,10 @@ def validate_positive_delivery(
         errors.append("delivery receipt fingerprint does not match manifest")
 
     suite = receipt.get("canonical_suite")
-    if not isinstance(suite, Mapping) or dict(suite) != {
-        "probe": "passed",
-        "runs": 1,
-        "result": "passed",
-    }:
+    if not isinstance(suite, Mapping) or not _suite_receipt_accepted(suite):
         errors.append(
-            "delivery receipt requires exactly one passing canonical suite run"
+            "delivery receipt requires exactly one passing canonical suite run "
+            "or a verified reuse of a recorded green run"
         )
 
     delivery = receipt.get("delivery")
@@ -616,7 +656,7 @@ def validate_positive_delivery(
                 )
                 or not isinstance(commit, Mapping)
                 or not re.fullmatch(r"[0-9a-f]{40}", str(commit.get("sha", "")))
-                or commit.get("paths") != [SKILL_MANAGED_PATH]
+                or not _skill_commit_paths_accepted(commit.get("paths"), manifest)
                 or commit.get("verified") is not True
                 or commit.get("unrelated_staging_preserved") is not True
                 or commit.get("mode") != "100644"
@@ -900,6 +940,110 @@ def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list
         path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
         repinned.append(str(candidate["spec_id"]))
     return repinned
+
+
+def _preceding_release_version(manifest: Mapping[str, Any]) -> tuple[int, int, int] | None:
+    current = _semver(manifest.get("kit_version"))
+    if current is None:
+        return None
+    lower = [
+        v
+        for r in manifest.get("retained_manifests", [])
+        if isinstance(r, Mapping)
+        and (v := _semver(r.get("kit_version"))) is not None
+        and v < current
+    ]
+    return max(lower) if lower else None
+
+
+def _folded_repin_candidate(
+    canonical: Path, data: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """BUG-NS-KIT-132 R3 a-f: the re-pinned candidate, or None when refused."""
+    if not _is_stranded(data, manifest):
+        return None
+    disposition = data.get("disposition")
+    if disposition_errors(disposition) or disposition.get("decision") != "fold":
+        return None
+    if _pending_handoff_blocked_by_spec_status(canonical, data):
+        return None
+    target = _semver(data.get("target_version"))
+    current = _semver(manifest.get("kit_version"))
+    if (
+        target is None
+        or current is None
+        or target >= current
+        or target != _preceding_release_version(manifest)
+    ):
+        return None
+    changed = data.get("changed_managed_paths")
+    if not isinstance(changed, list) or not set(changed) <= managed_paths(manifest):
+        return None
+    candidate = dict(data)
+    candidate["repinned_from"] = {
+        "target_version": data.get("target_version"),
+        "manifest_fingerprint": data.get("manifest_fingerprint"),
+    }
+    candidate["target_version"] = manifest.get("kit_version")
+    candidate["manifest_fingerprint"] = fingerprint(manifest)
+    if validate_artifact(
+        candidate, spec_id=str(candidate.get("spec_id", "")), manifest=manifest
+    ):
+        return None
+    return candidate
+
+
+def repin_folded_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list[str]:
+    """BUG-NS-KIT-132 R3: re-pin the preceding release's ``fold`` records.
+
+    Same call contract as ``repin_pending_handoffs``. It never completes
+    anything; ``complete_pending_handoffs`` still gates on positive delivery.
+    """
+    repinned: list[str] = []
+    directory = canonical / HANDOFF_DIR
+    if not directory.is_dir():
+        return repinned
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text())
+        candidate = _folded_repin_candidate(canonical, data, manifest)
+        if candidate is None:
+            continue
+        path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
+        repinned.append(str(candidate["spec_id"]))
+    return repinned
+
+
+def pending_handoffs_not_completed(
+    canonical: Path, manifest: Mapping[str, Any], release_result: Mapping[str, Any]
+) -> list[dict[str, str]]:
+    """BUG-NS-KIT-132 R2: completable-looking pending records refused, with error."""
+    refused: list[dict[str, str]] = []
+    directory = canonical / HANDOFF_DIR
+    if not directory.is_dir():
+        return refused
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text())
+        if data.get("status") != "pending" or not (
+            _matches_current_manifest_fingerprint(data, manifest)
+        ):
+            continue
+        if _pending_handoff_blocked_by_spec_status(canonical, data):
+            continue
+        spec_id = str(data.get("spec_id", ""))
+        errors = validate_artifact(data, spec_id=spec_id, manifest=manifest)
+        if not errors:
+            candidate = dict(data)
+            candidate["status"] = "completed"
+            candidate["release_report"] = DELIVERY_RECEIPT_REPORT
+            candidate["delivery_receipt"] = build_delivery_receipt(
+                candidate, manifest, release_result, canonical=canonical
+            )
+            errors = validate_positive_delivery(
+                candidate, spec_id=spec_id, manifest=manifest, canonical=canonical
+            )
+        if errors:
+            refused.append({"spec_id": spec_id, "error": errors[0]})
+    return refused
 
 
 def pending_handoffs_blocked_by_spec_status(

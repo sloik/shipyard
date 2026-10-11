@@ -43,6 +43,8 @@ speculative explanation of why it worked.
    mark_spec_blocked(Path('specs/<spec-file>'), '<specific reason: which check(s) failed and why>')
    "
    ```
+   The bare call above is not the complete recipe: it records `unknown` class and scope, and `unblock_spec.py prepare` can act on it only because it also writes a `reports/failures/<ts>-blocked-<stem>.json` evidence record. Pass the classification and an existing retained file when you have them:
+   `mark_spec_blocked(Path('specs/<spec-file>'), '<reason>', blocker_class='technical_infeasibility', blocker_scope='in_scope', blocker_evidence='reports/<ID>/artifacts/<retained-file>', unblock_condition='<what must change>')`
 
    For `private-local`, call `transition_private_state(..., "blocked",
    run_id=<started-run-id>, owner="coordinator", assigned_spec=<spec-id>,
@@ -89,6 +91,21 @@ speculative explanation of why it worked.
    Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
    Nightshift-Experimental-Sample-For: <currently-live designating spec (e.g. canonical SPEC-223, which supersedes the original SPEC-ARGO-038-001 designation — read that spec's own file for the live target before writing this trailer) | omit unless Resolution-Kind is self-verified-experimental>
    ```
+
+   Produce this block with the command below; never type it by hand:
+
+   ```bash
+   python3 .nightshift/record_metrics.py --commit-terminal --spec-id <spec-id> --outcome blocked \
+     --body-file <one-line-reason.txt> --path <spec-file> --path <reports/<spec-id>/artifacts dir> \
+     --verdict <reports/<spec-id>/verifier-verdict.json> \
+     --evidence-report <pass|fail|unknown> --evidence-tests <pass|fail|unknown> --evidence-code <pass|fail|unknown> \
+     --blocker-class <implementation|test_infrastructure|fixture_drift|baseline_regression|external_input|evidence_gap|scope_violation|unknown> \
+     --blocker-scope <in_scope|out_of_scope|mixed|unknown> --unblock-attempts <0|1> \
+     --parent-tool-calls <N|unavailable> --resolution-kind <verifier-dispatched|self-verified|self-verified-experimental> \
+     --attribution "<Co-Authored-By: ...>"
+   ```
+
+   `--commit-terminal` (BUG-NS-KIT-139) builds the eleven required trailers (verifier and ACs values come from the verdict file), exits 2 without committing when an input is missing, and commits only the `--path` list. For a raw `git commit`, paste `record_metrics.py --render-terminal-trailers` output (same flags) instead of typing the block. Optional flags: `--scope-check`, `--unblock-rung`, `--experimental-sample-for`. `--parent-tool-calls unavailable` is the explicit "not tallied" value; never omit the trailer.
 
    **BUG-017 — same single-paragraph rule as the `done` commit above applies here.**
    If attribution trailers (`Co-Authored-By:`, `Claude-Session:`, or equivalent)
@@ -199,6 +216,17 @@ classification and source-aware child arguments. The processor runs the
 source-aware conflict check, preserves distinct conflict/NFR/tool outcomes, and
 seals `created` only after its child exists with the exact backlink. No
 suggestion records the required zero observation. A report alone is not evidence.
+
+Lineage discovery skips unrelated plain notes and horizontal-rule prose, including
+normal generated `admission-plan.md`. Spec filenames and leading spec metadata
+identify strict candidates, including qualifying underscore files. Shipped prose
+templates skip by their structure. Malformed candidates, duplicate parsed IDs and
+unresolved referenced source/child IDs refuse before persistence. Only exact
+parsed IDs resolve targets. Current source hashes and child proof are checked on
+replay. A failed processor remains a diagnostic failure, never a successful zero
+observation; it leaves no new child or partial lineage store. Application Done
+and auxiliary processor success are separate facts. Retain the original failure
+and use disposable fixture evidence when investigating it.
 
 For each suggestion entry, run the conflict check:
 

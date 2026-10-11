@@ -96,11 +96,15 @@ Condensed parent checklist, in order (the run guides give the detail of each com
 4. **Independent verification is mandatory.** `prepare-dispatch` with `--head <candidate-sha>`, dispatch one
    `nightshift-verifier`, then `assemble-verdict` and `validate-verdict` until the validator prints `GATE: accept`.
    The parent never re-derives the evidence itself and never substitutes a self-check.
+   If the spec was amended on main after the candidate was built, re-run `prepare-dispatch` with `--contract-ref main` and the same `--head`; do not commit main's spec onto the candidate to refresh the contract.
 5. Run the terminal-integrity check with the retained receipts (control plane first, as above).
 6. **The merge-gate check is mandatory.** `verification_report.py merge-gate --plan --evidence --verdict --branch
    --candidate <candidate-sha>` must print `MERGE-GATE: bound <sha>`; merge exactly that sha, never the branch name.
    `stale_head` means re-verify the new tip (`stale_head` redispatch reason).
+   Before merging, run `python3 release.py finding-floor` on the candidate; exit 1 refuses the merge.
 7. Record `done` (transition artifact and trailers, `followup_processor.py` once, cleanup) and emit the lane event.
+   Build the trailers with `record_metrics.py --commit-terminal` (BUG-NS-KIT-139).
+   Before the done commit run `spec_artifacts.py untracked-refs <spec-file>`: commit its `outside` paths first, stage its `stage_with_done` paths in the done commit.
 
 ## Lane telemetry (both lanes)
 

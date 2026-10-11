@@ -7,6 +7,218 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.25.1 (unreleased)
+
+### Resolve spec identity and retain board evidence (SPEC-NS-KIT-185)
+
+The canonical skill resolves the registered project and watched spec root before
+assigning IDs, distinguishes branch durability, board visibility and main
+integration, and retains indexed author decisions and durable evidence.
+Board discovery uses the supported health, refresh, list and detail workflow.
+Migration: none. Distribution uses the normal whole-kit skill delivery route.
+
+### Complete the first tracked terminal projection (BUG-NS-KIT-167)
+
+The coordinator seals complete first-projection metadata before terminal
+persistence. A pending projection retains the accepted terminal decision and
+recovers through the supported queue without replaying application gates,
+remerging the candidate or replacing the original admission.
+Migration: none. Existing ownership and commit-backed recovery guards remain.
+
+### Isolate follow-up lineage from non-spec Markdown (BUG-NS-KIT-178)
+
+Follow-up lineage processing distinguishes actual specs from unrelated Markdown
+in the spec directory, preserving real-spec validation, evidence references,
+source hashing and safe writes. Unrelated notes no longer abort processing.
+Migration: none. No application build or test command is added.
+
+
+### Retain suite-sample native evidence before presentation (BUG-NS-KIT-181)
+
+Unsafe sample output identifiers and unusable sinks refuse before child launch.
+A preopened private binary spool and native journal retain exact output and the
+actual child exit independently of final-name, summary or timing failures.
+Storage and wrapper errors stay separate; children are drained without replay.
+Migration: use a short suite label and put command argv after `--`. Pending
+whole-kit release; no installed-copy rollout or historical native exit inferred.
+
+### Check final canonical packaging before configured suites (SPEC-NS-KIT-162)
+
+A supported read-only final-manifest command binds final managed bytes, modes,
+manifest and pending handoff membership, naming stale paths before an expensive
+configured launch. Canonical preflight applies the check before project commands;
+installed-profile behavior is unchanged. Regeneration remains explicit and serial.
+Migration: none. Pending whole-kit release; no rollout claimed.
+
+### Explain optional external asset evidence setup (SPEC-NS-KIT-169)
+
+README and spec authoring links lead to the existing run guide's practical
+per-spec declaration workflow, sharing boundaries and consumer approval
+commit/digest cross-check. Existing importer safeguards and runtime behavior
+are unchanged. Migration: none. Pending whole-kit release; no rollout claimed.
+
+### Disambiguate generated verifier inventory revisions (BUG-NS-KIT-180)
+
+Suite and no-suite verifier briefs append the Git revision/path separator to
+the complete rename-aware changed-path command. Materialized arm directories
+can now share their verifier ref names without an ambiguity error. Scope
+classification and denied-path checks retain the complete inventory.
+Migration: none. Pending whole-kit handoff; no installed-copy rollout claimed.
+
+### Bind approved operational sampling before execution (BUG-NS-KIT-179)
+
+A separate parent-held sampling anchor authenticates the exact ordered operational
+command tuple and source-reviewed requirement/amendment bindings before execution.
+Native observer, assembly and independent validation require complete collection
+on both arms, unchanged assertions and every clean non-target member. One eligible
+pair establishes an observed correction only; invalid/late authority preserves
+strict escalation. Legacy configured schema 1.0 and original receipts remain intact.
+Migration: none. Pending whole-kit handoff; no rollout or production-savings claim.
+
+### Order required-deliverable verifier intake (BUG-NS-KIT-166)
+
+Both suite and no-suite verifier briefs first derive relevant source behavior,
+test assertions and native results, then inspect the real required authored
+deliverable against the exact assigned arms. Generated composition refuses a
+stale template lacking that order. Actual early exposure remains rejected;
+identity, read-only footprints and exposed-failure reproduction stay strict.
+This is an instruction contract, without staged access or placeholder substitution.
+
+### Align completion warning severity (BUG-NS-KIT-165)
+
+Board completion and the shared status gate distinguish genuine validator warnings
+from blocking errors. Pending re-pin warnings remain visible in API responses and
+both UI controls; invalid handoffs still refuse before persistence. Commit-backed
+checkpoint/recovery, CLI owner guards and installed-project exemptions are unchanged.
+Migration: none. Whole-kit release and installed adoption remain pending.
+
+### Preserve verifier release contracts (BUG-NS-KIT-163)
+
+Neutral verifier specs retain the exact release-handoff declaration and its proof
+hash in both assigned-contract arms. Required, exempt and absent semantics remain
+unchanged; withheld author-artifact mentions and tampering refuse preparation.
+Corpus identity, existence, tracking and deny-scope checks remain strict.
+Migration: none. Whole-kit release and installed adoption remain pending.
+
+### Bound resampling for predeclared baseline fixes (BUG-NS-KIT-170)
+
+Trusted pre-execution AC/test/source declarations can establish one complete
+configured suite pair for a narrowly observed baseline-only correction. The
+checker independently verifies unchanged target assertions/files, actual native
+collection, names/counts/exits, identities and both footprints; missing proof,
+head/unexpected failures and instability retain strict escalation. Original raw
+diagnostics and all five observation classifications remain intact. One pair
+makes no statistical determinism or future-flake claim. Migration: none.
+Trusted native pytest observations also support unchanged quiet/xdist commands,
+retaining agreed collection and every test phase in private external artifacts.
+Inherited options/plugins/import paths survive; incomplete or conflicting transport
+keeps strict sampling. Whole-kit release and installed adoption remain pending.
+
+### Native verification failures stay separate from diagnostics (SPEC-NS-KIT-160)
+
+Suite invocations retain their arm, identity, native exit and raw hash with a
+completed/unavailable process record. Pytest's final outer summary owns failure
+membership; captured child failures remain separate diagnostics. Missing or
+conflicting summaries, denied launches and timeouts remain evidence gaps.
+Hash-bound diagnostic hypotheses do not excuse failures or replace controls.
+Stable setup evidence records one next action and actor for the existing unblock
+fingerprint/attempt guard; unchanged prerequisites do not grant another retry.
+The conditional one/three-per-arm policy remains unchanged. Migration: none.
+Whole-kit release and installed adoption remain pending.
+
+### Pending terminal metadata recovery stays bound to the original receipt (SPEC-NS-KIT-150)
+
+An explicit parent-pinned descendant recovery base now permits unrelated committed main work while retaining the original receipt, hashes and default original-base refusal. Recovery and crash replay bind the exact separate parent and preserve unrelated committed/index bytes.
+
+The serialized integration queue accepts explicit `metadata_recovery` input for
+v12 pending done projections. It derives matching official rationale/transition
+artifacts and inline references on already checked LE items, binds existing safe
+local evidence hashes and the complete artifact closure, and appends recovery
+links without replacing the original status-only receipt or terminal decision.
+Crash/retry and hook rejection remain recoverable; ordinary validation/hooks and
+exact commit postconditions precede completion and cleanup. GIT.md documents the
+operator call. No installed copy or live pending application run is changed;
+whole-kit release and rollout remain pending. Migration: none.
+
+### The rules guide maps the blocker-evidence-unresolved validator family to the lifecycle row (BUG-NS-KIT-144)
+The `lifecycle` row of `guides/rules.md` and `board_ctl.RULE_ROWS` name `blocker-evidence-unresolved` and state that a blocked spec's `blocker_evidence` must name an existing evidence file, so `tests/test_board_ctl_rules.py` passes again.
+
+### Release refreshes a wired kit commit-msg hook after replaying recent history (SPEC-NS-KIT-143)
+
+The whole-kit release now refreshes a recognised kit `.git/hooks/commit-msg` (never creating or overwriting a project-owned one), keeps the old bytes as `commit-msg.nightshift-prev`, and defers the refresh with a report when the last 30 days of commits include a subject the new hook would reject; `--refresh-commit-msg-hooks auto|force|never` overrides. Projects clear a deferral by writing `chore: mark <ID> done|blocked|in_progress` and using `record_metrics.py --commit-terminal`.
+
+### unblock_spec resolves a project root to the install, and mark_spec_blocked writes real blocker evidence (BUG-NS-KIT-142)
+`unblock_spec.py` accepts a project root or the install directory for `--root`/`project_root` and keeps all state under the install (a directory with neither layout raises `NS-UNBLOCK-ROOT-NOT-INSTALL` before any write), `mark_spec_blocked` takes `blocker_class`/`blocker_scope`/`blocker_evidence`/`unblock_condition` and writes `reports/failures/<ts>-blocked-<stem>.json` as default evidence (`persist_failure` passes its own report), and `validate_specs.py` warns `blocker_evidence_unresolved` for blocked specs whose evidence is not an existing install-relative file.
+
+### assemble-verdict reads unittest and xcodebuild samples and treats null arm windows as absent (BUG-NS-KIT-141)
+`parse_raw_sample` parses `python -m unittest` and `xcodebuild test` output (failing names required, ambiguous or unknown text refused with the accepted formats listed), a `started_at`/`ended_at` that is null, empty, `"None"` or `"null"` is absent (one end alone is refused as `arm_isolation_invalid`), the verdict records no absent window fields, and the suite brief and `run-6.md` state the accepted sample forms and the structured sample shape.
+
+### The verifier sees AC Amendments and can take its contract from main (BUG-NS-KIT-140)
+The verifier's spec copy now includes `## AC Amendments` (briefs state the latest row names the criterion in force), `validate_specs.py` warns `ac_amendment_unapplied` for new rows whose AC line was not edited, and `verification_report.py prepare-dispatch --contract-ref main` projects both arms' spec from main without touching the candidate.
+
+### Terminal lifecycle trailers come from a builder (BUG-NS-KIT-139)
+`record_metrics.py --render-terminal-trailers` / `--commit-terminal` build the eleven required trailers from the verifier verdict (no hand-filled block, explicit `unavailable` tally), `parallel_executor` shares the renderer, a done commit with no evidence trailers no longer defaults to `pass` (`evidence_source` verdict|none), and `--correct-commit` reads legacy bracketed marks.
+
+### Commit-msg hook accepts the coordinator's subject forms (SPEC-NS-KIT-118)
+
+`hooks/commit-msg`: besides `[<ID>] ...`, the hook now accepts `<ID>: ...`, maintenance subjects (`chore|telemetry|release|merge: ...`, no ID) and conventional subjects (`spec(BUG-NS-KIT-132,BUG-NS-KIT-133): ...`, `fix: ... (BUG-320 recurrence)`) that carry an ID; status marks `chore: mark <ID> draft|planned|ready|in_progress|superseded|retired` need no trailers; `chore(<ID>): ...` is accepted; a bracketed `[<ID>] chore: mark ...` subject is rejected for every status (metrics never reads it; GIT.md no longer prescribes it); any other `chore: mark ...` subject is rejected as a malformed lifecycle subject. Lifecycle trailer requirements are unchanged. `GIT.md` documents the forms and the install/rollback command.
+
+### Board graph keeps the selected spec out from under the details panel (SPEC-NS-KIT-134)
+
+`board.py`: selecting a node in the graph view (click, card, deep link) now places it at the center of the canvas area the details panel does not cover (right, left or bottom dock, using the panel's real size), keeps the current zoom (at least 1.2), and leaves the camera still when the node is already inside that area with a 48 px margin; with the panel closed the focus is unchanged. Migration: none.
+
+### Pre-commit gate tells a missing lint/type tool from findings and can lint only staged files (BUG-NS-KIT-135)
+
+`hooks/pre-commit` reports a lint or type_check command that cannot run (exit 127, 126 or 78, `<python> -m <module>` with that module missing, or a failing `commands.lint_probe` / `type_check_probe`) as `LINT TOOL UNAVAILABLE` / `TYPE CHECK TOOL UNAVAILABLE` instead of `FAILED`; it still blocks by default and only warns with `commands.on_tool_unavailable: warn`. New opt-in `commands.lint_staged` (with `{files}`) and `commands.lint_exclude` lint only the staged files, and `hooks/pre-commit --check-tools` lists each install's gate commands and whether their tools are usable (read-only); documented in `config-reference.yaml` and `GIT.md`. No config change is required.
+
+### Release coordinator `--isolated-root` scans the given root alone (BUG-NS-KIT-133)
+
+`release_coordinator.py --isolated-root` restricts install discovery to `--root` (no `EXTRA_SCAN_ROOTS`) in `--dry-run`, `--apply` and `--checkpoint-plan`; the result records `discovery` (`isolated`, scanned `roots`) and the apply rerun command keeps the flag. Without the flag coverage is unchanged. `guides/release.md` tells rehearsals to use it.
+
+### Write-scope hook classifies checkouts that live under a scratch root (BUG-NS-KIT-136)
+
+`write-scope-hook.sh` no longer treats an absolute path inside the project root as scratch just because the checkout sits under `/tmp`, `/private/tmp` or `/var/folders`; such paths are classified (narrowing the carve-out only; symlink escapes stay `outside_root`).
+
+### Skill-touching and folded release handoffs can complete (BUG-NS-KIT-132)
+
+`validate_positive_delivery` accepts a skill commit of SKILL.md plus manifest-derived guides; `repin_folded_handoffs` re-pins the preceding release's `fold` records before completion; the coordinator result gains `release_handoffs_not_completed`.
+
+### Register WorkshopFractionSheet project code WFS (SPEC-ARGO-127)
+
+`spec_id.PROJECT_CODES` gains `"WORKSHOPFRACTIONSHEET": "WFS"` for SideGigs app 3; native `SPEC-WFS-*` IDs, no legacy ID file.
+
+### Release coordinator exit status separates skips from failure (BUG-NS-KIT-131)
+
+`release_coordinator.py` exits `0` (`outcome: completed`), `3` (`completed_with_skips`: known skips only), `1` (`failed`: any `failure_class` or `unexpected_failure`) or `2` (invalid manifest), the same in dry-run and apply; `guides/release.md` Step 5 carries the table.
+
+### Scanner ignores spec-ID digits; suite summary is committable; pre-commit scans repo-root paths (BUG-NS-KIT-130)
+
+`scanner.py` no longer reads digits wholly inside a spec ID as a card number (grammar pinned to `spec_id.TOKEN_PATTERN`); `release_coordinator.py` writes `canonical-suite-test-summary-<stamp>Z.json` (totals and duration per test file, no ids or output) beside the raw JUnit file; `hooks/pre-commit` resolves an ambiguous repo-root path to the `canonical` install so its scanner runs, and prints "No config.yaml found" only when no install config exists.
+
+### Release runbook hygiene (SPEC-NS-KIT-129)
+
+`guides/release.md` gains a "Release roles" section: one suite owner, background suites polled between tool calls, no commits outside the named steps, and cut-dependent ACs written as "the value at the cut" plus a check.
+
+### Policy-aware pre-release checkpoint plan (SPEC-NS-KIT-128)
+
+`release_coordinator.py --root <root> --checkpoint-plan` is a read-only third mode: per repository it prints the dirty path count, the paths a checkpoint commit may take, the excluded paths with a reason (`private_artifact`, `generated_registry`, `spec_wrong_home`) and the classification the dry-run would give it (same `_repository_refusal` the dry-run uses). It writes nothing into any repository; `guides/release.md` gains a Step 0, "Dirty-tree audit and checkpoints".
+
+### Done gate names referenced files that are not in git; coordinator reports uncommitted handoffs (BUG-NS-KIT-127)
+
+`spec_artifacts.py untracked-refs <spec-file>` lists the files a spec's evidence references (checked LE evidence, `proof/evidence.json` sources, `index.json` entries, a required release handoff) that are neither tracked nor staged, split into `stage_with_done` and `outside` (exit 1 when `outside` is non-empty). The `done` transition in `status_transition.gate_status_write` refuses and names every `outside` path; `guides/run-7.md` and `guides/kickoff.md` run the check before the done commit, and `release_coordinator.py` records `release_handoffs_uncommitted` (see `guides/release.md` Step 5).
+
+### Release dry-run validates every install; apply records post-sync validation (SPEC-NS-KIT-123)
+
+`release_coordinator.py --dry-run` now runs installed-profile validation in process for every discovered install (read-only: no artifact or receipt is written) and reports `fleet_validation` (verdict, failed invariants classed `fixed_by_release` or `pre_existing`, duration) plus a table on stderr; `--apply` records `post_sync_validation` per verified install without changing commit, stop or exit semantics. `guides/release.md` Steps 2 and 5 name both.
+
+### Cheap release checks run before the canonical suite (SPEC-NS-KIT-124)
+
+`release_coordinator.py --dry-run` now reports the finding-family floor and suite headroom (`finding_family_regression_*`, `canonical_suite_headroom_*`); `--apply` enforces both before the probe and suite, refusing with `canonical_preflight` and `canonical_suite_runs: 0`. New `release.py finding-floor [--canonical <dir>]` (exit 1 on regression, SKIP without a baseline) is called per merge from `guides/run-7.md` and `guides/kickoff.md`; `guides/release.md` lists the apply gates.
+
+### The apply reuses a recent green suite record for release-mechanical diffs (SPEC-NS-KIT-126)
+
+Suite duration records now carry `canonical_commit`, `tree_clean_start`, `tree_clean_end` and `phase`; `release_coordinator.py --apply` runs the `RELEASE_MECHANICAL_TESTS` subset instead of the full suite when the newest record passed, is under 24 hours old, was clean at both ends, the tree is clean and every changed path is in `RELEASE_MECHANICAL_PATHS` (result `canonical_suite_result: reused`, `canonical_suite_reused_from`, `canonical_suite_subset_result`); the release handoff accepts a verified reuse as it does a passed run. New `--record-suite-run --duration-s <s> (--passed|--failed)` writes a `merge`-phase record and a WARNING appears at 1.6x growth over the newest `release_apply` record; `guides/release.md` and `guides/run-7.md` document both.
+
 ## 3.25.0 (2026-10-07)
 
 **The fleet catch-up release.** Installs move from 3.24.12 (3.24.10 for Fartownik,

@@ -806,6 +806,227 @@ def main_render_timing_trailers(argv) -> int:
     return 0
 
 
+# BUG-NS-KIT-139: the terminal lifecycle trailer block is built here, never hand-written.
+# The names mirror REQUIRED_LIFECYCLE_TRAILERS in hooks/commit-msg (a test pins them equal).
+TERMINAL_LIFECYCLE_TRAILERS = (
+    "Nightshift-Evidence-Report",
+    "Nightshift-Evidence-Tests",
+    "Nightshift-Evidence-Code",
+    "Nightshift-Evidence-ACs",
+    "Nightshift-Evidence-Verifier",
+    "Nightshift-Blocker-Class",
+    "Nightshift-Blocker-Scope",
+    "Nightshift-Unblock-Attempts",
+    "Nightshift-Unblock-Limit",
+    "Nightshift-Parent-Tool-Calls",
+    "Nightshift-Resolution-Kind",
+)
+_VERDICT_VERIFIER_VALUES = ("pass", "fail", "disputes_premise")
+
+
+def verdict_evidence(data) -> tuple[str, str]:
+    """(verifier, acs) evidence values from a parsed verifier-verdict.json.
+
+    ACs is `pass` only when every entry passes, `fail` when any fails, else `unknown`.
+    Verifier is the top-level verdict when it is a recognized value, else `absent`.
+    """
+    if not isinstance(data, dict):
+        return "absent", "unknown"
+    verdict = str(data.get("verdict") or "").lower()
+    verifier = verdict if verdict in _VERDICT_VERIFIER_VALUES else "absent"
+    acs = data.get("acs")
+    statuses = [
+        str(a.get("status") or "").lower() if isinstance(a, dict) else ""
+        for a in (acs if isinstance(acs, list) else [])
+    ]
+    if "fail" in statuses:
+        return verifier, "fail"
+    if statuses and all(st == "pass" for st in statuses):
+        return verifier, "pass"
+    return verifier, "unknown"
+
+
+def render_terminal_trailers(
+    *,
+    report: str,
+    tests: str,
+    code: str,
+    acs: str,
+    verifier: str,
+    parent_tool_calls: str,
+    resolution_kind: str,
+    blocker_class: str = "none",
+    blocker_scope: str = "none",
+    unblock_attempts: int | str = 0,
+    unblock_limit: int | str = 1,
+    scope_check: str = "",
+    unblock_rung: int | str = "",
+    merged_revision: str = "",
+    experimental_sample_for: str = "",
+    model: str = "",
+) -> list[str]:
+    """Terminal-commit trailer lines in the order the run guides prescribe (one block)."""
+    optional = lambda key, value: [f"{key}: {value}"] if str(value) != "" else []  # noqa: E731
+    return [
+        f"Nightshift-Evidence-Report: {report}",
+        f"Nightshift-Evidence-Tests: {tests}",
+        f"Nightshift-Evidence-Code: {code}",
+        f"Nightshift-Evidence-ACs: {acs}",
+        f"Nightshift-Evidence-Verifier: {verifier}",
+        f"Nightshift-Blocker-Class: {blocker_class}",
+        f"Nightshift-Blocker-Scope: {blocker_scope}",
+        *optional("Nightshift-Scope-Check", scope_check),
+        *optional("Nightshift-Merged-Revision", merged_revision),
+        f"Nightshift-Unblock-Attempts: {unblock_attempts}",
+        f"Nightshift-Unblock-Limit: {unblock_limit}",
+        *optional("Nightshift-Unblock-Rung", unblock_rung),
+        f"Nightshift-Parent-Tool-Calls: {parent_tool_calls}",
+        f"Nightshift-Resolution-Kind: {resolution_kind}",
+        *optional("Nightshift-Experimental-Sample-For", experimental_sample_for),
+        *optional("Nightshift-Model", model),
+    ]
+
+
+def missing_terminal_trailers(message: str) -> list[str]:
+    """Required names with no non-empty value in ``message`` (the hook's test)."""
+    return [
+        name for name in TERMINAL_LIFECYCLE_TRAILERS
+        if not re.search(rf"(?m)^{name}:[ \t]*\S", message)
+    ]
+
+
+def _terminal_parser(commit: bool) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Render (or commit with) the terminal lifecycle trailer block (BUG-NS-KIT-139)."
+    )
+    p.add_argument("--render-terminal-trailers", action="store_true")
+    p.add_argument("--commit-terminal", action="store_true")
+    p.add_argument("--spec-id")
+    p.add_argument("--outcome", choices=["done", "blocked"])
+    p.add_argument("--verdict", help="verifier-verdict.json for this spec")
+    p.add_argument("--evidence-report", choices=sorted(EVIDENCE_RESULT_ENUM))
+    p.add_argument("--evidence-tests", choices=sorted(EVIDENCE_RESULT_ENUM))
+    p.add_argument("--evidence-code", choices=sorted(EVIDENCE_RESULT_ENUM))
+    p.add_argument("--parent-tool-calls", help="N, or 'unavailable' when not tallied")
+    p.add_argument("--resolution-kind")
+    p.add_argument("--blocker-class", choices=sorted(BLOCKER_CLASS_ENUM))
+    p.add_argument("--blocker-scope", choices=sorted(BLOCKER_SCOPE_ENUM))
+    p.add_argument("--unblock-attempts", default="0")
+    p.add_argument("--unblock-limit", default="1")
+    p.add_argument("--unblock-rung", default="")
+    p.add_argument("--scope-check", default="", choices=["", *sorted(SCOPE_CHECK_ENUM)])
+    p.add_argument("--merged-revision", default="")
+    p.add_argument("--experimental-sample-for", default="")
+    p.add_argument("--model", default="")
+    p.add_argument("--body-file", default="")
+    p.add_argument("--path", action="append", default=[])
+    p.add_argument("--attribution", action="append", default=[])
+    p.add_argument("--repo", default=".")
+    return p
+
+
+def build_terminal_trailers(args) -> list[str]:
+    """Validate the explicit inputs and render the block; ValueError names what is missing."""
+    missing = [
+        flag for flag, value in (
+            ("--spec-id", args.spec_id), ("--outcome", args.outcome), ("--verdict", args.verdict),
+            ("--evidence-report", args.evidence_report), ("--evidence-tests", args.evidence_tests),
+            ("--evidence-code", args.evidence_code), ("--parent-tool-calls", args.parent_tool_calls),
+            ("--resolution-kind", args.resolution_kind),
+        ) if not value
+    ]
+    if args.outcome == "blocked":
+        missing += [
+            flag for flag, value in (
+                ("--blocker-class", args.blocker_class), ("--blocker-scope", args.blocker_scope),
+            ) if not value
+        ]
+    if missing:
+        raise ValueError("missing required input(s): " + ", ".join(missing))
+    if not (args.parent_tool_calls == "unavailable" or args.parent_tool_calls.isdigit()):
+        raise ValueError("--parent-tool-calls must be a count or 'unavailable'")
+    try:
+        data = json.loads(Path(args.verdict).read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read verdict file {args.verdict}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("spec_id") != args.spec_id:
+        found = data.get("spec_id") if isinstance(data, dict) else None
+        raise ValueError(f"verdict spec_id {found!r} does not match --spec-id {args.spec_id!r}")
+    verifier, acs = verdict_evidence(data)
+    if verifier == "absent":
+        raise ValueError(f"verdict {data.get('verdict')!r} is not one of {', '.join(_VERDICT_VERIFIER_VALUES)}")
+    return render_terminal_trailers(
+        report=args.evidence_report, tests=args.evidence_tests, code=args.evidence_code,
+        acs=acs, verifier=verifier, parent_tool_calls=args.parent_tool_calls,
+        resolution_kind=args.resolution_kind,
+        blocker_class=args.blocker_class if args.outcome == "blocked" else "none",
+        blocker_scope=args.blocker_scope if args.outcome == "blocked" else "none",
+        unblock_attempts=args.unblock_attempts, unblock_limit=args.unblock_limit,
+        scope_check=args.scope_check, unblock_rung=args.unblock_rung,
+        merged_revision=args.merged_revision,
+        experimental_sample_for=args.experimental_sample_for, model=args.model,
+    )
+
+
+def main_render_terminal_trailers(argv) -> int:
+    args = _terminal_parser(False).parse_args(argv)
+    try:
+        lines = build_terminal_trailers(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print("\n".join(lines))
+    return 0
+
+
+def main_commit_terminal(argv) -> int:
+    """Assemble `chore: mark <ID> <outcome>` + body + one trailer block and commit explicit paths."""
+    args = _terminal_parser(True).parse_args(argv)
+    try:
+        if not args.path:
+            raise ValueError("missing required input(s): --path")
+        lines = build_terminal_trailers(args)
+        body = Path(args.body_file).read_text().strip() if args.body_file else ""
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    message = f"chore: mark {args.spec_id} {args.outcome}\n\n"
+    if body:
+        message += body + "\n\n"
+    message += "\n".join([*lines, *[a.strip() for a in args.attribution if a.strip()]]) + "\n"
+    absent = missing_terminal_trailers(message)
+    if absent:
+        print("Error: assembled message is missing required trailer(s): " + ", ".join(absent), file=sys.stderr)
+        return 1
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".msg", delete=False) as handle:
+        handle.write(message)
+        message_path = handle.name
+    try:
+        # Explicit paths only: stage the named paths (new report artifacts are untracked), then
+        # commit exactly them so another session's staged files are never swept in.
+        staged = subprocess.run(
+            ["git", "-C", args.repo, "add", "-A", "--", *args.path],
+            capture_output=True, text=True, check=False,
+        )
+        if staged.returncode != 0:
+            sys.stderr.write(staged.stderr)
+            return 1
+        result = subprocess.run(
+            ["git", "-C", args.repo, "commit", "-F", message_path, "--", *args.path],
+            capture_output=True, text=True, check=False,
+        )
+    finally:
+        os.unlink(message_path)
+    sys.stdout.write(result.stdout)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        return 1
+    return 0
+
+
+
 def append_failure_ledger(ledger_path: Path, args, now: str, dry_run: bool) -> None:
     """Append a minimal failure record (matches metrics-schema.md minimal form)."""
     entry = {
@@ -926,6 +1147,13 @@ MARK_COMMIT_RE = re.compile(
 _MARK_COMMIT_NEAR_MISS_RE = re.compile(
     r"^chore: mark (" + _MARK_COMMIT_ID + r") (done|blocked)\b(.+)$"
 )
+# BUG-NS-KIT-139 R8: legacy bracketed subject, accepted only by --correct-commit (both IDs equal).
+_LEGACY_BRACKETED_MARK_RE = re.compile(
+    r"^\[(" + _MARK_COMMIT_ID + r")\] chore: mark (" + _MARK_COMMIT_ID + r") (done|blocked)$"
+)
+_BRACKETED_MARK_NEAR_MISS_RE = re.compile(
+    r"^\[(" + _MARK_COMMIT_ID + r")\] chore: mark (" + _MARK_COMMIT_ID + r") (done|blocked)\b"
+)
 _REPORT_TESTS_RE = re.compile(r"[Tt]ests?\s+passed:?\s*(\d+)\s*/\s*(\d+)")
 
 
@@ -939,9 +1167,10 @@ def find_in_progress_sha(repo: Path, spec_id: str, before: str) -> str:
     """Most-recent `chore: mark <spec_id> in_progress` commit at or before `before`."""
     out = _run_git(repo, ["log", "--format=%H %s", "-n", "1000", before])
     target = f"chore: mark {spec_id} in_progress"
+    legacy = f"[{spec_id}] {target}"  # BUG-NS-KIT-139 R8: read-only legacy bracketed form
     for line in out.splitlines():
         sha, _, subj = line.partition(" ")
-        if subj.strip() == target:
+        if subj.strip() in (target, legacy):
             return sha
     return ""
 
@@ -995,6 +1224,30 @@ def _bounded_int(value: str, default: int = 0) -> int:
         return default
 
 
+def _committed_verdict(repo: Path, spec_id: str, mark_commit: str):
+    """Parsed `reports/<spec_id>/verifier-verdict.json` as committed at ``mark_commit``, or None."""
+    candidates = []
+    for path in _changed_files(repo, mark_commit):
+        if "/specs/" in path and path.endswith(".md"):
+            root = path.rsplit("/specs/", 1)[0]
+            candidates.append(f"{root}/reports/{spec_id}/verifier-verdict.json")
+    candidates += [
+        f"canonical/reports/{spec_id}/verifier-verdict.json",
+        f".nightshift/reports/{spec_id}/verifier-verdict.json",
+    ]
+    for candidate in dict.fromkeys(candidates):
+        text = _run_git(repo, ["show", f"{mark_commit}:{candidate}"])
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("spec_id") in (None, spec_id):
+            return data
+    return None
+
+
 def derive_resolution(
     repo: Path,
     spec_id: str,
@@ -1039,14 +1292,32 @@ def derive_resolution(
         "acs_covered": "Nightshift-Evidence-ACs",
     }
     evidence_gate = {}
-    for field, trailer_key in evidence_keys.items():
-        value = commit_trailer(repo, evidence_commit, trailer_key).lower()
+    raw_evidence = {
+        field: commit_trailer(repo, evidence_commit, trailer_key).lower()
+        for field, trailer_key in evidence_keys.items()
+    }
+    raw_verifier = commit_trailer(
+        repo, evidence_commit, "Nightshift-Evidence-Verifier"
+    ).lower()
+    # BUG-NS-KIT-139 R6: a done commit with no evidence trailer at all no longer defaults to
+    # pass; the evidence comes from the committed verifier verdict, else it is unknown.
+    evidence_source = "trailers"
+    verdict_fields: dict = {}
+    if final_outcome == "done" and not raw_verifier and not any(raw_evidence.values()):
+        verdict = _committed_verdict(repo, spec_id, mark_commit)
+        if verdict is None:
+            evidence_source, default_evidence = "none", "unknown"
+        else:
+            evidence_source, default_evidence = "verdict", "unknown"
+            verdict_fields["verifier"], verdict_fields["acs_covered"] = verdict_evidence(verdict)
+    for field in evidence_keys:
+        value = raw_evidence[field]
         evidence_gate[field] = (
             value if value in EVIDENCE_RESULT_ENUM else default_evidence
         )
-    verifier_verdict = commit_trailer(
-        repo, evidence_commit, "Nightshift-Evidence-Verifier"
-    ).lower()
+    if "acs_covered" in verdict_fields:
+        evidence_gate["acs_covered"] = verdict_fields["acs_covered"]
+    verifier_verdict = raw_verifier or verdict_fields.get("verifier", "")
     evidence_gate["verifier"] = (
         verifier_verdict
         if verifier_verdict in VERIFIER_EVIDENCE_RESULT_ENUM
@@ -1103,6 +1374,8 @@ def derive_resolution(
         "later_session_required": stage == "recovery",
         "resolution_latency_s": max(0.0, (completed - started).total_seconds()),
     }
+    if evidence_source != "trailers":
+        resolution["evidence_source"] = evidence_source
     if 1 <= unblock_rung <= 5:
         resolution["unblock_rung"] = unblock_rung
     # BUG-NS-KIT-107 R3: the merged revision, only when the trailer is present, so rows
@@ -1309,7 +1582,7 @@ def main_mark_commit(argv) -> int:
     subject = _run_git(repo, ["log", "-1", "--format=%s", args.mark_commit])
     m = MARK_COMMIT_RE.match(subject)
     if not m:
-        near_miss = _MARK_COMMIT_NEAR_MISS_RE.match(subject)
+        near_miss = _MARK_COMMIT_NEAR_MISS_RE.match(subject) or _BRACKETED_MARK_NEAR_MISS_RE.match(subject)
         if near_miss:
             print(
                 "[mark-commit] ERROR: subject looks like a mark-done/blocked commit "
@@ -1488,15 +1761,19 @@ def main_correct_commit(argv) -> int:
     repo = Path(args.repo)
     bad_subject = _run_git(repo, ["log", "-1", "--format=%s", args.correct_commit])
     bad_match = MARK_COMMIT_RE.match(bad_subject)
-    if not bad_match:
-        print("Error: --correct-commit must name a terminal chore: mark <spec-id> done|blocked commit.", file=sys.stderr)
-        return 2
-    spec_id, outcome = bad_match.group(1), bad_match.group(2)
+    if bad_match:
+        spec_id, outcome = bad_match.group(1), bad_match.group(2)
+    else:
+        legacy = _LEGACY_BRACKETED_MARK_RE.match(bad_subject)
+        if not legacy or legacy.group(1) != legacy.group(2):
+            print("Error: --correct-commit must name a terminal chore: mark <spec-id> done|blocked commit.", file=sys.stderr)
+            return 2
+        spec_id, outcome = legacy.group(1), legacy.group(3)
     bad_commit = _run_git(repo, ["rev-parse", args.correct_commit]) or args.correct_commit
 
     correction_commit = _run_git(repo, ["rev-parse", "HEAD"])
     correction_subject = _run_git(repo, ["log", "-1", "--format=%s", "HEAD"])
-    if MARK_COMMIT_RE.match(correction_subject):
+    if MARK_COMMIT_RE.match(correction_subject) or _LEGACY_BRACKETED_MARK_RE.match(correction_subject):
         print(
             "Error: correction commit subject must not match MARK_COMMIT_RE; "
             "use a distinct correction subject so it cannot create another terminal transition.",
@@ -1636,6 +1913,10 @@ def main(argv=None) -> int:
         return main_verify_amend_head(argv)
     if "--mark-commit" in argv:
         return main_mark_commit(argv)
+    if "--commit-terminal" in argv:
+        return main_commit_terminal(argv)
+    if "--render-terminal-trailers" in argv:
+        return main_render_terminal_trailers(argv)
     if "--record-timing" in argv:
         return main_record_timing(argv)
     if "--render-timing-trailers" in argv:

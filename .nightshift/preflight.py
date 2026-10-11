@@ -655,6 +655,21 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
             result["blocking_failures"].append("state_rationale_validation_unavailable: sync the managed validator")
 
     commands = load_commands(config_path)
+    # SPEC-NS-KIT-162: canonical packaging is checked before any configured
+    # command. Installed copies have their separate admission contract.
+    if config_path.parent.resolve() == repo / "canonical":
+        try:
+            import release
+            final_manifest = release.check_final_manifest(config_path.parent)
+        except (ImportError, OSError, ValueError) as exc:
+            final_manifest = {"ok": False, "errors": [f"final manifest check unavailable: {exc}"],
+                              "affected_paths": []}
+        result["checks"]["final_manifest"] = final_manifest
+        if not final_manifest["ok"]:
+            result["blocking_failures"].extend(final_manifest["errors"])
+            result["ok"] = False
+            return result
+
     command_results = _command_state(commands, repo)
     result["checks"]["commands"] = command_results
     if command_results["test"]["skipped"]:

@@ -69,7 +69,8 @@ ID. Workers cannot transition state, and terminal transitions are idempotent.
 - When a spec is selected: set `status: in_progress` and commit
   `chore: mark <spec-id> in_progress` (no trailers; the hook accepts exactly this form).
 - When a spec completes: set `status: done` and commit
-  `[<spec-id>] chore: mark done`.
+  `chore: mark <spec-id> done` (with the terminal trailers, SPEC-221). The bracketed
+  `[<spec-id>] chore: mark ...` form is rejected: metrics reads only the exact form.
 - In orchestrator mode, the parent marks `in_progress` on `main` before launching
   a worktree sub-agent. Worktree-local status changes are not visible to the board
   until merged.
@@ -94,6 +95,103 @@ it during admission or recovery. Dirty mixed or
 opposite terminal edits are retained for explicit recovery; a clean tracked
 opposite value is safely corrected with the canonical `chore: mark` commit and
 trailers.
+
+
+### Complete first terminal projection (BUG-NS-KIT-167)
+
+The public parent queue seals v12 completion inputs before its first `started`
+receipt: exact candidate/run/decision/repository bindings, accepted evidence and
+verifier classifications, measured or unavailable parent tally, rationale and
+hash-bound existing checked-LE proof. Its immutable closure contains the spec,
+official status-transition artifact and index, committed together through normal
+hooks. No requirement, AC, scope, dependency or checkbox fact is manufactured.
+Staged validation reads inert captured index proof blobs, including referenced
+project-root files; worktree replacements cannot override the captured proof.
+
+An accepted application decision remains `done` if tracked projection or cleanup
+is pending. API/board/CLI diagnostics name the actual reason and
+`queue.recover_terminal_projection(handle)` action. Retry reuses the sealed
+closure and existing candidate/fresh-main acceptance: no application test, merge
+or replacement admission is replayed. A pending kit release remains separate
+from application completion. Genuine older status-only receipts retain the
+receipt-bound recovery path below.
+
+Pending projection: read `terminal_projection` diagnostics in API/board/CLI; this section records the recovery action.
+
+### Receipt-bound completion metadata recovery (SPEC-NS-KIT-150)
+
+For a v12 pending `done` projection rejected by rationale or checked-LE evidence
+validation, the parent may call
+`queue.recover_terminal_projection(handle, metadata_recovery=request)`. Keep the
+accepted candidate, merge, fresh-main proof, immutable terminal decision and
+original `started` projection event. The exact old status-only target must still
+be present. By default recovery requires its original base HEAD. No application
+suite is invoked.
+
+Build `request` from that original event's entire `payload`, adding exactly:
+
+```python
+request = {
+    **original_event["payload"],
+    "original_event_id": original_event["event_id"],
+    "spec_id": handle.spec_id,
+    "run_id": handle.terminal_run_id,
+    "reason": "Parent accepted completion with the retained evidence",
+    "created": "2026-10-09T18:01:00Z",  # explicit UTC, retained for replay
+    "le_evidence": {
+        "LE1": {"path": "canonical/reports/existing-proof.json",
+                "sha256": sha256(existing_proof_bytes).hexdigest()},
+    },
+}
+queue.recover_terminal_projection(handle, metadata_recovery=request)
+```
+
+If unrelated committed work has advanced main, the parent may add exactly one
+optional field: `request["recovery_base_head"] = pinned_full_commit_sha`. Capture
+the current HEAD's complete 40-character commit identity separately; a branch
+name, `HEAD` alias or an unpinned observation is invalid. The pinned commit must
+descend from the immutable original receipt base, and its committed spec blob
+must equal the original before blob. Initial working spec bytes must still equal
+the original pending target. Recovery preserves the descendant's unrelated
+committed and staged content, derives artifact history from that pinned snapshot,
+and appends the separate recovery base to its metadata link before any write.
+The one terminal commit and crash replay must prove that exact pinned parent.
+Unexpected movement after pinning, a non-descendant, changed committed original
+spec or edited pending bytes refuses recovery. Omitting this field retains the
+original-base-only refusal; never replace the original event, base or hashes.
+
+Evidence paths are repository-relative safe regular local files: no absolute,
+parent escape, symlink, hardlink or remote locator. Existing proof must remain
+available with the bound content hash during recovery and replay. Only already
+checked LE items lacking inline references may be annotated. Recovery never
+checks an item or changes its wording, R/AC text or checkboxes, scope,
+dependencies or release ownership. Supply every missing reference; an incomplete
+or invalid target fails the ordinary validator before integration-tree writes.
+The reason is a parent declaration: structural validation does not establish
+that an observation is true.
+
+The implementation derives a deterministic target through the official indexed
+status-transition/rationale capture routine in a disposable snapshot. It appends
+`metadata_started` linking the original event/request to all target closure
+hashes, then writes and commits only the spec plus its changed artifact/index
+closure. Ordinary hooks remain enabled; unrelated index entries and files are
+preserved. Postconditions bind the exact parent, terminal subject/trailers,
+changed paths and committed blobs before `metadata_completed` or queue cleanup.
+The original `started` event remains unchanged. A competing request is refused.
+
+After a crash or hook refusal, repeat the same public call. Once the recovery
+link exists, `queue.recover_terminal_projection(handle)` can also replay its
+stored request. Before-write, after-write and after-commit interruptions converge
+without another terminal commit. Edited pending bytes, moved HEAD, changed proof
+or unrelated closure/index content require explicit parent diagnosis; do not
+rewrite the receipt or reset unrelated state to force recovery.
+
+This API is a canonical portable rehearsal until a qualifying whole-kit release.
+Canonical authoring still requires the original SPEC-365 admission receipts and
+independent exact-candidate acceptance through the existing parent-owned
+`authoring_provider` seam. The pending release handoff and whole-kit rollout
+remain coordinator-owned. A rehearsal is no claim of released CJQ closure and
+provides no installed-copy or receipt-refresh exception.
 
 Main-merge failures use a separate coordinator-owned durable classification.
 Before `git merge`, append the exact main/candidate identity and retry number.
@@ -198,6 +296,40 @@ Rules:
 - Merge commits and revert commits are exempt from the prefix rule.
 - Bootstrap commits may use simple setup messages before specs exist.
 
+### Coordinator subjects (SPEC-NS-KIT-118)
+
+`hooks/commit-msg` accepts these forms (`<ID>` is `SPEC|BUG|NFR|QUESTIONS-...-<number>`):
+
+| Form | Example | Rule |
+| --- | --- | --- |
+| Ordinary | `[SPEC-033] feat: handler registry` | `[<ID>] ` plus text |
+| ID-led | `BUG-022: execute the plan` | `<ID>: ` plus text |
+| Lifecycle | `chore: mark <ID> done\|blocked` | need all `Nightshift-*` trailers (SPEC-221); the bracketed `[<ID>] chore: mark ...` form is rejected for every status (metrics reads only the exact form) |
+| Status mark | `chore: mark <ID> draft\|planned\|ready\|in_progress\|superseded\|retired` | no trailers |
+| Maintenance | `merge: SPEC-NS-KIT-134`, `telemetry: ...`, `release: ...`, `chore: ...` | no ID required |
+| Conventional | `spec(BUG-NS-KIT-132,BUG-NS-KIT-133): ...`, `fix: ... (BUG-320 recurrence)` | type in feat, fix, docs, test, refactor, perf, build, ci, style, chore, spec, evidence, audit, draft, formal, research, wip; the subject line must contain an `<ID>` |
+| Git-generated | `Merge ...`, `Revert ...` | exempt |
+
+Any other `chore: mark ...` or `chore(scope): mark ...` subject (multi-ID, suffixed, `(container)`) is rejected as a malformed lifecycle subject, and a
+conventional subject without an ID (`docs(specs): x`) is rejected. Install and roll back
+(worktrees share the repository's `.git/hooks`, so this affects every worktree at once):
+
+```bash
+cp hooks/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg   # install
+rm .git/hooks/commit-msg                                                        # roll back
+```
+
+A whole-kit release refreshes a recognised kit `.git/hooks/commit-msg` (SPEC-NS-KIT-143), never a project-owned
+or absent one, after replaying the last 30 days of commits through the new hook. If any would be newly rejected the
+refresh is deferred (release output: `commit_msg_hook: deferred`, with the reasons and example subjects). Clear it by
+writing `chore: mark <ID> done|blocked|in_progress` subjects and terminal commits with
+`record_metrics.py --commit-terminal`; the next release then refreshes the hook. The previous hook is kept as
+`commit-msg.nightshift-prev`; roll back with one line:
+
+```bash
+mv .git/hooks/commit-msg.nightshift-prev .git/hooks/commit-msg
+```
+
 ## Hooks
 
 Nightshift ships two git hooks:
@@ -206,6 +338,17 @@ Nightshift ships two git hooks:
   thresholds via `scanner.py`, validates staged specs when `validate_specs.py`
   is present, then runs configured `lint` and `type_check` commands from
   `.nightshift/config.yaml`.
+  A command that cannot run is reported as `LINT TOOL UNAVAILABLE` /
+  `TYPE CHECK TOOL UNAVAILABLE`, not as findings: exit 127, 126 or 78,
+  `<python> -m <module>` with that module not installed, or a failing
+  `commands.lint_probe` / `commands.type_check_probe`. It blocks the commit by
+  default; a missing tool only warns when `commands.on_tool_unavailable: warn`
+  is set (the hook then prints `gates not run: ...` at the end). Findings
+  always block. `commands.lint_staged` (with `{files}`) opts in to linting only
+  the staged files, minus `commands.lint_exclude` (default `.nightshift/*`);
+  `commands.lint` stays the full-tree command. `hooks/pre-commit --check-tools`
+  lists each install's configured commands and whether their tools are usable,
+  read-only.
 - `hooks/commit-msg`: enforces the `[SPEC-ID]` prefix when
   `git.commit_prefix: "spec-id"`, subject to `git.unprefixed_paths` (below),
   and rejects `chore: mark <id> done|blocked` unless every required terminal
@@ -301,6 +444,14 @@ must not change lifecycle state or merge. The hook does not trust author identit
 if a worker authors a terminal lifecycle subject, it is held to the same trailer
 contract and is rejected when that evidence is absent or empty. Ordinary commits
 and `in_progress` markers remain outside this terminal gate.
+
+Build the block with `record_metrics.py --render-terminal-trailers`, or let
+`record_metrics.py --commit-terminal` assemble the message and commit explicit
+`--path`s (BUG-NS-KIT-139); it refuses before git when an input is missing and
+works without this hook installed. `--parent-tool-calls unavailable` is the
+explicit "not tallied" value. A bracketed `[<id>] chore: mark <id> done|blocked`
+commit is not a terminal transition: `--mark-commit` refuses it, and only
+`--correct-commit` reads one, to repair its existing metrics row.
 
 ### Project terminal outcome records (SPEC-224)
 
@@ -506,6 +657,27 @@ authorization refuses bootstrap. Changed candidate bytes require fresh independe
 verification and a new authorization ID. Normal scope/release metadata gates,
 independent verdict, full canonical suite, exact fresh-main suite and lifecycle
 gates remain mandatory; the versioned release handoff remains pending.
+
+### Pre-execution operational sampling authority (BUG-NS-KIT-179)
+
+The parent injects a distinct `SamplingAnchor` through `sampling_provider` into
+`prepare_verifier_dispatch`. It retains immutable approved bytes outside candidate
+and verifier surfaces, an externally expected SHA-256 and pinned exact contract.
+Before execution, source review pins exact requirement/amendment text, target
+assertions/artifact relationship and the complete ordered command/collection tuple.
+The returned `dispatch.sampling_anchor` additionally seals the neutral dispatch;
+pass it separately to observation, assembly and executable public validation.
+Never obtain this context from a plan, verdict, environment or self-digest. A
+human-labelled amendment alone supplies no authentication. Terminal AuthoringAnchor
+and original admission receipts retain their separate acceptance obligations.
+
+Every approved member runs separately on both arms, including clean non-target
+members. Tuple-wide native collection, invocation order, raw exits, source identity,
+unchanged assertions and read-only footprints are independently rechecked before
+one observed correction pair qualifies. Missing or altered authority/proof retains
+escalation; late issue/freeze cannot be repaired by rewriting timestamps. Legacy
+schema 1.0 configured declarations are unchanged. No retrospective application to
+old runs, reliability/savings claim, lifecycle, merge or release authorization follows.
 
 ### Main test-status ledger commits (SPEC-NS-KIT-002-002)
 

@@ -287,3 +287,38 @@ touching — or being tempted to touch — the verbatim AC block R2 requires.
 > coverage is Out of Scope for SPEC-ARGO-048, which changes how the gate is
 > asserted, not what it checks.
 
+
+### Required authored deliverables: ordered intake (BUG-NS-KIT-166)
+
+Generated handoff and manually copied suite/no-suite pinned briefs use the same
+`NIGHTSHIFT-ORDERED-DELIVERABLE-INTAKE` block in `pinned-briefs.md`. Preserve it
+verbatim. Before accessing substantive required-deliverable conclusions, the
+verifier independently derives the relevant source behavior, test assertions
+and actual command results from the exact assigned arms, preserving observations
+outside the arms. Metadata/path existence and unrelated AC work do not establish
+that derivation; target reads rather than searching outcome-bearing documents.
+Then inspect the real contractual deliverable and its committed digest. This
+instruction order adds no staged-access capability or content-free substitution.
+
+Classify actual exposure honestly. Unavoidable/accidental early exposure remains
+`before_derivation` with any capability/evidence gap; it cannot become a final
+pass by relabelling. Supported late exposure is `required_deliverable /
+after_derivation`. Keep original rejected evidence, exact identity and both-arm
+read-only checks. Exposed failures still need independent native reproduction
+and lead-only remediation. Assembly and strict final admission remain unchanged.
+
+### Final canonical packaging before configured suites (SPEC-NS-KIT-162)
+
+At canonical hand-back, after all final managed edits including CHANGELOG, run
+`python3 canonical/release.py check-final-manifest --canonical canonical` before
+launching an expensive configured suite. A nonzero result stops that launch and
+names affected paths. The read-only result binds manifest bytes, complete declared
+managed bytes and executable modes, and applicable pending handoff membership.
+The supported canonical preflight performs this same check before commands.
+
+Finish edits, explicitly regenerate using the existing authoring release helper,
+then check again. Every launch needs current identity; a later managed edit, mode
+change, manifest edit or handoff change invalidates retained packaging evidence.
+This command never regenerates, bumps versions, reseals historical releases or
+patches installed copies. Installed-profile preflight retains its own admission
+contract and does not require a canonical-only manifest.

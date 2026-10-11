@@ -93,13 +93,9 @@ this pass actually did (SPEC-ARGO-061 R1/R3):
   `self-verified` commit with a deliberate `self-verified-experimental` one: the trailer value is
   the whole distinction, and the two are never interchangeable or backfillable into each other.
 
-**Runs resolved before this instruction existed have no recoverable count.** A future reader
-(including `SPEC-ARGO-038-001`) must report those as `unavailable` — never estimate, reconstruct, or
-backfill a number for them, no matter how plausible an estimate would be. Likewise, a pre-SPEC-ARGO-061
-`self-verified` commit is not retroactively relabeled `self-verified-experimental` — Out of Scope
-for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified resolutions.
-
 **Evidence gate (all seven must pass to merge):**
+
+The parent seals complete first-projection metadata from truthful inputs before `started`. Pending projection preserves accepted `done`; retry `queue.recover_terminal_projection(handle)` without application gates, remerge or replacement admission (GIT.md).
 
 1. **Report exists** — `reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md` (the Step 14 path) is present in the worktree.
 2. **Tests passed** — report contains no `❌` on test-result lines.
@@ -160,11 +156,15 @@ for SPEC-ARGO-061 explicitly forbids reclassifying prior sessions' self-verified
 
 **If all seven pass → merge and clean up:**
 
+Before merging, run `python3 release.py finding-floor` on the candidate (kit repository: `canonical/release.py`); exit 1 refuses the merge (SKIP is fine).
+
 ```bash
 git merge --no-ff <candidate-sha>
 git worktree remove <path>
 git branch -d <branch>
 ```
+
+After the post-merge full suite, run `python3 release_coordinator.py --record-suite-run --duration-s <seconds> --passed` (or `--failed`; kit repository: `canonical/`); it prints a WARNING at 1.6x growth and never blocks.
 
 In `commit-backed`, first record the SPEC-291 transition artifact for the
 evidence-gated `in_progress -> done` transition about to be made — its reason
@@ -175,6 +175,8 @@ commit (writing it after would leave it untracked):
 python3 .nightshift/spec_artifacts.py record-transition <spec-file> \
   --from in_progress --to done --run-id <started-run-id>
 ```
+
+Before the done commit run `python3 .nightshift/spec_artifacts.py untracked-refs <spec-file>` (kit repository: `canonical/spec_artifacts.py`): commit every `outside` path first (exit 1 until none remain), then stage the `stage_with_done` paths in the done commit.
 
 Resolve terminal status on main. In `commit-backed`, flip to `done` and
 commit, staging both the spec file and its `reports/<spec-id>/artifacts/`
@@ -200,6 +202,19 @@ Nightshift-Parent-Tool-Calls: <N>
 Nightshift-Resolution-Kind: <verifier-dispatched|self-verified|self-verified-experimental>
 Nightshift-Experimental-Sample-For: <currently-live designating spec (e.g. canonical SPEC-223, which supersedes the original SPEC-ARGO-038-001 designation — read that spec's own file for the live target before writing this trailer) | omit unless Resolution-Kind is self-verified-experimental>
 ```
+
+Produce this block with the command below; never type it by hand:
+
+```bash
+python3 .nightshift/record_metrics.py --commit-terminal --spec-id <spec-id> --outcome done \
+  --body-file <body.txt> --path <spec-file> --path <reports/<spec-id>/artifacts dir> \
+  --verdict <reports/<spec-id>/verifier-verdict.json> \
+  --evidence-report pass --evidence-tests pass --evidence-code pass \
+  --parent-tool-calls <N|unavailable> --resolution-kind <verifier-dispatched|self-verified|self-verified-experimental> \
+  --attribution "<Co-Authored-By: ...>"
+```
+
+`--commit-terminal` (BUG-NS-KIT-139) builds the eleven required `Nightshift-*` trailers, refuses (exit 2, no commit) when an input or the verdict is missing, and commits only the `--path` list. The verifier and ACs values come from the verdict file; the other evidence values and the tally have no default. `--parent-tool-calls unavailable` is the explicit "not tallied" value (never drop the line). Optional: `--scope-check`, `--merged-revision`, `--unblock-rung`, `--experimental-sample-for` (only for `self-verified-experimental`, naming the live designating spec: read its file before writing it). For a raw `git commit`, paste the output of `record_metrics.py --render-terminal-trailers` with the same flags instead; never type the block by hand.
 
 **Lane event (SPEC-NS-KIT-108).** With this commit, emit the run's lane event: `python3 .nightshift/loop_events.py lane ... --lane full` (`--lane small` under the small-spec checklist); the arguments and counters are in `kickoff.md` § Lane telemetry. Same `<N>` as the trailer above.
 
@@ -322,3 +337,5 @@ itself returned `worker-blocked` with a `## Scope Blockers` report section
 proposed scope change on its behalf (R7); the parent is not a scope
 authority.
 
+
+Native evidence, recovery and historical-count unavailability: see `run-6.md` § Structured native failures and setup recovery (SPEC-NS-KIT-160).

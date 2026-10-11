@@ -231,6 +231,7 @@ Concrete, verifiable conditions. These become test cases.
 
 Leave this table empty unless an acceptance criterion changes after `status: ready`.
 Every amendment preserves the original criterion and records independent approval.
+The AC line itself carries the new wording (optionally with an `Amended <date>` suffix); the row preserves the old wording. A row whose new wording is missing from its AC line is reported as `ac_amendment_unapplied`.
 
 | Date | AC | Change (old → new) | Kind | Justification | Approved by |
 | --- | --- | --- | --- | --- | --- |

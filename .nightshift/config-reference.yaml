@@ -115,7 +115,7 @@ schema_version: "3.2.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.25.0"
+kit_version: "3.25.1"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -359,12 +359,67 @@ commands:
   # Required: yes (but can be "")
   # Default:  ""
   # Static analysis. Configure to fail on warnings.
+  # The pre-commit hook runs it from the install's project root (the whole tree
+  # unless the command names paths). Before BUG-NS-KIT-135 the flat lint and
+  # type_check commands had no "tool missing" outcome: any nonzero exit rejected the
+  # commit as findings. Now a command that cannot run is reported as
+  # "<GATE> TOOL UNAVAILABLE" instead of "<GATE> FAILED": exit 127 or 126, exit 78
+  # (the "unavailable" convention: a wrapper script that finds its tool missing
+  # should `exit 78`), `<python> -m <module>` whose stderr says that module is not
+  # installed, or a failing lint_probe / type_check_probe. By default an
+  # unavailable tool BLOCKS the commit (see on_tool_unavailable below); a missing
+  # tool only warns when `on_tool_unavailable: warn` is set. A real finding always
+  # blocks. `hooks/pre-commit --check-tools` lists the configured commands and
+  # whether each tool is usable (read-only).
   lint: "ruff check ."
+
+  # Type:     string (must contain the placeholder {files})
+  # Required: no
+  # Default:  absent (the hook runs `lint` unchanged)
+  # Opt-in changed-files lint for the pre-commit hook only; replaces `lint` there
+  # (`lint` stays what run_validation.py and full-tree gates run). {files} becomes the
+  # shell-quoted staged paths of this install (added, copied, modified or renamed;
+  # never deleted), relative to the project root, minus `lint_exclude`, and limited
+  # to `code_paths` when that is set. No path left = "No staged files for lint:
+  # skipped". A path starting with "-" is passed as written; put `--` before
+  # {files} if the linter needs it.
+  # lint_staged: "python3 -m ruff check {files}"
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [".nightshift/*"] (the vendored kit)
+  # Globs, relative to the project root, of staged paths `lint_staged` never lints
+  # (`*` also matches `/`). `[]` excludes nothing.
+  # lint_exclude: [".nightshift/*", "vendor/*"]
+
+  # Type:     string
+  # Required: no
+  # Default:  absent
+  # Command that exits 0 when the lint tool is usable (e.g. `python3 -m ruff --version`).
+  # Runs before `lint` / `lint_staged`; a nonzero exit marks the gate "tool unavailable"
+  # and the gate command is not run.
+  # lint_probe: "python3 -m ruff --version"
+
+  # Type:     string
+  # Required: no
+  # Default:  absent
+  # Same as lint_probe, for `type_check`.
+  # type_check_probe: "python3 -m mypy --version"
+
+  # Type:     "block" | "warn"
+  # Required: no
+  # Default:  "block"
+  # What the pre-commit hook does when a lint or type_check tool is unavailable
+  # (see `lint`). "block" rejects the commit; "warn" prints a WARNING, lets the
+  # commit through and repeats "gates not run: ..." at the end. Findings are never
+  # downgraded. Any other value is a config parse error.
+  # on_tool_unavailable: block
 
   # Type:     string
   # Required: yes for typed languages (but can be "")
   # Default:  ""
   # Type checking: tsc, mypy, pyright, etc. "" if the language is untyped.
+  # A missing type checker is reported as TYPE CHECK TOOL UNAVAILABLE (see `lint`).
   type_check: "mypy ."
 
   # Type:     string

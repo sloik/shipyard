@@ -5,6 +5,31 @@ Requires: the canonical Nightshift repository checkout, `release.py`, `release_c
 
 # Release guide
 
+### Release roles
+
+1. One owner runs every canonical-suite and formal-lane job for a release; the `--apply` preflight counts as
+   that owner's run. No second suite, and no other heavy job, runs in the same checkout while a measured suite
+   is running (issues log C8: two runs of one suite killed each other; C5: a timing test failed under load).
+2. Decide parallel runs before the release agent is launched, and give each run its own output name (C6: a
+   second formal run overwrote the first's output).
+3. Run long suites in the background and poll them, so that coordinator instructions arrive between tool
+   calls (C8: a redirect went unread while the agent sat in a foreground suite).
+4. Commit only in the named commit steps of this guide; diagnose with read-only commands (C7: a diagnostic
+   commit had to be amended into the cut).
+5. A release-spec AC that depends on the cut (fingerprint, CHANGELOG count, version) reads "the value at the
+   cut" plus the command that checks it, never a literal recorded earlier (A6: literals went stale).
+
+### Step 0: Dirty-tree audit and checkpoints
+
+1. A few days before the release run `python3 release_coordinator.py --root <root> --checkpoint-plan`
+   (read-only; prints JSON, writes nothing). Per repository it gives the dirty path count, the paths a
+   checkpoint may commit, the excluded paths (`private_artifact`, `generated_registry`, `spec_wrong_home`) and
+   the dry-run classification. Send each owner their repository's list.
+2. On release day run the dry-run first.
+3. Checkpoint only the plan's commit list per repository: `git commit -- <paths>`, through that repository's
+   own hooks. Escalation sign-off for a bulk checkpoint belongs to this step.
+4. Finish with a second dry-run.
+
 ### Step 1: Canonical preflight
 
 1. Read the canonical version, newest changelog entry, sync-managed file list and
@@ -23,6 +48,15 @@ Requires: the canonical Nightshift repository checkout, `release.py`, `release_c
    suite exactly once through the same declared dependency-capable environment.
    Never substitute ambient `python3`. Do not proceed to fleet mutation unless
    the probe and suite are green.
+
+The apply preflight's own gates, in order: finding-family floor and suite headroom on the
+last recorded run (both also reported by `--dry-run`), probe, full suite, headroom on the run
+just recorded. Do not repeat them in a release spec; `python3 release.py finding-floor` runs the floor alone.
+
+Reuse (SPEC-NS-KIT-126): instead of the full suite, the apply runs `RELEASE_MECHANICAL_TESTS` when the newest
+suite record passed, is under 24 hours old, was clean at both ends, the canonical tree is clean and every path
+changed since its commit is in `RELEASE_MECHANICAL_PATHS` (version-bearing files: version lines only). Any other
+case runs the full suite. The result shows `canonical_suite_result: reused`, `canonical_suite_reused_from` and the subset outcome.
 
 ### Step 2: Fleet dry-run
 
@@ -76,11 +110,29 @@ python3 canonical/release_coordinator.py \
   --dry-run
 ```
 
+Rehearsals and tests against a disposable root add `--isolated-root`, which scans `--root` alone; without
+it discovery also covers the real fleet scan roots. The result's `discovery` lists the roots scanned.
+
+Commit-msg hook refresh (SPEC-NS-KIT-143): before each release commit the coordinator refreshes a recognised kit
+`.git/hooks/commit-msg` (header `Nightshift Kit — Commit message hook`; never creates or overwrites a project-owned
+hook), keeping the old bytes in `commit-msg.nightshift-prev`. It first replays the repository's commits authored in the
+last 30 days (at most 500, no merges) through the new hook; if any would be newly rejected the refresh is deferred and the
+release continues. The dry-run prints the per-repository outcome (`would refresh`, `would defer (N would be rejected: ...)`,
+`project_owned`, `absent`, `unchanged`; JSON `commit_msg_hooks`). A project clears a deferral by writing `chore: mark <ID> done|blocked|in_progress`
+and terminal commits with `record_metrics.py --commit-terminal`; once the window holds no rejected message the next release
+refreshes it. `--refresh-commit-msg-hooks auto|force|never` (default `auto`) overrides: `force` refreshes despite rejects, `never` skips the step.
+
 Review exact repository/install coverage. Divergence inside the exact manifest
 payload is expected and never needs provenance reconstruction: release replaces
 those files deterministically. An unrelated pre-staged path or dirty
 project-owned migration path skips that whole repository. Do not clean, stash,
 overwrite, or stage project-owned work to make a repository eligible.
+
+Review the fleet validation table the dry-run prints (stderr; `fleet_validation` in the
+result): one row per install with its installed-profile verdict, failed invariant
+codes and duration, read-only and in process. `fixed_by_release` failures (`KIT.MARKER`,
+`KIT.PAYLOAD`, `CFG.PARSE_VERSION`) are cleared by the sync. Fix every `pre_existing` DENY
+(identity, test command, hooks) in that install before the apply.
 
 ### Step 3: Plan configuration migrations
 
@@ -149,10 +201,21 @@ verification, smoke or commit failure stops all later work immediately. Keep
 already completed local commits, leave untouched repositories on their prior
 exact release, and never roll back automatically.
 
+The exit status and the result's `outcome` field (dry-run and apply alike) tell the kinds of run apart:
+
+| Exit | `outcome` | Meaning |
+| --- | --- | --- |
+| 0 | `completed` | No skips, no failure. |
+| 3 | `completed_with_skips` | Known skips only; `failure_class` and `unexpected_failure` are null. |
+| 1 | `failed` | Any `failure_class` or `unexpected_failure`, with or without skips. |
+| 2 | (no result) | Invalid release manifest. |
+
 If a prior apply stopped after copying or staging, rerun the same exact release.
 Canonical payload replacement is idempotent, and the coordinator re-verifies
 the marker, staged allowlist, and project-owned configuration boundary before it
 commits. Never infer that an install is synchronized from a partial copy.
+
+The coordinator result lists `release_handoffs_uncommitted`: the handoff files it repinned or completed that git does not show clean. Commit them with the release report before the release closes.
 
 Write the final report and structured metrics with:
 
@@ -161,6 +224,7 @@ Write the final report and structured metrics with:
 - known versus unexpected failure classification;
 - migration worker evidence and local commit IDs;
 - canonical-suite/smoke counts, duration and observable post-commit rebuild time;
+- `post_sync_validation`: the installed-profile verdict per verified install (recorded, never a stop trigger);
 - the exact safe rerun command.
 
 The operator decides separately when/if local commits are pushed.

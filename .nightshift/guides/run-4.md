@@ -136,7 +136,7 @@ DISPATCH_PLAN=$(python3 .nightshift/verification_report.py prepare-dispatch \
 
 Instead of `--suite-command`, pass `--no-suite` after the invocation above for a docs/design spec: it emits the no-test-suite brief and never reads `commands.test` (`handoff` takes the same flag; it conflicts with `--suite-command`).
 `handoff` is also the one-call alternative that performs the worker-done head check (refusal reason `stale_head` when the branch moved) before and after brief composition.
-Repeat `--suite-command` once per exact configured suite command for the normal
+Repeat `--suite-command` once per exact approved suite command for the normal
 brief and omit it entirely for the no-test-suite brief. When no `--suite-command`
 is given, `prepare-dispatch` derives one default from the source project's own
 `commands.test` (SPEC-243-001) and fails closed to the no-test-suite brief when
@@ -154,6 +154,7 @@ preparation inputs and must not be copied into the brief. With `--spec-path`
 the AC block from it (and give it to `brief_check`), fill `{scope_summary}` from `DISPATCH_PLAN.scope_summary`, pass every
 same-spec report, attempt and event as `--report-path`, and keep briefs, scratch and
 verdict paths out of any directory holding author artifacts.
+The projection includes `## AC Amendments`. When a spec is amended on main after the candidate is built, re-run `prepare-dispatch` with `--contract-ref main` and the unchanged candidate revision (plan field `spec_contract`); do not commit main's spec onto the candidate to refresh the contract (check 6 reports `scope_self_edit`).
 
 **Trusted kit and arm isolation (SPEC-NS-KIT-002-004).** `prepare-dispatch` and
 `assemble-verdict` re-run themselves from main's copy of the kit when their own differs
@@ -176,6 +177,14 @@ needs its own real, independent run. The validator below accepts a reused sample
 baseline arm with a valid marker and a digest equal to the projected ledger, and never counts it
 toward the escalated count. `not_matched` means run the baseline for real.
 
+### Optional external asset evidence: setup and sharing
+
+Before setting up or sharing external inputs, read
+[external-evidence.md](external-evidence.md), installed as
+`.nightshift/guides/external-evidence.md` (canonical source:
+`canonical/guides/external-evidence.md`). Its setup and sharing instructions
+apply alongside the declaration contract below.
+
 **Declared external evidence (SPEC-288).** Some specs cannot be verified from the
 subject repository alone: their durable evidence — a retained benchmark run, a
 held-out reference output — lives in a *different* repository. `--spec-path` is
@@ -183,6 +192,8 @@ what lets such a spec's predeclared evidence reach its verifier, under
 containment, and it is the only route. Without `--spec-path`, `prepare-dispatch`
 behaves exactly as it did before SPEC-288, so no existing dispatch changes
 behaviour by upgrading the kit.
+
+<a id="external-evidence-declaration-contract"></a>
 
 *The declaration contract.* An external input is declared in the spec's own
 frontmatter, as one entry of `context.required_inputs`, in this exact form:
@@ -294,3 +305,33 @@ verifier so, without naming any source location: "Files under
 evidence, described in that directory's `MANIFEST.json`; they are not part of the
 repository under verification. Cite them from your assigned arm only."
 
+
+The `release_handoff` declaration is contractual projection input (BUG-NS-KIT-163).
+Both arms preserve its exact semantic value from the assigned contract; absence stays absent.
+Its declaration hash is proved alongside R/AC and scope. A withheld author-artifact name
+inside that declaration refuses preparation; it is never replaced to alter release semantics.
+Corpus identity, existence and Git-tracking checks still apply; projection grants no release.
+
+
+### Suite-sample output identity and retained native evidence (BUG-NS-KIT-181)
+
+`--suite unit` names a suite; pass command argv after `--`, for example
+`--suite unit -- python -m pytest -q tests/unit`. Never put command text in the label.
+Spec, arm and suite labels must be ASCII identifiers of 1..64 characters, starting
+with an alphanumeric and continuing with alphanumerics, underscore, hyphen or dot;
+sample numbers must be positive. Invalid names and unusable sinks refuse before launch.
+
+With `--output-dir`, suite-sample preopens a unique private `.suite-sample-*` spool
+below that directory; otherwise it uses `<metrics-dir>/suite-sample` and keeps live stdout.
+The spool's `raw.log` holds exact native bytes, including non-UTF-8 bytes. Its
+`native.jsonl` fsyncs the actual command, invocation identity and native exit before
+final output names, bounded summaries or timing metrics are presented. Missing run
+identity remains unavailable. Diagnostic text decoding never changes raw-byte evidence.
+
+A final log, process projection or summary failure reports a separate wrapper failure
+with surviving spool paths and digests. Secondary metrics failure preserves the native
+return. Native-zero storage or presentation failure returns wrapper error74; a known
+nonzero native exit remains unchanged. If all authorized storage routes fail, evidence
+is explicitly unavailable; the healthy child is drained and no native replay occurs.
+A recovered test count never supplies a missing native exit. Preserve the original
+failed wrapper and recovered native artifacts as distinct evidence.
