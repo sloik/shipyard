@@ -904,6 +904,7 @@ def _terminal_parser(commit: bool) -> argparse.ArgumentParser:
     p.add_argument("--spec-id")
     p.add_argument("--outcome", choices=["done", "blocked"])
     p.add_argument("--verdict", help="verifier-verdict.json for this spec")
+    p.add_argument("--assessment-state", type=Path, help="Closed reducer state for implementer-assessed-blocked only")
     p.add_argument("--evidence-report", choices=sorted(EVIDENCE_RESULT_ENUM))
     p.add_argument("--evidence-tests", choices=sorted(EVIDENCE_RESULT_ENUM))
     p.add_argument("--evidence-code", choices=sorted(EVIDENCE_RESULT_ENUM))
@@ -929,7 +930,7 @@ def build_terminal_trailers(args) -> list[str]:
     """Validate the explicit inputs and render the block; ValueError names what is missing."""
     missing = [
         flag for flag, value in (
-            ("--spec-id", args.spec_id), ("--outcome", args.outcome), ("--verdict", args.verdict),
+            ("--spec-id", args.spec_id), ("--outcome", args.outcome),
             ("--evidence-report", args.evidence_report), ("--evidence-tests", args.evidence_tests),
             ("--evidence-code", args.evidence_code), ("--parent-tool-calls", args.parent_tool_calls),
             ("--resolution-kind", args.resolution_kind),
@@ -945,6 +946,29 @@ def build_terminal_trailers(args) -> list[str]:
         raise ValueError("missing required input(s): " + ", ".join(missing))
     if not (args.parent_tool_calls == "unavailable" or args.parent_tool_calls.isdigit()):
         raise ValueError("--parent-tool-calls must be a count or 'unavailable'")
+    if args.resolution_kind == "implementer-assessed-blocked":
+        from verifier_feedback import feedback_state_from_dict, implementer_assessment_terminal_evidence
+        import hashlib
+
+        if args.outcome != "blocked" or args.verdict or not args.assessment_state:
+            raise ValueError("implementer-assessed-blocked requires blocked, --assessment-state and no --verdict")
+        data = args.assessment_state.read_bytes()
+        proof = implementer_assessment_terminal_evidence(feedback_state_from_dict(json.loads(data)))
+        if proof["spec_id"] != args.spec_id:
+            raise ValueError("assessment spec identity mismatch")
+        relative = args.assessment_state.resolve().relative_to(Path(args.repo).resolve()).as_posix()
+        return [*render_terminal_trailers(
+            report=args.evidence_report, tests=args.evidence_tests, code=args.evidence_code,
+            acs="unknown", verifier="absent", parent_tool_calls=args.parent_tool_calls,
+            resolution_kind=args.resolution_kind, blocker_class=args.blocker_class, blocker_scope=args.blocker_scope,
+            unblock_attempts=args.unblock_attempts, unblock_limit=args.unblock_limit,
+            scope_check=args.scope_check, unblock_rung=args.unblock_rung),
+            f"Nightshift-Evidence-Assessment: {relative}",
+            f"Nightshift-Evidence-Assessment-SHA256: {hashlib.sha256(data).hexdigest()}"]
+    if args.assessment_state:
+        raise ValueError("--assessment-state is only valid for implementer-assessed-blocked")
+    if not args.verdict:
+        raise ValueError("missing required input(s): --verdict")
     try:
         data = json.loads(Path(args.verdict).read_text())
     except (OSError, ValueError) as exc:
@@ -1374,6 +1398,11 @@ def derive_resolution(
         "later_session_required": stage == "recovery",
         "resolution_latency_s": max(0.0, (completed - started).total_seconds()),
     }
+    kind = commit_trailer(repo, evidence_commit, "Nightshift-Resolution-Kind").lower()
+    if kind == "implementer-assessed-blocked":
+        resolution.update(resolution_kind=kind, recovery_source="implementer_blocked",
+                          verifier_dispatches=0, verifier_samples=0, verified_delivery=False)
+        evidence_gate.update(verifier="absent", acs_covered="unknown")
     if evidence_source != "trailers":
         resolution["evidence_source"] = evidence_source
     if 1 <= unblock_rung <= 5:

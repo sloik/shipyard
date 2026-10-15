@@ -5,6 +5,40 @@ Requires: a ready spec in an installed project; read the parts in order: `run.md
 
 # Run guide, part 5 of 8
 
+**Independent head proof and fresh-main reuse (BUG-NS-KIT-199).** `handoff` forwards both
+ledger options through its existing gates and returns `ledger_baseline` alongside the result;
+the dispatch plan and ledger-match sidecar retain the same decision. Missing, malformed,
+mismatched, stale or partial baseline evidence requires a real baseline run.
+
+For an opted-in single full suite, `ledger_head.status: ready` binds its original input identity
+without exposing the private candidate SHA. Run the assigned independent head sample using the
+trusted helper, not the candidate's copy:
+
+```bash
+python3 <trusted-kit>/verification_report.py ledger head-run \
+  --plan <public-plan.json> --out-dir <private-native-evidence-outside-head>
+```
+
+This executes the exact declared command in the assigned head checkout and captures its native
+exit and original creation time. A direct pytest invocation receives only a JUnit output option;
+its command and test selection are retained. Other commands may write fresh JUnit to the
+`NIGHTSHIFT_LEDGER_JUNIT` output path; complete named XCTest terminal output is also supported.
+Stale JUnit is removed before execution. Missing output, ambiguous membership, skipped tests,
+unsupported/multiple commands, checkout mutation or a failed native command cannot authorize
+fresh-main reuse. Keep the native output and normal verifier sample/verdict obligations; a reuse
+record is never another independent sample and never replaces the existing head requirement.
+
+After the existing candidate merge gate accepts its plan/evidence/verdict, the parent adds
+`--head-record <native-evidence>/record.json --ledger-root <coordinator-project-root>` to that
+same `merge-gate` invocation. Only accepted, producer-bound proof is retained at
+`reports/_wip/ledger-head-<spec-id>.json` under that root. Missing/refused proof clears a stale
+head transport and records the full fresh-main fallback without waiving any merge gate.
+With `test_status_ledger.enabled`, the existing coordinator checks native proof, producer,
+admission, identity, coverage and expiry before consuming it. It records its decision under
+`reports/_wip/ledger-decision-<spec-id>.json`; matching proof yields a `reused` pending ledger
+with `reused_from` and unchanged original identity/native proof/creation time. Every doubt runs
+the normal full fresh-main validation. This does not claim installed adoption or a fleet rollout.
+
 **Declared preflight proof (SPEC-390-002).** A spec whose AC rests on an ordinary
 preflight run (for example "a preflight passes with admission `allow`") cannot let
 the verifier read that run: the retained result is ignored, untracked, and holds

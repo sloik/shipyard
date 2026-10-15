@@ -1210,3 +1210,74 @@ replay resumes matching ownership without a second successful outcome. After
 ready, admit a genuinely new worker/run from the fresh baseline and retain its
 own original receipt. The abandoned invocation, result and candidate remain
 permanently rejected.
+
+### Implementer-assessed terminal blocks (BUG-NS-KIT-173)
+
+`implementer-assessed-blocked` is a blocked-only resolution kind backed by the
+actual closed reducer state. Use `record_metrics.py --commit-terminal` with
+`--assessment-state` instead of a verdict; stage the state and lifecycle evidence.
+The normal commit hook validates state digest, original candidate and inventories.
+It cannot mark Done, claim a verifier or replace a later independent check.
+
+Pending release handoff source ranges use `release_handoff.pin_commit_range` before their normal authoring commit (SPEC-NS-KIT-192). Preserve original spellings and bind actual immutable endpoints, repository and bounded diff; unresolved legacy history stays unresolved. Checked cleanup requires main ancestry or its exact owned recovery ref to retain both endpoints, preserving uncommitted disposable handoff evidence and refusing unknown provenance. A SHA string is not a Git reachability root. The sole integration/cleanup owner and completed receipts remain unchanged.
+
+
+### Equivalent self-spec reconciliation
+
+SPEC-NS-KIT-172 adds an opt-in parent-provider capability to the existing
+`SerializedIntegrationQueue`; it is not semantic merging. Default queues retain
+strict conflict refusal. First obtain the ordinary durable held conflict under
+the original accepted immutable candidate/run. The existing single retry is the
+only mutation attempt available; no new run, rebase or candidate verification is
+manufactured to reset that budget.
+
+A trusted parent supplies `SelfSpecReconciliationAuthority(approval_path,
+approval_sha256, verification_path, verification_sha256)` through
+`selfspec_reconciliation_provider(handle)`. Both hash-pinned JSON files must be
+outside the subject/worker repositories. Candidate config, spec text, handle
+outcome and checkbox claims grant no authority. Require the original managed
+admission receipt and current terminal integrity check, accepted completion input,
+and a configured real fresh-main gate. A custom `merge_runner` is ineligible.
+
+Both parent records bind `spec_id`, original `run_id`, unique original `base`,
+`main_before`, original `candidate`, assigned repository-relative `spec_path`,
+original receipt `binding`/`receipt_sha256`, and `contract_sha256` of the narrowly
+normalized complete spec. Approval additionally requires `approved_by: human:<owner>`
+and `amendments_sha256` over the exact Scope Amendments and AC Amendments section
+bodies in that order (missing sections contribute no bytes). The parent's accepted
+independent-verifier projection additionally requires `producer: independent-verifier`,
+`independent: true`, `verdict: pass`, and sorted exact `checked_items` for every
+candidate-checked R/AC. This projection must come from original accepted independent
+evidence; the reconciler does not author acceptance or approvals.
+
+Call `queue.propose_selfspec_reconciliation(handle)` after the first held conflict
+for the deterministic proposal. Only existing identified Requirements/Acceptance
+Criteria checkbox marker bytes normalize; IDs, order, prose, whitespace, metadata,
+LE, comments, fenced examples and amendment/history bytes remain significant.
+The main/candidate normalized blobs must match exactly; candidate checked items
+must strictly extend main's checked items and all require accepted evidence.
+Only that assigned spec may conflict. The output blob is the original candidate
+blob, never edited prose or a newly ticked item.
+
+Reset the held handle's scheduler status to completed and submit it to the same
+queue API under the same run to consume its one existing retry. The queue persists
+the exact blobs, parent/receipt/authority digests, original held-event linkage and
+expected whole tree before any resolution write. It uses normal Git merge/commit
+hooks and Git's ordinary merge result for every other path. Exact two parents and
+the entire reproducible tree must match afterward. Arbitrary resolutions, additional
+conflicts, stale authority, moved tips, changed receipts or changed source refuse.
+No provider may choose a different resolution or approve another scope.
+
+The merge does not establish Done. Actual configured fresh-main validation on the
+exact resulting revision precedes ordinary terminal projection and checked cleanup.
+Failed validation follows existing checked-revert ownership rules. Hook rejection,
+partial writes, proof mismatch, concurrent user/index work or exhausted retries
+preserve resources and produce a controlled hold/failure; unowned state is never
+aborted or overwritten. A persisted owned merge commit can resume validation after
+interruption without a second merge. Before/after-write crashes otherwise converge
+only under existing exact ownership proof or stay safely held/terminally failed;
+they never reset the retry budget. Query the original StatusStore merge-attempt
+history for the append-only proof and outcomes. Durable/public proof records use
+relative paths, controlled reasons and hashes, never private spec bodies/host locators.
+A successful integration still needs its normal pending whole-kit release; no
+installed patch, extra worker, LLM conflict resolver, or file-only rollout is added.

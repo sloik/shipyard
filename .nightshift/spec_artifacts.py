@@ -1520,6 +1520,145 @@ def compose_run_state_explanation(
     return explanation
 
 
+def _ac_evidence_items(text: str) -> dict[str, str]:
+    block = re.search(r'^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)', text, re.M)
+    if block is None:
+        raise ArtifactError('acceptance criteria missing')
+    items = re.findall(r'^- \[[ x]\]\s*(AC\d+\b[^\n]*)', block.group(1), re.M)
+    result = {}
+    for item in items:
+        identity = re.match(r'AC\d+', item).group(0)
+        if identity in result:
+            raise ArtifactError('ambiguous acceptance criterion identity')
+        result[identity] = item
+    return result
+
+
+def amend_ac_evidence(spec_path: Path, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Record one explicitly approved locator-only amendment through existing indexed artifacts."""
+    import hashlib
+    import subprocess
+    import yaml
+    from datetime import date
+    import validate_specs
+    from spec_frontmatter import parse_spec_file
+
+    spec_path = Path(spec_path).resolve()
+    if not isinstance(request, Mapping):
+        raise ArtifactError('amendment request must be a mapping')
+    approval = request.get('approval')
+    if (not isinstance(approval, Mapping) or approval.get('kind') != 'explicit-user'
+            or not re.fullmatch(r'human:\s*\S[^\n|]*', str(approval.get('actor', '')))
+            or not all(isinstance(approval.get(key), str) and approval[key].strip()
+                       and not any(c in approval[key] for c in '\n\r|') for key in ('reason', 'evidence'))):
+        raise ArtifactError('genuine explicit user approval, actor, reason and provenance required')
+    try:
+        stamp = approval['date']
+        if not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', stamp):
+            raise ValueError()
+        date.fromisoformat(stamp)
+        baseline = validate_specs.ready_ac_baseline(spec_path)
+    except (KeyError, ValueError, OSError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+        raise ArtifactError('actual ready baseline and approval date required') from exc
+    if (request.get('ready_revision') != baseline['revision']
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', baseline['revision'])):
+        raise ArtifactError('pinned ready baseline does not match actual ready object')
+    parsed = parse_spec_file(spec_path)
+    spec_id = parsed.frontmatter.get('id')
+    baseline_fm = yaml.safe_load(re.match(r'\A---\r?\n(.*?)\r?\n---', baseline['text'], re.S).group(1))
+    if not isinstance(spec_id, str) or not spec_id or request.get('spec_id') != spec_id or baseline_fm.get('id') != spec_id:
+        raise ArtifactError('spec/ready baseline identity mismatch')
+    current = spec_path.read_bytes()
+    digest = hashlib.sha256(json.dumps(dict(request), sort_keys=True).encode()).hexdigest()
+    reports = reports_root_for_spec_path(spec_path)
+    state, entries, detail = _read_index_strict(reports, spec_id)
+    if state not in ('ok', 'absent'):
+        raise ArtifactError(detail)
+    if _symlinked_index_component(reports, spec_id):
+        raise ArtifactError('artifact index path is unsafe')
+    for entry in entries:
+        if entry.get('type') != 'decision':
+            continue
+        try:
+            artifact = json.loads(read_indexed_artifact(reports, spec_id, entry['path'])['content'])
+        except (ValueError, ArtifactReadError) as exc:
+            raise ArtifactError('indexed authoring history unavailable') from exc
+        amendment = artifact.get('amendment', {})
+        if isinstance(amendment, dict) and amendment.get('request_sha256') == digest:
+            if amendment.get('request') != dict(request) or amendment.get('ready_revision') != baseline['revision']:
+                raise ArtifactError('applied amendment provenance mismatch')
+            if hashlib.sha256(current).hexdigest() != amendment.get('source_after_sha256'):
+                raise ArtifactError('source drift after applied amendment')
+            return {'entry': entry, 'replayed': True, 'request_sha256': digest}
+    if hashlib.sha256(current).hexdigest() != request.get('source_sha256'):
+        raise ArtifactError('source drift before amendment')
+    ac_id = request.get('ac_id')
+    old, new = request.get('old_text'), request.get('new_text')
+    before = _ac_evidence_items(current.decode())
+    ready = _ac_evidence_items(baseline['text'])
+    if (ac_id not in ready or before.get(ac_id) != old or not isinstance(new, str)
+            or not re.match(r'^' + re.escape(str(ac_id)) + r'\b', new)
+            or any(c in str(old) + new + ready[ac_id] for c in '\n\r|')):
+        raise ArtifactError('AC identity or exact old/new wording mismatch')
+    offset = request.get('annotation_offset')
+    prior, annotation = request.get('old_annotation'), request.get('new_annotation')
+    pattern = r' ?\(evidence: ([^()\n\r]+)\)'
+    if (type(offset) is not int or not 0 <= offset <= len(old) or not isinstance(prior, str)
+            or (prior and not re.fullmatch(pattern, prior)) or not isinstance(annotation, str)
+            or not re.fullmatch(pattern, annotation) or old[offset:offset + len(prior)] != prior
+            or new != old[:offset] + annotation + old[offset + len(prior):] or new == old):
+        raise ArtifactError('not locator-only; substantive changes require existing independent AC-review authority')
+    locator = re.fullmatch(pattern, annotation).group(1)
+    relative = Path(locator)
+    project = spec_path.parent.parent if spec_path.parent.name == 'specs' else spec_path.parent
+    target = project / relative
+    if (relative.is_absolute() or '..' in relative.parts or not target.is_file()
+            or any(parent.is_symlink() for parent in (target, *target.parents))):
+        raise ArtifactError('exact evidence locator must name an existing safe project-relative file')
+    if ready[ac_id] != old and validate_specs.validate_ac_amendments(current.decode(), spec_path):
+        raise ArtifactError('prior substantive amendment must satisfy the existing approval contract first')
+    updated = re.sub(r'(?m)^(- \[[ x]\]\s*)' + re.escape(old) + r'$', lambda match: match.group(1) + new,
+                     current.decode(), count=1)
+    row = (f"| {stamp} | {ac_id} | {ready[ac_id]} → {new} | runtime-captured | {approval['reason']} | "
+           f"{approval['actor']} (explicit user approval: {approval['evidence']}) |\n")
+    table = re.search(r'^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)', updated, re.M)
+    if table:
+        insertion = table.end()
+        while insertion > table.start() and updated[insertion - 1] in '\r\n':
+            insertion -= 1
+        updated = updated[:insertion] + '\n' + row + updated[insertion:]
+    else:
+        updated += ('\n## AC Amendments\n\n| Date | AC | Change (old → new) | Kind | Justification | Reviewer |\n'
+                    '| --- | --- | --- | --- | --- | --- |\n' + row)
+    if validate_specs.validate_ac_amendments(updated, spec_path) or validate_specs.validate_ac_amendment_unapplied(updated):
+        raise ArtifactError('result rejected by existing amendment rules')
+    index = index_path(reports, spec_id)
+    index_before = index.read_bytes() if index.exists() else None
+    # All refusal checks precede artifact/spec writes; recheck the immutable baseline and current bytes.
+    if (validate_specs.ready_ac_baseline(spec_path) != baseline or spec_path.read_bytes() != current
+            or (index.read_bytes() if index.exists() else None) != index_before):
+        raise ArtifactError('concurrent baseline/source/index drift')
+    decision = lifecycle.decision_record(trigger='ac_evidence_amendment', current_state=parsed.frontmatter.get('status'),
+        candidates=[parsed.frontmatter.get('status')], reason=approval['reason'], findings=[],
+        resolution='runtime-captured', rationale='Only exact approved evidence annotation bytes change.', authority=approval['actor'])
+    entry = write_artifact(reports, spec_id, type='decision', actor=approval['actor'],
+        summary=f'{ac_id} exact evidence locator amendment', content={'decision': decision, 'amendment': {
+            'request_sha256': digest, 'request': dict(request), 'ready_revision': baseline['revision'],
+            'ready_text': ready[ac_id], 'old_text': old, 'new_text': new,
+            'source_before_sha256': hashlib.sha256(current).hexdigest(),
+            'source_after_sha256': hashlib.sha256(updated.encode()).hexdigest()}})
+    if spec_path.read_bytes() != current:
+        # Preserve the concurrent source edit and roll back only this newly created artifact/index append.
+        (reports / spec_id / entry['path']).unlink()
+        if index_before is None:
+            index.unlink()
+        else:
+            index.write_bytes(index_before)
+        raise ArtifactError('concurrent source drift; amendment artifact rolled back')
+    spec_path.write_text(updated)
+    return {'entry': entry, 'replayed': False, 'request_sha256': digest}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1573,6 +1712,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="BUG-NS-KIT-127 R3: list referenced files not tracked or staged; exit 1 when any is outside the done commit.",
     )
     untracked.add_argument("spec_file", type=Path)
+    amendment = sub.add_parser('amend-ac-evidence', help='Record an exact explicitly approved AC locator amendment')
+    amendment.add_argument('spec_file', type=Path)
+    amendment.add_argument('--request', type=Path, required=True)
     return parser
 
 
@@ -1593,6 +1735,15 @@ def main(argv: list[str] | None = None) -> int:
     ns = build_parser().parse_args(argv)
 
     from spec_frontmatter import parse_spec_file
+
+    if ns.command == 'amend-ac-evidence':
+        try:
+            result = amend_ac_evidence(ns.spec_file, json.loads(ns.request.read_text()))
+        except (ArtifactError, ValueError, OSError) as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}))
+            return 1
+        print(json.dumps({'ok': True, **result}, indent=2))
+        return 0
 
     if ns.command == "untracked-refs":
         found = untracked_references(ns.spec_file)

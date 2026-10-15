@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import yaml
 from ac_review import validate as validate_ac_review
 from loop_events import open_run_log
-from unblock_spec import AC_REVIEW_ELIGIBILITY, _attempts_dir, finalize, prepare
+from unblock_spec import AC_REVIEW_ELIGIBILITY, RETRY_CLOSED, _attempts_dir, _install_root, finalize, inspect_packet, prepare
 
 
 class LadderError(ValueError):
@@ -62,27 +62,28 @@ def _max_loosened(root: Path) -> int:
 
 
 def plan_ladder(spec_file: Path, project_root: Path, run_id: str, *,
-                from_rung: int | None = None) -> dict[str, Any]:
-    """Return the opt-in ladder plan and admission verdict; it dispatches nothing.
-
-    The admission is the ordinary controller's ``prepare``, which adopts the spec's pre-ledger attempt
-    files once and durably issues the packet (SPEC-NS-KIT-109), so a later plan on the same
-    fingerprint supersedes this packet; it changes no lifecycle state.
-    """
+                from_rung: int | None = None, dry_run: bool = False,
+                retry_override: bool = False) -> dict[str, Any]:
+    """Inspect admission first; only an admitted non-preview call issues a packet."""
     start = _start_rung(from_rung)
-    packet = prepare(spec_file, project_root, run_id, allow_escalation=True)
+    packet = inspect_packet(spec_file, project_root, run_id,
+                            retry_override=retry_override, allow_escalation=True)
+    if not packet["admitted"]:
+        authority_needed = packet["reason"] == RETRY_CLOSED
+        return {"mode": "authorization-required" if authority_needed else "ineligible",
+                "run_id": run_id, "spec_id": packet.get("spec_id", ""),
+                "from_rung": start, "admission": packet, "plan": [],
+                "terminal_state": "blocked", "human_action_needed": authority_needed,
+                "rungs": [], "next_action":
+                "parent must obtain human retry_override and use a new run identity" if authority_needed else packet["reason"]}
+    if not dry_run:
+        packet = prepare(spec_file, project_root, run_id, retry_override=retry_override, allow_escalation=True)
     if packet.get("finalize_only"):
-        # BUG-NS-KIT-109: this run's own success is on file; only finalize remains.
         return {"mode": "finalize-only", "run_id": run_id, "spec_id": packet["spec_id"],
                 "from_rung": None, "admission": packet, "plan": []}
-    return {
-        "mode": "drive to done",
-        "run_id": run_id,
-        "spec_id": packet["spec_id"],
-        "from_rung": start,
-        "admission": packet,
-        "plan": [dict(item) for item in RUNG_PLAN if item["rung"] >= start],
-    }
+    return {"mode": "drive to done", "run_id": run_id, "spec_id": packet["spec_id"],
+            "from_rung": start, "admission": packet,
+            "plan": [dict(item) for item in RUNG_PLAN if item["rung"] >= start]}
 
 
 def build_worker_brief(packet: Mapping[str, Any], *, rung: int) -> str:
@@ -158,7 +159,8 @@ def _verified_done(result: Mapping[str, Any]) -> bool:
 def drive_to_done(spec_file: Path, project_root: Path, run_id: str, *,
                   from_rung: int | None = None, dry_run: bool = False,
                   results: Mapping[int, Mapping[str, Any]] | None = None,
-                  reviewer_available: bool | None = None) -> dict[str, Any]:
+                  reviewer_available: bool | None = None,
+                  retry_override: bool = False) -> dict[str, Any]:
     """Advance sequentially through recorded rung evidence.
 
     A ``done`` return is an evidence conclusion for the parent.  This function
@@ -167,9 +169,10 @@ def drive_to_done(spec_file: Path, project_root: Path, run_id: str, *,
     ``finalize-only`` mode: when this run's own automatic ``succeeded`` attempt is
     already on file, no worker is dispatched and the ladder only finalizes it.
     """
-    root = Path(project_root).resolve()
-    summary = plan_ladder(spec_file, root, run_id, from_rung=from_rung)
-    if dry_run:
+    root = _install_root(Path(project_root).resolve()).resolve()
+    summary = plan_ladder(spec_file, project_root, run_id, from_rung=from_rung,
+                          dry_run=dry_run, retry_override=retry_override)
+    if dry_run or summary["mode"] in {"authorization-required", "ineligible"}:
         return summary
     packet = summary["admission"]
     if summary["mode"] == "finalize-only":
@@ -219,6 +222,7 @@ def drive_to_done(spec_file: Path, project_root: Path, run_id: str, *,
                 break
             if review_errors:
                 outcome = "failed"
+        rung_result = {**rung_result, "outcome": outcome}
         if outcome == "passed" and not _verified_done(rung_result):
             raise LadderError("a passed rung requires the ordinary evidence gate and fresh verifier")
         entered.append(_emit(root, packet, current, outcome, _refs(packet, rung_result)))
@@ -263,11 +267,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--to-done", action="store_true", required=True)
     parser.add_argument("--from-rung", type=int, choices=(2, 3, 4))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--retry-override", action="store_true", help="existing human retry authority; requires a new run after failure")
     parser.add_argument("--results", type=Path, help="recorded worker/verifier evidence keyed by rung")
     args = parser.parse_args(argv)
     result = drive_to_done(
         args.spec_file, args.root, args.run_id, from_rung=args.from_rung,
-        dry_run=args.dry_run, results=_load_results(args.results),
+        dry_run=args.dry_run, results=_load_results(args.results), retry_override=args.retry_override,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

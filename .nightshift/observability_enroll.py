@@ -35,6 +35,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/config.yaml", ".nightshift/STOP",
     ".nightshift/.gitignore", ".nightshift/BOOTSTRAP.md", ".nightshift/CHANGELOG.md",
     ".nightshift/README.md",
+    ".nightshift/board_performance_snapshot.py", ".nightshift/run_tooling.py",
     ".nightshift/EXTENSIONS.md", ".nightshift/GIT.md", ".nightshift/HUMAN-REVIEW.md",
     ".nightshift/LOOP-DOMAIN-MAP.md", ".nightshift/LOOP.md", ".nightshift/ORCHESTRATOR.md",
     ".nightshift/REVIEW.md", ".nightshift/SPEC-GUIDE.md", ".nightshift/Skills/nightshift/SKILL.md",
@@ -65,6 +66,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/synthesis_gate.py", ".nightshift/terminal_outcomes.py", ".nightshift/trace_export.py",
     ".nightshift/unblock_ladder.py", ".nightshift/unblock_spec.py", ".nightshift/validate_install.py",
     ".nightshift/validate_metrics.py", ".nightshift/validate_specs.py", ".nightshift/verification_report.py",
+    ".nightshift/verification_economics.py",
     ".nightshift/verifier_feedback.py", ".nightshift/vocabulary-registry.yaml", ".nightshift/vocabulary.py",
     ".nightshift/watchdog_cleanup.py", ".nightshift/worktree_janitor.py", ".nightshift/worktree_paths.py",
     ".nightshift/release-marker.json",
@@ -73,9 +75,11 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/deployment_tiers.py", ".nightshift/liveness_classifier.py",
     ".nightshift/resilience_ladder.py", ".nightshift/scope_guard.py",
     ".nightshift/spec_artifacts.py", ".nightshift/spec_promotion.py",
+    ".nightshift/spec_replacement.py",
     ".nightshift/token_usage.py",
     # SPEC-417-001: on-demand guides.
     ".nightshift/guides/board-and-api.md",
+    ".nightshift/guides/board-performance-comparisons.md",
     # SPEC-417-004: the rules guide.
     ".nightshift/guides/rules.md",
     # SPEC-417-005: command bodies moved out of SKILL.md.

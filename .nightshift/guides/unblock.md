@@ -13,34 +13,34 @@ the parent advances a sequential evidence ladder toward the ordinary fresh-main
 | Option | Meaning |
 |---|---|
 | `--to-done` | Opt into drive to done: bounded repair, work-to-done, per-AC coverage/runtime capture, gated AC review, then human authorization. |
-| `--from-rung <2-4>` | Begin drive to done at an explicitly selected rung; no prior failure is fabricated. |
-| `--dry-run` | Print the ladder plan and admission verdict without mutation, worker launch, or commit. |
+| `--from-rung <2-4>` | Begin at the selected rung; no prior failure is fabricated and this option grants no retry authority. |
+| `--dry-run` | Inspect admission without live-store, issuance, adoption, event or spec mutation. The returned preview cannot record an attempt. |
+| `--retry-override` | Use existing explicit human retry authority with a new run identity after a persisted failed/skipped attempt; durable issuance binds the override. |
 
 Drive to done calls `unblock_ladder.py`, which in turn calls `unblock_spec.py`.
-Rung 1 is the default unblock flow. A failed or skipped rung 1 enters rung 2;
+Rung 1 is the default unblock flow. Within one admitted invocation, failed or skipped rung-1 evidence enters rung 2;
 rung 2 gives an evidence-only implementer the blocker packet, prior attempts,
 and resilience ladder. Rung 3 records per-AC `covered-by` or
 `runtime-captured` evidence without changing AC text. Rung 4 calls the SPEC-260
 AC-review agent when available; until then it records `unavailable` and routes
 to rung 5. Rung 5 stops and asks the user to authorize. Every entered rung emits
-an `unblock_rung` event, and the terminal lifecycle commit records
+an `unblock_rung` event; an admission refusal enters no rung and writes no event. The terminal lifecycle commit records
 `Nightshift-Unblock-Rung: <n>`.
 
 Rung 4 dispatches the independent `nightshift-ac-reviewer` with the proposed
 per-AC changes, blocker packet, attempt history, and rung-3 evidence—not the
 implementer's narrative. It writes `reports/<SPEC>/ac-review.json`, which must
 pass `ac_review.py validate`. A veto (or invalid verdict) followed by continued
-failure routes to rung 5; the parent never loosens an AC past a veto.
+failure routes to rung 5; the parent never loosens an AC past a veto. A missing or malformed review is a failed rung even when raw pass flags are supplied, and cannot yield `done` guidance.
 
-`prepare` is the admission gate. A non-blocked, invalid, missing-evidence, stale,
-or unchanged-fingerprint spec is reported as ineligible: no worker/worktree is launched.
+Read-only inspection evaluates the existing adoption/retry rules on a disposable store snapshot. `prepare` remains the executable admission gate and revalidates before durable issuance. A non-blocked, invalid, missing-evidence, corrupt or stale spec is reported as ineligible: no worker/worktree is launched. A durably recorded failed/skipped attempt closes its fingerprint and returns `authorization-required`, including for `--from-rung 2/4`. The parent must obtain existing human `retry_override` authority and use a new run ID before another intervention. Failed evidence is preserved; same-run reuse, altered packets and repeated callbacks remain refused. An own succeeded-but-unfinalized attempt permits only finalize replay, never another repair.
 An `eligibility: skipped` packet is recorded with `record_attempt` as a
 controlled escalation; external input, credentials, product decisions,
 security/safety, destructive work, scope changes, and ambiguous causality never
 dispatch automatically.
 
 Under drive to done only, skipped rung-1 eligibility carries `escalate: true`
-and enters rung 2. Without `--to-done`, skipped eligibility ends unblock exactly
+and may enter rung 2 in that admitted invocation. A previously recorded skipped attempt still requires the explicit retry override; unsafe/external eligibility is never widened by that override. Without `--to-done`, skipped eligibility ends unblock exactly
 as before.
 
 For an eligible packet, the parent may launch exactly one isolated, bounded worker.
@@ -75,3 +75,13 @@ transport rebind. Each rung is run-id keyed and recorded as `resilience_rung`.
 When private Dropbox projection is configured, project only the hash-based run
 manifest and approved relative references. `awaiting_sync` is observable but
 does not alter the evidence gate or lifecycle result.
+
+### Replacing a settled unfinished contract
+
+Replacement is a separate administrative operation, not a recovery rung. See
+`../SPEC-GUIDE.md` § Obligation-preserving replacement plans and
+`spec_replacement.py`. Prepare may describe an active source; apply refuses
+until existing authorized settlement closes actual owned operations and indexed
+closure evidence binds the exact checkpoint. Never auto-kill a healthy attempt,
+reset budgets, rewrite completed history or promote replacement Drafts. Retain
+old attempts/branches/worktrees until existing cleanup authority applies.

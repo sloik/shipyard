@@ -246,3 +246,24 @@ Act on the JSON result:
 - **Script missing** (`.nightshift/check_followup_spec.py` not found) — record the suggestion as pending in the report; skip creation.
 
 Keep this policy here only — `board.py`'s run prompt points at this skill rather than duplicating it, so the two cannot drift.
+
+### Assessed blocks are not delivery (BUG-NS-KIT-173)
+
+Never mark Done with `implementer-assessed-blocked` or reuse its prior assessment
+as passing verifier evidence. Changed repairs require a new independent verifier
+and distinct serialized fresh-main proof. The configured outcome adapter records
+the implementer attempt and parent block separately, with no verified delivery.
+
+
+## Observational helper capture (SPEC-NS-KIT-168)
+
+At every ordinary handoff/report closure, always request newly authored helper metadata.
+Consult supported APIs, classify available helpers and hand the explicit list to the parent.
+The parent alone calls `run_tooling.capture_best_effort` (or `run_tooling.py capture`);
+capture is metadata/digests only and never delays correctness, recovery, Done or cleanup.
+Use `not_reported` without a reliable list; `none_authored` requires an explicit declaration.
+No temporary-root scan, source execution/copy, forced suite or historical census. Raw snapshots
+need separate owner approval. Review records one of generic_candidate, project_local,
+experiment, existing_supported or defect_adapter; single-context generic potential stays proposed.
+Eligibility requires hash-bound second-context evidence and owner/capability/privacy/check/scope
+fields with no material open choice. A recommendation grants no execution, installation or release.

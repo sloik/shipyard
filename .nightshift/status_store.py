@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 from contextlib import closing
@@ -23,7 +24,7 @@ from typing import Any, Callable, Iterable
 _BATCH_READ_CHUNK = 500
 
 
-_CURRENT_SCHEMA_VERSION = 5
+_CURRENT_SCHEMA_VERSION = 6
 _DEFAULT_DB_NAME = "nightshift-status.db"
 
 
@@ -428,6 +429,7 @@ class StatusStore:
             return states
         unique = list(states)
         projections = {}
+        activity_inputs = {identity: {"checkpoints": [], "events": []} for identity in unique}
         with closing(self._connect()) as conn:
             # Chunked to stay clear of SQLite's bound-parameter limit; the
             # connection is still opened exactly once.
@@ -449,7 +451,58 @@ class StatusStore:
                     states[str(row["spec_id"])] = _checkpoint_from_row(row).to_dict()
                 if include_terminal_projection:
                     projections.update(_terminal_projection_diagnostics(conn, chunk))
-        return _BoardStateBatch(states, projections) if include_terminal_projection else states
+                    for point in conn.execute(f'SELECT id,spec_id,status,created_at,run_id FROM status_checkpoints WHERE spec_id IN ({placeholders}) ORDER BY id', tuple(chunk)):
+                        activity_inputs[point['spec_id']]['checkpoints'].append({
+                            'checkpoint_id': point['id'], 'spec_id': point['spec_id'], 'status': point['status'],
+                            'created_at': point['created_at'], 'run_id': point['run_id']})
+                    for event in conn.execute(f'SELECT spec_id,payload_json FROM activity_events WHERE spec_id IN ({placeholders}) ORDER BY id', tuple(chunk)):
+                        activity_inputs[event['spec_id']]['events'].append(json.loads(event['payload_json']))
+        return _BoardStateBatch(states, projections, activity_inputs) if include_terminal_projection else states
+
+    def record_activity_event(self, *, spec_id: str, run_id: str, event_id: str, episode_id: str,
+                              category: str, kind: str, at: str, actor: str, source: str,
+                              phase: str | None = None, required_action: str | None = None,
+                              next_action: str | None = None) -> dict[str, Any]:
+        """Append a closed metadata boundary; never change status or store discussion content."""
+        from loop_observability import ACTIVITY_CATEGORIES, _activity_epoch
+        data = dict(spec_id=spec_id, run_id=run_id, event_id=event_id, episode_id=episode_id,
+                    category=category, kind=kind, at=at, actor=actor, source=source)
+        for key, value in dict(phase=phase, required_action=required_action, next_action=next_action).items():
+            if value is not None:
+                data[key] = value
+        if any(not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', value)
+               for key, value in data.items() if key != 'at') or _activity_epoch(at) is None:
+            raise ValueError('activity requires bounded identity codes and an explicit timezone timestamp')
+        allowed = {'question', 'answer', 'takeover'} if category == 'discussion' else {'start', 'end'}
+        if category not in (*ACTIVITY_CATEGORIES, 'discussion') or kind not in allowed:
+            raise ValueError('unknown activity boundary')
+        if (category == 'waiting' and kind == 'start' or category == 'discussion' and kind == 'question') and not required_action:
+            raise ValueError('human action code required for explicit waiting')
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute('BEGIN IMMEDIATE')
+                rows = conn.execute('SELECT payload_json FROM activity_events WHERE spec_id=? AND run_id=? AND (event_id=? OR episode_id=?)',
+                                    (spec_id, run_id, event_id, episode_id)).fetchall()
+                for row in rows:
+                    previous = json.loads(row['payload_json'])
+                    if previous['event_id'] == event_id:
+                        if previous != data:
+                            raise ValueError('activity event identity conflict')
+                        return previous
+                    if {k: v for k, v in previous.items() if k != 'event_id'} == {k: v for k, v in data.items() if k != 'event_id'}:
+                        return previous
+                    if previous['category'] != category:
+                        raise ValueError('episode category identity conflict')
+                    if category != 'discussion' and previous['kind'] == kind:
+                        raise ValueError('episode boundary identity conflict')
+                conn.execute('INSERT INTO activity_events (spec_id,run_id,event_id,episode_id,created_at,payload_json) VALUES (?,?,?,?,?,?)',
+                             (spec_id, run_id, event_id, episode_id, at, json.dumps(data, sort_keys=True)))
+        return data
+
+    def get_activity_events(self, spec_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            return [json.loads(row['payload_json']) for row in conn.execute(
+                'SELECT payload_json FROM activity_events WHERE spec_id=? ORDER BY id', (spec_id,))]
 
     def get_board_states(self, spec_ids: Iterable[str]) -> dict:
         """Read status and projection diagnostics over the same bounded connection."""
@@ -676,6 +729,35 @@ class StatusStore:
             )
         ):
             raise ValueError("merge attempt evidence is incomplete or invalid")
+        proof = payload.get("selfspec_reconciliation")
+        if proof is not None:
+            fields = {"schema_version", "spec_id", "run_id", "base", "main_before", "candidate", "spec_path",
+                      "binding", "receipt_sha256", "contract_sha256", "held_event_id", "base_blob", "main_blob",
+                      "candidate_blob", "resolution_blob", "mode", "expected_tree", "conflict_files",
+                      "approval_sha256", "verification_sha256", "checked_items"}
+            def hex_value(value, length):
+                return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value)
+            if (not isinstance(proof, dict) or set(proof) != fields or type(proof.get("schema_version")) is not int or proof.get("schema_version") != 1
+                    or proof.get("spec_id") != spec_id or proof.get("run_id") != run_id
+                    or proof.get("main_before") != payload["main_before"]
+                    or proof.get("candidate") != payload["candidate_revision"] or payload["attempt_number"] != 2
+                    or proof.get("resolution_blob") != proof.get("candidate_blob")
+                    or proof.get("mode") not in {"100644", "100755"}
+                    or not is_canonical_repository_relative_path(proof.get("spec_path"))
+                    or proof.get("conflict_files") != [proof["spec_path"]]
+                    or type(proof.get("held_event_id")) is not int or proof["held_event_id"] < 1
+                    or any(not hex_value(proof.get(key), 40) for key in
+                           ("base", "main_before", "candidate", "base_blob", "main_blob", "candidate_blob", "resolution_blob", "expected_tree"))
+                    or any(not hex_value(proof.get(key), 64) for key in
+                           ("receipt_sha256", "contract_sha256", "approval_sha256", "verification_sha256"))
+                    or not isinstance(proof.get("binding"), dict) or set(proof["binding"]) !=
+                       {"git_common_dir_sha256", "worktree_sha256", "install_relative_sha256"}
+                    or any(not hex_value(value, 64) for value in proof["binding"].values())
+                    or not isinstance(proof.get("checked_items"), list) or not proof["checked_items"]
+                    or any(not isinstance(item, str) or not re.fullmatch(r"(?:R|AC)[1-9][0-9]*", item)
+                           for item in proof["checked_items"])
+                    or proof["checked_items"] != sorted(set(proof["checked_items"]))):
+                raise ValueError("self-spec reconciliation proof is malformed")
         created_at = _utc_now()
         with closing(self._connect()) as conn:
             with conn:
@@ -690,6 +772,14 @@ class StatusStore:
                     row for row in prior
                     if _json_loads(row["payload_json"]).get("outcome") == "started"
                 ]
+                if outcome == "started" and proof is not None:
+                    anchor = next((row for row in prior if int(row["id"]) == proof["held_event_id"]), None)
+                    anchor_payload = _json_loads(anchor["payload_json"]) if anchor is not None else {}
+                    if (anchor_payload.get("outcome") != "conflict" or anchor_payload.get("attempt_number") != 1
+                            or anchor_payload.get("main_before") != payload["main_before"]
+                            or anchor_payload.get("candidate_revision") != payload["candidate_revision"]
+                            or anchor_payload.get("conflict_files") != proof["conflict_files"]):
+                        raise ValueError("self-spec proof lacks its original held conflict")
                 if outcome == "started":
                     if payload["attempt_number"] != len(starts) + 1 or (
                         prior and _json_loads(prior[-1]["payload_json"]).get("outcome")
@@ -709,7 +799,7 @@ class StatusStore:
                     if correcting_false_success:
                         matching_fields = (
                             "main_before", "candidate_revision", "observed_files",
-                            "declared_surfaces", "attempt_number",
+                            "declared_surfaces", "attempt_number", "selfspec_reconciliation",
                         )
                         if any(
                             payload.get(field) != started_payload.get(field)
@@ -725,7 +815,7 @@ class StatusStore:
                             payload.get(field) != started_payload.get(field)
                             for field in (
                                 "main_before", "candidate_revision", "observed_files",
-                                "declared_surfaces", "attempt_number",
+                                "declared_surfaces", "attempt_number", "selfspec_reconciliation",
                             )
                         )
                     ):
@@ -1387,6 +1477,8 @@ class StatusStore:
                 version = 4
             if version < 5:
                 _migrate_v4_to_v5(conn)
+            if version < 6:
+                _migrate_v5_to_v6(conn)
 
 
 def _schema_version(conn: sqlite3.Connection) -> int:
@@ -1520,6 +1612,21 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             ("schema_version", "5"),
         )
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS activity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                spec_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                event_id TEXT NOT NULL, episode_id TEXT NOT NULL,
+                created_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+                UNIQUE(spec_id, run_id, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_events_spec_run ON activity_events(spec_id,run_id,id);
+        """)
+        conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version','6')")
 
 
 # ---------------------------------------------------------------------------
@@ -1692,6 +1799,7 @@ _MIGRATION_SPEC_ID_TABLES = (
     "cleanup_events",
     "terminal_projection_events",
     "merge_attempt_events",
+    "activity_events",
 )
 
 
@@ -1984,6 +2092,7 @@ def read_terminal_projection_diagnostics_readonly(db_path: Path, spec_ids: list[
 
 
 class _BoardStateBatch(dict):
-    def __init__(self, states, projections):
+    def __init__(self, states, projections, activity_inputs=None):
         super().__init__(states)
         self.terminal_projections = projections
+        self.activity_inputs = activity_inputs or {}

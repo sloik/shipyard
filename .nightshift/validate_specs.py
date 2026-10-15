@@ -279,24 +279,46 @@ def validate_scope_amendments(content: str) -> list[str]:
     return errors
 
 
+def ready_ac_baseline(spec_file: Path) -> dict[str, str]:
+    """Resolve the actual ready object, including a transition which removed ready."""
+    root = Path(subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=spec_file.parent.parent,
+                               text=True, capture_output=True, check=True).stdout.strip())
+    relative = spec_file.resolve().relative_to(root).as_posix()
+    rows = subprocess.run(['git', 'log', '--max-count=1', '--full-history', '-m', '-G', r'^status: ready$', '--format=%H %P', '--', relative],
+                          cwd=root, text=True, capture_output=True, check=True).stdout.splitlines()
+    if not rows:
+        raise ValueError('ready baseline missing')
+    identities = rows[0].split()
+    def read(revision):
+        result = subprocess.run(['git', 'show', f'{revision}:{relative}'], cwd=root, text=True, capture_output=True)
+        if result.returncode:
+            return None
+        block = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', result.stdout, re.S)
+        if block is None:
+            return None
+        parsed = yaml.safe_load(block.group(1))
+        return result.stdout if isinstance(parsed, dict) and parsed.get('status') == 'ready' else None
+    current = read(identities[0])
+    if current is not None:
+        return {'revision': identities[0], 'text': current}
+    parents = [(revision, read(revision)) for revision in identities[1:]]
+    ready = [(revision, text) for revision, text in parents if text is not None]
+    if len(ready) != 1:
+        raise ValueError('ready baseline missing or ambiguous')
+    return {'revision': ready[0][0], 'text': ready[0][1]}
+
+
 def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
-    """Detect changed AC text against the last ready revision, when available."""
+    """Detect changed AC text against the actual last ready object, when available."""
     try:
-        root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=spec_file.parent.parent, text=True, capture_output=True, check=True).stdout.strip())
-        relative = spec_file.resolve().relative_to(root)
-        prior = subprocess.run(["git", "log", "-G", r"^status: ready$", "--format=%H", "--", str(relative)], cwd=root, text=True, capture_output=True, check=True).stdout.splitlines()
-        if not prior:
-            return []
-        old = subprocess.run(["git", "show", f"{prior[0]}:{relative}"], cwd=root, text=True, capture_output=True)
-        if old.returncode:
-            return []
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return []
+        baseline = ready_ac_baseline(spec_file)
+    except (OSError, subprocess.SubprocessError, ValueError, yaml.YAMLError):
+        return []  # Existing validator's history-unavailable policy remains unchanged.
     def acs(text: str) -> dict[str, str]:
         block = re.search(r"^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)", text, re.MULTILINE)
         items = re.findall(r"^- \[[ x]\]\s*(AC\d+[^\n]*)", block.group(1), re.MULTILINE) if block else []
         return {re.match(r"AC\d+", item).group(0): item for item in items}
-    current, previous = acs(content), acs(old.stdout)
+    current, previous = acs(content), acs(baseline["text"])
     deleted = sorted(set(previous) - set(current))
     changed = [key for key in sorted(set(previous) & set(current)) if previous[key] != current[key]]
     amendment = re.search(r"^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
@@ -2298,6 +2320,8 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     errors.extend(validate_reuse_gate(body))
     errors.extend(validate_ac_amendments(content, spec_file))
     errors.extend(validate_ac_amendment_unapplied(content))
+    from verification_report import required_external_input_findings
+    errors.extend(required_external_input_findings(fm))
     errors.extend(validate_scope(fm))
     errors.extend(validate_scope_amendments(body))
     errors.extend(validate_resolved_blocker_fields(fm))

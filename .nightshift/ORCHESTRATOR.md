@@ -585,8 +585,10 @@ the broker leases declared `touches:` plus configured release hotspots, queues
 an overlap rather than racing it, and checks main is clean and index-safe before
 each integration. A dirty main is recorded as `main_dirty_external` without
 stashing, staging, or changing user files. CHANGELOG/version/release-handoff
-surfaces are parent-owned: workers provide relative-path intents, never direct
-edits. A rebase conflict receives one bounded packet containing only conflict
+surfaces and their manifest reseal are parent-owned on broker-owned routes: workers
+provide relative-path intents, never direct edits or reseals. Scope permission is not
+operation ownership; other routes require an explicit route brief under existing
+authority. Missing or conflicting ownership returns a bounded issue to the parent. A rebase conflict receives one bounded packet containing only conflict
 paths and refs; its terminal result is durable and never left in progress.
 
 **Ledger reuse (SPEC-NS-KIT-002-002).** With `test_status_ledger.enabled`, `prepare-dispatch --ledger
@@ -793,9 +795,13 @@ if spec.type == "main":
     3. Read execution-plan.json
     4. Set main spec status: in_progress (update file, commit)
     5. Add children to task_queue in execution_order
-    6. Process each child as a normal spec (§3)
+    6. Process each admissible child as a normal spec (§3), under the existing frontier
+       Parent grouping creates no hard dependency; only declared dependencies gate children
+       Keep default sequential behavior and existing overlap/limit controls under the same sole coordinator
 
-    When last child completes successfully:
+    When all declared child obligations are satisfied:
+        Check explicit parent-level obligations before the integration rollup below
+        Child Done labels alone cannot close unfinished parent integration/AC obligations
         changed_files = union(child.files_changed for child in completed_children)
         related_stacks = []
 
@@ -828,11 +834,16 @@ if spec.type == "main":
                 Write reports/_wip/integration-failure-<SPEC-ID>-<timestamp>.md
                 Record report entry: integration_gate: failed
                 Leave main spec as in_progress
-                STOP for human review
+                Retain the failed parent obligation and any required human decision
+                Settle the failed merge under GIT.md before resuming integration into safe MAIN
+                Continue admissible independent frontier work under the same sole coordinator
 
     If any child fails:
-        Log failure, leave main spec as in_progress
-        Human must decide next step
+        Log the failed child, retain its work/evidence, leave parent completion unresolved
+        Hold only its transitive descendants; retain any required human decision for the failed obligation
+        Settle any failed merge under GIT.md; unsafe MAIN or unknown ownership holds integration
+        Once safe MAIN and ownership are restored, continue admissible independent frontier work
+        Keep existing overlap/limit controls and default sequential behavior under the same sole coordinator
 ```
 
 Main specs are containers. They describe WHAT a feature achieves but are never executed as code tasks. Their children are the executable units.
@@ -1643,3 +1654,56 @@ controller recovery alone reaches ready. Preserve old evidence and candidate;
 never accept, merge, complete or clean the old run. A new run requires its own
 original admission. Ordinary installed, authoring, expiry and parallel callback
 gates remain strict.
+
+### Source-tagged pre-verifier blocks (BUG-NS-KIT-173)
+
+A validated implementer-blocked reducer terminal can use `implementer-assessed-blocked`
+with its retained closed state, original authority/candidate and one keyed parent
+effect. This records zero verifier activity and a parent block, never delivery.
+Missing/unvalidated diagnosis, actual verifier dispatch, or delivery acceptance
+cannot use this kind. Persist complete block reason, reconsider condition and proof
+through the existing single-owner lifecycle path; changed repair still rejoins new
+independent verification and serialized fresh-main validation.
+
+### Pre-dispatch implementer assessment terminal kind (BUG-NS-KIT-173)
+
+A validated implementer-blocked assessment that ends before verifier dispatch uses
+`implementer-assessed-blocked`, only for a parent Blocked resolution. Serialize
+the actual reducer state with `feedback_state_record`; retain original authority,
+candidate branch/worktree references, diagnosis, inventories and keyed effects.
+Use `--assessment-state <repo-relative-state.json>` instead of `--verdict` with
+`record_metrics.py --commit-terminal --outcome blocked`. The normal hook checks
+the staged state digest, exact preserved candidate and inventory; missing or
+changed proof refuses. This does not accept delivery or substitute for a verifier.
+
+### Source-tagged assessed block (BUG-NS-KIT-173)
+
+The normal verification/delivery resolution kinds remain unchanged. A
+separate pre-dispatch implementer assessment may use `implementer-assessed-blocked`
+only for Blocked, with closed reducer proof, explicit reason, reconsider condition
+and original candidate retained. The renderer requires `--assessment-state` and
+no `--verdict`; it emits verifier `absent`, AC coverage `unknown`, and exact staged
+state reference/digest trailers. Zero verifier actors, dispatches and samples are
+recorded when none occurred. Worker prose or absent verdict alone is insufficient.
+Callback loss, reconnect and repeated keyed events reuse one terminal effect;
+never replace original receipts or renew allowances. Actual verifier dispatch or
+launch rejection remains `verifier-dispatched`; plain new `self-verified` refuses
+and experimental self-verification still requires prior designation.
+
+## Activity durations and human discussion boundaries (SPEC-NS-KIT-156)
+
+The board shows the known subtotal of all recorded in-progress intervals, independently of activity categories. Checkpoint timestamps are the only lifecycle timing source; missing historical boundaries remain unknown. Recorded reasoning, human work, tool, tests, scripts and Waiting durations may overlap. Union coverage determines unclassified time; never sum category durations to claim total work. Unclosed execution boundaries are unreliable and stay unclassified. Silence, commits and file mtimes establish neither work nor Waiting nor liveness; heartbeat remains the sole liveness signal.
+
+Parents use `StatusStore.record_activity_event(spec_id=..., run_id=..., event_id=..., episode_id=..., category=..., kind=..., at=..., actor=..., source=...)` for reliable explicit boundaries. IDs/actor/source/phase/action fields are bounded identity codes; `at` is timezone-qualified ISO time. Do not store prompts, raw commands, questions or human content. Generic categories use `start`/`end`; only explicit human-action `waiting` starts may remain open through observation. Supply `required_action` and optionally `phase`/`next_action` codes. Stable event/episode identities deduplicate restarts and refuse conflicting replay. These events never change lifecycle or merge ownership.
+
+A `discussion` episode uses `question`, `answer` and final `takeover` events. Intermediate questions/answers stay in one episode. Waiting spans only outstanding human action, ending at an answer and reopening for another question; the discussion remains open until explicit final agent takeover, including answer-to-takeover delay. An unanswered question remains waiting; an answered but not resumed episode remains an involvement estimate with no inferred outstanding human action. The whole discussion is approximate human involvement, not continuous active human effort. Preserve answer arrivals and takeover separately.
+
+Only the scoped coordinator's own validation commands automatically record tests/scripts/tool boundaries. Their acceptance and output remain authoritative; unavailable telemetry leaves gaps. Reasoning and human work require reliable explicit parent boundaries. Unsupported harness activity stays unclassified; no automatic cross-harness capture or historical backfill is claimed. Card and detail consume the same projection, display phase/actor/action/next action and quote the existing heartbeat classifier separately. Card heartbeat metadata is available for a durable timing stream; legacy unbound lists retain unknown timing/heartbeat coverage and detail uses its existing bounded live heartbeat read.
+
+## Verification environment setup (SPEC-NS-KIT-157)
+
+`prepare-dispatch`, the parent handoff/brief gate, `suite-sample` and operational expected-fix sampling consume the shared `preflight.suite_environment_preflight` contract. It is setup eligibility, never a suite sample or AC proof. The private native receipt binds arm revision/root, exact command/config, resolved executable/interpreter, relevant environment, dependency runtime, cache/output capabilities and checker bytes. Public plans expose controlled reasons/digests only; private containment evidence binds the plan's eligibility so a forged public pass cannot bypass a setup refusal. Historical completed receipts retain their existing contract.
+
+The bounded POSIX macOS/Linux inventory resolves the actual Python executable or Python entrypoint and imports explicitly declared top-level runtime modules under that interpreter, with isolated imports and bytecode writes disabled. It checks existing cache read/write/traversal and creates/removes disposable output through the runtime. The canonical uv dependency inventory is fastapi/httpx/playwright/pytest/uvicorn/xdist/yaml. The probe never calls uv to install, download or synchronize an environment, never chmods or repairs caches, and never runs application tests. An existing explicitly active no-sync uv runtime can be checked; ephemeral `--with` resolution, unknown runners/platforms or an unavailable intended interpreter are reported unavailable. Prepare the exact runtime through the normal pre-run setup boundary outside this read-only probe; never substitute a global interpreter to manufacture eligibility.
+
+Use the existing configured helper/test timeout (`commands.test_timeout_s` authority), not a new universal budget. A timed-out probe kills its owned process group and retains native invocation/exit/timeout evidence. An unchanged retained failure may be returned with `reused_refusal`; do not automatically retry an unchanged prerequisite. Repair the recorded prerequisite through the normal owner setup/recovery route and recheck changed bindings at actual launch. Parent/brief refusal happens before verifier checkpoints; sample setup gaps record no completed samples and do not cause default extra sampling. No lifecycle transition or admission receipt regeneration is authorized by a setup result. Normal sampling, isolation, leases, final native evidence, serial integration and fresh-main gates remain unchanged.

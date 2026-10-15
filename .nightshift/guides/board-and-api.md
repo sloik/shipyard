@@ -337,15 +337,23 @@ why a card did not move: `board_ctl.py board-doctor`, then `show <id>`.
 
 ### Completion warnings and release delivery
 
-Done uses validator severity: only `WARNING: ` diagnostics
-are advisory. A valid handoff pending coordinator re-pin permits Done and remains pending. The status API returns `warnings`, displayed by drag and status dropdown controls. Blocking handoff findings return HTTP 400 with separate
-`detail`, `errors` and `warnings`. Malformed manifests and missing or invalid
-required handoffs refuse before the durable checkpoint.
-
-Done records implementation evidence, not a shipped release. Only the whole-kit
-release flow can re-pin and deliver the handoff. Installed projects without
-canonical release bookkeeping retain the BUG-337 exemption. The board/CLI gate shares the rule; `board_ctl transition` still refuses Done and moves
-into or out of `in_progress`: parent and verifier own these decisions.
-Persistence failure after the durable checkpoint retains an explicit recovery
-diagnostic; reconcile the artifact/file and retry through the supported writer,
+Only `WARNING: ` is advisory. Valid pending re-pin permits Done, not delivery.
+API warnings reach drag/dropdown; 400: detail/errors/warnings.
+Invalid manifest/handoff blocks checkpoint. Whole-kit release
+re-pins/delivers; BUG-337 exempts installs without bookkeeping. Board/CLI share
+gate; `board_ctl transition` refuses Done/in_progress (parent/verifier).
+Persistence failure: reconcile recovery artifact/file, retry supported writer;
 never edit state manually.
+
+Live/export cards: ≤2 title lines, ≤1 activity line; wait/incomplete flags.
+Unknown duration; no activity: no row. Hover/focus: full title;
+click/Enter/Space: full activity.
+
+Replacement: see `../SPEC-GUIDE.md` (SPEC-NS-KIT-184).
+
+
+Graph **Load diagnostics**: invocation→first draw+next frame; fetch/decode,
+preparation/paint. Diagnostic budget: 2,000ms; warn above it; aggregate p95 needs
+five successes. Exclude hidden windows; errors/cancellations separate.
+128 successes/key reset on process restart; server time separate.
+Exports: local timing; server aggregates unavailable; no POST.

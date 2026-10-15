@@ -38,6 +38,7 @@ if v["verdict"] not in ("pass","fail","disputes_premise"): die("verdict not in e
 _cx = v["contamination"]  # SPEC-NS-KIT-002-005 R2: null, or closed {class, timing} exposure object(s)
 for _c in (_cx if isinstance(_cx, list) else [] if _cx is None else [_cx]):
     if not (isinstance(_c, dict) and _c.get("class") in ("spec_bookkeeping","author_artifact_name","required_deliverable","author_conclusion") and _c.get("timing") in ("before_derivation","after_derivation")): die("contamination must be null or {class, timing} exposure objects")
+    if set(_c)-{"class","timing","detail"} or not isinstance(_c.get("detail",""),str): die("contamination keys/detail")
 
 # R5 — disputes_premise must carry its evidence, or it is just an opinion.
 # R2 (SPEC-ARGO-049) — and must state explicitly whether the dispute names a

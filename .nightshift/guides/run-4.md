@@ -71,6 +71,11 @@ expected to come back `unverifiable` with reason "cannot independently re-execut
 mutation under worktree isolation" (see the matching Rule in both brief templates below, and the
 BUG-021 worked example after them).
 
+Classify scope with the assigned head arm as project root and its matching spec/kit.
+The standalone repository supplies exact Git inventory; it is not the classification root.
+Never substitute another arm, kit or spec.
+Classify scope against the assigned head arm project root and its corresponding spec/kit; keep container-level Git change paths exact.
+
 **`{scope_summary}` (R5).** Read the spec's `scope:` from the spec file **on the
 configured main branch** (`scope_guard.scope_from_main`), never from the worker
 branch. When `scope.write` is empty or `scope:` is absent, render the literal text
@@ -168,7 +173,7 @@ is refused (`arm_device_overlap`), arms on different runtimes (or one unlike an 
 runtime) are `surface_env_gap`.
 
 **Reused baseline (SPEC-NS-KIT-002-002).** Add `--ledger <ledger.json> --ledger-identity-file
-<identity.json>` to `prepare-dispatch` when the project keeps a main test-status ledger. If the
+<identity.json>` to `handoff` (or `prepare-dispatch`) when the project keeps a main test-status ledger. If the
 plan carries `ledger_baseline.status: matched`, the verifier may record the baseline arm as one
 sample `{"executed": true, "reused": true, "ledger_digest": "<ledger_baseline.record_digest>",
 "failing": [<the ledger's failing names>], "passed": N, "failed": M}` instead of running it
@@ -176,6 +181,10 @@ sample `{"executed": true, "reused": true, "ledger_digest": "<ledger_baseline.re
 needs its own real, independent run. The validator below accepts a reused sample only on the
 baseline arm with a valid marker and a digest equal to the projected ledger, and never counts it
 toward the escalated count. `not_matched` means run the baseline for real.
+
+
+For independent head capture and accepted proof transport, read [run-5.md](run-5.md),
+section **Independent head proof and fresh-main reuse**, before executing the head sample.
 
 ### Optional external asset evidence: setup and sharing
 
@@ -335,3 +344,12 @@ nonzero native exit remains unchanged. If all authorized storage routes fail, ev
 is explicitly unavailable; the healthy child is drained and no native replay occurs.
 A recovered test count never supplies a missing native exit. Preserve the original
 failed wrapper and recovered native artifacts as distinct evidence.
+
+Before suite dispatch, consume the shared setup eligibility in the plan; see ORCHESTRATOR.md § Verification environment setup (SPEC-NS-KIT-157). Setup is never a test sample.
+
+Before implementation, normal instruction apply/coordinator admission checks trusted external inputs (SPEC-NS-KIT-175); follow SPEC-GUIDE.md § Required external input readiness. Exit0 alone is not eligibility; repair setup before a new run, never replace its receipt.
+
+SPEC209 observations are advisory. Use throughput-report with --delivery-sources
+for declared receipt joins; unknown populations stay unknown. Restoration,
+integration, projection and release are distinct. Preserve required gates and
+original native proof; see metrics-schema.md for schema and optional study.

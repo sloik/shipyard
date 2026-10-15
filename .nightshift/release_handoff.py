@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
@@ -406,6 +407,8 @@ def build_delivery_receipt(
         # SPEC-NS-KIT-126 R3: a reuse names its source record and subset outcome.
         suite_receipt["reused_from"] = release_result.get("canonical_suite_reused_from")
         suite_receipt["subset_result"] = release_result.get("canonical_suite_subset_result")
+    if suite_receipt["result"] == "repair-composed":
+        suite_receipt["composition"] = release_result.get("canonical_suite_composition")
     receipt = {
         "schema_version": DELIVERY_RECEIPT_SCHEMA_VERSION,
         "producer": "release_coordinator",
@@ -501,6 +504,17 @@ def validate_artifact(
         or not artifact["canonical_commit_range"]
     ):
         errors.append("release handoff requires canonical_commit_range")
+    provenance = artifact.get('range_provenance')
+    if provenance is not None:
+        if not isinstance(provenance, Mapping) or provenance.get('status') not in {'bound', 'unresolved'}:
+            errors.append('release handoff range provenance is invalid')
+        elif provenance['status'] == 'bound':
+            if (not all(isinstance(provenance.get(k), str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', provenance[k]) for k in ('base', 'end'))
+                    or artifact.get('canonical_commit_range') != provenance.get('base', '') + '..' + provenance.get('end', '')
+                    or not re.fullmatch(r'[0-9a-f]{64}', str(provenance.get('repository_identity', '')))
+                    or not isinstance(provenance.get('changed_paths'), list)
+                    or not provenance.get('original_range')):
+                errors.append('release handoff bound range identity is invalid')
     if (
         not isinstance(artifact.get("changelog_entry"), str)
         or not artifact["changelog_entry"]
@@ -524,10 +538,226 @@ def validate_artifact(
     return errors
 
 
-def _suite_receipt_accepted(suite: Mapping) -> bool:
+REPAIR_READER = "tests/test_spec_229_006_live_e2e.py"
+REPAIR_RECORD = "tests/fixtures/spec-229-006/le2-installed-allow.json"
+REPAIR_FAILED_TEST = REPAIR_READER + "::test_ac1_le2_real_install_reaches_allow_in_installed_profile"
+
+
+def _repair_ref(canonical: Path, reference: Mapping) -> tuple[Path, bytes]:
+    if not isinstance(reference, Mapping) or set(reference) != {"path", "sha256"}:
+        raise ValueError("repair reference schema")
+    relative = reference["path"]
+    if not isinstance(relative, str) or not relative.startswith("reports/_wip/"):
+        raise ValueError("repair evidence must remain in private reports")
+    path = canonical / relative
+    if (Path(relative).is_absolute() or ".." in Path(relative).parts
+            or any(parent.is_symlink() for parent in (path, *path.parents))
+            or not path.resolve().is_relative_to(canonical.resolve())):
+        raise ValueError("repair reference escapes canonical")
+    body = path.read_bytes()
+    if hashlib.sha256(body).hexdigest() != reference["sha256"]:
+        raise ValueError("repair reference changed")
+    return path, body
+
+
+def _repair_native_inventory(record: Mapping, record_path: Path) -> dict[str, str]:
+    """Reconcile complete native collection/events with every JUnit case."""
+    import xml.etree.ElementTree as ET
+    proof = record["native_proof"]
+    obs = proof["observation"]
+    if (proof.get("schema_version") != 1 or proof.get("record_mode") is not False
+            or proof.get("complete_selection") is not True
+            or obs.get("schema_version") != "1.0.0" or obs.get("completed") is not True
+            or obs.get("errors") != [] or type(proof.get("native_exit_code")) is not int
+            or obs.get("session_exitstatus") != proof["native_exit_code"]):
+        raise ValueError("incomplete native repair proof")
+    groups, workers = obs["collections"], obs["workers"]
+    if not isinstance(groups, dict) or not groups or not isinstance(workers, list):
+        raise ValueError("missing complete collection")
+    if set(groups) != (set(workers) if workers else {"serial"}) or len(set(workers)) != len(workers):
+        raise ValueError("incomplete worker collection")
+    catalog = next(iter(groups.values()))
+    if (not isinstance(catalog, list) or not catalog or len(set(catalog)) != len(catalog)
+            or any(not isinstance(node, str) or "::" not in node for node in catalog)
+            or any(not isinstance(ids, list) or len(ids) != len(catalog) or set(ids) != set(catalog)
+                   for ids in groups.values())):
+        raise ValueError("inconsistent complete collection")
+    phases = {node: {} for node in catalog}
+    for event in obs["reports"]:
+        if (not isinstance(event, dict) or set(event) != {"nodeid", "when", "outcome", "wasxfail", "rerun"}
+                or event["nodeid"] not in phases or event["when"] not in {"setup", "call", "teardown"}
+                or event["outcome"] not in {"passed", "failed", "skipped"}
+                or type(event["wasxfail"]) is not bool or event["rerun"] is not False):
+            raise ValueError("unattributed or unsupported native event")
+        bucket = phases[event["nodeid"]]
+        if event["when"] in bucket:
+            raise ValueError("duplicate native phase")
+        bucket[event["when"]] = event
+    outcomes = {}
+    for node, events in phases.items():
+        if ("setup" not in events or "teardown" not in events
+                or events["teardown"]["outcome"] != "passed"):
+            raise ValueError("incomplete terminal native phases")
+        setup = events["setup"]["outcome"]
+        if setup == "passed":
+            if set(events) != {"setup", "call", "teardown"}:
+                raise ValueError("missing call outcome")
+            call = events["call"]
+            outcomes[node] = ("XFAIL" if call["wasxfail"] and call["outcome"] == "skipped"
+                              else "XPASS" if call["wasxfail"] else
+                              {"passed": "PASS", "failed": "FAIL", "skipped": "SKIP"}[call["outcome"]])
+        elif setup == "skipped" and set(events) == {"setup", "teardown"}:
+            outcomes[node] = "XFAIL" if events["setup"]["wasxfail"] else "SKIP"
+        else:
+            raise ValueError("unsupported setup failure")
+    name = record["test_durations_artifact"]
+    if not isinstance(name, str) or Path(name).name != name:
+        raise ValueError("unsafe native JUnit reference")
+    junit = record_path.parent / name
+    if junit.is_symlink() or hashlib.sha256(junit.read_bytes()).hexdigest() != proof["junit_sha256"]:
+        raise ValueError("native JUnit changed")
+    cases = {}
+    for case in ET.parse(junit).getroot().iter("testcase"):
+        key = (case.get("classname"), case.get("name"))
+        if key in cases:
+            raise ValueError("duplicate native JUnit case")
+        cases[key] = ("ERROR" if case.find("error") is not None else "FAIL" if case.find("failure") is not None
+                      else "SKIP" if case.find("skipped") is not None else "PASS")
+    expected = {}
+    for node, outcome in outcomes.items():
+        parts = node.split("::")
+        key = (parts[0][:-3].replace("/", ".") + ("." + ".".join(parts[1:-1]) if len(parts) > 2 else ""), parts[-1])
+        expected[key] = "SKIP" if outcome in {"SKIP", "XFAIL"} else outcome
+    if len(expected) != len(outcomes) or cases != expected:
+        raise ValueError("native JUnit/catalog mismatch")
+    failures = any(value in {"FAIL", "ERROR", "XPASS"} for value in outcomes.values())
+    if proof["native_exit_code"] != (1 if failures else 0):
+        raise ValueError("native exit/catalog mismatch")
+    return outcomes
+
+
+def record_repair_coverage(canonical: Path, receipt: Mapping) -> dict[str, int]:
+    """The one closed composition contract used by release and handoff consumers.
+
+    Evidence is owner retained and hash addressed. Legacy aggregate measurements
+    lack this proof and cannot be upgraded into it retrospectively.
+    """
+    import subprocess
+    from datetime import datetime, timezone
+    from release_coordinator import _repair_environment_digest
+    canonical = canonical.resolve()
+    if (not isinstance(receipt, Mapping) or receipt.get("schema_version") != 1
+            or receipt.get("outcome") != "repair-composed"
+            or set(receipt) - {"schema_version", "outcome", "manifest_fingerprint", "original_record", "closure_record", "review", "approval", "coverage"}):
+        raise ValueError("repair composition schema")
+    def load(key):
+        path, body = _repair_ref(canonical, receipt[key])
+        return path, json.loads(body)
+    full_path, full = load("original_record")
+    closure_path, closure = load("closure_record")
+    review_path, review = load("review")
+    _, approval = load("approval")
+    if (not str(approval.get("approved_by", "")).startswith("human:")
+            or approval.get("compose") is not True or approval.get("reader_paths") != [REPAIR_READER]
+            or approval.get("original_record_sha256") != receipt["original_record"]["sha256"]
+            or approval.get("closure_record_sha256") != receipt["closure_record"]["sha256"]
+            or approval.get("review_sha256") != receipt["review"]["sha256"]):
+        raise ValueError("missing exact composition authority/reader closure")
+    if full.get("suite_passed") is not False or closure.get("suite_passed") is not True:
+        raise ValueError("failed-full and passing normal closure required")
+    for record in (full, closure):
+        if record.get("tree_clean_start") is not True or record.get("tree_clean_end") is not True:
+            raise ValueError("unclean repair run")
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(record["recorded_at"])).total_seconds()
+        if not 0 <= age <= 86400:
+            raise ValueError("stale repair evidence")
+    def git(*args):
+        result = subprocess.run(["git", "-C", str(canonical), *args], capture_output=True, check=True)
+        return result.stdout
+    base, head = full["canonical_commit"], closure["canonical_commit"]
+    if (not re.fullmatch(r"[0-9a-f]{40}", base) or not re.fullmatch(r"[0-9a-f]{40}", head)
+            or git("rev-parse", "HEAD").decode().strip() != head
+            or git("status", "--porcelain", "--", ".").strip()):
+        raise ValueError("current source identity/cleanliness drift")
+    git("merge-base", "--is-ancestor", base, head)
+    prefix = git("rev-parse", "--show-prefix").decode().strip()
+    changed = git("diff", "--name-only", "--no-renames", "--relative", "-z", base, head, "--", ".")
+    if changed.split(b"\0") != [REPAIR_RECORD.encode(), b""]:
+        raise ValueError("repair changed source/assertions or unrelated data")
+    old_bytes = git("show", f"{base}:{prefix}{REPAIR_RECORD}")
+    old, new = json.loads(old_bytes), json.loads(git("show", f"{head}:{prefix}{REPAIR_RECORD}"))
+    manifest = json.loads((canonical / "release-manifest.json").read_text())
+    if receipt.get("manifest_fingerprint") != manifest["fingerprint"]:
+        raise ValueError("repair manifest drift")
+    from release import release_entries
+    a, b = old["stable"], new["stable"]
+    changed_keys = {key for key in a.keys() | b.keys() if a.get(key) != b.get(key)}
+    if (old.get("scenario") != "LE2" or new.get("scenario") != "LE2"
+            or changed_keys != {"manifest_files_checked"} or type(b["manifest_files_checked"]) is not int
+            or b["manifest_files_checked"] != len(release_entries(manifest))
+            or b.get("admission") != "allow" or b.get("exit_code") != 0 or b.get("returncode") != 0):
+        raise ValueError("not an installed-allow inventory-only stable repair")
+    retained = review_path.parent / "retained-original-le2.json"
+    proposal = review_path.parent / "proposed-le2.json"
+    diff = review_path.parent / "approved-stable-diff.json"
+    if any(path.is_symlink() for path in (retained, proposal, diff)):
+        raise ValueError("symlinked reviewed evidence")
+    if (retained.read_bytes() != old_bytes or json.loads(proposal.read_bytes()) != new
+            or json.loads(diff.read_bytes()) != {"stable.manifest_files_checked": {"before": a["manifest_files_checked"], "after": b["manifest_files_checked"]}}
+            or not str(review.get("approved_by", "")).startswith("human:")
+            or review.get("allowed_fields") != ["stable.manifest_files_checked"]
+            or review.get("old_record_sha256") != hashlib.sha256(old_bytes).hexdigest()
+            or review.get("manifest_fingerprint") != manifest["fingerprint"]
+            or review.get("source_sha256") != hashlib.sha256((canonical / REPAIR_READER).read_bytes()).hexdigest()):
+        raise ValueError("SPEC191 reviewed repair identity changed")
+    fp, cp = full["native_proof"], closure["native_proof"]
+    command = manifest["canonical_suite"]["command"]
+    if (not command or command[-1] != "tests" or fp["command"] != command or fp["base_command"] != command
+            or cp["base_command"] != command or cp["command"] != command[:-1] + [REPAIR_READER]
+            or fp["environment_sha256"] != cp["environment_sha256"]
+            or cp["environment_sha256"] != _repair_environment_digest()
+            or not fp.get("runtime") or fp["runtime"] != cp["runtime"]):
+        raise ValueError("repair command/runtime/dependency environment drift")
+    for row in cp["runtime"]:
+        if hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest() != row["sha256"]:
+            raise ValueError("repair runtime/dependency identity changed")
+    original = _repair_native_inventory(full, full_path)
+    repaired = _repair_native_inventory(closure, closure_path)
+    affected = {node for node in original if node.split("::", 1)[0] == REPAIR_READER}
+    failures = {node for node, status in original.items() if status in {"FAIL", "ERROR", "XPASS"}}
+    if failures != {REPAIR_FAILED_TEST} or set(repaired) != affected:
+        raise ValueError("unrelated failure or incomplete affected-reader closure")
+    if any(status != "PASS" and status != original[node] for node, status in repaired.items()) or repaired[REPAIR_FAILED_TEST] != "PASS":
+        raise ValueError("new skip/xfail/failure or unresolved repaired failure")
+    covered = {node for node, status in original.items() if status in {"PASS", "SKIP", "XFAIL"}} | set(repaired)
+    coverage = {"collected": len(original), "original_passed": sum(v == "PASS" for v in original.values()),
+                "original_failed": len(failures), "repaired_failed": len(failures & set(repaired)),
+                "covered_union": len(covered), "retained_skipped": sum(v in {"SKIP", "XFAIL"} for v in original.values())}
+    if covered != set(original) or receipt.get("coverage", coverage) != coverage:
+        raise ValueError("repair coverage union mismatch")
+    return coverage
+
+
+def validate_record_repair_composition(canonical: Path | None, receipt: Mapping) -> list[str]:
+    if canonical is None:
+        return ["repair composition requires retained canonical proof"]
+    try:
+        if not isinstance(receipt, Mapping) or not isinstance(receipt.get("coverage"), Mapping):
+            raise ValueError("repair receipt lacks explicit coverage accounting")
+        record_repair_coverage(canonical, receipt)
+    except Exception as exc:  # all missing/malformed/stale native proof fails closed
+        return ["repair composition refused: " + type(exc).__name__]
+    return []
+
+
+def _suite_receipt_accepted(suite: Mapping, *, canonical: Path | None = None) -> bool:
     """One passing run, or a reuse (SPEC-NS-KIT-126) naming its record and commit
     whose release-mechanical test subset passed."""
     suite = dict(suite)
+    if suite.get("result") == "repair-composed":
+        return (set(suite) == {"probe", "runs", "result", "composition"}
+                and suite.get("probe") == "passed" and suite.get("runs") == 0
+                and not validate_record_repair_composition(canonical, suite.get("composition")))
     if suite == {"probe": "passed", "runs": 1, "result": "passed"}:
         return True
     source = suite.get("reused_from")
@@ -595,11 +825,15 @@ def validate_positive_delivery(
         errors.append("delivery receipt fingerprint does not match manifest")
 
     suite = receipt.get("canonical_suite")
-    if not isinstance(suite, Mapping) or not _suite_receipt_accepted(suite):
+    if not isinstance(suite, Mapping) or not _suite_receipt_accepted(suite, canonical=canonical):
         errors.append(
             "delivery receipt requires exactly one passing canonical suite run "
-            "or a verified reuse of a recorded green run"
+            "or a verified reuse of a recorded green run or approved record-repair composition"
         )
+
+    if (isinstance(suite, Mapping) and suite.get("result") == "repair-composed"
+            and (suite.get("composition") or {}).get("manifest_fingerprint") != fingerprint(manifest)):
+        errors.append("repair composition fingerprint does not match judged manifest")
 
     delivery = receipt.get("delivery")
     if not isinstance(delivery, Mapping):
@@ -905,6 +1139,113 @@ def complete_pending_handoffs(
     return completed
 
 
+def _range_git(canonical: Path, *args: str) -> str:
+    import subprocess
+    try:
+        result = subprocess.run(['git', *args], cwd=canonical, capture_output=True, text=True,
+                                env={**os.environ, 'LC_ALL': 'C'}, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('commit_range_source_unavailable') from exc
+    if result.returncode or 'ambiguous' in result.stderr.lower():
+        raise ValueError('commit_range_unresolved_or_ambiguous')
+    return result.stdout
+
+
+def _range_binding(canonical: Path, artifact: Mapping[str, Any]) -> dict:
+    root = Path(_range_git(canonical, 'rev-parse', '--show-toplevel').strip()).resolve()
+    common = _range_git(canonical, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip()
+    identity = hashlib.sha256(str(Path(common).resolve()).encode()).hexdigest()
+    prefix = canonical.resolve().relative_to(root).as_posix()
+    value = artifact.get('canonical_commit_range', '')
+    if not isinstance(value, str) or value.count('..') != 1 or '...' in value:
+        raise ValueError('commit_range_requires_two_actual_endpoints')
+    names = value.split('..')
+    if any(not part or part.startswith('-') for part in names):
+        raise ValueError('commit_range_invalid_endpoint')
+    endpoints = [_range_git(canonical, 'rev-parse', '--verify', '--end-of-options', part + '^{commit}').strip() for part in names]
+    if any(not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) for value in endpoints):
+        raise ValueError('commit_range_invalid_object')
+    base, end = endpoints
+    _range_git(canonical, 'merge-base', '--is-ancestor', base, end)
+    raw = _range_git(root, '--literal-pathspecs', 'diff', '--name-only', '-z', '--no-renames', base, end, '--', prefix)
+    paths = sorted(Path(name).relative_to(prefix).as_posix() if prefix != '.' else name
+                   for name in raw.split('\0') if name)
+    result = {'status': 'bound', 'repository_identity': identity, 'canonical_prefix': prefix,
+              'base': base, 'end': end, 'changed_paths': paths}
+    prior = artifact.get('range_provenance')
+    if isinstance(prior, Mapping) and prior.get('status') == 'bound':
+        if any(prior.get(key) != value for key, value in result.items()):
+            raise ValueError('commit_range_source_identity_or_diff_drift')
+        if artifact['canonical_commit_range'] != base + '..' + end:
+            raise ValueError('bound_commit_range_must_be_immutable')
+        if not isinstance(prior.get('original_range'), str) or not prior['original_range']:
+            raise ValueError('commit_range_original_spelling_missing')
+        result['original_range'] = prior['original_range']
+    else:
+        result['original_range'] = value
+    return result
+
+
+def pin_commit_range(canonical: Path, artifact: Mapping[str, Any], manifest: Mapping[str, Any],
+                     *, expected_binding: Mapping[str, Any] | None = None) -> dict:
+    """Pure authoring helper: resolve real endpoints, check/recheck source and preserve history."""
+    if artifact.get('status') == 'completed':
+        raise ValueError('completed_handoff_is_immutable')
+    binding = _range_binding(canonical, artifact)
+    if expected_binding is not None and dict(expected_binding) != binding:
+        raise ValueError('commit_range_ref_drift_before_authoring')
+    declared = artifact.get('changed_managed_paths')
+    actual = set(release_impact(binding['changed_paths'], manifest))
+    if not isinstance(declared, list) or not declared or not set(declared) <= actual:
+        raise ValueError('commit_range_declared_managed_paths_not_in_actual_diff')
+    if _range_binding(canonical, artifact) != binding:
+        raise ValueError('commit_range_ref_drift_before_authoring')
+    result = dict(artifact)
+    result['canonical_commit_range'] = binding['base'] + '..' + binding['end']
+    result['range_provenance'] = binding
+    history = result.get('range_history', [])
+    if not isinstance(history, list) or not all(isinstance(item, str) for item in history):
+        raise ValueError('commit_range_history_invalid')
+    history = list(history)
+    if binding['original_range'] not in history:
+        history.append(binding['original_range'])
+    result['range_history'] = history
+    return result
+
+
+def check_range_retention(canonical: Path, artifact: Mapping[str, Any], *, spec_id: str,
+                          run_id: str, main_branch: str = 'main', candidate_revision: str | None = None) -> dict:
+    """Require existing main ancestry or the exact checked-cleanup owned recovery root."""
+    if (not isinstance(artifact.get('range_provenance'), Mapping)
+            or artifact['range_provenance'].get('status') != 'bound'):
+        raise ValueError('commit_range_unbound_retention_unproven')
+    binding = _range_binding(canonical, artifact)
+    for ref in (f'refs/heads/{main_branch}', f'refs/nightshift/recovery/{spec_id}/{run_id}'):
+        try:
+            revision = _range_git(canonical, 'show-ref', '--verify', '--hash', ref).strip()
+            if ref.startswith('refs/nightshift/recovery/') and revision != (candidate_revision or binding['end']):
+                continue
+            for endpoint in (binding['base'], binding['end']):
+                _range_git(canonical, 'merge-base', '--is-ancestor', endpoint, revision)
+            return {'ref': ref, 'revision': revision, 'base': binding['base'], 'end': binding['end'],
+                    'repository_identity': binding['repository_identity']}
+        except ValueError:
+            continue
+    raise ValueError('commit_range_retention_missing_for_both_endpoints')
+
+
+def _pin_range_for_repin(canonical: Path, artifact: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict:
+    try:
+        return pin_commit_range(canonical, artifact, manifest)
+    except ValueError:
+        if isinstance(artifact.get('range_provenance'), Mapping) and artifact['range_provenance'].get('status') == 'bound':
+            raise  # A known binding can never silently degrade into legacy evidence.
+        result = dict(artifact)
+        result['range_provenance'] = {'status': 'unresolved', 'original_range': artifact.get('canonical_commit_range'),
+                                      'reason_code': 'legacy_source_objects_or_diff_unresolved'}
+        return result
+
+
 def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list[str]:
     """Mechanically seal eligible placeholder records for this coordinator run.
 
@@ -925,18 +1266,29 @@ def repin_pending_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list
     if not directory.is_dir():
         return repinned
     for path in sorted(directory.glob("*.json")):
-        data = json.loads(path.read_text())
+        original = path.read_bytes()
+        data = json.loads(original)
         if not _has_pending_manifest_placeholder(data):
             continue
         if _pending_handoff_blocked_by_spec_status(canonical, data):
             continue
-        candidate = dict(data)
+        try:
+            candidate = _pin_range_for_repin(canonical, data, manifest)
+        except ValueError:
+            continue
         candidate["target_version"] = manifest.get("kit_version")
         candidate["manifest_fingerprint"] = fingerprint(manifest)
         if validate_artifact(
             candidate, spec_id=str(candidate.get("spec_id", "")), manifest=manifest
         ):
             continue
+        if path.read_bytes() != original:
+            continue
+        if candidate.get('range_provenance', {}).get('status') == 'bound':
+            try:
+                pin_commit_range(canonical, data, manifest, expected_binding=candidate['range_provenance'])
+            except ValueError:
+                continue
         path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
         repinned.append(str(candidate["spec_id"]))
     return repinned
@@ -979,7 +1331,10 @@ def _folded_repin_candidate(
     changed = data.get("changed_managed_paths")
     if not isinstance(changed, list) or not set(changed) <= managed_paths(manifest):
         return None
-    candidate = dict(data)
+    try:
+        candidate = _pin_range_for_repin(canonical, data, manifest)
+    except ValueError:
+        return None
     candidate["repinned_from"] = {
         "target_version": data.get("target_version"),
         "manifest_fingerprint": data.get("manifest_fingerprint"),
@@ -1004,10 +1359,18 @@ def repin_folded_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list[
     if not directory.is_dir():
         return repinned
     for path in sorted(directory.glob("*.json")):
-        data = json.loads(path.read_text())
+        original = path.read_bytes()
+        data = json.loads(original)
         candidate = _folded_repin_candidate(canonical, data, manifest)
         if candidate is None:
             continue
+        if path.read_bytes() != original:
+            continue
+        if candidate.get('range_provenance', {}).get('status') == 'bound':
+            try:
+                pin_commit_range(canonical, data, manifest, expected_binding=candidate['range_provenance'])
+            except ValueError:
+                continue
         path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
         repinned.append(str(candidate["spec_id"]))
     return repinned

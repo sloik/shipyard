@@ -90,6 +90,7 @@ class AdmissionSpec:
     # SPEC-419: policy violations of the spec's own ``spec_metadata`` values (strict, severity-free);
     # a ready spec carrying any is never admitted. Informational for every other status.
     metadata_problems: Tuple[str, ...] = ()
+    input_readiness: Dict[str, Any] | None = None
 
 
 @dataclass
@@ -103,6 +104,7 @@ class AdmissionDecision:
     blocking_ancestor: Optional[str] = None
     conflicting_spec_ids: List[str] = field(default_factory=list)
     conflicting_surfaces: List[str] = field(default_factory=list)
+    input_readiness: Dict[str, Any] | None = None
 
 
 @dataclass
@@ -283,10 +285,18 @@ class BoundedWorktreeDispatcher:
         self.last_plan = plan
         launched: List[DispatchedWorker] = []
         by_id = {spec.spec_id: spec for spec in specs}
-        for spec_id in plan.admitted:
+        for spec_id in list(plan.admitted):
             if spec_id in self.active:
                 continue
-            launched.append(self._launch(by_id[spec_id]))
+            worker = self._launch(by_id[spec_id])
+            if worker is not None:
+                launched.append(worker)
+            else:
+                plan.admitted.remove(spec_id)
+                decision = next(item for item in plan.decisions if item.spec_id == spec_id)
+                decision.disposition = "deferred"
+                decision.reason = "input_binding_changed"
+                decision.detail = "Input eligibility changed before launch; restore setup before a fresh admission."
         return launched
 
     def drain_completed(self) -> List[WorktreeHandle]:
@@ -306,6 +316,7 @@ class BoundedWorktreeDispatcher:
         return spec_metadata_policy_for_specs_dir(self.specs_dir)
 
     def _load_specs(self) -> List[AdmissionSpec]:
+        from verification_report import verifier_input_readiness
         policy = self._spec_metadata_policy()
         specs: List[AdmissionSpec] = []
         qualified_by_consumer: Dict[str, tuple[tuple[tuple[str, str], ...], str | None]] = {}
@@ -357,6 +368,8 @@ class BoundedWorktreeDispatcher:
                 priority=int(data.get("priority", 1)),
                 spec_path=path.resolve(),
                 metadata_problems=tuple(spec_metadata_problems(data, policy)),
+                input_readiness=(verifier_input_readiness(
+                    self.project_root, path) if status == "ready" else None),
             ))
         # Admission must observe a prerequisite's current on-disk status on
         # every refill; the resolver's short structural cache is unsuitable for
@@ -381,7 +394,7 @@ class BoundedWorktreeDispatcher:
                 spec.touches,
                 spec.priority,
                 spec.spec_path,
-                spec.metadata_problems,
+                spec.metadata_problems, spec.input_readiness,
             ))
         self._dependency_statuses = statuses
         self._dependency_errors = errors
@@ -393,11 +406,18 @@ class BoundedWorktreeDispatcher:
             if spec.spec_id == worker.spec_id:
                 return AdmissionSpec(
                     spec.spec_id, "in_progress", spec.after, spec.touches,
-                    spec.priority, spec.spec_path, spec.metadata_problems,
+                    spec.priority, spec.spec_path, spec.metadata_problems, spec.input_readiness,
                 )
         return AdmissionSpec(worker.spec_id, "in_progress")
 
-    def _launch(self, spec: AdmissionSpec) -> DispatchedWorker:
+    def _launch(self, spec: AdmissionSpec) -> DispatchedWorker | None:
+        if spec.spec_path is not None:
+            from verification_report import verifier_input_readiness
+            readiness = verifier_input_readiness(self.project_root, spec.spec_path,
+                                                expected=spec.input_readiness if spec.input_readiness and
+                                                spec.input_readiness.get("reason") != "not_required" else None)
+            if not readiness["eligible"]:
+                return None  # Derived eligibility only: no checkpoint/worktree/worker.
         if self.janitor is not None:
             self.janitor()
         # The status checkpoint is deliberately written before creating the
@@ -779,6 +799,67 @@ class CheckedCleanupProtocol:
             },
         )
 
+    def _handoff_range_resources(self, handle: WorktreeHandle, run_id: str) -> List[Dict[str, Any]]:
+        import release_handoff
+        canonical = Path(handle.canonical_spec_path).parent.parent.resolve()
+        relative = canonical.relative_to(self.repo_root)
+        surfaces = [canonical, handle.worktree_path / relative]
+        resources = []
+        for surface in surfaces:
+            directory = surface / release_handoff.HANDOFF_DIR
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.glob('*.json')):
+                try:
+                    data = json.loads(path.read_bytes())
+                except (ValueError, OSError):
+                    if path.stem == handle.spec_id:
+                        raise ValueError('cleanup_handoff_range_unresolved')
+                    continue
+                if not isinstance(data, dict):
+                    if path.stem == handle.spec_id:
+                        raise ValueError('cleanup_handoff_range_unresolved')
+                    continue
+                provenance = data.get('range_provenance') or {}
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                original = provenance.get('original_range', data.get('canonical_commit_range', ''))
+                endpoints = str(original).split('..')
+                relevant = (data.get('spec_id') == handle.spec_id
+                            or any(value in {handle.branch_name, 'refs/heads/' + handle.branch_name,
+                                             handle.verified_revision} for value in endpoints))
+                if not relevant:
+                    continue
+                if surface != canonical:
+                    relative_path = path.relative_to(surface).as_posix()
+                    _tracked = subprocess.run(['git', 'ls-files', '--error-unmatch', '--', relative_path], cwd=surface, capture_output=True)
+                    _dirty = subprocess.run(['git', 'status', '--porcelain', '--', relative_path], cwd=surface, capture_output=True)
+                    if _tracked.returncode or _dirty.returncode or _dirty.stdout:
+                        raise ValueError('cleanup_handoff_uncommitted_worktree_evidence')
+                retained = release_handoff.check_range_retention(
+                    surface, data, spec_id=handle.spec_id, run_id=run_id, main_branch=self.main_branch,
+                    candidate_revision=handle.verified_revision)
+                resources.append({'kind': 'handoff_range', 'identity': path.relative_to(surface).as_posix(),
+                                  'state': 'retained', 'canonical_relative': relative.as_posix(),
+                                  'artifact': {key: data[key] for key in ('spec_id', 'canonical_commit_range', 'range_provenance')},
+                                  'retention': retained})
+        return resources
+
+    def _range_resources_valid(self, resources: List[Dict[str, Any]], spec_id: str, run_id: str) -> bool:
+        import release_handoff
+        try:
+            for resource in resources:
+                if resource.get('kind') != 'handoff_range':
+                    continue
+                release_handoff.check_range_retention(
+                    self.repo_root / resource['canonical_relative'], resource['artifact'],
+                    spec_id=spec_id, run_id=run_id, main_branch=self.main_branch,
+                    candidate_revision=(resource['retention']['revision'] if resource['retention']['ref'].startswith('refs/nightshift/recovery/') else None))
+            return True
+        except (ValueError, KeyError, OSError):
+            return False
+
+
     def cleanup(self, handle: WorktreeHandle) -> CleanupResult:
         run_id, decision = self._terminal_gate(handle)
         history = self.status_store.get_cleanup_history(handle.spec_id, run_id)
@@ -828,10 +909,11 @@ class CheckedCleanupProtocol:
                     != resource.get("revision")
                 for resource in recovery_resources
             )
+            range_drift = not self._range_resources_valid(payload['resources'], handle.spec_id, run_id)
             if (
                 worktree_resource["state"] != "released"
                 or branch_revision is not None
-                or recovery_drift
+                or recovery_drift or range_drift
             ):
                 resources = [
                     worktree_resource,
@@ -851,6 +933,7 @@ class CheckedCleanupProtocol:
                     handle, run_id, phase="retained", owner=owner,
                     resources=resources,
                     reason_code=(
+                        "cleanup_handoff_range_unresolved" if range_drift else
                         "cleanup_recovery_ref_missing_or_drift"
                         if recovery_drift
                         else "cleanup_owner_path_occupied"
@@ -958,6 +1041,15 @@ class CheckedCleanupProtocol:
                     return CleanupResult(handle.spec_id, run_id, "retained", resources,
                                          "cleanup_recovery_ref_failed", checkpoint["checkpoint_id"])
 
+        try:
+            range_resources = self._handoff_range_resources(handle, run_id)
+        except (ValueError, KeyError, OSError, TypeError):
+            resources = [{**resource, 'state': 'retained'} for resource in started_resources]
+            checkpoint = self._record(handle, run_id, phase='retained', owner=owner, resources=resources,
+                                      reason_code='cleanup_handoff_range_unresolved')
+            return CleanupResult(handle.spec_id, run_id, 'retained', resources,
+                                 'cleanup_handoff_range_unresolved', checkpoint['checkpoint_id'])
+
         worktree_state = "released"
         worktree_detail = "reconciled_from_started_inventory"
         if registered:
@@ -987,6 +1079,8 @@ class CheckedCleanupProtocol:
         if current_branch_revision is not None:
             if current_branch_revision != expected_revision:
                 branch_state, branch_detail = "retargeted_retained", "revision_changed_after_started"
+            elif not self._range_resources_valid(range_resources, handle.spec_id, run_id):
+                branch_state, branch_detail = 'retained', 'cleanup_handoff_range_unresolved'
             elif worktree_state != "released":
                 branch_state, branch_detail = "retained", "worktree_still_retained"
             else:
@@ -1006,7 +1100,8 @@ class CheckedCleanupProtocol:
         ]
         if needs_recovery_ref:
             resources.append({"kind": "recovery_ref", "identity": recovery_ref, "state": "retained", "revision": expected_revision})
-        retained = [resource for resource in resources if resource["state"] != "released" and resource["kind"] != "recovery_ref"]
+        resources.extend(range_resources)
+        retained = [resource for resource in resources if resource["state"] != "released" and resource["kind"] not in {"recovery_ref", "handoff_range"}]
         outcome = "released" if not retained else "partially_released" if worktree_state == "released" else "retained"
         phase = "completed" if outcome == "released" else "retained"
         reason = "cleanup_released" if outcome == "released" else "cleanup_resources_retained"
@@ -1676,6 +1771,55 @@ class TrackedTerminalFrontmatterProjector:
         )
 
 
+@dataclass(frozen=True)
+class SelfSpecReconciliationAuthority:
+    """Parent-injected private approvals; never read from a handle/config/spec."""
+    approval_path: Path
+    approval_sha256: str
+    verification_path: Path
+    verification_sha256: str
+
+
+def normalise_selfspec_checkboxes(body: bytes) -> tuple[bytes, set[str]]:
+    """Change only identified R/AC marker bytes inside their exact sections."""
+    section = b""
+    checked: set[str] = set()
+    identified: set[str] = set()
+    result = []
+    fence = None
+    comment = False
+    for line in body.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith((b"```", b"~~~")):
+            marker = stripped[:3]
+            fence = None if fence == marker else marker if fence is None else fence
+            result.append(line)
+            continue
+        if fence is not None or comment or b"<!--" in line:
+            if b"<!--" in line:
+                comment = True
+            if b"-->" in line:
+                comment = False
+            result.append(line)
+            continue
+        if line.startswith(b"## "):
+            section = line.rstrip(b"\r\n")
+        match = re.match(rb"^- \[([ x])\] (?:\*\*)?((?:R|AC)[1-9][0-9]*)(?=[: (])", line)
+        if match and ((section == b"## Requirements" and match[2].startswith(b"R"))
+                      or (section == b"## Acceptance Criteria" and match[2].startswith(b"AC"))):
+            item = match[2].decode("ascii")
+            if item in identified:
+                raise ValueError("duplicate self-spec item")
+            identified.add(item)
+            if match[1] == b"x":
+                checked.add(item)
+            line = line[:match.start(1)] + b" " + line[match.end(1):]
+        result.append(line)
+    if not identified:
+        raise ValueError("no identified self-spec R/AC items")
+    return b"".join(result), checked
+
+
 class SerializedIntegrationQueue:
     """Coordinator-only queue that integrates one completed worktree at a time.
 
@@ -1708,6 +1852,7 @@ class SerializedIntegrationQueue:
         terminal_frontmatter_projector: Any = None,
         cleanup_protocol: CheckedCleanupProtocol | None = None,
         authorization_gate: Optional[Callable[[WorktreeHandle, str, bool], Any]] = None,
+        selfspec_reconciliation_provider: Optional[Callable[[WorktreeHandle], SelfSpecReconciliationAuthority]] = None,
     ) -> None:
         if not isinstance(status_store, StatusStore):
             raise StatusStoreError(
@@ -1721,6 +1866,8 @@ class SerializedIntegrationQueue:
         self.repo_root = Path(repo_root)
         self.main_branch = main_branch
         self.validate_main = validate_main or (lambda _handle: (True, "validation not configured"))
+        self._selfspec_validation_configured = validate_main is not None
+        self.selfspec_reconciliation_provider = selfspec_reconciliation_provider
         self.request_repair = request_repair
         self.status_store = status_store
         self.dependency_graph = dependency_graph or {}
@@ -2224,7 +2371,7 @@ class SerializedIntegrationQueue:
             and merge_payload.get("attempt_number") in {1, 2}
         )
         semantically_applied, current, application_detail = (
-            self._merge_application_state(before, str(intent_revision or ""))
+            self._merge_application_state(before, str(intent_revision or ""), handle=handle, reconciliation=merge_payload.get("selfspec_reconciliation"))
             if identity_matches else
             (False, current, "prepared/ledger merge identity mismatch")
         )
@@ -2282,7 +2429,7 @@ class SerializedIntegrationQueue:
             )
         if semantically_applied and latest_merge is not None \
                 and (latest_merge.get("payload") or {}).get("outcome") == "succeeded":
-            passed, output = self.validate_main(handle)
+            passed, output = self._validate_owned_main(handle, latest_merge["payload"])
             if passed:
                 handle.status = "accepted"
                 self._project_terminal_status(
@@ -2774,8 +2921,170 @@ class SerializedIntegrationQueue:
             "merge_recovery_rule": payload.get("recovery_rule", "unknown"),
         }
 
+    def propose_selfspec_reconciliation(self, handle: WorktreeHandle) -> Dict[str, Any]:
+        """Propose one exact held-conflict retry, without touching worktree/index/state."""
+        history = self.status_store.get_merge_attempt_history(handle.spec_id, self._terminal_run_id(handle))
+        if (not history or history[-1]["payload"].get("outcome") != "conflict"
+                or history[-1]["payload"].get("attempt_number") != 1
+                or self._head() != history[-1]["payload"].get("main_before")
+                or self._main_has_external_dirty_state()):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-NO-HELD-RETRY")
+        try:
+            return self._derive_selfspec_proof(handle, history[-1]["payload"]["main_before"],
+                                               history[-1]["payload"]["candidate_revision"])
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-PROOF-UNAVAILABLE") from None
+
+    def _derive_selfspec_proof(self, handle: WorktreeHandle, before: str, candidate: str) -> Dict[str, Any]:
+        provider = self.selfspec_reconciliation_provider
+        if (provider is None or not self._selfspec_validation_configured or self.merge_runner is not None
+                or self.terminal_gate is None or not handle.verified_revision
+                or handle.verified_revision != candidate or self._verified_revision_error(handle)):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-MISSING-AUTHORITY")
+        _assert_handle_ownership_if_present(handle, self.repo_root)
+        accepted = handle.completion_evidence_acceptance
+        if not isinstance(accepted, dict) or accepted.get("ok") is not True:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-NO-ACCEPTED-CANDIDATE")
+        terminal = self.terminal_gate(handle)
+        if not isinstance(terminal, Mapping) or terminal.get("ok") is not True:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-RECEIPT-REFUSED")
+        authority = provider(handle)
+        if not isinstance(authority, SelfSpecReconciliationAuthority):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-PARENT-PROVIDER-REQUIRED")
+        path = handle.canonical_spec_path
+        if path is None or path.is_symlink():
+            raise ValueError("NS-INTEGRATION-SELFSPEC-ASSIGNED-PATH")
+        relative = path.resolve().relative_to(self.repo_root.resolve()).as_posix()
+        if not is_canonical_repository_relative_path(relative):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-ASSIGNED-PATH")
+        bases = self._git(["merge-base", "--all", before, candidate], check=True).stdout.splitlines()
+        if len(bases) != 1:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-AMBIGUOUS-BASE")
+        base = bases[0]
+        def blob(revision):
+            tree = self._git(["ls-tree", "-z", revision, "--", relative], check=True).stdout
+            metadata, name = tree.rstrip("\0").split("\t", 1)
+            mode, kind, oid = metadata.split()
+            if name != relative or kind != "blob" or mode not in {"100644", "100755"}:
+                raise ValueError("NS-INTEGRATION-SELFSPEC-BLOB")
+            body = subprocess.run(["git", "show", f"{revision}:{relative}"], cwd=self.repo_root,
+                                  capture_output=True, check=True).stdout
+            return mode, oid, body
+        bm, bo, _ = blob(base)
+        mm, mo, main_body = blob(before)
+        cm, co, candidate_body = blob(candidate)
+        main_normal, main_checked = normalise_selfspec_checkboxes(main_body)
+        candidate_normal, checked = normalise_selfspec_checkboxes(candidate_body)
+        if mm != cm or main_normal != candidate_normal or not main_checked < checked:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-NOT-EQUIVALENT")
+        fm = yaml.safe_load(main_body.decode().split("---", 2)[1])
+        if fm.get("id") != handle.spec_id or fm.get("status") != "in_progress":
+            raise ValueError("NS-INTEGRATION-SELFSPEC-SPEC-IDENTITY")
+        import managed_payload_provenance as mpi
+        worker_install = (handle.worktree_path / relative).parent.parent
+        receipt, _ = mpi._load_receipt(worker_install, handle.integrity_receipt_path,
+                                       handle.integrity_receipt_sha256)
+        binding = mpi._git_binding(worker_install)
+        expected_identity = {"project_sha256": binding["git_common_dir_sha256"],
+                             "run_sha256": mpi._digest_text(handle.integrity_run_id or self._terminal_run_id(handle)),
+                             "spec_sha256": mpi._digest_text(handle.spec_id)}
+        if receipt["binding"] != binding or receipt["identity"] != expected_identity:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-ORIGINAL-RECEIPT-IDENTITY")
+        identity = {"spec_id": handle.spec_id, "run_id": self._terminal_run_id(handle),
+                    "base": base, "main_before": before, "candidate": candidate,
+                    "spec_path": relative, "binding": binding,
+                    "receipt_sha256": handle.integrity_receipt_sha256,
+                    "contract_sha256": hashlib.sha256(main_normal).hexdigest()}
+        def parent_document(path, digest):
+            path = Path(path)
+            resolved = path.resolve()
+            if (path.is_symlink() or resolved.is_relative_to(self.repo_root.resolve())
+                    or resolved.is_relative_to(handle.worktree_path.resolve())
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+                raise ValueError("NS-INTEGRATION-SELFSPEC-PRIVATE-AUTHORITY-CHANGED")
+            document = json.loads(path.read_bytes())
+            if not isinstance(document, dict):
+                raise ValueError("NS-INTEGRATION-SELFSPEC-AUTHORITY-SCHEMA")
+            if any(document.get(key) != value for key, value in identity.items()):
+                raise ValueError("NS-INTEGRATION-SELFSPEC-AUTHORITY-BINDING")
+            return document
+        approval = parent_document(authority.approval_path, authority.approval_sha256)
+        verifier = parent_document(authority.verification_path, authority.verification_sha256)
+        amendments = []
+        for heading in (b"## Scope Amendments", b"## AC Amendments"):
+            tail = main_body.split(heading, 1)
+            if len(tail) == 2:
+                amendments.append(re.split(rb"(?m)^## ", tail[1], maxsplit=1)[0])
+        if (not str(approval.get("approved_by", "")).startswith("human:")
+                or approval.get("amendments_sha256") != hashlib.sha256(b"".join(amendments)).hexdigest()
+                or verifier.get("producer") != "independent-verifier" or verifier.get("independent") is not True
+                or verifier.get("verdict") != "pass" or verifier.get("checked_items") != sorted(checked)):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-APPROVAL-OR-CHECKED-EVIDENCE")
+        merged = self._git(["merge-tree", "--write-tree", "--name-only", "-z", before, candidate])
+        fields = merged.stdout.split("\0")
+        conflicts = []
+        for name in fields[1:]:
+            if not name:
+                break
+            conflicts.append(name)
+        if merged.returncode != 1 or conflicts != [relative] or not re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-EXTRA-OR-UNKNOWN-CONFLICT")
+        with tempfile.TemporaryDirectory(prefix="nightshift-selfspec-proof-") as scratch:
+            env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / "index"))
+            def index(*args):
+                return subprocess.run(["git", *args], cwd=self.repo_root, env=env,
+                                      capture_output=True, text=True, check=True)
+            index("read-tree", fields[0])
+            index("update-index", "--cacheinfo", cm, co, relative)
+            expected = index("write-tree").stdout.strip()
+        held = [row for row in self.status_store.get_merge_attempt_history(handle.spec_id, self._terminal_run_id(handle))
+                if row["payload"].get("outcome") == "conflict" and row["payload"].get("attempt_number") == 1
+                and row["payload"].get("main_before") == before and row["payload"].get("candidate_revision") == candidate]
+        if len(held) != 1 or held[0]["payload"].get("conflict_files") != [relative]:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-HELD-CONFLICT-BINDING")
+        return {"schema_version": 1, **identity, "held_event_id": held[0]["event_id"], "base_blob": bo, "main_blob": mo,
+                "candidate_blob": co, "resolution_blob": co, "mode": cm,
+                "expected_tree": expected, "conflict_files": conflicts,
+                "approval_sha256": authority.approval_sha256,
+                "verification_sha256": authority.verification_sha256,
+                "checked_items": sorted(checked)}
+
+    def _apply_selfspec_resolution(self, handle: WorktreeHandle, proof: Mapping[str, Any]):
+        self._selfspec_git_mutation_started = False
+        if (self._head() != proof["main_before"] or self._main_has_external_dirty_state()
+                or self._git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode == 0
+                or self._derive_selfspec_proof(handle, proof["main_before"], proof["candidate"]) != proof):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-PREWRITE-DRIFT")
+        merged = self._git(["merge", "--no-ff", "--no-commit", proof["candidate"]])
+        if merged.returncode != 1:
+            return merged
+        if (self._git(["rev-parse", "MERGE_HEAD"]).stdout.strip() != proof["candidate"]
+                or self._head() != proof["main_before"]):
+            raise ValueError("NS-INTEGRATION-SELFSPEC-MERGE-OWNERSHIP")
+        self._selfspec_git_mutation_started = True
+        conflicts = self._git(["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0")
+        if conflicts != [proof["spec_path"], ""]:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-CONFLICT-INVENTORY-DRIFT")
+        # Restore only the admitted original candidate blob; every other path
+        # remains Git's ordinary merge result. No custom merge_runner is allowed.
+        self._git(["restore", "--source", proof["candidate"], "--staged", "--worktree", "--", proof["spec_path"]], check=True)
+        if self._git(["write-tree"], check=True).stdout.strip() != proof["expected_tree"]:
+            raise ValueError("NS-INTEGRATION-SELFSPEC-COMPLETE-TREE-MISMATCH")
+        return self._git(["commit", "-m", "Merge verified candidate with approved equivalent self-spec"])
+
+    def _validate_owned_main(self, handle: WorktreeHandle, payload: Mapping[str, Any]) -> Tuple[bool, str]:
+        before = self._head()
+        passed, output = self.validate_main(handle)
+        if payload.get("selfspec_reconciliation") and (before != payload.get("main_after")
+                or self._head() != before or self._main_has_external_dirty_state()):
+            return False, "NS-INTEGRATION-SELFSPEC-VALIDATION-REVISION-DRIFT\n" + output
+        return passed, output
+
     def _merge_application_state(
-        self, main_before: str, candidate: str,
+        self, main_before: str, candidate: str, *,
+        handle: WorktreeHandle | None = None, reconciliation: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str, str]:
         """Prove either one exact merge commit or an already-contained candidate."""
         try:
@@ -2809,6 +3118,12 @@ class SerializedIntegrationQueue:
                 and actual_tree.stdout.strip() == expected_tree_id
             ):
                 return True, current, "exact two-parent candidate merge and tree"
+            if reconciliation is not None and handle is not None:
+                fresh = self._derive_selfspec_proof(handle, main_before, candidate)
+                parents = self._git(["show", "-s", "--format=%P", current], check=True).stdout.strip().split()
+                if (fresh == reconciliation and parents == [main_before, candidate]
+                        and actual_tree.stdout.strip() == fresh["expected_tree"]):
+                    return True, current, "exact approved self-spec two-parent merge and complete tree"
             return False, current, "merge HEAD parent/tree shape is not owned"
         except (Exception, KeyboardInterrupt) as exc:
             return False, main_before, f"merge postcondition inspection failed: {type(exc).__name__}"
@@ -2867,7 +3182,8 @@ class SerializedIntegrationQueue:
         if outcome == "succeeded":
             valid, current, detail = self._merge_application_state(
                 str(payload.get("main_before") or ""),
-                str(payload.get("candidate_revision") or ""),
+                str(payload.get("candidate_revision") or ""), handle=handle,
+                reconciliation=payload.get("selfspec_reconciliation"),
             )
             observed_success = payload.get("observed_files")
             if not isinstance(observed_success, list) or not all(
@@ -2890,7 +3206,7 @@ class SerializedIntegrationQueue:
                 payload = attempt["payload"]
                 outcome = "recovery_required"
             else:
-                passed, output = self.validate_main(handle)
+                passed, output = self._validate_owned_main(handle, payload)
                 if passed:
                     handle.status = "accepted"
                     self._project_terminal_status(
@@ -2939,6 +3255,16 @@ class SerializedIntegrationQueue:
             self._head() == payload.get("main_before")
             and not self._main_is_dirty()
         )
+        if outcome == "started" and identity_matches and payload.get("selfspec_reconciliation"):
+            valid, current, detail = self._merge_application_state(
+                str(payload["main_before"]), str(payload["candidate_revision"]),
+                handle=handle, reconciliation=payload["selfspec_reconciliation"])
+            if valid and current != payload["main_before"]:
+                self.status_store.record_merge_attempt(handle.spec_id, run_id, payload={
+                    **payload, "outcome": "succeeded", "reason_code": "NS-INTEGRATION-MERGE-SUCCEEDED",
+                    "recovery_rule": "continue_validation", "main_after": current, "returncode": 0,
+                    "started_event_id": attempt["event_id"], "application_proof": detail})
+                return self._recover_merge_failure(handle, reserved)
         if outcome == "started" and identity_matches:
             reconciled_outcome = "interrupted" if safe_main else "recovery_required"
             reconciled_reason = (
@@ -3025,6 +3351,8 @@ class SerializedIntegrationQueue:
             "declared_surfaces": sorted(set(handle.declared_touches)),
             "attempt_number": attempt_number,
         }
+        if self.selfspec_reconciliation_provider is not None and attempt_number == 2:
+            common["selfspec_reconciliation"] = self.propose_selfspec_reconciliation(handle)
         started = self.status_store.record_merge_attempt(
             handle.spec_id, run_id, payload={
                 **common, "outcome": "started",
@@ -3036,6 +3364,8 @@ class SerializedIntegrationQueue:
         )
         try:
             merged = (
+                self._apply_selfspec_resolution(handle, common["selfspec_reconciliation"])
+                if "selfspec_reconciliation" in common else
                 self.merge_runner(handle) if self.merge_runner is not None
                 else self._git(["merge", "--no-ff", integration_ref])
             )
@@ -3063,7 +3393,7 @@ class SerializedIntegrationQueue:
             stdout = ""
             stderr = f"{type(exc).__name__}: {exc}"
         if returncode == 0:
-            valid, current, detail = self._merge_application_state(main_before, candidate)
+            valid, current, detail = self._merge_application_state(main_before, candidate, handle=handle, reconciliation=common.get("selfspec_reconciliation"))
             if valid:
                 succeeded = self.status_store.record_merge_attempt(
                     handle.spec_id, run_id, payload={
@@ -3095,6 +3425,12 @@ class SerializedIntegrationQueue:
                 if restored else "NS-INTEGRATION-MERGE-RECOVERY-REQUIRED"
             )
         else:
+            if common.get("selfspec_reconciliation") and not getattr(self, "_selfspec_git_mutation_started", False):
+                return self.status_store.record_merge_attempt(handle.spec_id, run_id, payload={
+                    **common, "outcome": "recovery_required", "reason_code": "NS-INTEGRATION-MERGE-RECOVERY-REQUIRED",
+                    "main_after": self._head(), "returncode": returncode, "stdout": stdout, "stderr": stderr,
+                    "conflict_files": [], "recovery_rule": "restore_exact_main_then_retry_once",
+                    "started_event_id": started["event_id"]})
             try:
                 conflicts = self._git(["diff", "--name-only", "--diff-filter=U"])
                 conflict_files = sorted(
@@ -3197,7 +3533,16 @@ class SerializedIntegrationQueue:
                         **evidence,
                     ))
                     return False
-            merge = self._checked_merge(handle, before, observed)
+            try:
+                merge = self._checked_merge(handle, before, observed)
+            except ValueError as exc:
+                if self.selfspec_reconciliation_provider is None:
+                    raise
+                handle.status = "held"
+                result.held.append(handle.spec_id)
+                result.decisions.append(QueueDecision(handle.spec_id, "held", before, self._head(), observed,
+                    reason="NS-INTEGRATION-SELFSPEC-REFUSED", human_status_ping_required=True, **evidence))
+                return False
             if (merge.get("payload") or {}).get("outcome") != "succeeded":
                 classified = self._classify_merge_attempt(
                     handle, merge, observed, **evidence,
@@ -3206,7 +3551,7 @@ class SerializedIntegrationQueue:
                 result.reverted.extend(classified.reverted)
                 result.decisions.extend(classified.decisions)
                 return False
-            passed, output = self.validate_main(handle)
+            passed, output = self._validate_owned_main(handle, merge["payload"])
             if passed:
                 handle.status = "accepted"
                 self._project_terminal_status(
@@ -3815,6 +4160,10 @@ def plan_dynamic_admission(
                 decisions[spec.spec_id] = AdmissionDecision(
                     spec.spec_id, "invalid", "spec_metadata_invalid", "; ".join(spec.metadata_problems)
                 )
+            elif spec.status == "ready" and spec.input_readiness and not spec.input_readiness["eligible"]:
+                decisions[spec.spec_id] = AdmissionDecision(
+                    spec.spec_id, "deferred", spec.input_readiness["reason"],
+                    "Required verifier input unavailable; restore pre-run declarations or clean sources.")
             elif spec.status != "ready":
                 decisions[spec.spec_id] = AdmissionDecision(
                     spec.spec_id, "not_ready", "status_not_ready", f"status is {spec.status}"
@@ -3866,6 +4215,8 @@ def plan_dynamic_admission(
                 candidate.spec_id, "admitted", "compatible", "dependencies complete and surface is compatible"
             )
 
+    for spec_id, decision in decisions.items():
+        decision.input_readiness = spec_by_id[spec_id].input_readiness
     ordered = [decisions[spec_id] for spec_id in sorted(decisions)]
     return AdmissionPlan(
         worker_limit=worker_limit,

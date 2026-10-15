@@ -101,7 +101,7 @@ class GitError(Exception):
 class SpecContractError(CoordinatorError):
     """Raised when a spec's required input or output artifact contract fails."""
 
-    def __init__(self, message: str, *, status: str, error_type: str):
+    def __init__(self, message: str, *, status: str | None, error_type: str):
         super().__init__(message)
         self.status = status
         self.error_type = error_type
@@ -482,12 +482,29 @@ def set_spec_status(spec_file: Path, status: str) -> None:
     write_spec_frontmatter(spec_file, mutate)
 
 
-def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any]) -> List[Path]:
+def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any], *, spec_file: Path | None = None) -> List[Path]:
     """Ensure required input files exist before a spec launches."""
+    from verification_report import EXTERNAL_INPUT_PREFIX, required_external_input_findings, verifier_input_readiness
     required_inputs = extract_required_inputs(frontmatter)
+    findings = required_external_input_findings(frontmatter)
+    external = any(value.startswith(EXTERNAL_INPUT_PREFIX) for value in required_inputs)
+    if findings or external or spec_file is not None:
+        if findings:
+            readiness = {"eligible": False, "reason": findings[0]}
+        elif spec_file is None:
+            readiness = {"eligible": False, "reason": "spec_baseline_missing"}
+        else:
+            readiness = verifier_input_readiness(project_root, spec_file)
+        if not readiness["eligible"]:
+            error = SpecContractError("verifier input readiness: " + readiness["reason"],
+                                      status=None, error_type=readiness["reason"])
+            error.readiness = readiness
+            raise error
     resolved: List[Path] = []
 
     for rel_path in required_inputs:
+        if rel_path.startswith(EXTERNAL_INPUT_PREFIX):
+            continue
         path = project_root / rel_path
         if not path.exists():
             raise SpecContractError(
@@ -500,10 +517,10 @@ def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any]) -> L
     return resolved
 
 
-def load_required_input_context(project_root: Path, frontmatter: Dict[str, Any]) -> List[Dict[str, str]]:
+def load_required_input_context(project_root: Path, frontmatter: Dict[str, Any], *, spec_file: Path | None = None) -> List[Dict[str, str]]:
     """Load required input file contents for injection into the implementation brief."""
     payloads: List[Dict[str, str]] = []
-    for path in verify_required_inputs(project_root, frontmatter):
+    for path in verify_required_inputs(project_root, frontmatter, spec_file=spec_file):
         payloads.append(
             {
                 'path': str(path.relative_to(project_root)),
@@ -596,10 +613,11 @@ CONTEXT_FOLDER_NAMES = ('.agent-context', '.argo')
 class ContextPointerAssembler:
     """Builds context pointer list for implementation agent."""
 
-    def __init__(self, project_root: Path, config: Dict[str, Any], spec: Dict[str, Any], argo_home: Path):
+    def __init__(self, project_root: Path, config: Dict[str, Any], spec: Dict[str, Any], argo_home: Path, *, spec_file: Path | None = None):
         self.project_root = project_root
         self.config = config
         self.spec = spec
+        self.spec_file = spec_file
         self.argo_home = argo_home
 
     def assemble(self) -> Dict[str, Any]:
@@ -710,7 +728,7 @@ class ContextPointerAssembler:
 
     def _required_input_payloads(self) -> List[Dict[str, str]]:
         """Load required input artifacts into context so the implementation agent can read them."""
-        return load_required_input_context(self.project_root, self.spec)
+        return load_required_input_context(self.project_root, self.spec, spec_file=self.spec_file)
 
 
 class CoordinatorMetrics:
@@ -919,6 +937,7 @@ class PostMergeValidator:
     def __init__(self, project_root: Path, config: Dict[str, Any]):
         self.project_root = project_root
         self.config = config
+        self.activity_context = None
 
     def _stack_profile(self, frontmatter: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Resolve a stack profile for the given spec frontmatter, if any."""
@@ -948,6 +967,21 @@ class PostMergeValidator:
         if not normalized:
             return True, f"{label} skipped (not configured)"
 
+        import uuid
+        episode_id = 'command-' + uuid.uuid4().hex
+        category = 'tests' if 'test' in label.lower() else 'scripts' if 'build' in label.lower() else 'tool'
+        def boundary(kind):
+            if self.activity_context is None:
+                return
+            store, spec_id, run_id = self.activity_context
+            try:
+                store.record_activity_event(spec_id=spec_id, run_id=run_id, episode_id=episode_id,
+                    event_id=episode_id + ':' + kind, category=category, kind=kind, at=datetime.now(timezone.utc).isoformat(),
+                    actor='agent:coordinator', source='coordinator',
+                    phase=category + ('_execution' if kind == 'start' else '_complete'), next_action='inspect_result')
+            except Exception:
+                pass  # Unavailable telemetry cannot change command acceptance; missing boundaries stay unclassified.
+        boundary('start')
         try:
             result = subprocess.run(
                 normalized,
@@ -961,6 +995,8 @@ class PostMergeValidator:
             return False, f"{label} timed out ({timeout}s)"
         except Exception as exc:  # pragma: no cover - defensive wrapper
             return False, f"{label} error: {exc}"
+        finally:
+            boundary('end')
 
         combined_output = "\n".join(
             chunk for chunk in [result.stdout.strip(), result.stderr.strip()] if chunk
@@ -1383,9 +1419,9 @@ class Coordinator:
         except ValueError:
             worker_spec = source
         frontmatter, _ = read_spec_frontmatter(worker_spec)
-        verify_required_inputs(handle.worktree_path, frontmatter)
+        verify_required_inputs(handle.worktree_path, frontmatter, spec_file=worker_spec)
         context = ContextPointerAssembler(
-            handle.worktree_path, self.config, frontmatter, self.argo_home,
+            handle.worktree_path, self.config, frontmatter, self.argo_home, spec_file=worker_spec,
         ).assemble()
         result = self._delegate_spec(
             spec_id, worker_spec,
@@ -2049,6 +2085,7 @@ class Coordinator:
 
     def ledger_fresh_main_decision(
         self, spec_id: str, *, repo_root: Path, main_branch: str, now: Any = None,
+        observation: dict | None = None,
     ) -> Dict[str, Any]:
         """SPEC-NS-KIT-002-002 R6: may the verifier's head run stand in for fresh-main?
 
@@ -2060,20 +2097,61 @@ class Coordinator:
         `run_full_fresh_main`, i.e. today's behaviour. Never raises.
         """
         fallback: Dict[str, Any] = {"action": "run_full_fresh_main", "reuse": False}
+        head_record = None
+
+        def finish(decision):
+            # Decisions are observable even when missing proof requires the real run.
+            try:
+                if not re.fullmatch(r"[A-Z][A-Z0-9-]*", spec_id):
+                    return {**fallback, "reason": "invalid_spec_identity"}
+                wip = self.project_root / 'reports' / '_wip'
+                wip.mkdir(parents=True, exist_ok=True)
+                if decision.get('action') == 'run_full_fresh_main':
+                    (wip / f"ledger-pending-{spec_id}.json").unlink(missing_ok=True)
+                path = wip / f"ledger-decision-{spec_id}.json"
+                temporary = path.with_suffix('.tmp')
+                payload = decision
+                # Advisory metadata is outside the existing ledger receipt and return value.
+                try:
+                    from loop_events import delivery_observation_context, normalize_delivery_observation
+                    reason = 'missing_transport' if head_record is None and decision.get('reason') == 'head_proof_untrusted' else decision.get('reason')
+                    native = head_record.get('native_result', {}) if isinstance(head_record, dict) and head_record.get('receipt_digest') == decision.get('record_digest') else {}
+                    demand = normalize_delivery_observation({**delivery_observation_context(self.project_root),
+                        'spec_id': spec_id, 'run_id': self.metrics.run_id,
+                        'observation_id': 'fresh-main-demand', 'action_id': 'fresh-main',
+                        'eligibility': decision.get('reuse') is True, 'reason_code': reason,
+                        'source_receipt_digest': decision.get('record_digest'),
+                        'demand_receipt_digest': hashlib.sha256(json.dumps(decision, sort_keys=True).encode()).hexdigest(),
+                        'native_created_at': native.get('created') if isinstance(native, dict) else None})
+                    if demand is not None:
+                        payload = {**decision, 'delivery_demand': demand}
+                        if isinstance(observation, dict):
+                            observation.update(demand)
+                except Exception:
+                    pass
+                temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding='utf-8')
+                temporary.replace(path)
+            except OSError:
+                pass
+            return decision
         settings = self.config.get('test_status_ledger')
         if not isinstance(settings, dict) or not settings.get('enabled'):
             return {**fallback, "reason": "ledger_disabled"}
         try:
             import verification_report as ledger
         except ImportError:
-            return {**fallback, "reason": "ledger_module_unavailable"}
+            return finish({**fallback, "reason": "ledger_module_unavailable"})
         try:
             wip = self.project_root / 'reports' / '_wip'
             head_record = ledger.load_ledger(wip / f"ledger-head-{spec_id}.json")
+            errors = ledger.head_run_errors(head_record, require_admission=True, spec_id=spec_id)
+            if errors:
+                return finish({**fallback, "reason": "head_proof_untrusted", "detail": errors[0]})
             extras = dict(settings.get('identity') or {})
             extras.setdefault('command', normalize_command((self.config.get('commands') or {}).get('test')))
             relative = str(settings.get('path') or ledger.LEDGER_RELATIVE_PATH)
-            merged = ledger.identity_from_extras(Path(repo_root), main_branch, extras, exempt=[relative])
+            merged = ledger.identity_from_extras(
+                Path(repo_root), main_branch, extras, exempt=[relative], ledger_path=relative)
             updated, decision = ledger.dedup_fresh_main(
                 head_record, merged, now=now or ledger.utc_now(), run_id=self.metrics.run_id,
             )
@@ -2081,9 +2159,9 @@ class Coordinator:
                 (wip / f"ledger-pending-{spec_id}.json").write_text(
                     json.dumps(updated, indent=2, sort_keys=True) + "\n", encoding='utf-8',
                 )
-            return decision
+            return finish(decision)
         except Exception as exc:  # noqa: BLE001 - fail closed to the real run
-            return {**fallback, "reason": f"ledger_error:{type(exc).__name__}"}
+            return finish({**fallback, "reason": f"ledger_error:{type(exc).__name__}"})
 
     def build_integration_queue(self, *, request_repair=None, dependency_graph=None) -> SerializedIntegrationQueue:
         """Create the sole main-branch integration owner for parallel workers.
@@ -2106,16 +2184,31 @@ class Coordinator:
         protected_surfaces = (self.config.get("parallel_integration") or {}).get("protected_release_surfaces", [])
 
         def validate(handle):
+            observation = {}
             reuse = self.ledger_fresh_main_decision(
-                handle.spec_id, repo_root=repo_root, main_branch=main_branch,
+                handle.spec_id, repo_root=repo_root, main_branch=main_branch, observation=observation,
             )
+            def observed(disposition, passed):
+                try:
+                    from loop_events import observe_delivery_boundary
+                    fields = {key: value for key, value in observation.items()
+                        if key not in {'event', 'schema_version', 'observation_id', 'spec_id', 'run_id', 'action_id', 'disposition', 'eligibility', 'product_outcome'}}
+                    fields.setdefault('reason_code', reuse.get('reason'))
+                    observe_delivery_boundary(self.project_root, handle.spec_id,
+                        run_id=self.metrics.run_id, action_id='fresh-main', **fields,
+                        disposition=disposition, eligibility=reuse.get('reuse') is True,
+                        product_outcome='passed' if passed else 'failed')
+                except Exception:
+                    pass
             if reuse.get("action") == "reuse_head_run":
+                observed('consumed', True)
                 return True, (
                     "main validation reused the verifier head run (label: reused, ledger receipt "
                     f"{reuse.get('record_digest')}); merged identity equals the verified head identity"
                 )
             passed, error, metadata = self.validator.validate()
             output = error or metadata.get("output") or "main validation passed"
+            observed('native_fallback', passed)
             return passed, output
 
         def terminal_gate(handle):
@@ -2489,6 +2582,12 @@ class Coordinator:
         # Keep the exact admission receipt for this selected spec.  A later
         # admission would bless changed bytes and is not a terminal check.
         self._admit_managed_payload(spec_id)
+        # Bind only this coordinator's owned validation subprocesses; other harness activity is not inferred.
+        from status_store import StatusStore
+        try:
+            self.validator.activity_context = (StatusStore.for_specs_dir(spec_file.parent), spec_id, self.metrics.run_id)
+        except Exception:
+            self.validator.activity_context = None  # Telemetry cannot add a new execution gate.
 
         if frontmatter.get('type') == 'main':
             self._run_main_spec(spec_id, spec_file, frontmatter)
@@ -2500,21 +2599,28 @@ class Coordinator:
             }
 
         try:
-            verify_required_inputs(self.project_root, frontmatter)
+            verify_required_inputs(self.project_root, frontmatter, spec_file=spec_file)
         except SpecContractError as exc:
-            update_spec_status(spec_file, status=exc.status, message=str(exc), error_type=exc.error_type)
+            if hasattr(exc, 'readiness'):
+                self.metrics.data.setdefault('verifier_input_readiness', {})[spec_id] = exc.readiness
+            if exc.status is not None:
+                update_spec_status(spec_file, status=exc.status, message=str(exc), error_type=exc.error_type)
             raise
+
+        from verification_report import verifier_input_readiness
+        self.metrics.data.setdefault('verifier_input_readiness', {})[spec_id] = verifier_input_readiness(self.project_root, spec_file)
 
         # Step 1: Assemble context pointers
         assembler = ContextPointerAssembler(
-            self.project_root, self.config, frontmatter, self.argo_home
+            self.project_root, self.config, frontmatter, self.argo_home, spec_file=spec_file
         )
         context_pointers = assembler.assemble()
 
         # Step 2: Generate brief for implementation agent
         brief = self._generate_agent_brief(spec_id, spec_file, context_pointers)
 
-        # Step 3: Delegate to implementation agent
+        # Step 3: Recheck at launch, then delegate to implementation agent.
+        verify_required_inputs(self.project_root, frontmatter, spec_file=spec_file)
         agent_result = self._delegate_spec(spec_id, spec_file, brief)
         self._enforce_run_token_ceiling(spec_id, spec_file, agent_result)
 

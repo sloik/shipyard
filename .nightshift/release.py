@@ -402,6 +402,75 @@ def managed_local_resource_gaps(canonical: Path, names: list[str]) -> list[str]:
     return sorted(set(gaps))
 
 
+def source_cut_metadata(canonical: Path) -> dict:
+    """Bind source-cut wording; this metadata never attests delivery completion."""
+    from datetime import date
+
+    path = canonical / 'CHANGELOG.md'
+    version = kit_version(canonical)
+    if not path.is_file():
+        return {'status': 'unknown', 'version': version, 'reason': 'missing CHANGELOG.md'}
+    blob = path.read_bytes()
+    rows = re.findall(r'^##\s+' + re.escape(version) + r'\s+\(([^\n]*)\)\s*$', blob.decode(), re.MULTILINE)
+    result = {'status': 'unknown', 'version': version, 'delivery': 'not_attested',
+              'changelog_sha256': hashlib.sha256(blob).hexdigest()}
+    if len(rows) != 1:
+        return {**result, 'reason': 'current version needs exactly one heading'}
+    value = rows[0]
+    if value == 'unreleased':
+        return {**result, 'status': 'development'}
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        return {**result, 'status': 'legacy', 'reason': 'date does not explicitly identify source cut'}
+    match = re.fullmatch(r'source cut: (\d{4}-\d{2}-\d{2})', value)
+    if match:
+        try:
+            date.fromisoformat(match.group(1))
+            return {**result, 'status': 'finalized', 'date': match.group(1)}
+        except ValueError:
+            pass
+    return {**result, 'reason': 'invalid source-cut date/heading'}
+
+
+def source_cut_errors(canonical: Path, manifest: dict, *, require_finalized: bool) -> list[str]:
+    metadata = source_cut_metadata(canonical)
+    errors = []
+    if metadata['status'] == 'unknown' or (require_finalized and metadata['status'] != 'finalized'):
+        errors.append('RELEASE.SOURCE_CUT: CHANGELOG.md: finalized source-cut date required for apply; '
+                      + metadata.get('reason', metadata['status']))
+    if manifest.get('source_cut') != metadata:
+        errors.append('RELEASE.SOURCE_CUT: CHANGELOG.md: manifest source-cut binding differs from current bytes')
+    return errors
+
+
+def finalize_source_cut(canonical: Path, source_cut_date: str) -> dict:
+    """Explicit authorized pre-seal step; never rewrite a completed same-version cut."""
+    from datetime import date
+
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', source_cut_date):
+        raise ValueError('source-cut date must be an ISO calendar date')
+    date.fromisoformat(source_cut_date)
+    path = canonical / 'CHANGELOG.md'
+    version = kit_version(canonical)
+    blob = path.read_bytes()
+    pattern = rb'(?m)^##[ \t]+' + re.escape(version.encode()) + rb'[ \t]+\([^\r\n]*\)[ \t]*'
+    if len(re.findall(pattern, blob)) != 1:
+        raise ValueError('CHANGELOG.md needs one current-version release heading')
+    updated = re.sub(pattern, f'## {version} (source cut: {source_cut_date})'.encode(), blob)
+    receipt = {'version': version, 'date': source_cut_date, 'delivery': 'not_attested',
+               'changed': updated != blob, 'old_sha256': hashlib.sha256(blob).hexdigest(),
+               'new_sha256': hashlib.sha256(updated).hexdigest(), 'manifest': 'generate_after_finalization'}
+    if updated == blob:
+        return receipt
+    previous_path = canonical / 'release-manifest.json'
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_bytes())
+        if (previous.get('kit_version') == version
+                and completed_records_on_fingerprint(canonical, previous.get('fingerprint', ''))):
+            raise SameVersionResealError('completed same-version source-cut metadata is immutable; bump version first')
+    path.write_bytes(updated)
+    return receipt
+
+
 def build_manifest(
     canonical: Path,
     names: list[str],
@@ -412,6 +481,7 @@ def build_manifest(
 ) -> dict:
     payload = {
         "kit_version": kit_version(canonical),
+        "source_cut": source_cut_metadata(canonical),
         "schema_version": schema_version(canonical),
         "files": manifest_files(canonical, names),
         "smoke_checks": smoke_checks
@@ -880,7 +950,7 @@ def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
 
 
 def validate_manifest(
-    canonical: Path, names: list[str]
+    canonical: Path, names: list[str], *, require_finalized: bool = False
 ) -> tuple[bool, list[str], dict | None]:
     path = canonical / "release-manifest.json"
     if not path.exists():
@@ -896,8 +966,9 @@ def validate_manifest(
         retained_manifests=manifest.get("retained_manifests", []),
         unretained_manifests=manifest.get("unretained_manifests", []),
     )
-    errors = []
+    errors = source_cut_errors(canonical, manifest, require_finalized=require_finalized)
     for key in (
+        "source_cut",
         "kit_version",
         "schema_version",
         "files",
@@ -1230,7 +1301,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     floor.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
     final = sub.add_parser("check-final-manifest", help="read-only final canonical packaging gate before a configured suite")
     final.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    invariants = sub.add_parser("check-release-invariants", help="read-only guide/report/saved-inventory preflight before expensive validation")
+    invariants.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    cut = sub.add_parser('finalize-source-cut', help='authorized source-cut date finalization before manifest generation')
+    cut.add_argument('--canonical', type=Path, default=Path(__file__).resolve().parent)
+    cut.add_argument('--date', required=True)
     args = parser.parse_args(argv)
+    if args.command == 'finalize-source-cut':
+        try:
+            print(json.dumps(finalize_source_cut(args.canonical, args.date), indent=2))
+            return 0
+        except (ValueError, OSError, SameVersionResealError) as exc:
+            print(json.dumps({'status': 'refused', 'reason': str(exc)}))
+            return 1
+
+    if args.command == "check-release-invariants":
+        from preflight import release_invariant_preflight
+        result = release_invariant_preflight(args.canonical, json.loads((args.canonical / "release-manifest.json").read_bytes()))
+        print(json.dumps(result, indent=2))
+        return 0 if result["ok"] else 1
     if args.command == "check-final-manifest":
         result = check_final_manifest(args.canonical)
         print(json.dumps(result, indent=2, sort_keys=True))

@@ -84,7 +84,15 @@ in the kit repository, the fixture re-record it forces); adding, removing or ren
 an enrolment list, makes it a full-lane spec. Anything else uses the full flow above. The lane trims paperwork, never a gate: head binding, scope, terminal integrity
 and independent verification are identical in both lanes.
 
-The worker brief for this lane is one page: the spec path, its `scope.write`, the baseline commit, the exact suite
+For both full and small lanes, scope permission is not operation ownership. Resolve operation ownership in the
+explicit route brief under existing authority (`ORCHESTRATOR.md` § Serialized integration queue and fresh-main
+validation). On broker-owned routes, workers return relative-path intents for parent-owned CHANGELOG/version/
+release-handoff surfaces and their manifest reseal; workers do not edit or reseal them. A legitimate worker-owned
+mechanical operation on another route names its surface and operation explicitly. Missing or conflicting ownership
+is a bounded issue to the parent before edits, not an implicit transfer of authority.
+
+The worker brief for this lane is one page: the spec path, its `scope.write`, explicit operation ownership
+(parent-owned intents or expressly assigned worker operations), the baseline commit, the exact suite
 command, the report path, and the line "Read `.nightshift/guides/worker-small.md` instead of LOOP.md". It keeps the
 heartbeat file path and drops the long Kickoff Parent Context text.
 
@@ -101,6 +109,8 @@ Condensed parent checklist, in order (the run guides give the detail of each com
 6. **The merge-gate check is mandatory.** `verification_report.py merge-gate --plan --evidence --verdict --branch
    --candidate <candidate-sha>` must print `MERGE-GATE: bound <sha>`; merge exactly that sha, never the branch name.
    `stale_head` means re-verify the new tip (`stale_head` redispatch reason).
+   After the exact merge, complete the existing fresh-main validation; a failure enters the same sole owner's
+   settlement before integration resumes (GIT.md).
    Before merging, run `python3 release.py finding-floor` on the candidate; exit 1 refuses the merge.
 7. Record `done` (transition artifact and trailers, `followup_processor.py` once, cleanup) and emit the lane event.
    Build the trailers with `record_metrics.py --commit-terminal` (BUG-NS-KIT-139).
@@ -122,3 +132,5 @@ python3 .nightshift/loop_events.py lane --run-id <run-id> --spec-id <spec-id> --
 launch to `TERMINAL`; `verifier-wall-s` is the sum of the dispatch durations recorded with
 `record_metrics.py --record-timing dispatch`; each re-dispatch adds one reason from that command's closed list. A
 value the parent could not measure is `unavailable`, never 0.
+
+Before implementation, normal instruction apply/coordinator admission checks trusted external inputs (SPEC-NS-KIT-175); follow SPEC-GUIDE.md § Required external input readiness. Exit0 alone is not eligibility; repair setup before a new run, never replace its receipt.

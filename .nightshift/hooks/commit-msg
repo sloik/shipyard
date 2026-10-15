@@ -68,6 +68,26 @@ if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9
         echo "[nightshift commit-msg] ERROR: terminal lifecycle commit is missing required trailer(s): ${missing[*]}" >&2
         exit 1
     fi
+    RESOLUTION_KIND=$(sed -nE 's/^Nightshift-Resolution-Kind:[[:space:]]*//p' "$COMMIT_MSG_FILE")
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*self-verified[[:space:]]*$' "$COMMIT_MSG_FILE"; then
+        echo "[nightshift commit-msg] ERROR: plain self-verified is forbidden for new terminal commits" >&2
+        exit 1
+    fi
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*self-verified-experimental[[:space:]]*$' "$COMMIT_MSG_FILE" && ! grep -qE '^Nightshift-Experimental-Sample-For:[[:space:]]*[^[:space:]]' "$COMMIT_MSG_FILE"; then
+        echo "[nightshift commit-msg] ERROR: experimental self-verification requires its prior designation" >&2
+        exit 1
+    fi
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*implementer-assessed-blocked[[:space:]]*$' "$COMMIT_MSG_FILE"; then
+        ASSESSMENT_TOOL=".nightshift/terminal_outcomes.py"
+        ASSESSMENT_PATH=$(sed -nE 's/^Nightshift-Evidence-Assessment:[[:space:]]*//p' "$COMMIT_MSG_FILE")
+        case "$ASSESSMENT_PATH" in canonical/*) ASSESSMENT_TOOL="canonical/terminal_outcomes.py" ;; esac
+        if [ ! -f "$ASSESSMENT_TOOL" ]; then ASSESSMENT_TOOL="canonical/terminal_outcomes.py"; fi
+        if [ ! -f "$ASSESSMENT_TOOL" ]; then
+            echo "[nightshift commit-msg] ERROR: implementer assessment validator unavailable" >&2
+            exit 1
+        fi
+        python3 "$ASSESSMENT_TOOL" --check-assessment-resolution "$COMMIT_MSG_FILE" --repo . || exit $?
+    fi
     # SPEC-224 terminal-outcome-record: projects explicitly opting into terminal_outcomes receive a
     # second boundary. The Python module reads the configured adapter and staged
     # data, so this shell hook never duplicates a record parser. A deliberate

@@ -7,6 +7,181 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.0 (source cut: 2026-10-15)
+
+- Read instruction audit config through strict merged YAML, classify both managed helpers as public kit, and repair validation fixture prerequisites while retaining admission, scope and browser assertions (BUG-NS-KIT-211).
+
+- Join declared retained delivery evidence, distinguish observed stages and unknown coverage, and add fail-tolerant parent observations without changing eligibility or lifecycle authority (SPEC-NS-KIT-209).
+
+- Report delivery and observed admission separately for each discovered install, preserve release exit semantics, and derive informational recovery guidance from the recorded exact target (SPEC-NS-KIT-208).
+
+- Align small/full worker operation ownership with broker intents and explicit route authority; retain failed parent obligations while admissible independent frontier work continues after safe-main settlement (BUG-NS-KIT-206).
+
+- Forward opt-in ledger reuse through gated handoff, capture independent native head proof, retain it only through accepted merge admission and consume matching proof through the existing fresh-main fallback path (BUG-NS-KIT-199).
+
+- Bind migration candidates to reviewed source bytes and release targets, share the existing strict YAML reader with the pure migration engine, support all three version quote styles, and revalidate complete candidate batches before repository writes (BUG-NS-KIT-207).
+
+- Make recovery-ladder preview read-only and nonexecutable; report persisted failure as an authorization-required continuation through existing durable retry issuance, and prevent invalid AC review from returning success guidance (BUG-NS-KIT-205).
+
+- Add explicitly commissioned finite graph captures and immutable, identity-qualified offline comparisons; retain partial outcomes and distinguish suspected degradation from the separate 2,000ms diagnostic budget (SPEC-NS-KIT-201).
+
+- Limit board card titles to two visual lines and activity to one line, retaining full title previews, full activity details and visible wait/incomplete indicators in live and exported boards (SPEC-NS-KIT-199).
+
+- Show graph load status, phase diagnostics and qualified 2,000ms warnings through the existing process-local timing registry; keep failures/cancellations separate and static exports local-only (SPEC-NS-KIT-200).
+
+- Capture explicit helper metadata without execution, review reuse candidates through existing artifacts, and retain duplicate-checked separate draft recommendations at nonblocking parent closure (SPEC-NS-KIT-168).
+
+- Preserve main test-status ledger reuse over declared non-input changes; bind opt-in include/exclude policies and resolved inputs, retain mandatory code/config/hooks/resources and conservative fallback for unresolved commands, and keep independent head verification (BUG-NS-KIT-197).
+
+- Reconcile only parent-approved byte-equivalent self-spec R/AC conflicts within the original serialized retry; bind original accepted evidence/receipts, full tree/parents, durable recovery and exact fresh-main validation (SPEC-NS-KIT-172).
+
+- Compose an explicitly approved inventory-only repair with complete native failed-full and normal reader proof; preserve the failure and share one strict reuse/delivery validator (SPEC-NS-KIT-189).
+
+- Check mandatory external verifier inputs before implementation; recognize anchored declarations in instruction packets and defer unavailable inputs without lifecycle mutation (SPEC-NS-KIT-175).
+
+### Check verifier setup before suite launch (SPEC-NS-KIT-157)
+
+Bounded actual-runtime probes check executable/dependency availability, existing
+cache access and disposable output access. Dispatch, parent and sample launch
+share privacy-safe setup eligibility; failures retain native gaps and launch no
+suite. Setup never counts as completed tests or replaces final verifier evidence.
+Unresolved ephemeral runtimes remain explicit setup gaps; no automatic repair.
+
+### Show recorded activity and human waits (SPEC-NS-KIT-156)
+
+Durable metadata boundaries separate reasoning, human involvement, tools, tests,
+scripts and explicit human waits. Cards and detail show known in-progress totals,
+independent overlapping categories, unclassified gaps and recorded next actions.
+Discussion episodes close only at takeover; answer arrivals end outstanding waits.
+Heartbeat retains sole liveness authority; unsupported capture remains unknown.
+
+### Author exact approved AC evidence amendments (SPEC-NS-KIT-188)
+
+The existing artifact CLI records selected evidence-locator edits against the
+actual ready Git object, preserving exact wording, approval, hashes and history.
+Substantive changes, unknown baselines and concurrent drift refuse mutation;
+unchanged replay adds no duplicate amendment. Lifecycle and verdicts stay intact.
+
+### Preserve immutable handoff source ranges (SPEC-NS-KIT-192)
+
+Resolve actual handoff endpoints and retain original spelling, source repository
+identity and bounded diff. Pending repins label unknown legacy history explicitly.
+Checked cleanup retains source roots unless main or the existing exact owned
+recovery ref durably contains both endpoints. Completed deliveries stay immutable.
+
+### Finalize source-cut dates before sealing (BUG-NS-KIT-193)
+
+An authorized pre-seal command labels and binds the ISO source-cut date without
+attesting delivery. Apply refuses unreleased or changed source-cut metadata
+before expensive gates or copies; development validation/dry-run remain available.
+Completed same-version cuts remain immutable. Delivered3.25.1 is unchanged.
+
+### Audit declared project instruction pins (SPEC-NS-KIT-194)
+
+Read-only project declarations distinguish active drift, historical examples and
+unknown/undeclared coverage against exact installed marker/config identity.
+Optional drift stays advisory; explicit required pins block the audit. Approved
+exact corrections use normal project Git hooks, retain old/new evidence and
+preserve unrelated staged work. No project instruction joins the managed payload.
+
+### Review installed inventory evidence maintenance (SPEC-NS-KIT-191)
+
+The existing LE2 recorder accepts inventory upkeep only with owner review bound
+to the old record, sealed manifest and recorder source. Only the installed-allow
+`stable.manifest_files_checked` may change; all other stable fields stay strict.
+Original/proposed evidence and the approved diff are retained before replacement.
+Normal reader-module validation with record mode unset remains required; recording
+does not grant admission or suite reuse. Pending release only; no rollout claimed.
+
+### Reject deterministic release invariant failures early (SPEC-NS-KIT-187)
+
+The shared read-only release preflight checks guide byte caps/registry, report
+reachability/index ownership, and the reviewed LE2 saved inventory count before
+floor scans and native validation. Failures name the rule and path; no evidence
+is rewritten and count equality never grants installed admission. Relevant
+bytes, modes and inventory bind success lineage; unrelated application bytes
+stay outside this canonical-only check. Existing later gates remain required.
+Migration: run `release.py check-release-invariants` during report preparation
+and final cut. Pending whole-kit release only; no installed rollout claimed.
+
+### Record validated implementer-assessed terminal blocks (BUG-NS-KIT-173)
+
+`implementer-assessed-blocked` records a schema-bound parent Blocked assessment
+before verifier dispatch. The terminal renderer accepts closed reducer state
+instead of a verdict; normal hooks check staged proof, candidate and inventory.
+Metrics and outcome adapters report zero verifier activity and no verified delivery.
+The kind cannot mark Done or replace later independent verification. Bare new
+self-verification refuses; experimental designation remains required. Inherited
+scope/schema guidance is consolidated under the unchanged guide byte caps.
+Migration: stage actual state and use `--assessment-state` with the blocked-only
+kind. Pending whole-kit release; no installed rollout claimed.
+
+### Bind verdict scope to the assigned head arm (BUG-NS-KIT-177)
+
+Assembly and public verdict validation classify exact Git changes with the
+assigned head arm and matching spec/kit. The containment repository remains
+the inventory source. Missing, swapped, foreign, stale or altered bindings
+refuse; existing private candidate identity and real scope denials stay enforced.
+Migration: explicit spec overrides must name the committed corresponding head
+spec. Pending whole-kit release only; no installed rollout is claimed.
+
+### Complete generated verifier scope summaries (BUG-NS-KIT-176)
+
+Suite and no-suite briefs include the canonical implicit scope rule exactly once.
+Absent or empty write scope displays `project root (default)`, retaining declared
+read and deny constraints. Already-complete parent summaries remain compatible.
+Public historical-attempt placeholders and trusted scope enforcement stay intact.
+Migration: none; pending whole-kit release, with no installed rollout claimed.
+
+### Match contamination object schemas (BUG-NS-KIT-182)
+
+The embedded verifier validator rejects unsupported contamination keys and
+non-string optional detail, matching strict final validation. Malformed class
+or timing values produce schema rejection. Null, empty lists and supported
+exposures retain their existing behavior; independence checks remain intact.
+Migration: keep explanations in string detail or outside the closed exposure
+object. Pending whole-kit release only; no installed rollout is claimed.
+
+### Review marginal verification evidence before another launch (SPEC-NS-KIT-183)
+
+An opt-in parent checkpoint records exact action/obligation identities, original
+receipt lineage and separately scoped observed costs before handoff preparation
+or recovery retries. Owner signals, repeated proof without named new evidence
+and explicitly configured soft limits recommend review. A pinned owner disposition
+can continue with named evidence and a finite budget, apply existing eligible
+reuse, propose amendment or recommend replacement. Unknown costs stay unknown.
+Existing mandatory gates, healthy operations, hard budgets, sampling and the
+sole lifecycle/integration owner remain intact. Full/small/recovery summaries agree.
+Migration: explicitly opt in with `verification_economics.enabled: true` and supply
+parent action context. No numeric soft defaults, rollout or efficacy claim.
+
+
+### Preserve exact checkpoint path identities (BUG-NS-KIT-190)
+
+Checkpoint plans use NUL-delimited Git identities, retaining literal pathname
+bytes and both rename paths. Copies stage only their changed destination while
+source associations remain subject to existing safety exclusions. Malformed status
+and Git failure refuse without parser repair writes. Migration: none. Distribution
+remains pending the normal whole-kit release.
+
+### Restore canonical-suite margin and isolate formal regeneration fixtures (BUG-NS-KIT-190)
+
+The release coordinator keeps the existing two-times headroom criterion and
+raises its internal canonical-suite limit to 7200 seconds against the retained
+3330.842-second measurement. Formal regeneration unit fixtures use copied private
+config layouts, retaining the original hash, trace and negative-control assertions.
+Migration: none. Distribution remains pending the normal whole-kit release.
+
+### Preserve obligations when replacing unfinished specs (SPEC-NS-KIT-184)
+
+The prepare/apply CLI pins a finite replacement plan to source, lifecycle and
+retained evidence identities. Every obligation has one explicit disposition;
+exact indexed owner authority and actual run closure are required before apply.
+Recoverable journals retain Draft replacements and reconcile interrupted
+metadata commits without launching work or claiming the source Done.
+Migration: none. Existing lifecycle and serialized integration gates remain.
+Distribution is pending the normal whole-kit release.
+
 ## 3.25.1 (unreleased)
 
 ### Resolve spec identity and retain board evidence (SPEC-NS-KIT-185)

@@ -311,3 +311,17 @@ its manifest, payload and handoff digests as one binding, never as permission to
 reuse a green result after edits. A mismatch stops launch until final edits and
 explicit regeneration are complete. The helper is a packaging check; existing
 whole-kit release validation and the sole serial integration owner remain in force.
+
+### Verification economics summary at verification/recovery (SPEC-NS-KIT-183)
+
+Opt-in full/small/recovery parents use `verification_economics.checkpoint`:
+`status`, `reason_codes`, `decision`, `disposition`, `unmet_obligations` and scoped
+`cumulative` measurements belong in the existing parent brief/progress/report.
+See `run-3.md` § Opt-in verification economics at parent boundaries for setup,
+finite fixtures and authority. `unblock_spec.prepare` / `resume_recovery` expose
+the same summary before retry; pass `--economics-context <private-json>`.
+`review_needed` stops automatic launch; retain original eligibility, failures and
+unmet gates. Existing reuse/authority contracts, healthy operations, hard budgets,
+default/opt-out behavior and distinct fresh-main remain unchanged.
+
+Blocks/setup: ORCHESTRATOR.md.

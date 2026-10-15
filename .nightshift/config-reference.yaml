@@ -115,7 +115,7 @@ schema_version: "3.2.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.25.1"
+kit_version: "3.26.0"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -1701,3 +1701,30 @@ extensions: []
 
 # This file is the canonical schema reference for config.yaml.
 # Update it as the config schema evolves.
+
+
+# Optional main test-status ledger (BUG-NS-KIT-197).
+# Absent inputs preserves the existing identity exactly. Opt-in input declarations
+# are hashed with the resolved tracked paths; changing the declaration invalidates
+# reuse even when its current blob set is unchanged. Choose ONE form only.
+# A project owner must declare the actual command's non-input boundary; do not
+# exclude documents/resources the tests read. This is not dependency discovery.
+# Supported direct runners: pytest, python[3[.N]] -m pytest/unittest, swift test,
+# cargo test; uv run [--with PACKAGE ...] may prefix them. Arbitrary shell/script
+# commands, symlinks and submodules force conservative identity and a real run.
+# Tracked source/executable files, hooks, tests/resources, build/config files and
+# lockfiles remain mandatory regardless of either declaration. Matching preserves
+# exact Git path identity. No declaration can waive independent full head tests.
+# The identity-file and --ledger-identity-file JSON use this same inputs mapping;
+# coordinator fresh-main comparison reads this exact configuration mapping.
+# test_status_ledger:
+#   enabled: true
+#   path: .nightshift/test-status-ledger.json
+#   identity:
+#     command: python3 -m pytest -q
+#     inputs:
+#       exclude: ["docs/**", "decisions/**"]
+#       # Alternative: include: ["app/**", "tests/**", "resources/**"]
+# Reused decisions/dispatch plans carry inputs_digest, identity_digest and
+# inputs (schema_version, declaration, mode, resolved_paths). Invalid declarations
+# refuse identity creation; ordinary dispatch/coordinator consumers run for real.

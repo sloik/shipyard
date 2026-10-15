@@ -24,6 +24,7 @@ except ImportError as e:
 import errno
 import json
 import logging
+import math
 import os
 import re
 import resource
@@ -148,15 +149,17 @@ class PerformanceRegistry:
         self, key: str, duration_s: float, *, error: bool = False, cancelled: bool = False
     ) -> None:
         # Callers select keys from the fixed allowlist below.
-        if key not in _PERFORMANCE_KEYS or duration_s < 0:
+        if (key not in _PERFORMANCE_KEYS or type(duration_s) not in (int, float)
+                or not math.isfinite(duration_s) or duration_s < 0):
             return
         if cancelled:
             self._cancelled[key] += 1
             self._updated_at = self._clock()
             return
-        self._samples[key].append(round(duration_s * 1000, 3))
         if error:
             self._errors[key] += 1
+        else:
+            self._samples[key].append(round(duration_s * 1000, 3))
         self._updated_at = self._clock()
 
     def summary(self) -> dict:
@@ -195,6 +198,8 @@ _PERFORMANCE_KEYS = frozenset({
     "route.spec.2xx", "route.allowed.error",
     "browser.initial_board_ready", "browser.poll_unchanged", "browser.poll_diff",
     "browser.poll_full", "browser.spec_panel_ready", "browser.graph_ready",
+    "browser.graph_fetch", "browser.graph_json_decode", "browser.graph_prepare",
+    "browser.graph_first_paint",
     "browser.panel_fetch", "browser.panel_json_decode", "browser.panel_markdown_parse",
     "browser.panel_dom_mutation", "browser.panel_title_controls_paint",
     "browser.panel_body_paint", "browser.panel_cancelled",
@@ -235,6 +240,8 @@ class SpecCache:
     def __init__(self, specs_dir: Path, status_store=None) -> None:
         self._specs_dir = specs_dir
         self._status_store = status_store
+        self._activity_inputs = {}
+        self._last_heartbeat_text = {}
         self._dir_mtime: float = 0.0
         self._entries: dict[str, CacheEntry] = {}  # keyed by spec id
         self._dependency_resolver = DependencyRegistryResolver(specs_dir)
@@ -301,12 +308,20 @@ class SpecCache:
             if self._projection_signature is not None:
                 if self._corpus_signature() == self._projection_signature:
                     projected = self._projection.get(spec_id)
-                    return dict(projected) if projected is not None else None
+                    return self._with_activity(dict(projected)) if projected is not None else None
         # Signature changed (or never derived): do the slow fleet scan outside the lock, then the pass.
         for item in self.get_all_frontmatter():
             if item.get("id") == spec_id:
                 return dict(item)
         return None
+
+    def _with_activity(self, item: dict) -> dict:
+        from loop_observability import project_activity
+        source = self._activity_inputs.get(str(item.get('id')), {})
+        result = dict(item)
+        result['activity'] = project_activity(str(item.get('id')), source.get('checkpoints', []),
+                                               source.get('events', []), now=datetime.now(timezone.utc))
+        return result
 
     def _invalidate_projection(self) -> None:
         self._projection = {}
@@ -336,6 +351,7 @@ class SpecCache:
         now = datetime.now(timezone.utc)
         try:
             evidence = spec_artifacts.read_heartbeat_evidence(kwargs["reports_root"], spec_id, now=now)
+            self._last_heartbeat_text[spec_id] = evidence["text"]
             return spec_artifacts.compose_run_state_explanation(
                 item, **{**kwargs, "now": now, "heartbeat_evidence": evidence})
         except Exception:
@@ -469,6 +485,7 @@ class SpecCache:
         states = self._durable_states(
             [str(e.frontmatter.get("id")) for e in self._entries.values() if e.frontmatter.get("id")]
         )
+        self._activity_inputs = getattr(states, "activity_inputs", {})
         public = performance_registry.measure(
             "cache.frontmatter_public_assembly",
             lambda: [
@@ -573,7 +590,7 @@ class SpecCache:
         }
         self._projection_signature = signature
         performance_registry.record("cache.frontmatter", time.monotonic() - start)
-        return [dict(item) for item in public]
+        return [self._with_activity(item) for item in public]
 
     @staticmethod
     def _admission_settings(specs_dir: Path) -> tuple[int, str]:
@@ -2074,6 +2091,7 @@ def get_performance() -> dict:
 _CLIENT_PERFORMANCE_OPERATIONS = frozenset({
     "initial_board_ready", "poll_unchanged", "poll_diff", "poll_full",
     "spec_panel_ready", "graph_ready", "panel_fetch", "panel_json_decode",
+    "graph_fetch", "graph_json_decode", "graph_prepare", "graph_first_paint",
     "panel_markdown_parse", "panel_dom_mutation", "panel_title_controls_paint",
     "panel_body_paint", "panel_cancelled",
 })
@@ -2085,24 +2103,36 @@ def record_client_performance(payload: dict) -> dict:
     operation = payload.get("operation")
     duration_ms = payload.get("duration_ms")
     failed = payload.get("failed", False)
+    cancelled = payload.get("cancelled", False)
     if (
-        operation not in _CLIENT_PERFORMANCE_OPERATIONS
-        or not isinstance(duration_ms, (int, float))
+        not isinstance(operation, str) or operation not in _CLIENT_PERFORMANCE_OPERATIONS
+        or set(payload) - {"operation", "duration_ms", "failed", "cancelled"}
+        or type(duration_ms) not in (int, float)
+        or not math.isfinite(duration_ms) or duration_ms < 0
         or not isinstance(failed, bool)
+        or not isinstance(cancelled, bool) or (failed and cancelled)
     ):
         raise HTTPException(status_code=400, detail="invalid performance sample")
     performance_registry.record(
         f"browser.{operation}",
         float(duration_ms) / 1000,
         error=failed,
-        cancelled=operation == "panel_cancelled",
+        cancelled=cancelled or operation == "panel_cancelled",
     )
     return {"ok": True}
 
 
 @app.get("/api/specs")
 def get_specs() -> list[dict]:
-    return cache.get_all_frontmatter()
+    items = cache.get_all_frontmatter()
+    for item in items:
+        if item.get('status') == 'in_progress' and item.get('activity', {}).get('status_history_available'):
+            try:
+                reports = spec_artifacts.reports_root_for_spec_path(Path(cache._specs_dir) / 'placeholder.md')
+                item['activity']['last_heartbeat'] = spec_artifacts.read_heartbeat_evidence(reports, str(item['id']))['text']
+            except Exception:
+                pass  # Unknown heartbeat stays unknown; timing never establishes liveness.
+    return items
 
 
 @app.get("/api/spec-metadata")
@@ -2191,6 +2221,8 @@ def get_spec(spec_id: str) -> JSONResponse:
         # (list responses carry only its bounded `run_state_summary`).
         "run_state_explanation": cache.get_explanation(spec_id),
     }
+    if 'activity' in fm:
+        fm['activity']['last_heartbeat'] = getattr(cache, '_last_heartbeat_text', {}).get(spec_id, 'unknown')
     return performance_registry.measure(
         "server.selected_response_serialization", lambda: JSONResponse(jsonable_encoder(payload))
     )
@@ -3427,7 +3459,25 @@ body {
   line-height: 1.4;
   margin-bottom: 4px;
   word-break: break-word;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
+
+.card-activity {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.card-activity-duration, .card-activity-flags { flex-shrink: 0; }
+.card-activity-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .card-meta {
   display: flex;
@@ -4448,6 +4498,8 @@ button.artifact-row:focus-visible,
 }
 #graph-view.active { display: flex; flex-direction: column; }
 
+#graph-timing { margin: 48px 220px 0 12px; font-size: 12px; flex-shrink: 0; }
+
 #graph-container {
   flex: 1;
   background: var(--bg);
@@ -4712,6 +4764,9 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <button class="btn" id="btn-graph-topo" onclick="applyDepsOrderLayout()" title="Arrange left→right by dependency depth: sources (no prereqs) on left, most-blocked on right. Clusters stacked vertically.">↦ TOPO</button>
       <button class="btn" id="btn-graph-auto" onclick="autoArrangeGraph()" title="Toggle force-directed auto-arrange; click again or drag a node to stop">⚙ AUTO</button>
       <button class="btn" id="btn-graph-snap" onclick="toggleGraphSnap()" title="Snap dragged nodes to a grid">⚏ SNAP</button>
+    </div>
+    <div id="graph-timing"><span id="graph-load-status" role="status">Graph timing unavailable</span>
+      <details id="graph-diagnostics" ontoggle="if(this.open) refreshGraphDiagnostics()"><summary>Load diagnostics</summary><pre id="graph-diagnostics-content" style="white-space:pre-wrap;max-height:200px;overflow:auto"></pre></details>
     </div>
     <div id="graph-container"></div>
     <div id="graph-info"></div>
@@ -5550,6 +5605,31 @@ function runStateSummaryHtml(summary) {
   return `<div class="tt-current"><span class="tt-label">This spec now</span>${rows.join('')}</div>`;
 }
 
+function cardActivitySummaryHtml(t) {
+  if (!t) return '';
+  const flags = [t.waiting ? 'Needs action' : '', t.history_incomplete ? 'Incomplete' : ''].filter(Boolean);
+  const phase = String(t.current_phase || 'unrecorded').replaceAll('_', ' ');
+  return '<div class="card-activity">'
+    + `<span class="card-activity-duration" title="Known in-progress duration">${_escHtml(t.in_progress_label || 'unknown')} ·</span>`
+    + (flags.length ? `<span class="card-activity-flags">${flags.join(' · ')} ·</span>` : '')
+    + `<span class="card-activity-copy">${_escHtml(phase)}</span></div>`;
+}
+
+function activitySummaryHtml(t) {
+  if (!t) return '';
+  const phase = String(t.current_phase || 'unrecorded').replaceAll('_', ' ');
+  const categories = Object.entries(t.category_labels || {}).map(([k,v]) =>
+    `${k === 'human_work' && t.human_work_is_estimate ? 'human involvement estimate' : k.replaceAll('_',' ')} ${v}`).join(' · ');
+  const action = t.waiting ? `Human action: ${t.required_action || 'unknown'}` : '';
+  return `<div class="activity-summary"><b>Known in-progress subtotal: ${_escHtml(t.in_progress_label)}</b>`
+    + `${t.history_incomplete ? ' · incomplete history' : ''}<br>`
+    + `Recorded phase: ${_escHtml(phase)} · actor: ${_escHtml(t.actor || 'unknown')} ${_escHtml(action)}<br>`
+    + `Next: ${_escHtml(t.next_action || 'unrecorded')} · Last heartbeat: ${_escHtml(t.last_heartbeat || 'unknown')}<br>`
+    + `Recorded: ${_escHtml(categories)}<br>Unclassified: ${_escHtml(t.unclassified_label)} · overlap: ${_escHtml(t.overlap_label)}`
+    + `${t.incomplete_activity ? ' · incomplete activity records' : ''}`
+    + `${t.human_work_note ? '<br>' + _escHtml(t.human_work_note) : ''}<br>${_escHtml(t.history_coverage || '')}</div>`;
+}
+
 function runStateSummaryText(summary) {
   if (!summary) return '';
   const state = summary.run_state ? String(summary.run_state).replaceAll('_', ' ') : 'not applicable';
@@ -5696,30 +5776,33 @@ let performanceClock = () => performance.now();
 // guard can reject a sample whose whole measurement WINDOW overlapped a hidden
 // period, not merely one reported while hidden.
 let documentHiddenSince = (typeof document !== 'undefined' && document.hidden)
-  ? performanceClock() : null;
+  ? graphClock() : null;
 let documentLastHiddenEnd = null;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
-    documentHiddenSince = performanceClock();
+    documentHiddenSince = graphClock();
   } else {
-    documentLastHiddenEnd = performanceClock();
+    documentLastHiddenEnd = graphClock();
     documentHiddenSince = null;
   }
 });
 
-function reportPerformance(operation, start, { failed = false } = {}) {
+function reportPerformance(operation, start, { failed = false, cancelled = false, duration_ms: measuredDuration, windowStart = start } = {}) {
   // Diagnostic-only: capability absence or a rejected post never affects UI.
-  if (!window.performance || typeof start !== 'number') return;
+  if (window.__STATIC__ || !window.performance || !Number.isFinite(start)) return;
   // Discard rather than distort: a duration that spans a hidden period is not a
   // measurement of this operation, and one bad sample poisons min/mean/max for
   // the whole bounded window.
   if (document.visibilityState === 'hidden' || documentHiddenSince !== null) return;
-  if (documentLastHiddenEnd !== null && documentLastHiddenEnd >= start) return;
-  const duration_ms = performanceClock() - start;
-  fetch('/api/performance/client', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ operation, duration_ms, failed }),
-  }).catch(() => {});
+  if (documentLastHiddenEnd !== null && documentLastHiddenEnd >= windowStart) return;
+  const duration_ms = measuredDuration ?? (graphClock() - start);
+  if (!Number.isFinite(duration_ms) || duration_ms < 0) return;
+  try {
+    return fetch('/api/performance/client', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operation, duration_ms, failed, cancelled }),
+    }).catch(() => {});
+  } catch { return; }
 }
 
 function renderPendingWork() {
@@ -5897,20 +5980,19 @@ function renderCard(spec, blocksMap) {
   card.dataset.status = status;
 
   const title = spec._title || spec.title || spec.id || '';
-  const displayTitle = title.length > 40 ? title.substring(0, 40) + '…' : title;
 
   const priority = parseInt(spec.priority) || 0;
   const dots = '●'.repeat(Math.min(priority, 3));
 
-  const typeBadge = spec.type ? `<span class="badge">${spec.type}</span>` : '';
+  const typeBadge = spec.type ? `<span class="badge">${_escHtml(spec.type)}</span>` : '';
   const versionBadge = (spec.version !== undefined && spec.version !== null)
     ? `<span class="badge version-badge" title="Target product version (not template_version or kit_version)">${_escHtml(String(spec.version))}</span>` : '';
   const tagBadges = specTagLabels(spec).map(t =>
     `<span class="badge tag-badge" title="Spec tag (organizational label; not touches or NFR scope_tags)">${_escHtml(t)}</span>`).join('');
   const layerBadge = spec.layer !== undefined && spec.layer !== null
-    ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'layer'))}">L${spec.layer}</span>` : '';
+    ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'layer'))}">L${_escHtml(spec.layer)}</span>` : '';
   const readinessBadge = spec.readiness
-    ? `<span class="badge readiness-${spec.readiness.toLowerCase()}" title="${_escHtml(registryHelp(spec, 'readiness'))}">${_escHtml(spec.readiness)}</span>`
+    ? `<span class="badge readiness-${_escHtml(spec.readiness.toLowerCase())}" title="${_escHtml(registryHelp(spec, 'readiness'))}">${_escHtml(spec.readiness)}</span>`
     : '';
   const runStateTip = registryHelp(spec, 'run_state')
     + (spec.run_state_summary ? ' | This spec: ' + runStateSummaryText(spec.run_state_summary) : '');
@@ -5937,17 +6019,18 @@ function renderCard(spec, blocksMap) {
     const _slashIdx = _b.lastIndexOf('/');
     const branchShort = (_slashIdx >= 0 ? _b.slice(_slashIdx + 1) : _b).slice(0, 28);
     const more = wt.length > 1 ? ` +${wt.length - 1}` : '';
-    wtHtml = `<div class="wt-badge" title="Worktree branch '${first.branch}' has status: ${first.status}">🔧 ${(first.status || '').toUpperCase()} · ${branchShort}${more}</div>`;
+    wtHtml = `<div class="wt-badge" title="Worktree branch '${_escHtml(first.branch)}' has status: ${_escHtml(first.status)}">🔧 ${_escHtml((first.status || '').toUpperCase())} · ${_escHtml(branchShort)}${more}</div>`;
   }
 
   card.innerHTML = `
     <div class="card-header">
-      <span class="card-id">${spec.id || ''}</span>
+      <span class="card-id">${_escHtml(spec.id || '')}</span>
       <span class="card-dots">${dots}</span>
     </div>
-    <div class="card-title">${displayTitle}</div>
+    <div class="card-title">${_escHtml(title)}</div>
     <div class="card-meta">${typeBadge}${versionBadge}${tagBadges}${layerBadge}${readinessBadge}${runStateBadge}${depHtml}</div>
     ${wtHtml}
+    ${cardActivitySummaryHtml(spec.activity)}
   `;
 
   card.addEventListener('click', (e) => {
@@ -6372,7 +6455,7 @@ function renderPanelMeta(specId, fm) {
   const hiddenCount = collapsibleFields.length;
   const toggleLabel = metaCollapsed ? `▸ details (${hiddenCount})` : `▾ details`;
   const toggleRow = `<tr><td colspan="2"><button type="button" id="panel-meta-toggle" class="meta-toggle-btn" aria-expanded="${!metaCollapsed}" onclick="toggleMetaCollapsed()">${_escHtml(toggleLabel)}</button></td></tr>`;
-  metaEl.innerHTML = statusRow + projectionRow + modelRows + runStateRow + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
+  metaEl.innerHTML = statusRow + projectionRow + modelRows + runStateRow + `<tr><td>activity</td><td>${activitySummaryHtml(fm.activity)}</td></tr>` + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
 
   // SPEC-294-001: render (or hide) the deployment-authorization approve/
   // reject control in the same panel the run_state row already renders.
@@ -7233,7 +7316,7 @@ async function toggleShowAllDependencies() {
   const hadFocus = !!document.activeElement && document.activeElement.id === 'graph-show-all-deps';
   showAllDependencies = !showAllDependencies;
   renderGraphLegend();
-  await showGraph(openPanelId || undefined);
+  await showGraph(openPanelId || undefined, { refresh: false });
   if (openPanelId) refreshPanelDependencies();
   if (hadFocus) { const sw = document.getElementById('graph-show-all-deps'); if (sw) sw.focus(); }
 }
@@ -7257,8 +7340,128 @@ function omittedEdgesPanelHtml(specId) {
   return `<div class="omitted-deps" id="omitted-deps" role="note" style="margin:6px 0;font-size:11px"><div><b>Not drawn in the reduced graph</b> (declared in metadata):</div><ul style="margin:2px 0;padding-left:16px">${li}</ul><div style="opacity:.7;font-size:10px">Each arrow is implied by another dependency path. <button class="btn" id="omitted-deps-show-all" onclick="toggleShowAllDependencies()">Show all dependencies</button></div></div>`;
 }
 
-async function showGraph(selectId) {
-  const performanceStart = performanceClock();
+// SPEC-NS-KIT-200: one attempt spans invocation through first draw + next frame.
+const GRAPH_DIAGNOSTIC_BUDGET_MS = 2000;
+let graphLoadSequence = 0;
+let graphLoadAttempt = null;
+let graphLatestLoad = null;
+let graphAggregateMetrics = null;
+let graphTelemetrySettled = Promise.resolve();
+
+function graphClock() {
+  try {
+    const now = performanceClock();
+    return Number.isFinite(now) ? now : null;
+  } catch { return null; }
+}
+function graphWindowVisible(start) {
+  return Number.isFinite(start) && document.visibilityState !== 'hidden'
+    && documentHiddenSince === null
+    && (documentLastHiddenEnd === null || documentLastHiddenEnd < start);
+}
+function graphDuration(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 10) / 10} ms` : 'unavailable';
+}
+function renderGraphLoadStatus() {
+  const el = document.getElementById('graph-load-status');
+  if (!el) return;
+  const value = graphLatestLoad;
+  if (!value) { el.textContent = 'Graph timing unavailable'; return; }
+  el.textContent = value.state === 'loading' ? 'Graph loading…'
+    : `Graph ${value.state} · ${graphDuration(value.total_ms)}`
+      + (value.qualified ? '' : ' (timing unavailable: hidden window or clock)')
+      + (value.slow ? ` · Slow load: ${graphDuration(value.total_ms)} exceeds ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms diagnostic budget` : '');
+  el.dataset.state = value.state;
+  renderGraphDiagnostics();
+}
+function renderGraphDiagnostics() {
+  const el = document.getElementById('graph-diagnostics-content');
+  if (!el) return;
+  const value = graphLatestLoad;
+  const lines = [`Diagnostic budget: ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms (not an optimization target).`];
+  if (value) {
+    lines.push(`Latest: ${value.state}; total ${graphDuration(value.total_ms)}.`);
+    for (const phase of ['fetch', 'json_decode', 'prepare', 'first_paint']) {
+      const timing = value.phases[phase];
+      lines.push(`${phase}: ${timing === null && !value.requested && ['fetch', 'json_decode'].includes(phase) ? 'not applicable (no request)' : graphDuration(timing)}`);
+    }
+    if (value.nodes !== undefined) lines.push(`Visible nodes ${value.nodes}; edges ${value.edges}; corpus nodes ${value.corpus_nodes}.`);
+  }
+  if (window.__STATIC__) {
+    lines.push('Static export: server/process aggregates unavailable. Local latest-load timing only.');
+  } else {
+    lines.push('Process-local aggregates reset on board process restart; latest 128 successful samples. Error/cancellation counts are process-local totals.');
+    if (!graphAggregateMetrics) lines.push('Aggregates unavailable; open diagnostics to request current values.');
+    else for (const key of ['browser.graph_ready', 'browser.graph_fetch', 'browser.graph_json_decode', 'browser.graph_prepare', 'browser.graph_first_paint', 'route.graph.2xx']) {
+      const metric = graphAggregateMetrics[key] || { state: 'unavailable', count: 0, error_count: 0, cancelled_count: 0 };
+      lines.push(`${key === 'route.graph.2xx' ? 'server route (separate from browser total)' : key}: ${metric.state}; count ${metric.count}; p50 ${graphDuration(metric.p50_ms)}; p95 ${graphDuration(metric.p95_ms)}; max ${graphDuration(metric.max_ms)}; errors ${metric.error_count}; cancelled ${metric.cancelled_count}`);
+      if (key === 'browser.graph_ready' && metric.count >= 5 && metric.p95_ms > GRAPH_DIAGNOSTIC_BUDGET_MS) {
+        lines.push(`Slow aggregate: successful end-to-end p95 ${graphDuration(metric.p95_ms)} exceeds ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms diagnostic budget.`);
+      }
+    }
+  }
+  el.textContent = lines.join('\\n');
+}
+async function refreshGraphDiagnostics() {
+  renderGraphDiagnostics();
+  if (window.__STATIC__) return;
+  try {
+    const response = await fetch('/api/performance');
+    if (!response.ok) throw new Error('unavailable');
+    const data = await response.json();
+    graphAggregateMetrics = data.metrics || null;
+  } catch { graphAggregateMetrics = null; }
+  renderGraphDiagnostics();
+}
+function beginGraphLoad(requested) {
+  if (graphLoadAttempt && !graphLoadAttempt.done) finishGraphLoad(graphLoadAttempt, 'cancelled');
+  const start = graphClock();
+  const attempt = { id: ++graphLoadSequence, start, requested, done: false,
+    phase: requested ? null : 'prepare', phaseStart: start,
+    phases: { fetch: null, json_decode: null, prepare: null, first_paint: null } };
+  graphLoadAttempt = attempt;
+  graphLatestLoad = { state: 'loading', total_ms: null, requested, phases: { ...attempt.phases } };
+  renderGraphLoadStatus();
+  return attempt;
+}
+function graphPhase(attempt, phase, now = graphClock()) {
+  if (attempt.done) return;
+  if (attempt.phase && Number.isFinite(now) && Number.isFinite(attempt.phaseStart) && now >= attempt.phaseStart) {
+    attempt.phases[attempt.phase] = now - attempt.phaseStart;
+  }
+  attempt.phase = phase;
+  attempt.phaseStart = now;
+}
+function finishGraphLoad(attempt, state) {
+  if (attempt.done) return;
+  const now = graphClock();
+  graphPhase(attempt, null, now);
+  attempt.done = true;
+  const qualified = graphWindowVisible(attempt.start) && Number.isFinite(now) && now >= attempt.start;
+  const total = qualified ? now - attempt.start : null;
+  const phases = Object.fromEntries(Object.entries(attempt.phases).map(([key, value]) => [key, qualified ? value : null]));
+  if (attempt === graphLoadAttempt) {
+    graphLatestLoad = { state, total_ms: total, phases, requested: attempt.requested, qualified,
+      slow: state === 'success' && qualified && total > GRAPH_DIAGNOSTIC_BUDGET_MS,
+      nodes: attempt.nodes, edges: attempt.edges, corpus_nodes: attempt.corpus_nodes };
+    renderGraphLoadStatus();
+  }
+  if (qualified) {
+    const options = { failed: state === 'error', cancelled: state === 'cancelled', windowStart: attempt.start };
+    const samples = Object.entries(phases).filter(([, value]) => Number.isFinite(value))
+      .map(([key, duration_ms]) => reportPerformance('graph_' + key, attempt.start, { ...options, duration_ms }));
+    samples.push(reportPerformance('graph_ready', attempt.start, { ...options, duration_ms: total }));
+    graphTelemetrySettled = Promise.all(samples).then(() => {
+      if (document.getElementById('graph-diagnostics')?.open) refreshGraphDiagnostics();
+    }).catch(() => {});
+  }
+}
+
+async function showGraph(selectId, { refresh = true } = {}) {
+  const needsData = refresh || !graphData;
+  const requested = needsData && !window.__STATIC__;
+  const loadAttempt = beginGraphLoad(requested);
+  try {
   activeTab = 'graph';
   document.getElementById('board-view').style.display = 'none';
   document.getElementById('search-results').classList.remove('visible');
@@ -7271,13 +7474,24 @@ async function showGraph(selectId) {
   // SPEC-063: fetch /api/specs in parallel with /api/graph so node status
   // promotion (line ~2917 below) uses fresh data on tab-activate, not the
   // possibly-stale cached specs[] from the last poll.
-  const [graphResp, specsResp] = await Promise.all([
-    fetch('/api/graph'),
-    fetch('/api/specs').catch(() => null),
-  ]);
-  graphData = await graphResp.json();
-  if (specsResp && specsResp.ok) {
-    try { specs = await specsResp.json(); } catch {}
+  if (needsData) {
+    if (requested) graphPhase(loadAttempt, 'fetch');
+    const [graphResp, specsResp] = await Promise.all([
+      fetch('/api/graph'),
+      fetch('/api/specs').catch(() => null),
+    ]);
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
+    if (!graphResp.ok) throw new Error('graph unavailable');
+    if (requested) graphPhase(loadAttempt, 'json_decode');
+    const freshGraph = await graphResp.json();
+    let freshSpecs = specs;
+    if (specsResp && specsResp.ok) {
+      try { freshSpecs = await specsResp.json(); } catch {}
+    }
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
+    graphData = freshGraph;
+    specs = freshSpecs;
+    graphPhase(loadAttempt, 'prepare');
   }
 
   const container = document.getElementById('graph-container');
@@ -7408,6 +7622,11 @@ async function showGraph(selectId) {
   window.graphNodesDataset = graphNodesDataset;
   window.graphEdgesDataset = graphEdgesDataset;
 
+  loadAttempt.nodes = nodesArr.length;
+  loadAttempt.edges = edgesArr.length + parentEdgesArr.length;
+  loadAttempt.corpus_nodes = graphData.nodes.length;
+  graphPhase(loadAttempt, 'first_paint');
+
   const options = {
     layout: { improvedLayout: false },
     // Physics disabled: nodes use our explicit column positions and don't drift.
@@ -7442,15 +7661,19 @@ async function showGraph(selectId) {
 
   // Physics is disabled, so stabilizationIterationsDone may not fire — use afterDrawing
   // (fires once per frame; .once() ensures it only runs on the first paint).
+  const loadNetwork = network;
   network.once('afterDrawing', () => {
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
     if (selectId || pendingSelectId) {
       const sid = selectId || pendingSelectId;
       pendingSelectId = null;
       highlightNode(sid);
     } else {
-      network.fit();
+      loadNetwork.fit();
     }
-    requestAnimationFrame(() => reportPerformance('graph_ready', performanceStart));
+    requestAnimationFrame(() => {
+      if (loadAttempt === graphLoadAttempt && activeTab === 'graph') finishGraphLoad(loadAttempt, 'success');
+    });
   });
 
   // vis.js fires `click` even after a drag finishes. Track whether a node-drag
@@ -7542,6 +7765,7 @@ async function showGraph(selectId) {
   network.on('doubleClick', function() {
     network.fit();
   });
+  } catch { finishGraphLoad(loadAttempt, 'error'); }
 }
 
 // SPEC-NS-KIT-134: the details panel overlays the graph, so a selected node is placed in the part of the
@@ -7969,7 +8193,7 @@ function renderGraphLegend() {
       else graphHiddenStatuses.add(status);
       saveSettings();
       renderGraphLegend();
-      showGraph();  // re-render with new filter
+      showGraph(undefined, { refresh: false });  // re-render with new filter
     });
     el.appendChild(item);
   }
@@ -7982,7 +8206,7 @@ function renderGraphLegend() {
     showGroupingEdges = !showGroupingEdges;
     saveSettings();
     renderGraphLegend();
-    showGraph();  // re-render with/without grouping edges
+    showGraph(undefined, { refresh: false });  // re-render with/without grouping edges
   });
   el.appendChild(ge);
   // SPEC-NS-KIT-003: reduced/full dependency arrows. Keyboard-operable switch; view-only, writes nothing.
@@ -8008,6 +8232,7 @@ function renderGraphLegend() {
 }
 
 async function showBoard() {
+  if (graphLoadAttempt && !graphLoadAttempt.done) finishGraphLoad(graphLoadAttempt, 'cancelled');
   activeTab = 'board';
   document.getElementById('board-view').style.display = 'flex';
   document.getElementById('graph-view').classList.remove('active');

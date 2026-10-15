@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -172,6 +173,7 @@ class PreparedVerifierDispatch:
     spec_projection_declined: bool = False
     expected_baseline_fix: dict[str, Any] | None = None
     sampling_anchor: SamplingAnchor | None = None
+    suite_environment: dict[str, Any] | None = None
 
     def public_plan(self) -> dict[str, Any]:
         commits = self.evidence["surface_commits"]
@@ -200,6 +202,8 @@ class PreparedVerifierDispatch:
             "sampling": sampling_plan(flaky_suspected=self.flaky_suspected),
             "arm_isolation": self.arm_isolation or build_arm_isolation(),
         }
+        if self.suite_environment is not None:
+            plan['suite_environment'] = copy.deepcopy(self.suite_environment)
         if self.expected_baseline_fix is not None:
             plan["sampling"]["expected_baseline_fix"] = copy.deepcopy(self.expected_baseline_fix)
         normalisation = self.evidence.get("spec_normalisation")
@@ -246,6 +250,8 @@ class PreparedVerifierDispatch:
             }
         if self.ledger_baseline is not None:
             plan["ledger_baseline"] = dict(self.ledger_baseline)
+        if "ledger_head" in self.evidence:
+            plan["ledger_head"] = copy.deepcopy(self.evidence["ledger_head"])
         return plan
 
 
@@ -378,7 +384,11 @@ def validate_dispatch_identity(
     expected_head = (
         surface_commits.get("head") if isinstance(surface_commits, dict) else None
     )
+    setup = containment_evidence.get('suite_environment')
+    if setup is not None and (not isinstance(setup, Mapping) or dispatch_plan.get('suite_environment') != setup or setup.get('launch_allowed') is not True):
+        raise ValueError('verifier setup environment unavailable or mismatched')
     checks = (
+        dispatch_plan.get("ledger_head") == containment_evidence.get("ledger_head"),
         dispatch_plan.get("schema_version") == "2.0.0",
         dispatch_plan.get("identity_schema_version") == VERIFIER_IDENTITY_SCHEMA_VERSION,
         containment_evidence.get("identity_schema_version") == VERIFIER_IDENTITY_SCHEMA_VERSION,
@@ -715,6 +725,117 @@ def declared_external_inputs(spec_text: str) -> list[str]:
         item for item in spec_required_inputs(spec_text)
         if item.startswith(EXTERNAL_INPUT_PREFIX)
     ]
+
+
+def required_external_input_findings(frontmatter: Mapping[str, Any]) -> list[str]:
+    """Validate the explicit mandatory subset; ordinary paths are unchanged."""
+    context = frontmatter.get("context")
+    if not isinstance(context, dict) or "required_external_inputs" not in context:
+        return []
+    required = context["required_external_inputs"]
+    declared = context.get("required_inputs")
+    if declared is None:
+        declared = []
+    if (not isinstance(required, list)
+            or any(not isinstance(item, str) or not item.startswith(EXTERNAL_INPUT_PREFIX)
+                   for item in required)
+            or len(set(required)) != len(required)
+            or not isinstance(declared, list)
+            or any(not isinstance(item, str) for item in declared)):
+        return ["required_external_inputs_schema"]
+    if any(item not in declared for item in required):
+        return ["required_external_declaration_missing"]
+    return []
+
+
+def verifier_input_readiness(
+    project_root: Path, spec_file: Path, *, baseline_ref: str = "HEAD",
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read-only, launch-time eligibility using the existing pinned resolver.
+
+    The returned object is privacy safe and carries no acceptance authority.
+    Call again at launch, optionally comparing a previous binding. Final dispatch
+    independently resolves both arms and retains its declaration-equality gate.
+    """
+    import yaml
+
+    def refused(reason: str, category: str = "project_setup") -> dict[str, Any]:
+        return {"schema_version": 1, "eligible": False, "reason": reason,
+                "category": category, "inputs": []}
+
+    try:
+        root = project_root.resolve()
+        path = spec_file.resolve().relative_to(root).as_posix()
+        current_text = spec_file.read_text(encoding="utf-8")
+        current = yaml.safe_load(_spec_frontmatter(current_text)) or {}
+        if not isinstance(current, dict):
+            return refused("required_external_inputs_schema")
+        def has_external(fm):
+            ctx = fm.get("context")
+            if not isinstance(ctx, dict):
+                return False
+            values = ctx.get("required_inputs")
+            return ("required_external_inputs" in ctx
+                    or isinstance(values, list) and any(
+                        isinstance(item, str) and item.startswith(EXTERNAL_INPUT_PREFIX)
+                        for item in values))
+        selected = has_external(current)
+        if not selected:
+            # A working edit removing all declarations cannot impersonate legacy.
+            try:
+                old = _blob_text_at_ref(root, baseline_ref, path)
+                old_fm = yaml.safe_load(_spec_frontmatter(old or "")) or {}
+                selected = isinstance(old_fm, dict) and has_external(old_fm)
+            except (RuntimeError, ValueError):
+                pass  # Legacy non-Git fixtures retain their local-input contract.
+        if not selected:
+            return {"schema_version": 1, "eligible": True, "reason": "not_required",
+                    "category": "eligibility", "inputs": []}
+        problems = required_external_input_findings(current)
+        if problems:
+            return refused(problems[0])
+        baseline = _run_git(root, "rev-parse", "--verify", baseline_ref + "^{commit}").strip()
+        committed_text = _blob_text_at_ref(root, baseline, path)
+        if committed_text is None:
+            return refused("spec_baseline_missing")
+        committed = yaml.safe_load(_spec_frontmatter(committed_text)) or {}
+        problems = required_external_input_findings(committed)
+        if problems:
+            return refused(problems[0])
+        def requirements(fm):
+            ctx = fm.get("context") or {}
+            return {key: ctx.get(key) or [] for key in ("required_inputs", "required_external_inputs")}
+        if (current.get("id") != committed.get("id")
+                or requirements(current) != requirements(committed)
+                or declared_external_inputs(current_text) != declared_external_inputs(committed_text)):
+            return refused("spec_binding_changed")
+        # Reject unsupported declaration spellings that the deployed flat parser
+        # cannot read; a mandatory YAML value must never silently disappear.
+        declared = [item for item in requirements(committed)["required_inputs"]
+                    if isinstance(item, str) and item.startswith(EXTERNAL_INPUT_PREFIX)]
+        if declared != declared_external_inputs(committed_text):
+            return refused("required_external_inputs_schema")
+        _, records = resolve_declared_external_inputs(
+            root, baseline_ref=baseline, head_ref=baseline, spec_path=path,
+            spec_id=str(committed.get("id", "")))
+        inputs = external_input_manifest(records)["inputs"]
+        binding = {"project": str(root), "spec_path": path, "baseline": baseline,
+                   "spec_sha256": hashlib.sha256(committed_text.encode()).hexdigest(),
+                   "requirements": requirements(committed), "inputs": inputs,
+                   "resolver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+        digest = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+        if expected is not None and (not expected.get("eligible")
+                                     or expected.get("binding_sha256") != digest):
+            return refused("input_binding_changed", "source_availability")
+        return {"schema_version": 1, "eligible": True, "reason": "eligible",
+                "category": "eligibility", "spec_path": path, "baseline_commit": baseline,
+                "binding_sha256": digest, "inputs": inputs}
+    except DeclaredInputRefusal as exc:
+        # Never echo declaration/detail: both may contain private host locators.
+        return refused(exc.reason, "source_availability")
+    except (OSError, ValueError, TypeError, RuntimeError, yaml.YAMLError):
+        return refused("input_readiness_unavailable", "source_availability")
 
 
 def _blob_text_at_ref(repository: Path, ref: str, path: str) -> str | None:
@@ -2212,7 +2333,30 @@ class _AttemptNames:
         )
 
 
-def _scope_summary(block: list[str]) -> str | None:
+IMPLICIT_SCOPE_RULE = (
+    "Kit-owned evidence paths (`reports/**`, `metrics/**`, `red-proofs/**`, `runs/**`, "
+    "`knowledge/attempts/**`, `release-handoffs/**`, `reports/_wip/**`, and this spec's own file) "
+    "are always writable; a new `SPEC-*.md`/`NFR-*.md` file is writable only in the project's "
+    "specs directory; targets with malformed names are never writable."
+)
+
+
+def _complete_scope_summary(summary: str | None, scope: Mapping[str, Any] | None = None) -> str:
+    """Presentation only: preserve declarations and add the canonical rule once."""
+    declared = (summary or "").replace(". " + IMPLICIT_SCOPE_RULE, "").replace(IMPLICIT_SCOPE_RULE, "").strip(" ;")
+    if not declared:
+        scope = scope or {}
+        writes = scope.get("write") or []
+        fields = ["write: " + (", ".join(writes) if writes else "project root (default)")]
+        for key in ("read", "deny"):
+            values = scope.get(key)
+            if values:
+                fields.append(f"{key}: " + (values if isinstance(values, str) else ", ".join(values)))
+        declared = "; ".join(fields)
+    return declared + ". " + IMPLICIT_SCOPE_RULE
+
+
+def _scope_summary(block: list[str]) -> str:
     entries: list[str] = []
     key: str | None = None
     items: list[str] = []
@@ -2236,7 +2380,9 @@ def _scope_summary(block: list[str]) -> str | None:
         if item and key is not None:
             items.append(_unquote_yaml_scalar(item.group(1)))
     flush()
-    return "; ".join(entries) or None
+    if not any(entry.startswith("write:") for entry in entries):
+        entries.insert(0, "write: project root (default)")
+    return _complete_scope_summary("; ".join(entries))
 
 
 def project_spec_for_verifier(
@@ -2806,6 +2952,50 @@ def _projection_is_contained(root: Path, relative: str, digest: str) -> bool:
     )
 
 
+def verification_environment_setup(command: list[str], *, root: Path, output_root: Path,
+                                   timeout_s: float | None = None, previous: dict | None = None, environment: dict | None = None) -> dict:
+    """The parent/dispatch/sample setup contract; setup is never suite evidence."""
+    import preflight
+    config = {}
+    config_bytes = b''
+    try:
+        kit = resolve_kit_root(root)
+        config_bytes = (kit / 'config.yaml').read_bytes()
+        config = load_commands(kit / 'config.yaml')
+    except (OSError, ValueError, KitRootError):
+        pass
+    limit = timeout_s if timeout_s is not None else config.get('test_timeout_s', 300)
+    try:
+        revision = _git_bytes(root, 'rev-parse', 'HEAD').decode().strip()
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+        revision = 'unavailable'
+    return preflight.suite_environment_preflight(command, arm_root=root, arm_revision=revision,
+        config_identity=hashlib.sha256(config_bytes).hexdigest(), output_root=output_root,
+        timeout_s=limit, previous=previous, environment=environment)
+
+
+def _dispatch_environment_setup(evidence: Mapping[str, Any], suites: Iterable[str], evidence_path: Path,
+                                spec_id: str, run_id: str) -> dict | None:
+    if not suites:
+        return None
+    import preflight
+    import shlex
+    root = evidence_path.parent / '_wip' / 'suite-environment' / (spec_id + '-' + uuid.uuid4().hex)
+    root.mkdir(parents=True, mode=0o700)
+    arms = {}
+    allowed = True
+    for arm, path in evidence['surface_repositories'].items():
+        results = []
+        for index, command in enumerate(suites):
+            record = verification_environment_setup(shlex.split(command), root=Path(path), output_root=root)
+            persist_private(root, f'{arm}-{index}.json', json.dumps(record, sort_keys=True))
+            results.append(preflight.suite_environment_public(record))
+            allowed &= record['launch_allowed']
+        arms[arm] = results
+    return {'schema_version': 1, 'launch_allowed': bool(allowed), 'is_suite_sample': False,
+            'arms': arms, 'spec_id': spec_id, 'run_id': run_id}
+
+
 def prepare_verifier_dispatch(
     source_repository: Path,
     destination: Path,
@@ -2883,6 +3073,8 @@ def prepare_verifier_dispatch(
         exact_candidate_revision = _run_git(
             source_repository, "rev-parse", "--verify", f"{head_ref}^{{commit}}"
         ).strip()
+        if ledger_path is not None:
+            evidence["ledger_head"] = _ledger_head_binding(source_repository, head_ref, suites, Path(ledger_path), ledger_identity)
         identity = derive_verifier_identity(
             evidence,
             spec_id=spec_id,
@@ -3237,9 +3429,13 @@ def prepare_verifier_dispatch(
         raise VerifierSurfacePreparationError("verifier surface reachability assertion failed")
     ledger_baseline = None
     if ledger_path is not None:
+        baseline_identity = ledger_identity or {}
+        if suites and isinstance(baseline_identity, Mapping) and baseline_identity.get('command'):
+            # Bind reuse to the command actually assigned, not a stale identity-file command.
+            baseline_identity = {**baseline_identity, 'command': suites[0] if len(suites) == 1 else json.dumps(suites)}
         ledger_baseline = _project_ledger_baseline(
             source_repository, destination, durable_evidence, baseline_ref,
-            Path(ledger_path), ledger_identity or {}, evidence_path, ledger_now,
+            Path(ledger_path), baseline_identity, evidence_path, ledger_now,
         )
     flaky = False
     if ledger_path is not None:
@@ -3264,7 +3460,13 @@ def prepare_verifier_dispatch(
             spec_id=spec_id, run_id=run_id, baseline_ref=baseline_ref,
             head_ref=head_ref, suite_commands=suites, evidence=durable_evidence,
         )
+    setup = _dispatch_environment_setup(durable_evidence, suites, evidence_path, spec_id, run_id)
+    if setup is not None:
+        durable_evidence['suite_environment'] = setup
+        evidence_bytes = (json.dumps(durable_evidence, indent=2, sort_keys=True) + '\n').encode()
+        evidence_path.write_bytes(evidence_bytes)
     return PreparedVerifierDispatch(
+        suite_environment=setup,
         repository=destination,
         evidence_path=evidence_path.resolve(),
         evidence=durable_evidence,
@@ -3307,18 +3509,21 @@ def _project_ledger_baseline(
     """
     outcome: dict[str, Any] = {"status": "not_matched", "reason": "ledger_error"}
     try:
+        if not isinstance(identity_extras, Mapping) or not identity_extras.get("command"):
+            raise LedgerError("ledger identity command is missing")
         record = load_ledger(ledger_path)
         try:
             relative = ledger_path.resolve().relative_to(source_repository).as_posix()
         except ValueError:
             relative = LEDGER_RELATIVE_PATH
         identity = identity_from_extras(
-            source_repository, baseline_ref, identity_extras, exempt=[relative],
+            source_repository, baseline_ref, identity_extras, exempt=[relative], ledger_path=relative,
         )
         moment = now or utc_now()
         decision = reuse_decision(record, identity, now=moment)
         if not decision["reuse"]:
-            outcome = {"status": "not_matched", "reason": decision["reason"]}
+            outcome = {"status": "not_matched", "reason": decision["reason"],
+                       "record_digest": decision.get("record_digest"), "label": None}
         else:
             arms = [Path(p) for p in evidence["surface_repositories"].values()]
             body = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -3345,6 +3550,8 @@ def _project_ledger_baseline(
                 "record_digest": decision["record_digest"],
                 "identity_digest": decision["identity_digest"],
                 "projected_path": PROJECTED_RELATIVE_PATH,
+                **({"inputs": decision["inputs"], "inputs_digest": decision["inputs_digest"]}
+                   if "inputs" in decision else {}),
             }
     except Exception:  # noqa: BLE001 - fail closed to a real baseline run
         outcome = {"status": "not_matched", "reason": "ledger_error"}
@@ -3353,6 +3560,8 @@ def _project_ledger_baseline(
             if stale.exists():
                 stale.chmod(0o644)
                 stale.unlink()
+    outcome.setdefault("record_digest", None)
+    outcome.setdefault("label", None)
     try:
         sidecar = evidence_path.with_name(evidence_path.stem + ".ledger-match.json")
         sidecar.write_text(json.dumps(outcome, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3374,7 +3583,9 @@ def contamination_exposures(value: Any) -> list[dict[str, Any]] | None:
         return None
     for item in items:
         if (
-            item.get("class") not in CONTAMINATION_CLASSES
+            not isinstance(item.get("class"), str)
+            or not isinstance(item.get("timing"), str)
+            or item.get("class") not in CONTAMINATION_CLASSES
             or item.get("timing") not in CONTAMINATION_TIMINGS
             or not set(item) <= CONTAMINATION_KEYS
             or not isinstance(item.get("detail", ""), str)
@@ -4077,6 +4288,25 @@ def run_suite_sample(
     per-host advisory lease and records its gate wait as the `coordination_gate_wait` stage; the
     sample's wall time starts after acquisition. With `output_dir` the full output is persisted
     privately before a bounded summary (path, sha256, head/tail, exit marker) is printed."""
+    import preflight
+    try:
+        _suite_sample_stem(spec_id, arm, suite, sample)
+    except ValueError as error:
+        print(f"suite-sample: {error}", file=sys.stderr)
+        return 64
+    setup_root = metrics_dir / '_wip' / 'suite-environment'
+    try:
+        setup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        actual_output = output_dir if output_dir is not None else metrics_dir / 'suite-sample'
+        actual_output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        record = verification_environment_setup(command, root=Path.cwd(), output_root=actual_output)
+        persist_private(setup_root, f'{spec_id}-{arm}-{sample}-{uuid.uuid4().hex}.json', json.dumps(record, sort_keys=True))
+    except (ValueError, OSError) as error:
+        print('suite-sample: setup evidence unavailable; suite not launched', file=sys.stderr)
+        return 78
+    if not record['launch_allowed']:
+        print('suite-sample: setup gap: ' + ','.join(record['reason_codes']) + '; suite not launched', file=sys.stderr)
+        return 78
     if heavy:
         try:
             config = dict(heavy_config) if heavy_config is not None else load_heavy_config(
@@ -4265,6 +4495,7 @@ def _run_suite_sample(
 
     try:
         try:
+            head_native_created = _iso(utc_now()) if os.environ.get("NIGHTSHIFT_LEDGER_HEAD_CAPTURE") == "1" else None
             proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except OSError as exc:
             denied = True
@@ -4287,6 +4518,8 @@ def _run_suite_sample(
                   "native_exit_code": code, "launch_denied": denied, "raw_complete": raw_complete,
                   "raw_path": str(spool.directory / "raw.log"), "raw_sha256": digest.hexdigest(),
                   "raw_bytes": sum(map(len, captured)), "wall_s": wall}
+        if not denied and head_native_created is not None:
+            native["created"] = head_native_created
         try:
             spool.append(native)
             native_retained = True
@@ -4414,7 +4647,282 @@ def _summarize_lanes(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_throughput_report(sources: list[tuple[str, Path]]) -> dict[str, Any]:
+def _delivery_receipt_observations(raw: dict, kind: str, source: dict) -> list[dict]:
+    """Read supported receipt fields without converting them into new emitted events."""
+    import hashlib
+    base = {key: raw.get(key) for key in ('repository_id', 'project_id', 'spec_id', 'run_id', 'attempt_id', 'action_id')}
+    digest = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+    base.update(event='delivery_observed', observation_id=digest, observation_origin='receipt',
+                source_receipt_digest=digest)
+    if kind == 'terminal':
+        rows = []
+        if raw.get('decision') == 'done':
+            rows.append({**base, 'stage': 'candidate_accepted', 'admissibility_outcome': 'accepted'})
+            if raw.get('projection') in {'completed', 'metadata_completed'}:
+                rows.append({**base, 'observation_id': digest + ':projection', 'stage': 'projection_complete'})
+        elif raw.get('decision') == 'blocked':
+            rows.append({**base, 'settlement_outcome': 'failed'})
+        if raw.get('integration_outcome') == 'accepted':
+            rows.append({**base, 'observation_id': digest + ':integration', 'stage': 'integrated'})
+        return rows or [base]
+    if kind == 'native':
+        native = raw.get('retained_native', raw)
+        if not isinstance(native, dict) or native.get('kind') != 'native':
+            raise ValueError('unsupported native receipt')
+        code = native.get('native_exit_code')
+        outcome = 'passed' if code == 0 and not isinstance(code, bool) else 'failed' if isinstance(code, int) and not isinstance(code, bool) else 'unknown'
+        return [{**base, 'product_outcome': outcome,
+            'native_created_at': native.get('created'), 'native_age_s': native.get('native_age_s'),
+            'measurements': {'native_seconds': native.get('wall_s')},
+            'started_at': native.get('started_at'), 'ended_at': native.get('ended_at')}]
+    if kind == 'activity':
+        return [{**base, 'started_at': raw.get('started_at'), 'ended_at': raw.get('ended_at'),
+                 'measurements': {'parent_tool_calls': raw.get('parent_tool_calls')}}]
+    if kind == 'dispatch':
+        offer = raw.get('ledger_baseline')
+        return [{**base, 'action_id': raw.get('action_id') or 'baseline-reuse',
+                 'source_receipt_digest': offer.get('record_digest') if isinstance(offer, dict) else None,
+                 'disposition': 'offered' if isinstance(offer, dict) and offer.get('status') == 'matched' else 'not_offered',
+                 'reason_code': 'missing_transport' if offer is None else offer.get('reason') if isinstance(offer, dict) else None}]
+    if kind == 'release':
+        row = base
+        if raw.get('status') == 'completed' and isinstance(source.get('manifest_path'), (str, Path)):
+            import release_handoff
+            manifest_path = Path(source['manifest_path'])
+            if manifest_path.is_symlink() or manifest_path.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError('unbounded manifest')
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            canonical = Path(source['canonical_root']) if source.get('canonical_root') else None
+            if not release_handoff.validate_positive_delivery(raw, spec_id=str(raw.get('spec_id', '')),
+                                                               manifest=manifest, canonical=canonical):
+                row = {**base, 'stage': 'released'}
+        return [row]
+    raise ValueError('unsupported receipt kind')
+
+
+def build_delivery_observation_report(sources: list[dict]) -> dict[str, Any]:
+    """Read declared local receipts; no discovery, store construction or eligibility call."""
+    from loop_events import normalize_delivery_observation
+    import verification_economics as economics
+    import re
+    observations, demands, unjoinable = {}, {}, []
+    observation_conflicts, demand_conflicts = set(), set()
+    duplicate_count = 0
+    complete_populations = []
+    lineage_links = set()
+    released_proofs = set()
+    population_unknown = False
+    def reject(code):
+        unjoinable.append({'reason_code': code})
+    def group(row):
+        return tuple(row.get(key) for key in ('repository_id', 'project_id', 'spec_id', 'run_id', 'attempt_id'))
+    def associated(row, source):
+        row = dict(row)
+        for key in ('repository_id', 'project_id'):
+            explicit = source.get(key)
+            if explicit is not None and row.get(key) not in (None, explicit):
+                reject('source_identity_conflict')
+                return None
+            if row.get(key) is None:
+                row[key] = explicit
+        return row
+    if len(sources) > 64:
+        reject('source_limit')
+        sources = sources[:64]
+        population_unknown = True
+    for source in sources:
+        if not isinstance(source, dict) or not isinstance(source.get('kind'), str) or source.get('kind') not in {'events', 'economics', 'fresh_main', 'dispatch', 'terminal', 'terminal_store', 'native', 'activity', 'release'}:
+            reject('unsupported_source')
+            population_unknown = True
+            continue
+        kind = source['kind']
+        try:
+            path = Path(source['path'])
+            if path.is_symlink() or (kind != 'terminal_store' and path.stat().st_size > 2 * 1024 * 1024):
+                raise ValueError('unbounded source')
+            if kind == 'terminal_store':
+                import status_store
+                spec_ids = source.get('spec_ids')
+                if not isinstance(spec_ids, list) or len(spec_ids) > 256 or not all(isinstance(s, str) for s in spec_ids):
+                    raise ValueError('explicit bounded spec identities required')
+                states = status_store.read_terminal_projection_diagnostics_readonly(path, spec_ids)
+                if not states:
+                    raise ValueError('terminal evidence unavailable')
+                items = [{**state, 'spec_id': spec_id} for spec_id, state in states.items()]
+                kind = 'terminal'
+            else:
+                text = path.read_text(encoding='utf-8')
+                items = [json.loads(line) for line in text.splitlines() if line.strip()] if kind == 'events' else json.loads(text)
+            items = items if isinstance(items, list) else [items]
+            if len(items) > 10000:
+                raise ValueError('unbounded population')
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            reject('malformed_source')
+            if kind in {'economics', 'fresh_main'}:
+                population_unknown = True
+            continue
+        if kind in {'economics', 'fresh_main', 'dispatch'}:
+            population = normalize_delivery_observation({
+                'repository_id': source.get('repository_id'), 'project_id': source.get('project_id'),
+                'spec_id': 'POPULATION', 'run_id': 'POPULATION', 'observation_id': 'population'})
+            if population is None:
+                reject('missing_population_identity')
+                population_unknown = True
+            elif source.get('population_complete') is True:
+                complete_populations.append({'kind': kind, 'repository_id': population['repository_id'],
+                    'project_id': population['project_id'], 'retained_records': len(items)})
+            else:
+                population_unknown = True
+        if kind == 'dispatch':
+            for raw in items:
+                offer = raw.get('ledger_baseline') if isinstance(raw, dict) else None
+                context = associated(raw, source) if isinstance(raw, dict) else None
+                action = raw.get('action_id') or 'baseline-reuse' if isinstance(raw, dict) else None
+                probe = normalize_delivery_observation({**(context or {}), 'action_id': action, 'observation_id': action})
+                if probe is None or not isinstance(offer, dict) or not isinstance(offer.get('status'), str) or offer.get('status') not in {'matched', 'not_matched'}:
+                    reject('dispatch_population_unavailable')
+                    population_unknown = True
+                    continue
+                receipt = offer.get('record_digest')
+                receipt = receipt if isinstance(receipt, str) and re.fullmatch(r'[a-f0-9]{64}', receipt) else None
+                key = (*group(probe), action)
+                value = {'eligible': offer['status'] == 'matched', 'source_receipt_digest': receipt}
+                if key in demands and demands[key] != value:
+                    demand_conflicts.add(key)
+                else:
+                    demands[key] = value
+        if kind not in {'events', 'economics', 'fresh_main'}:
+            adapted = []
+            for raw in items:
+                try:
+                    if not isinstance(raw, dict):
+                        raise ValueError('receipt object required')
+                    converted = _delivery_receipt_observations(raw, kind, source)
+                    for row in converted:
+                        if row.get('stage') == 'released':
+                            released_proofs.add(row['observation_id'])
+                    adapted.extend(converted)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                    reject('malformed_optional_receipt')
+            items, kind = adapted, 'events'
+        for raw in items:
+            if kind == 'events':
+                if isinstance(raw, dict) and raw.get('event') == 'lane_recorded':
+                    reject('legacy_lane_identity_unavailable')
+                    continue
+                if isinstance(raw, dict) and raw.get('event') != 'delivery_observed':
+                    continue
+                row = associated(raw, source) if isinstance(raw, dict) else None
+                row = normalize_delivery_observation(row)
+                if row is None:
+                    reject('missing_observation_identity')
+                    continue
+                key = (row['repository_id'], row['project_id'], row['observation_id'])
+                if key in observations:
+                    if observations[key] != row:
+                        observation_conflicts.add(key)
+                    else:
+                        duplicate_count += 1
+                else:
+                    observations[key] = row
+            else:
+                if kind == 'economics':
+                    record = raw.get('verification_economics') if isinstance(raw, dict) else None
+                    if not isinstance(record, dict) or record.get('schema_version') != economics.SCHEMA or record.get('record_digest') != economics._digest({k: v for k, v in record.items() if k != 'record_digest'}):
+                        reject('invalid_demand_receipt')
+                        population_unknown = True
+                        continue
+                    proposal = record.get('proposal')
+                    action = proposal.get('action_id') if isinstance(proposal, dict) else None
+                    context = associated(record, source)
+                    reuse = record.get('reuse')
+                else:
+                    record = raw.get('delivery_demand') if isinstance(raw, dict) else None
+                    core = {k: v for k, v in raw.items() if k != 'delivery_demand'} if isinstance(raw, dict) else {}
+                    core_digest = hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
+                    if not isinstance(record, dict) or record.get('demand_receipt_digest') != core_digest or record.get('eligibility') is not core.get('reuse') or record.get('source_receipt_digest') != core.get('record_digest'):
+                        reject('invalid_demand_receipt')
+                        population_unknown = True
+                        continue
+                    action = record.get('action_id')
+                    context = associated(record, source)
+                    reuse = {'eligible': record.get('eligibility'), 'record_digest': record.get('source_receipt_digest')}
+                probe = normalize_delivery_observation({**(context or {}), 'observation_id': action})
+                if context is None or probe is None or not isinstance(reuse, dict) or not isinstance(reuse.get('eligible'), bool):
+                    reject('missing_demand_identity')
+                    population_unknown = True
+                    continue
+                lineage = record.get('lineage')
+                if isinstance(lineage, list) and lineage and lineage[0] == probe['spec_id']:
+                    for parent in lineage[1:]:
+                        valid = normalize_delivery_observation({**probe, 'spec_id': parent})
+                        if valid is not None and parent != probe['spec_id']:
+                            lineage_links.add((probe['repository_id'], probe['project_id'], probe['spec_id'], parent))
+                key = (*group(probe), action)
+                receipt = reuse.get('record_digest')
+                receipt = receipt if isinstance(receipt, str) and re.fullmatch(r'[a-f0-9]{64}', receipt) else None
+                demand = {'eligible': reuse['eligible'], 'source_receipt_digest': receipt}
+                if key in demands and demands[key] != demand:
+                    demand_conflicts.add(key)
+                else:
+                    demands[key] = demand
+    for key in observation_conflicts:
+        observations.pop(key, None)
+        reject('observation_identity_conflict')
+    for key in demand_conflicts:
+        demands.pop(key, None)
+        reject('demand_identity_conflict')
+        population_unknown = True
+    groups = {}
+    stages = ('ready_restored', 'candidate_accepted', 'integrated', 'projection_complete', 'released')
+    def bucket(key):
+        if key not in groups:
+            groups[key] = {**dict(zip(('repository_id', 'project_id', 'spec_id', 'run_id', 'attempt_id'), key)),
+                'stages': {stage: None for stage in stages}, 'observations': [],
+                'outcomes': {domain: [] for domain in ('product', 'diagnostic', 'admissibility', 'settlement')}}
+        return groups[key]
+    matched_demands, consumed, fallback_count, avoided = set(), set(), 0, []
+    for key in demands:
+        bucket(key[:5])
+    for row in sorted(observations.values(), key=lambda r: r['observation_id']):
+        record = bucket(group(row))
+        record['observations'].append(row)
+        # A lane event claiming release is not independent release proof.
+        if row['stage'] and (row['stage'] != 'released' or row['observation_id'] in released_proofs):
+            record['stages'][row['stage']] = True
+        for domain in record['outcomes']:
+            value = row[domain + '_outcome']
+            if value and value not in record['outcomes'][domain]:
+                record['outcomes'][domain].append(value)
+                record['outcomes'][domain].sort()
+        key = (*group(row), row['action_id'])
+        demand = demands.get(key)
+        if demand is not None and demand['eligible'] and row['observation_origin'] == 'emitted':
+            matched_demands.add(key)
+        if row['disposition'] == 'consumed':
+            if demand and demand['eligible'] and row['source_receipt_digest'] is not None and row['source_receipt_digest'] == demand['source_receipt_digest']:
+                consumed.add(row['source_receipt_digest'])
+                if row['source_native_seconds'] is not None:
+                    avoided.append(row['source_native_seconds'])
+            else:
+                reject('consumption_receipt_not_matched')
+        if row['disposition'] == 'native_fallback':
+            fallback_count += 1
+    known = bool(complete_populations) and not population_unknown
+    records = [groups[key] for key in sorted(groups, key=lambda values: tuple(value or '' for value in values))]
+    return {'schema_version': '1.0.0', 'records': records, 'duplicate_observations': duplicate_count,
+        'lineage_links': [dict(zip(('repository_id', 'project_id', 'spec_id', 'parent_spec_id'), link)) for link in sorted(lineage_links)],
+        'unjoinable': sorted(unjoinable, key=lambda item: item['reason_code']),
+        'coverage': {'eligible': sum(d['eligible'] for d in demands.values()) if known else None,
+            'observed': len(matched_demands) if known else None,
+            'source_population': 'declared_complete_supported_demands' if known else 'unknown',
+            'sample_state': 'population_unknown' if not known else 'no_samples' if not any(d['eligible'] for d in demands.values()) else 'observed',
+            'populations': sorted(complete_populations, key=lambda item: json.dumps(item, sort_keys=True))},
+        'consumed_receipts': sorted(consumed), 'native_fallbacks': fallback_count,
+        'avoided_runtime': {'kind': 'estimated', 'seconds': sum(avoided) if consumed and len(avoided) == len(consumed) else None}}
+
+
+def build_throughput_report(sources: list[tuple[str, Path]], *, delivery_sources: list[dict] | None = None) -> dict[str, Any]:
     """Aggregate per-project verification distributions from metrics rows (R5).
 
     Rows lacking the SPEC-NS-KIT-002-001 fields are counted but contribute
@@ -4488,7 +4996,11 @@ def build_throughput_report(sources: list[tuple[str, Path]]) -> dict[str, Any]:
         lanes = _summarize_lanes(lane_events.get(project, []))
         if lanes:
             projects[project]["lanes"] = lanes
-    return {"schema_version": 1, "projects": projects}
+    if delivery_sources is None:
+        delivery_sources = [{'kind': 'events', 'path': path} for _label, directory in sources
+            for path in sorted((directory.resolve().parent / 'runs').glob('*/events.jsonl'))]
+    return {"schema_version": 1, "projects": projects,
+            "delivery_observations": build_delivery_observation_report(delivery_sources)}
 
 
 def _fmt_distribution(value: Any, *, share: bool = False) -> str:
@@ -4526,6 +5038,15 @@ def render_throughput_report(data: dict[str, Any]) -> str:
             lines.append("  - re-dispatch reasons: "
                          + (", ".join(f"{k}={v}" for k, v in lv["redispatch_reasons"].items()) or "none recorded"))
         lines.append("")
+    delivery = data.get('delivery_observations')
+    if delivery is not None:
+        coverage = delivery['coverage']
+        eligible = coverage['eligible'] if coverage['eligible'] is not None else 'unknown'
+        observed = coverage['observed'] if coverage['observed'] is not None else 'unknown'
+        lines += ['## delivery observations',
+            f"eligible={eligible} observed={observed} source_population={coverage['source_population']}",
+            f"consumed_receipts={len(delivery['consumed_receipts'])} native_fallbacks={delivery['native_fallbacks']} unjoinable={len(delivery['unjoinable'])}",
+            'avoided runtime is estimated; absent stages and measurements remain unknown.']
     return "\n".join(lines)
 
 
@@ -5083,6 +5604,110 @@ def compute_inputs_digest(repo: Path, ref: str, *, exempt: Iterable[str] = ()) -
     return sha256_hex("\n".join(sorted(rows)).encode("utf-8", "surrogateescape"))
 
 
+def _ledger_input_policy(inputs: Any) -> dict[str, list[str]]:
+    if not isinstance(inputs, dict) or len(inputs) != 1 or next(iter(inputs), None) not in {"include", "exclude"}:
+        raise LedgerError("input policy needs exactly one include or exclude list")
+    kind, patterns = next(iter(inputs.items()))
+    if not isinstance(patterns, list) or not patterns:
+        raise LedgerError("input policy needs a nonempty glob list")
+    for pattern in patterns:
+        if (not isinstance(pattern, str) or not pattern or pattern.startswith("/")
+                or "\\" in pattern or any(c in pattern for c in "\x00\r\n")
+                or any(part in {"", ".", ".."} for part in pattern.split("/"))
+                or pattern.count("[") != pattern.count("]")):
+            raise LedgerError("invalid repository-relative input glob")
+    return {kind: sorted(set(patterns))}
+
+
+def _ledger_known_runner(command: str) -> bool:
+    # No shell evaluation, arbitrary script dependency guessing or external launch.
+    if any(char in command for char in ";&|`$<>\n\r"):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    if words[:2] == ["uv", "run"]:
+        words = words[2:]
+        while words and words[0] == "--with" and len(words) >= 2:
+            words = words[2:]
+    if not words:
+        return False
+    executable = words[0]
+    if "/" in executable or "\\" in executable:
+        return False
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", executable):
+        return len(words) >= 3 and words[1:3] in (["-m", "pytest"], ["-m", "unittest"])
+    return (executable in {"pytest", "pytest-3"}
+            or words[:2] in (["swift", "test"], ["cargo", "test"]))
+
+
+def _ledger_mandatory_input(path: str, mode: str, command: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1]
+    # A declared non-input glob never overrides executable/source, runner/config,
+    # hook, test or resource ownership, including such files below docs/.
+    protected_dirs = {"app", "src", "source", "sources", "scripts", "hooks", "tests", "test",
+                      "resources", "fixtures", "assets", "config", "configs", ".github", ".gitlab",
+                      "testdata", "data", "res", "xcassets"}
+    source_suffixes = {".py", ".pyi", ".sh", ".bash", ".zsh", ".fish", ".js", ".jsx", ".ts", ".tsx",
+                       ".swift", ".m", ".mm", ".h", ".c", ".cpp", ".rs", ".go", ".java", ".kt",
+                       ".rb", ".pl", ".php", ".cs", ".fs", ".ex", ".exs", ".lua", ".r", ".sql",
+                       ".html", ".css", ".vue", ".svelte", ".gradle", ".cmake", ".xcscheme", ".pbxproj",
+                       ".dart", ".scala", ".vb", ".clj", ".cxx", ".xcconfig"}
+    config_suffixes = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".lock", ".plist"}
+    return (mode != "100644" or bool({part.lower() for part in parts[:-1]} & protected_dirs)
+            or Path(name).suffix.lower() in source_suffixes | config_suffixes
+            or any(fnmatch.fnmatchcase(path.lower(), pattern) for pattern in DEFAULT_FORCE_FULL_PATTERNS)
+            or name.lower() in {"makefile", "dockerfile", "jenkinsfile", "justfile", "gemfile", "rakefile",
+                                "package.swift", "requirements.txt", "requirements-dev.txt", "poetry.lock"}
+            or name.lower().endswith(("lock", "lockfile"))
+            or path in command)
+
+
+def _ledger_policy_inputs(repo: Path, ref: str, command: str, inputs: Any,
+                          exempt: Iterable[str], ledger_path: str) -> tuple[str, dict[str, Any]]:
+    declaration = _ledger_input_policy(inputs)
+    kind, patterns = next(iter(declaration.items()))
+    entries = []
+    unresolved = not _ledger_known_runner(command)
+    for entry in _ledger_git(repo, "ls-tree", "-r", "-z", ref).split(b"\0"):
+        if not entry:
+            continue
+        meta, _, raw = entry.partition(b"\t")
+        mode, object_type, oid = meta.decode("ascii").split()
+        path = raw.decode("utf-8", "surrogateescape")
+        if object_type != "blob" or mode not in {"100644", "100755"}:
+            unresolved = True
+        # Preserve the trusted ledger's self-exclusion; other explicit exempts
+        # cannot subtract protected inputs in opt-in mode.
+        if path in exempt and path == ledger_path and path.endswith(".json") and path not in command:
+            # A custom path is an output exemption only when the tracked bytes
+            # really are a ledger, never merely because a config names it so.
+            try:
+                ledger_value = json.loads(_ledger_git(repo, "cat-file", "blob", oid))
+                valid_ledger = not verify_record(ledger_value)
+            except (ValueError, TypeError, LedgerError):
+                valid_ledger = False
+            if valid_ledger:
+                continue
+            unresolved = True
+        mandatory = _ledger_mandatory_input(path, mode, command)
+        matched = any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+        selected = matched if kind == "include" else not matched
+        if mandatory or (selected and not _EXEMPT_RE.match(path) and path not in exempt):
+            entries.append((path, oid))
+    if unresolved:
+        digest = compute_inputs_digest(repo, ref, exempt=exempt)
+    else:
+        digest = sha256_hex("\n".join(f"{path}\0{oid}" for path, oid in sorted(entries)).encode("utf-8", "surrogateescape"))
+    return digest, {"schema_version": 1, **declaration,
+                    "mode": "conservative" if unresolved else "declared",
+                    "resolved_paths": sorted(path for path, _ in entries)}
+
+
 def default_toolchain() -> dict[str, str]:
     return {
         "python": platform.python_version(),
@@ -5105,11 +5730,14 @@ def build_identity(
     device_policy: Mapping[str, str] | None = None,
     host: str | None = None,
     exempt: Iterable[str] = (),
+    inputs: Mapping[str, Any] | None = None,
+    ledger_path: str = LEDGER_RELATIVE_PATH,
 ) -> dict[str, Any]:
     """The full identity a result is bound to (parent spec, Design decisions)."""
     if not isinstance(command, str) or not command.strip():
         raise LedgerError("identity needs the exact test command")
-    return {
+    exempt = tuple(exempt)
+    identity = {
         "inputs_digest": compute_inputs_digest(repo, ref, exempt=exempt),
         "command": command,
         "selection": selection,
@@ -5119,6 +5747,10 @@ def build_identity(
         "device_policy": dict(sorted((device_policy or {"simulator": "none", "data": "fresh-per-run"}).items())),
         "host": host if host is not None else platform.node(),
     }
+    if inputs is not None:
+        identity["inputs_digest"], identity["inputs"] = _ledger_policy_inputs(
+            repo, ref, command, inputs, exempt, ledger_path)
+    return identity
 
 
 def identity_digest(identity: Mapping[str, Any]) -> str:
@@ -5322,6 +5954,8 @@ def entry_active(entry: Mapping[str, Any], now: datetime) -> bool:
 
 def reuse_decision(record: Any, identity: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     """May this record stand in for a real full run of *identity*? (R5/R6.)"""
+    if "inputs" in identity and identity["inputs"].get("mode") != "declared":
+        return {"reuse": False, "reason": "input_policy_unresolved"}
     errors = verify_record(record)
     if errors:
         return {"reuse": False, "reason": "untrusted_receipt", "detail": errors[0]}
@@ -5337,6 +5971,8 @@ def reuse_decision(record: Any, identity: Mapping[str, Any], *, now: datetime) -
         "reuse": True, "reason": "identity_match", "label": "reused",
         "record_digest": digest, "identity_digest": record["identity_digest"],
         "originating_run": record["originating_run"], "evidence_digest": record["evidence_digest"],
+        **({"inputs": copy.deepcopy(identity["inputs"]), "inputs_digest": identity["inputs_digest"]}
+           if "inputs" in identity else {}),
     }
 
 
@@ -5603,6 +6239,21 @@ def run_expected_baseline_fix_sample(plan: Mapping[str, Any], *, arm: str,
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (env.get("PYTHONPATH", ""), str(observer_dir))))
     env["NIGHTSHIFT_PYTEST_BINDING"] = json.dumps(binding, sort_keys=True)
     env["NIGHTSHIFT_PYTEST_OBSERVATION"] = str(observation_path)
+    import shlex
+    import preflight
+    setup = verification_environment_setup(shlex.split(command), root=root, output_root=output_dir, environment=env)
+    persist_private(output_dir, 'setup-preflight.json', json.dumps(setup, sort_keys=True))
+    if not setup['launch_allowed']:
+        log = output_dir / 'native-output.log'
+        log.write_text('Setup prerequisite unavailable: ' + ','.join(setup['reason_codes']) + '\n')
+        native = {'exit_code': None, 'timed_out': False, 'denied': True, 'launched': False,
+                  'process_group_id': None, 'process_group_closed': True}
+        entry = {'path': str(log), 'arm': arm, 'invocation_identity': invocation_identity, 'native': native,
+                 'evidence_gap': 'verification_environment_unavailable', 'is_suite_sample': False,
+                 'setup_preflight': preflight.suite_environment_public(setup),
+                 'sampling_observation': {'command': command, 'completed': False}}
+        persist_private(output_dir, 'sample-entry.json', json.dumps(entry, sort_keys=True))
+        return entry
     started = datetime.now(timezone.utc).isoformat()
     moment = time.monotonic()
     timed_out, denied, code = False, False, None
@@ -6399,6 +7050,245 @@ def write_ledger(path: Path, record: Mapping[str, Any]) -> None:
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
+def _ledger_head_binding(source: Path, ref: str, suites: tuple[str, ...], ledger_path: Path, extras: Any) -> dict[str, Any]:
+    """Bind original head inputs privately; expose no source checkout coordinates."""
+    try:
+        if not isinstance(extras, Mapping) or len(suites) != 1 or extras.get('command') != suites[0]:
+            raise LedgerError('one exact full suite command is required')
+        try:
+            relative = ledger_path.resolve().relative_to(source).as_posix()
+        except ValueError:
+            relative = LEDGER_RELATIVE_PATH
+        original = identity_from_extras(source, ref, extras, exempt=[relative], ledger_path=relative)
+        if original['selection'] != 'full':
+            raise LedgerError('head selection is not full')
+        return {'status': 'ready', 'identity': original}
+    except (LedgerError, ValueError, KeyError, TypeError, RuntimeError):
+        return {'status': 'unavailable', 'reason': 'ledger_head_identity_unavailable'}
+
+
+def _head_plan_digest(plan: Mapping[str, Any]) -> str:
+    return sha256_hex(canonical_json({key: plan.get(key) for key in (
+        'spec_id', 'run_id', 'head_commit', 'implementation_head_digest',
+        'containment_evidence_sha256', 'ledger_head', 'suite_commands', 'arm_working_directories')}))
+
+
+def _head_native_results(native: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int | None, str]:
+    if native.get('format') == 'junit':
+        xml = native['junit_xml'].encode('utf-8')
+        digest = sha256_hex(xml)
+        if digest != native['junit_sha256']:
+            raise LedgerError('head JUnit digest mismatch')
+        results, claimed = parse_junit(xml)
+        return results, claimed, digest
+    if native.get('format') == 'xcode-terminal':
+        text = native['output_log']
+        digest = sha256_hex(text.encode('utf-8'))
+        if digest != native['output_sha256']:
+            raise LedgerError('head native output digest mismatch')
+        try:
+            summary = _parse_xcodebuild_text(text)
+        except VerdictAssemblyError as error:
+            raise LedgerError(str(error)) from error
+        rows = _XCODE_CASE_RE.findall(text)
+        total = summary['passed'] + summary['failed'] + summary['skipped']
+        ids = [f'{klass}.{method}' for klass, method, state in rows]
+        if not rows or len(rows) != len(set(ids)) or len(rows) != total:
+            raise LedgerError('native head output does not account for every test')
+        return [{'id': name, 'status': {'passed': 'pass', 'failed': 'fail', 'skipped': 'unavailable'}[row[2]]}
+                for name, row in zip(ids, rows)], total, digest
+    raise LedgerError('head native proof format unavailable')
+
+
+def _head_pytest_capture(command: str, junit: Path, environment: dict[str, str]) -> bool:
+    """Add only an output option for direct pytest; retain its command and selection."""
+    if any(char in command for char in ';&|`$<>\n\r'):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if words[:2] == ['uv', 'run']:
+        words = words[2:]
+        while words[:1] == ['--with'] and len(words) >= 2:
+            words = words[2:]
+    if not words:
+        return False
+    executable = Path(words[0]).name
+    if not (executable in {'pytest', 'pytest-3'} or
+            (re.fullmatch(r'python(?:3(?:\.\d+)?)?', executable) and words[1:3] == ['-m', 'pytest'])):
+        return False
+    environment['PYTEST_ADDOPTS'] = (environment.get('PYTEST_ADDOPTS', '') +
+                                    ' --junitxml=' + shlex.quote(str(junit))).strip()
+    return True
+
+def head_run_errors(record: Any, *, plan: Mapping[str, Any] | None = None,
+                    require_admission: bool = False, spec_id: str | None = None) -> list[str]:
+    """Verify executed native proof, then its accepted parent transport when consumed."""
+    errors = verify_record(record)
+    if errors:
+        return errors
+    try:
+        native, producer = record['native_result'], record['producer']
+        if record['label'] != 'executed' or producer['kind'] != 'independent-head-native-v1':
+            raise ValueError('record is not an independently executed head')
+        if producer['helper_sha256'] != sha256_hex(Path(__file__).read_bytes()):
+            raise ValueError('untrusted head producer')
+        if native['executed'] is not True or type(native['exit_code']) is not int or native['exit_code'] != 0:
+            raise ValueError('head native execution did not pass')
+        if native['created'] != record['created'] or native['command'] != record['identity']['command']:
+            raise ValueError('original native creation/command mismatch')
+        receipt = native['process_receipt']
+        if (receipt['kind'] != 'native' or receipt['arm'] != 'head'
+                or receipt['spec_id'] != producer['spec_id'] or receipt['run_id'] != record['originating_run']
+                or receipt['command'] != ['bash', '-c', native['command']]
+                or receipt['created'] != native['created'] or receipt['native_exit_code'] != native['exit_code']
+                or receipt['launch_denied'] is not False or receipt['raw_complete'] is not True
+                or receipt['raw_sha256'] != sha256_hex(native['raw_output'].encode('utf-8'))):
+            raise ValueError('head native process receipt mismatch')
+        results, claimed, digest = _head_native_results(native)
+        if record['evidence_digest'] != digest:
+            raise ValueError('head evidence digest mismatch')
+        rebuilt = build_record(record['identity'], results, run_id=record['originating_run'],
+            commit=record['commit'], native_result=native, evidence_digest=digest,
+            now=_parse_iso(record['created']), reported_total=claimed,
+            bug_links={name: item['bug'] for name, item in record['tests'].items() if 'bug' in item})
+        if any(record[key] != rebuilt[key] for key in ('tests', 'counts', 'coverage', 'executed_ids')):
+            raise ValueError('head coverage does not rederive from native JUnit')
+        if spec_id is not None and producer['spec_id'] != spec_id:
+            raise ValueError('head spec identity mismatch')
+        if plan is not None:
+            binding = plan['ledger_head']
+            if (binding.get('status') != 'ready' or binding['identity'] != record['identity']
+                    or plan['head_commit'] != record['commit']
+                    or producer['plan_digest'] != _head_plan_digest(plan)
+                    or producer['spec_id'] != plan['spec_id']
+                    or record['originating_run'] != plan['run_id']):
+                raise ValueError('head proof differs from accepted dispatch')
+        if require_admission:
+            admission = record['head_admission']
+            if (admission['kind'] != 'accepted-merge-gate-v1'
+                    or admission['executed_head'] != record['commit']
+                    or not GIT_OBJECT_ID_RE.fullmatch(admission['candidate'])
+                    or admission['plan_digest'] != producer['plan_digest']
+                    or admission['spec_id'] != producer['spec_id']
+                    or not SHA256_RE.fullmatch(admission['original_receipt_digest'])
+                    or _parse_iso(admission['accepted_at']) is None):
+                raise ValueError('head proof has no accepted parent admission')
+            original = copy.deepcopy(record)
+            del original['head_admission']
+            original['receipt_digest'] = admission['original_receipt_digest']
+            if verify_record(original):
+                raise ValueError('original independent receipt changed during admission')
+    except (ValueError, KeyError, TypeError, AttributeError, ET.ParseError, OSError) as error:
+        return [str(error)]
+    return []
+
+
+def run_ledger_head(plan: Mapping[str, Any], out_dir: Path) -> dict[str, Any]:
+    """Execute the assigned full head command; never seal caller-supplied native status."""
+    binding = plan.get('ledger_head') or {}
+    if binding.get('status') != 'ready':
+        raise LedgerError('dispatch has no eligible full head identity')
+    command = binding['identity']['command']
+    if plan.get('suite_commands') != [command]:
+        raise LedgerError('head command differs from dispatch')
+    arm = Path(plan['arm_working_directories']['head']).resolve()
+    out_dir = out_dir.resolve()
+    if out_dir == arm or out_dir.is_relative_to(arm):
+        raise LedgerError('native head evidence must be outside the assigned checkout')
+    if _run_git(arm, 'rev-parse', 'HEAD').strip() != plan['head_commit']:
+        raise LedgerError('assigned head moved before native execution')
+    before = capture_verifier_footprint(arm)
+    expected = (plan.get('footprint_before') or {}).get('head')
+    if expected != {'tree': before.tree, 'porcelain': before.porcelain}:
+        raise LedgerError('assigned head changed before native execution')
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    junit, target = out_dir / 'junit.xml', out_dir / 'record.json'
+    for old in (junit, target):
+        old.unlink(missing_ok=True)
+    environment = {**os.environ, **binding['identity'].get('env', {}), 'PYTHONDONTWRITEBYTECODE': '1', 'NIGHTSHIFT_LEDGER_JUNIT': str(junit)}
+    capture = _head_pytest_capture(command, junit, environment)
+    helper_digest = sha256_hex(Path(__file__).read_bytes())
+    sample_root = out_dir / ('native-sample-' + uuid.uuid4().hex)
+    environment.update(NIGHTSHIFT_LEDGER_HEAD_CAPTURE='1', NIGHTSHIFT_RUN_ID=str(plan['run_id']))
+    argv = [sys.executable, str(Path(__file__).resolve()), 'suite-sample', '--spec-id', plan['spec_id'],
+            '--arm', 'head', '--suite', 'ledger-head-full', '--metrics-dir', str(out_dir / 'metrics'),
+            '--output-dir', str(sample_root), '--', 'bash', '-c', command]
+    with (out_dir / 'wrapper-output.log').open('wb') as sink:
+        done = subprocess.run(argv, cwd=arm, stdout=sink, stderr=subprocess.STDOUT, env=environment)
+    result = {'native_exit': None, 'wrapper_exit': done.returncode,
+              'record_status': 'unavailable', 'reason': 'head_proof_unavailable'}
+    try:
+        stem = _suite_sample_stem(plan['spec_id'], 'head', 'ledger-head-full', 1)
+        process = json.loads((sample_root / (stem + '.process.json')).read_text())
+        receipt = process['retained_native']
+        if not receipt['raw_complete'] or receipt['launch_denied']:
+            raise LedgerError('suite-sample native receipt unavailable')
+        raw = (sample_root / (stem + '.log')).read_bytes()
+        if sha256_hex(raw) != receipt['raw_sha256']:
+            raise LedgerError('suite-sample native bytes changed')
+        (out_dir / 'native-output.log').write_bytes(raw)
+        created = _parse_iso(receipt['created'])
+        if created is None:
+            raise LedgerError('suite-sample native creation time unavailable')
+        native = {'exit_code': receipt['native_exit_code'], 'executed': True, 'created': receipt['created'],
+                  'command': command, 'process_receipt': receipt, 'raw_output': raw.decode('utf-8'),
+                  'capture': {'pytest_junit_output_option': capture}}
+        result['native_exit'] = native['exit_code']
+    except (LedgerError, ValueError, OSError, KeyError, TypeError) as error:
+        result['detail'] = str(error)
+        persist_private(out_dir, 'head-result.json', json.dumps(result, sort_keys=True))
+        return result
+    try:
+        after = capture_verifier_footprint(arm)
+        if before != after or _run_git(arm, 'rev-parse', 'HEAD').strip() != plan['head_commit']:
+            raise LedgerError('head checkout mutated during native execution')
+        if junit.is_file():
+            xml = junit.read_bytes()
+            native.update({'format': 'junit', 'junit_xml': xml.decode('utf-8'), 'junit_sha256': sha256_hex(xml)})
+        else:
+            text = (out_dir / 'native-output.log').read_text(encoding='utf-8')
+            native.update({'format': 'xcode-terminal', 'output_log': text, 'output_sha256': sha256_hex(text.encode())})
+        results, claimed, digest = _head_native_results(native)
+        record = build_record(binding['identity'], results, run_id=plan['run_id'],
+            commit=plan['head_commit'], native_result=native, evidence_digest=digest,
+            now=created, reported_total=claimed)
+        record['producer'] = {'kind': 'independent-head-native-v1',
+            'helper_sha256': helper_digest,
+            'spec_id': plan['spec_id'], 'plan_digest': _head_plan_digest(plan)}
+        record['receipt_digest'] = _receipt_digest(record)
+        errors = head_run_errors(record, plan=plan)
+        if errors:
+            raise LedgerError(errors[0])
+        write_ledger(target, record)
+        result.update({'record_status': 'sealed', 'reason': 'independent_head_executed',
+                       'record': str(target), 'receipt_digest': record['receipt_digest']})
+    except (LedgerError, ValueError, KeyError, OSError, ET.ParseError) as error:
+        result['detail'] = str(error)
+    persist_private(out_dir, 'native-exit.json', json.dumps(native, sort_keys=True))
+    persist_private(out_dir, 'head-result.json', json.dumps(result, sort_keys=True))
+    return result
+
+
+def retain_accepted_head(record: Any, plan: Mapping[str, Any], evidence: Mapping[str, Any],
+                         *, candidate: str, ledger_root: Path) -> dict[str, Any]:
+    """Parent-only transport after the candidate's existing merge gate succeeds."""
+    if plan.get('ledger_head') != evidence.get('ledger_head'):
+        raise LedgerError('head identity differs from private dispatch evidence')
+    errors = head_run_errors(record, plan=plan)
+    if errors:
+        raise LedgerError(errors[0])
+    if candidate_revision_digest(candidate) != evidence.get('candidate_revision_digest') or not re.fullmatch(r'[A-Z][A-Z0-9-]*', plan['spec_id']):
+        raise LedgerError('head candidate/spec identity mismatch')
+    retained = copy.deepcopy(record)
+    retained['head_admission'] = {'kind': 'accepted-merge-gate-v1', 'candidate': candidate, 'executed_head': record['commit'],
+        'spec_id': plan['spec_id'], 'plan_digest': _head_plan_digest(plan),
+        'original_receipt_digest': record['receipt_digest'], 'accepted_at': _iso(utc_now())}
+    retained['receipt_digest'] = _receipt_digest(retained)
+    write_ledger(ledger_root / 'reports' / '_wip' / f"ledger-head-{plan['spec_id']}.json", retained)
+    return retained
+
 
 # --------------------------------------------------------------------------- verdict assembly
 # SPEC-NS-KIT-002-004: the kit, not the verifier, derives scope, the five classification lists,
@@ -7112,6 +8002,57 @@ def _read_sample(entry: Any, base: Path) -> dict[str, Any]:
     return dict(entry)  # structured sample (reused ledger baseline, first-scaffold attempt)
 
 
+def _assigned_head_scope_root(plan: Mapping[str, Any], spec_file: Path) -> Path:
+    """Bind classification to the assigned checkout; Git inventory stays container-wide.
+
+    This verifies local arm/spec coordinates. The existing parent identity gate
+    still binds the public plan to private containment evidence and candidate.
+    """
+    import yaml
+
+    try:
+        raw_container = Path(plan["repository"])
+        container = raw_container.resolve(strict=True)
+        common = Path(_run_git(container, "rev-parse", "--git-common-dir").strip())
+        common = (container / common).resolve()
+        roots = {}
+        for arm in ARM_LABELS:
+            raw = Path(plan["arm_working_directories"][arm])
+            if ".." in raw.parts or ".." in raw_container.parts:
+                raise ValueError("traversal in assigned root")
+            root = raw.resolve(strict=True)
+            root.relative_to(container)
+            if root == container or Path(_run_git(root, "rev-parse", "--show-toplevel").strip()).resolve() != root:
+                raise ValueError("assigned arm is not a corresponding checkout")
+            arm_common = Path(_run_git(root, "rev-parse", "--git-common-dir").strip())
+            if (root / arm_common).resolve() != common:
+                raise ValueError("foreign object database")
+            ref = f"verifier-{arm}"
+            if plan.get(f"{arm}_ref") != ref:
+                raise ValueError("substituted arm reference")
+            expected = plan[f"{arm}_commit"]
+            if (_run_git(root, "rev-parse", "HEAD").strip() != expected
+                    or _run_git(container, "rev-parse", ref).strip() != expected):
+                raise ValueError("stale or swapped arm identity")
+            roots[arm] = root
+        if roots["baseline"] == roots["head"] or ".." in spec_file.parts:
+            raise ValueError("aliased arms or spec traversal")
+        spec = spec_file.resolve(strict=True)
+        relative = spec.relative_to(roots["head"]).as_posix()
+        kit_guard = spec.parent.parent / "scope_guard.py"
+        if spec.parent.name != "specs" or not kit_guard.is_file():
+            raise ValueError("spec has no corresponding kit")
+        kit_guard.resolve().relative_to(roots["head"])
+        text = spec.read_text(encoding="utf-8")
+        front = yaml.safe_load(_spec_frontmatter(text)) or {}
+        if (not isinstance(front, Mapping) or front.get("id") != plan["spec_id"]
+                or _git_bytes(roots["head"], "show", f"HEAD:{relative}") != spec.read_bytes()):
+            raise ValueError("foreign or changed spec contract")
+        return roots["head"]
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, yaml.YAMLError) as error:
+        raise VerdictAssemblyError(f"scope arm binding refused: {error}") from error
+
+
 def assemble_verdict(
     plan: Mapping[str, Any], supplied: Mapping[str, Any], *, input_dir: Path, spec_file: Path,
     main_root: Path | None = None, main_branch: str = "main",
@@ -7172,7 +8113,7 @@ def assemble_verdict(
     if stated is not None and stated != derived and not (stated == "fail" and derived == "pass"):
         raise VerdictAssemblyError(f"stated verdict {stated!r} contradicts the supplied evidence (derived {derived!r})")
     verdict_value = stated if stated is not None else derived
-    surface = Path(plan["repository"])
+    surface = _assigned_head_scope_root(plan, spec_file)
     footprint = supplied.get("git_footprint")
     if footprint is None:
         before = plan.get("footprint_before")
@@ -7224,7 +8165,7 @@ def assemble_and_validate(
         draft = Path(scratch) / "verdict.json"
         draft.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
         result = run_embedded_validator(
-            draft, spec_file, Path(plan["repository"]), main_root, main_branch, locate_skill(skill_path), dispatch_plan=plan, sampling_anchor=sampling_anchor,
+            draft, spec_file, _assigned_head_scope_root(plan, spec_file), main_root, main_branch, locate_skill(skill_path), dispatch_plan=plan, sampling_anchor=sampling_anchor,
         )
     report = (result.stdout + result.stderr).strip()
     return (verdict if result.returncode == 0 else None), report
@@ -7296,12 +8237,29 @@ def merge_gate_main(args: argparse.Namespace) -> int:
         if args.evidence is None or args.verdict is None or args.candidate is None:
             print("merge-gate: --plan needs --evidence, --verdict and --candidate", file=sys.stderr)
             return 2
+        plan = json.loads(args.plan.read_text(encoding="utf-8"))
+        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
         bound = check_merge_gate(
-            json.loads(args.plan.read_text(encoding="utf-8")),
-            json.loads(args.evidence.read_text(encoding="utf-8")),
-            json.loads(args.verdict.read_text(encoding="utf-8")),
+            plan, evidence, json.loads(args.verdict.read_text(encoding="utf-8")),
             candidate=args.candidate, branch_head=branch_head,
         )
+        if "ledger_head" in plan:
+            root = getattr(args, "ledger_root", None) or getattr(args, "main_root", None) or args.repo
+            spec_id = str(plan["spec_id"])
+            if not re.fullmatch(r"[A-Z][A-Z0-9-]*", spec_id):
+                raise MergeGateRefused("invalid ledger spec identity")
+            wip = Path(root) / "reports" / "_wip"
+            (wip / f"ledger-head-{spec_id}.json").unlink(missing_ok=True)
+            record_path = getattr(args, "head_record", None)
+            try:
+                if record_path is None:
+                    raise LedgerError("independent head proof missing")
+                retained = retain_accepted_head(load_ledger(record_path), plan, evidence,
+                    candidate=bound, ledger_root=Path(root))
+                decision = {"action": "head_proof_retained", "receipt_digest": retained["receipt_digest"]}
+            except (LedgerError, ValueError, OSError, KeyError, TypeError) as error:
+                decision = {"action": "run_full_fresh_main", "reason": "head_proof_untrusted", "detail": str(error)}
+            persist_private(wip, f"ledger-head-transport-{spec_id}.json", json.dumps(decision, sort_keys=True))
     except MergeGateRefused as refusal:
         return refuse(str(refusal))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -7316,7 +8274,7 @@ def validate_verdict_main(args: argparse.Namespace) -> int:
         plan = json.loads(args.plan.read_text(encoding="utf-8"))
         spec_file = args.spec_file or Path(plan["arm_working_directories"]["head"]) / args.spec_path
         result = run_embedded_validator(
-            args.verdict, spec_file, Path(plan["repository"]), args.main_root, args.main_branch,
+            args.verdict, spec_file, _assigned_head_scope_root(plan, spec_file), args.main_root, args.main_branch,
             locate_skill(args.skill), dispatch_plan=plan,
         )
     except (VerdictAssemblyError, KeyError, ValueError, OSError, TypeError) as refusal:
@@ -7365,13 +8323,17 @@ def assemble_verdict_main(args: argparse.Namespace, trusted: Mapping[str, Any]) 
 
 def identity_from_extras(
     repo: Path, ref: str, extras: Mapping[str, Any], *, exempt: Iterable[str] = (),
+    ledger_path: str = LEDGER_RELATIVE_PATH,
 ) -> dict[str, Any]:
     """Identity at *ref* from a JSON-style mapping of command/selection/flags/env/..."""
+    if "inputs" in extras and extras["inputs"] is None:
+        raise LedgerError("input declaration cannot be null; omit it for legacy identity")
     return build_identity(
         repo, ref, command=extras.get("command") or "",
         selection=extras.get("selection", "full"), flags=extras.get("flags", ()),
         env=extras.get("env"), toolchain=extras.get("toolchain"),
         device_policy=extras.get("device_policy"), host=extras.get("host"), exempt=exempt,
+        inputs=extras.get("inputs"), ledger_path=ledger_path,
     )
 
 
@@ -7384,6 +8346,7 @@ def _identity_from_args(args: argparse.Namespace) -> dict[str, Any]:
     ledger_rel = args.ledger_relpath
     return identity_from_extras(
         Path(args.repo), args.ref, extras, exempt=[ledger_rel] if ledger_rel else [],
+        ledger_path=ledger_rel or LEDGER_RELATIVE_PATH,
     )
 
 
@@ -7391,7 +8354,7 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", default=".")
     parser.add_argument("--ref", default="HEAD")
     parser.add_argument("--command-text", default=None, help="exact test command")
-    parser.add_argument("--identity-file", default=None, help="JSON with selection/flags/env/toolchain/device_policy/host")
+    parser.add_argument("--identity-file", default=None, help="JSON with selection/flags/env/toolchain/device_policy/host/inputs")
     parser.add_argument("--ledger-relpath", default=LEDGER_RELATIVE_PATH)
 
 
@@ -7399,6 +8362,9 @@ def ledger_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verification_report.py ledger", description="Main test-status ledger")
     sub = parser.add_subparsers(dest="cmd", required=True)
     _common(sub.add_parser("identity"))
+    head = sub.add_parser("head-run")
+    head.add_argument("--plan", required=True, type=Path)
+    head.add_argument("--out-dir", required=True, type=Path)
     rec = sub.add_parser("record")
     _common(rec)
     rec.add_argument("--junit", required=True)
@@ -7420,6 +8386,10 @@ def ledger_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     now = utc_now()
     try:
+        if args.cmd == "head-run":
+            outcome = run_ledger_head(json.loads(args.plan.read_text()), args.out_dir)
+            print(json.dumps(outcome, sort_keys=True))
+            return outcome["native_exit"] if outcome["native_exit"] is not None else (outcome.get("wrapper_exit") or 74)
         if args.cmd == "identity":
             identity = _identity_from_args(args)
             print(json.dumps({"identity": identity, "identity_digest": identity_digest(identity)}, sort_keys=True))
@@ -7998,6 +8968,9 @@ class HandoffRequest:
     run_kind: str = "kickoff"
     kit_root: Path | None = None
     evidence: Path | None = None
+    economics_context: Mapping[str, Any] | None = None
+    ledger_path: Path | None = None
+    ledger_identity_file: Path | None = None
 
 
 def _skill_block(skill: Path, begin: str, end: str) -> str:
@@ -8021,6 +8994,8 @@ def _ac_block(spec_text: str) -> str:
 
 def compose_handoff_brief(skill: Path, spec_text: str, plan: Mapping[str, Any], verdict_path: Path) -> str:
     """Verifier brief from the SKILL template: ACs verbatim from main's spec, canonical verdict block."""
+    if plan.get('suite_commands') and (plan.get('suite_environment') or {}).get('launch_allowed') is not True:
+        raise HandoffRefused('verification_environment_unavailable', 'Setup eligibility is required before composing a suite verifier brief.')
     import yaml
 
     suites = list(plan.get("suite_commands") or [])
@@ -8035,7 +9010,7 @@ def compose_handoff_brief(skill: Path, spec_text: str, plan: Mapping[str, Any], 
             or not block[block.index(intake_begin) + len(intake_begin):block.index(intake_end)].strip()):
         raise HandoffRefused("required_deliverable_intake_missing", tag)
     front = yaml.safe_load(spec_text.split("---")[1]) or {}
-    scope = plan.get("scope_summary") or ("scope.write = " + ", ".join((front.get("scope") or {}).get("write") or []))
+    scope = _complete_scope_summary(plan.get("scope_summary"), front.get("scope"))
     sampling = plan.get("sampling") or {}
     values = {
         "spec-id": str(plan["spec_id"]), "branch": f"{plan['head_ref']} ({plan['head_commit']})",
@@ -8058,6 +9033,7 @@ def compose_handoff_brief(skill: Path, spec_text: str, plan: Mapping[str, Any], 
     header = (
         "Assigned verifier surface (your ONLY working directories; never read anything else under /Users):\n"
         f"- repository: {plan['repository']}\n- baseline arm dir: {arms['baseline']}\n- head arm dir: {arms['head']}\n"
+        f"Scope classification project root: {arms['head']} (matching head spec/kit only; repository supplies Git inventory).\n"
         f"Identity fields to copy into the verdict: baseline_commit={plan['baseline_commit']}, "
         f"head_commit={plan['head_commit']}, branch=\"{plan['head_ref']}\", "
         f"implementation_head_digest={plan['implementation_head_digest']}, identity_schema_version=\"1.0.0\".\n"
@@ -8137,6 +9113,28 @@ class RealHandoffSteps:
             findings.append("report contains a failed-check marker")
         return findings
 
+    def verification_economics(self) -> dict[str, Any]:
+        import verification_economics as economics
+        from nightshift_coordinator import load_yaml
+
+        policy = economics.load_policy(self.kit)
+        if not policy.get("enabled", False):
+            return {"status": "disabled", "launch_allowed": True, "marks_done": False}
+        context = dict(self.req.economics_context or {})
+        intent = context.pop("intent", {})
+        commands = self.req.suite_commands or [load_yaml(self.kit / "config.yaml").get("commands", {}).get("test", "")]
+        if self.req.no_suite:
+            commands = ["no-suite contractual verification"]
+        command = commands[0] if len(commands) == 1 else json.dumps(commands)
+        spec_file = self.req.project_root / self.req.spec_path
+        proposal = economics.pinned_proposal(self.req.worktree, spec_file,
+            source_ref=self.req.worker_done_head, command=command, action="prepare_dispatch",
+            action_id=intent.get("action_id", "handoff-preparation"),
+            expected_new_evidence=intent.get("expected_new_evidence", ""),
+            changed_boundary=intent.get("changed_boundary", ""))
+        return economics.checkpoint(self.kit, spec_file, run_id=self.req.run_id,
+                                    proposal=proposal, context=context, policy=policy)
+
     def prepare_dispatch(self, timeout_s: float) -> dict[str, Any]:
         req = self.req
         surface = req.private_dir / "surface"
@@ -8149,6 +9147,10 @@ class RealHandoffSteps:
             argv += ["--suite-command", command]
         if req.no_suite:
             argv.append("--no-suite")
+        if req.ledger_path is not None:
+            argv += ["--ledger", str(req.ledger_path)]
+        if req.ledger_identity_file is not None:
+            argv += ["--ledger-identity-file", str(req.ledger_identity_file)]
         shutil.rmtree(surface, ignore_errors=True)
         try:
             done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
@@ -8190,6 +9192,7 @@ class RealHandoffSteps:
 def run_handoff(req: HandoffRequest, steps: Any, *, clock: Any = _time.monotonic) -> dict[str, Any]:
     """Every post-worker-done step in one invocation; refuses if the worker head moved (R5)."""
     done: list[str] = []
+    economics_summary = None
     # A poller can tell "running" from "crashed": the record exists before any step runs.
     persist_private(req.result_path.parent, req.result_path.name,
                     json.dumps({"status": "running", "spec_id": req.spec_id}, sort_keys=True))
@@ -8219,11 +9222,26 @@ def run_handoff(req: HandoffRequest, steps: Any, *, clock: Any = _time.monotonic
         findings = steps.report_check()
         if findings:
             raise HandoffRefused("report_check", "; ".join(findings))
+        economics_step = getattr(steps, "verification_economics", None)
+        if economics_step is not None:
+            try:
+                economics_summary = economics_step()
+            except ValueError as error:
+                raise HandoffRefused("verification_economics_invalid", str(error)) from error
+            if economics_summary.get("status") != "disabled":
+                done.append("verification_economics")
+            if not economics_summary["launch_allowed"]:
+                result = {"status": "review_needed", "spec_id": req.spec_id, "steps": done,
+                          "verification_economics": economics_summary, "marks_done": False}
+                persisted = persist_private(req.result_path.parent, req.result_path.name, json.dumps(result, sort_keys=True))
+                return {**result, "result_file": persisted}
         done.append("prepare_dispatch")
         timeout_s = prepare_dispatch_timeout_s(req.metrics_dir)
         started = clock()
         plan = steps.prepare_dispatch(timeout_s)
         steps.record_stage("surface_preparation", clock() - started)
+        if plan.get('suite_commands') and (plan.get('suite_environment') or {}).get('launch_allowed') is not True:
+            raise HandoffRefused('verification_environment_unavailable', 'Repair the recorded runtime/cache/output prerequisite before suite launch; setup is not a test sample.')
         done.append("brief")
         brief, spec_text = steps.build_brief(plan)
         req.private_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -8247,10 +9265,29 @@ def run_handoff(req: HandoffRequest, steps: Any, *, clock: Any = _time.monotonic
                           "required_samples_per_arm", SAMPLES_DEFAULT)),
                       suites=len(plan.get("suite_commands") or []) or 1),
                   "integration_budget_s": integration_budget_s(req.metrics_dir)}
+        if "ledger_baseline" in plan:
+            result["ledger_baseline"] = copy.deepcopy(plan["ledger_baseline"])
     except HandoffRefused as refusal:
         result = {"status": "refused", "spec_id": req.spec_id, "reason": refusal.reason, "detail": refusal.detail,
                   "steps": done}
+    if economics_summary is not None and economics_summary.get("status") != "disabled":
+        result["verification_economics"] = economics_summary
     persisted = persist_private(req.result_path.parent, req.result_path.name, json.dumps(result, sort_keys=True))
+    if result.get('status') == 'ok':
+        try:
+            from loop_events import observe_delivery_boundary
+            import spec_artifacts
+            install = spec_artifacts.reports_root_for_spec_path(req.project_root / req.spec_path).parent
+            offer = plan.get('ledger_baseline')
+            known = isinstance(offer, dict) and offer.get('status') in {'matched', 'not_matched'}
+            observe_delivery_boundary(install, req.spec_id, run_id=req.run_id, action_id='baseline-reuse',
+                eligibility=offer['status'] == 'matched' if known else None,
+                disposition='offered' if known and offer['status'] == 'matched' else 'not_offered',
+                reason_code=offer.get('reason') if known else 'missing_transport',
+                source_receipt_digest=offer.get('record_digest') if known else None,
+                demand_receipt_digest=persisted.get('sha256'))
+        except Exception:
+            pass
     return {**result, "result_file": persisted}
 
 
@@ -8263,14 +9300,16 @@ def handoff_main(args: argparse.Namespace) -> int:
         private_dir=args.private_dir.resolve(),
         result_path=(args.result_path or root / ".nightshift" / "reports" / args.spec_id / "handoff.json").resolve(),
         main_branch=args.main_branch, suite_commands=list(args.suite_command), metrics_dir=args.metrics_dir,
-        no_suite=args.no_suite, run_kind=args.run_kind, kit_root=args.kit_root, evidence=args.evidence)
+        no_suite=args.no_suite, run_kind=args.run_kind, kit_root=args.kit_root, evidence=args.evidence,
+        economics_context=json.loads(args.economics_context.read_text()) if getattr(args, "economics_context", None) else None,
+        ledger_path=args.ledger, ledger_identity_file=args.ledger_identity_file)
     try:
         steps = RealHandoffSteps(req, skill=args.skill)
     except VerdictAssemblyError as error:
         print(json.dumps({"status": "refused", "reason": "skill_missing", "detail": str(error)}), file=sys.stderr)
         return 2
     result = run_handoff(req, steps)
-    print(json.dumps({k: result[k] for k in ("status", "reason", "steps", "result_file", "private_dir") if k in result},
+    print(json.dumps({k: result[k] for k in ("status", "reason", "steps", "result_file", "private_dir", "ledger_baseline") if k in result},
                      sort_keys=True))
     return 0 if result["status"] == "ok" else 2
 
@@ -8376,6 +9415,8 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--verdict", type=Path, default=None)
     gate.add_argument("--branch", required=True)
     gate.add_argument("--candidate", default=None)
+    gate.add_argument("--head-record", type=Path, default=None)
+    gate.add_argument("--ledger-root", type=Path, default=None)
     gate.add_argument("--heartbeat", type=Path, default=None)
     gate.add_argument("--repo", type=Path, default=Path.cwd())
     gate.add_argument("--main-root", type=Path, default=None)
@@ -8395,7 +9436,11 @@ def main(argv: list[str] | None = None) -> int:
     hand.add_argument("--run-kind", default="kickoff", choices=("run", "kickoff"))
     hand.add_argument("--kit-root", type=Path, default=None)
     hand.add_argument("--evidence", type=Path, default=None)
+    hand.add_argument("--ledger", type=Path, default=None)
+    hand.add_argument("--ledger-identity-file", type=Path, default=None)
     hand.add_argument("--skill", type=Path, default=None)
+    hand.add_argument("--economics-context", type=Path, default=None,
+                      help="parent intent, receipt references and exact owner disposition; opt-in config only")
     subparsers.add_parser("verifier-self-test")
     sample = subparsers.add_parser("suite-sample")
     sample.add_argument("--spec-id", required=True)
@@ -8410,6 +9455,8 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("suite_command", nargs=argparse.REMAINDER)
     report = subparsers.add_parser("throughput-report")
     report.add_argument("--metrics-dir", action="append", required=True)
+    report.add_argument("--delivery-sources", type=Path, default=None,
+                        help="declared local evidence descriptors; optional read-only coverage join")
     report.add_argument("--json", action="store_true")
     report.add_argument("--out", type=Path, default=None)
     lane = subparsers.add_parser("lane-spend-report")
@@ -8486,7 +9533,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"throughput-report: not a directory: {directory.name}", file=sys.stderr)
                 return 2
             sources.append((label if sep else "", directory))
-        data = build_throughput_report(sources)
+        delivery_sources = None
+        if args.delivery_sources is not None:
+            try:
+                if args.delivery_sources.is_symlink() or args.delivery_sources.stat().st_size > 2 * 1024 * 1024:
+                    raise ValueError('unbounded descriptor')
+                delivery_sources = json.loads(args.delivery_sources.read_text(encoding='utf-8'))
+                if not isinstance(delivery_sources, list):
+                    raise ValueError('descriptor list required')
+                delivery_sources = [dict(item) if isinstance(item, dict) else {} for item in delivery_sources]
+                for item in delivery_sources:
+                    for key in ('path', 'manifest_path', 'canonical_root'):
+                        if isinstance(item.get(key), str) and not Path(item[key]).is_absolute():
+                            item[key] = args.delivery_sources.parent / item[key]
+            except (OSError, ValueError, TypeError, RecursionError):
+                delivery_sources = [{'kind': 'unsupported'}]
+        data = build_throughput_report(sources, delivery_sources=delivery_sources)
         text = json.dumps(data, indent=2, sort_keys=True) if args.json else render_throughput_report(data)
         if args.out is not None:
             args.out.write_text(text + "\n", encoding="utf-8")
@@ -8566,7 +9628,7 @@ def main(argv: list[str] | None = None) -> int:
                 },
                 trusted_tooling=trusted_record,
                 ledger_identity=(
-                    json.loads(args.ledger_identity_file.read_text(encoding="utf-8"))
+                    load_ledger(args.ledger_identity_file)
                     if args.ledger is not None and args.ledger_identity_file is not None else None
                 ),
             )

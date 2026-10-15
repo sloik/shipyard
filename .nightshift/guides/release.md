@@ -25,6 +25,12 @@ Requires: the canonical Nightshift repository checkout, `release.py`, `release_c
    (read-only; prints JSON, writes nothing). Per repository it gives the dirty path count, the paths a
    checkpoint may commit, the excluded paths (`private_artifact`, `generated_registry`, `spec_wrong_home`) and
    the dry-run classification. Send each owner their repository's list.
+   Path entries are literal repository-relative Git identities from NUL-delimited status. Preserve
+   spaces, quotes, Unicode, newlines and arrow text when passing the list to Git; do not split it into
+   lines or decode Git display quoting. Renames include both old and new paths. Copies include only
+   the changed destination, with the source retained for safety checks. An excluded associated path
+   excludes the checkpoint destination; release preflight also refuses protected associations. A Git
+   failure or malformed status stops planning without changing HEAD, the index or project files.
 2. On release day run the dry-run first.
 3. Checkpoint only the plan's commit list per repository: `git commit -- <paths>`, through that repository's
    own hooks. Escalation sign-off for a bulk checkpoint belongs to this step.
@@ -34,7 +40,9 @@ Requires: the canonical Nightshift repository checkout, `release.py`, `release_c
 
 1. Read the canonical version, newest changelog entry, sync-managed file list and
    `release-manifest.json`.
-2. Regenerate the manifest from the current complete managed list.
+2. At the authorized release cut, run `python3 canonical/release.py finalize-source-cut --date YYYY-MM-DD` with the approved ISO source-cut date, then regenerate the manifest from the current complete managed list.
+   The heading becomes `(source cut: YYYY-MM-DD)` before sealing. The manifest binds this date and exact changelog bytes; delivery completion is attested only by the coordinator receipt/report. Development may remain `(unreleased)` for development validation and dry-run; apply requires finalized source-cut metadata before floor, suite or copies (`RELEASE.SOURCE_CUT: CHANGELOG.md`).
+   Existing release authorization covers finalization. No post-delivery rewrite occurs: repeated same-date finalization is read-only; changed completed same-version metadata requires the existing new-version whole-kit path. Historical3.25.1 stays unchanged.
 3. Run manifest validation. Version/changelog/manifest parity, exact file
    coverage, hashes, executable modes, schema metadata and declared smoke checks
    must all pass. Apply is closed on any error.
@@ -130,9 +138,10 @@ overwrite, or stage project-owned work to make a repository eligible.
 
 Review the fleet validation table the dry-run prints (stderr; `fleet_validation` in the
 result): one row per install with its installed-profile verdict, failed invariant
-codes and duration, read-only and in process. `fixed_by_release` failures (`KIT.MARKER`,
-`KIT.PAYLOAD`, `CFG.PARSE_VERSION`) are cleared by the sync. Fix every `pre_existing` DENY
-(identity, test command, hooks) in that install before the apply.
+codes and duration, read-only and in process. `fixed_by_release` is a legacy aggregate classification:
+marker/payload replacement is release-owned; `CFG.PARSE_VERSION` also covers project YAML/schema errors,
+so copying does not necessarily repair it. Review available finding codes/actions, including stale kit-version
+remediation. Resolve project identity/test-command/hook conditions without treating delivery as admission.
 
 ### Step 3: Plan configuration migrations
 
@@ -140,7 +149,7 @@ For every install below the manifest's required config schema, prepare one fresh
 code-writing subagent in an isolated worktree. Bound concurrency to at most four
 workers and give each worker only:
 
-- that one install and its old/required schemas;
+- that one install, its old/required schemas, the reviewed config SHA-256 and required release kit version;
 - the registered deterministic migration — `canonical/config_migrations.py`'s
   `MIGRATIONS` registry, keyed by target `schema_version`
   (`release_coordinator.default_migration_runner` is the reference caller: it
@@ -151,7 +160,7 @@ workers and give each worker only:
 - manifest fingerprint, relevant DevKB and migration validation commands.
 
 The worker may not copy canonical payload, commit, push, merge, alter spec lifecycle, or touch paths
-outside its allowlist. The coordinator validates each result before integration.
+outside its allowlist. The coordinator validates each result before integration. A worker Boolean is not acceptance: config.yaml must be present and byte-identical to the registered transformation of the request-bound source. The existing strict YAML reader rejects duplicate keys, conflicting documents and invalid structure; the deterministic kit-version projection must match the required release. Double-quoted, single-quoted and plain supported versions preserve surrounding comments and custom bytes. All collected candidates are revalidated against their original source hashes before the first repository write; refusal is repository-local and independent eligible repositories can continue. Project identity/test-command readiness remains separately classified.
 
 For an install with no per-install customization to reconcile, the coordinator
 may be run with `--migration-runner reference` (BUG-326): it applies
@@ -215,6 +224,17 @@ Canonical payload replacement is idempotent, and the coordinator re-verifies
 the marker, staged allowlist, and project-owned configuration boundary before it
 commits. Never infer that an install is synchronized from a partial copy.
 
+The additive `readiness_summary` (schema1.0.0) separates delivery from runnable admission.
+Rows cover unique discovered installs with stable repository association: delivered, skipped, untouched or
+interrupted/unknown; allow, deny, indeterminate or not_observed. Install and distinct-known-repository counts
+have explicit scope. CLI stderr and JSON agree; original outcome/exit/commit/rollback rules above stay intact.
+Dry-run admission is pre_apply observation, not predicted post-upgrade readiness. Post-apply DENY or validator
+exception remains observational; missing evidence never counts as admitted. Pre-existing observations are
+separate from post-apply failures whose cause is unknown. Partial copy is interrupted/unknown, never delivered.
+Recovery guidance is informational only: correct project config, resolve tracked dirty work, or inspect then
+retry the same exact release. Confirm recorded version/fingerprint against canonical before the supported
+apply path; absent target identity means unknown/inspect, with no resume command. Guidance executes nothing.
+
 The coordinator result lists `release_handoffs_uncommitted`: the handoff files it repinned or completed that git does not show clean. Commit them with the release report before the release closes.
 
 Write the final report and structured metrics with:
@@ -228,3 +248,85 @@ Write the final report and structured metrics with:
 - the exact safe rerun command.
 
 The operator decides separately when/if local commits are pushed.
+
+### Cheap deterministic cut checks (SPEC-NS-KIT-187)
+
+Run `python3 release.py check-release-invariants --canonical canonical` during
+report preparation before committing new reports, and again for the final cut.
+The read-only policy checks guide caps/registry, report reachability and index
+ownership, and only the reviewed LE2 stable inventory count. It never rewrites
+evidence or substitutes count equality for installed admission. The coordinator
+refuses expensive validation on failure, preserving later floor/full-suite gates.
+Retained success binds checked bytes/modes, report ownership and sealed inventory;
+unrelated application bytes remain outside this canonical-only check.
+
+### Reviewed installed inventory upkeep (SPEC-NS-KIT-191)
+
+Only `le2-installed-allow.json` / `stable.manifest_files_checked` is eligible.
+Every other stable field remains a strict behavioral oracle. Retain the original
+record and native failure; bind owner authorization to its SHA256, the sealed
+manifest fingerprint, recorder source SHA256 and exact allowed field. Existing
+explicit owner approval may cover this operation; no new confirmation is needed.
+Set `SPEC_229_006_RECORD=1` and `SPEC_229_006_INVENTORY_REVIEW=<review.json>` only
+for the existing LE2 installed-allow test. The existing recorder retains original,
+proposal and approved stable diff; extra stable changes refuse before overwrite.
+Then unset record/review mode and run the whole affected reader module normally.
+Recording-only success never proves reader closure, admission correctness or
+suite reuse; SPEC-NS-KIT-189 owns any later evidence composition.
+
+### Declared project instruction versions (SPEC-NS-KIT-194)
+
+Before/after rollout, audit project-owned version pins separately from payload admission:
+`python3 canonical/release_coordinator.py --audit-instructions --root /project --instruction-declaration /project/instruction-versions.json --instruction-install /project/.nightshift --metrics-out /tmp/instruction-audit.json`.
+The optional JSON/YAML declaration is `{schema_version: 1, references: [{path: AGENTS.md, prefix: "Active Nightshift kit: ", install: .nightshift, required: false}]}`.
+Each literal prefix identifies one entire version-only line; paths are project-relative, with no traversal/symlinks. Bind each active field to its exact install. Mark examples `classification: historical`; absent declarations report undeclared coverage. Unknown/ambiguous fields or marker/config/payload disagreement remain unknown. Drift is advisory unless `required: true` (exit2); it is never a payload-delivery failure. `opt_out: true` suppresses corrections; installed opt-out policy remains authoritative.
+Owner-authorized correction uses `--reconcile-instructions` with the same root/declaration/install arguments, `--instruction-audit /tmp/instruction-audit.json` and `--instruction-approval /tmp/instruction-approval.json`. Approval JSON names `approved_by` and the exact `audit_sha256`; reuse existing owner task/signoff when it covers that correction. No new confirmation is required.
+The correction rechecks file/authority/declaration hashes, HEAD and index, refuses dirty target files and unknown authority, then commits only declared fields through normal Git hooks. Other staged paths remain staged; managed payload allowlists are unchanged. Retain the JSON receipt's old/new versions, hashes and commit. A hook refusal retains pending edits and reports `commit_refused`; resolve normally rather than bypass hooks.
+
+### Durable handoff source ranges (SPEC-NS-KIT-192)
+
+Before committing a new pending handoff, use `release_handoff.pin_commit_range(canonical, artifact, manifest)` on its actual two-endpoint range. The pure helper returns full commit identities, exact original spelling/history, a repository identity and actual bounded diff; it refuses missing/ambiguous objects, reversed ancestry or declared managed paths absent from that diff. Pass the previously observed `range_provenance` as `expected_binding` when applying an approved authoring plan; recheck immediately before the normal artifact commit. Never substitute HEAD for an unknown endpoint.
+Pending/folded repin uses the same helper and preserves unresolved legacy source history explicitly; an unresolved label is no immutable-source proof. Completed deliveries are never repinned. Immutable replay adds no history and remains valid after original worker refs disappear.
+Before eligible cleanup, the sole checked cleanup owner verifies both endpoints under current main ancestry or the exact existing owned `refs/nightshift/recovery/<spec>/<run>` candidate root. A SHA string alone cannot retain Git objects. Missing proof, source/diff mismatch or uncommitted handoff evidence in a disposable worktree retains the source roots and reports `cleanup_handoff_range_unresolved`. No extra retention namespace, unrelated-ref rewrite or lifecycle owner is added.
+
+
+### Approved inventory-only repair composition (SPEC-NS-KIT-189)
+
+The release coordinator may accept `repair-composed` instead of repeating an
+otherwise complete failed FULL. The original duration record remains
+`suite_passed: false`; this outcome never creates a passed-FULL measurement.
+Only SPEC191's reviewed LE2 `stable.manifest_files_checked` repair is eligible.
+Every other stable field, source/assertion, native command and dependency/runtime
+identity must agree. The only failed ID is the existing LE2 installed-allow test.
+
+New normal suite execution retains the existing native JUnit plus the reused
+serial/xdist collection/phase observer and runtime metadata digests. A timeout,
+unknown dependency, incomplete collection or old aggregate-only record cannot be
+backfilled into complete proof. Native execution/result semantics stay unchanged
+if optional additional recording is unavailable. Existing old runs fall back to
+the full gate.
+
+After the explicitly reviewed SPEC191 record-only repair, use the coordinator's
+`record_inventory_repair_closure(canonical)` API to run the entire normal reader
+`tests/test_spec_229_006_live_e2e.py` with record mode unset. It writes a distinct
+`canonical-record-repair-closure-*` artifact, outside the FULL measurement glob.
+Retain the original/proposed LE2 and approved stable diff beside the review.
+Explicit composition approval JSON must name `approved_by: human:<owner>`,
+`compose: true`, exact `original_record_sha256`, `closure_record_sha256`,
+`review_sha256`, and `reader_paths: [tests/test_spec_229_006_live_e2e.py]`.
+Pass private canonical-relative `{path, sha256}` references for those four records
+to `compose_inventory_repair(canonical, original_record=..., closure_record=...,
+review=..., approval=...)`. This authors a separate private receipt, not an
+approval, source edit, lifecycle transition or delivery. Missing authority uses
+ordinary full fallback; no repair is performed by this API.
+
+The same closed validator governs reuse and positive handoff delivery. It checks
+current clean exact source, both native collections/JUnits, full affected-reader
+closure, runtime/dependency metadata and environment, review bindings and the
+24-hour window. Source/unknown reader drift, new skips/xfails, unrelated failures,
+missing or changed native evidence and changed approvals refuse. Coverage reports
+original passes/failures, repaired failures, retained skips and the exact covered
+union without double-counting rerun reader cases. A fresh probe and all ordinary
+whole-kit delivery/serial ownership/safety gates remain required. No additional
+worker or acceptance authority is introduced. Raw native proof remains private;
+share the controlled outcome/counts and evidence digests, not host locators.

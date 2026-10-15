@@ -314,3 +314,63 @@ file is a successful evidence check with status `not_re_derivable` and an explic
 reason, not a stale pass and not a controller crash. The parent verifies that the
 expected artifact/result is committed and verifier-readable before dispatch.
 
+
+### Opt-in verification economics at parent boundaries (SPEC-NS-KIT-183)
+
+When `verification_economics.enabled: true`, the full and small parent use the
+same `verification_economics.checkpoint` decision/disposition summary. Include
+its `status`, `reason_codes`, `decision` and `disposition` hash references,
+`unmet_obligations` and separately scoped `cumulative` measurements in the existing
+parent progress, next brief and report. Preserve native failure artifacts.
+The default/opt-out route keeps its existing launch behavior and gate inventory.
+
+Before expensive preparation, `verification_report.run_handoff` calls
+`RealHandoffSteps.verification_economics`; supply the optional parent
+`--economics-context <private-json>` transport. Its `intent` names a stable
+`action_id`, `expected_new_evidence` and/or `changed_boundary`. Reuse that action ID
+on a restart; a distinct proposed action gets a distinct ID. Current source,
+contract, runtime/environment and exact command identities are recaptured, never
+copied from the owner's old disposition. Environment values are hashed privately.
+
+Owner cost/oververification signals and repeats without named new evidence are
+on within this opt-in feature. Numeric soft thresholds have no defaults.
+`soft_duration_seconds` compares observed native command wall time; it does not
+pretend to measure reasoning, preparation or waiting. `soft_invocations` compares
+observed launches. `soft_spend: {amount, currency}` uses only retained known spend
+in that exact currency; unknown spend alone is not a refusal. No extra native
+sample, application benchmark, polling loop or cost/provider collection is added.
+
+Use `import_native_receipt` for existing `suite-sample` process/native records;
+use `import_timing_receipt` for retained completed `record_metrics` stage snapshots
+(`surface_preparation` or `coordination_gate_wait`). Pass these as `receipts` in
+the transport, retaining their portable original file/hash references. Native,
+preparation, reasoning and human/queue time are separate; unmeasured values are
+unknown. Same-receipt imports deduplicate across recovery/new run IDs and spec
+parents in indexed decision/context artifacts. Changed or missing originals,
+conflicting identities and corrupt history refuse rather than reset the budget.
+
+A nonempty `owner_signal` or another reason yields `review_needed` before launch.
+It is a recommendation, never blocked, Done or permission to skip a required gate.
+The parent retains the original decision and supplies one immutable `disposition`:
+`decision_digest`, `kind`, `authorized_by: human:<owner>`, `statement`,
+`evidence_delta` and `budget`. Supported kinds are `continue`, `reuse`,
+`propose_amendment` and `recommend_replacement`. A continuation's evidence delta
+must name the proposed new evidence or changed boundary, with finite positive
+`budget: {invocations, duration_seconds}`. No agent judgment waives a gate.
+Drift or additional receipts invalidates the old disposition; reevaluate without
+resetting the retained lineage. A conflicting disposition is refused.
+
+`reuse` delegates to existing ledger/recovery eligibility APIs with current pinned
+identity and contract binding; it grants no fresh-main/safety/scope waiver. The
+parent applies the existing eligible reuse plan and retains all still-required
+obligations. An amendment/replacement is only a proposal for its existing authority
+contract. A healthy already-running operation is never signalled by this soft
+checkpoint; existing hard budgets, one-pair sampling/escalation, original receipts,
+sole lifecycle/integration owner and distinct fresh-main gate remain unchanged.
+
+Prelaunch fixture inventory is finite: unchanged-proof owner review; changed-source
+or runtime continuation; identity/replay/unknown-cost/receipt-lineage controls;
+owner/no-new-evidence/each configured soft trigger; unauthorized waiver, fabricated
+zero, budget reset and terminal-Done refusal; healthy-operation and opt-out controls.
+First delivery observes only the two disposable LE1 entrypoints with actual decision
+artifacts and launch dispositions. Measurement is not an adoption/savings claim.

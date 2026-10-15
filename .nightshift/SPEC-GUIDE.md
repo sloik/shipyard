@@ -354,6 +354,12 @@ the row preserves the old wording and records approval. `validate_specs.py` warn
 `ac_amendment_unapplied` when a row dated on or after 2026-10-09 names new wording its AC
 line does not contain. The verifier's spec copy includes this table.
 
+#### Exact evidence-locator amendment authoring (SPEC-NS-KIT-188)
+
+Use `python3 spec_artifacts.py amend-ac-evidence specs/<spec>.md --request <request.json>` for an explicitly approved locator-only edit. The request supplies `spec_id`, `ac_id`, full actual `ready_revision`, current `source_sha256`, exact `old_text`/`new_text`, `annotation_offset`, `old_annotation` and `new_annotation`. An annotation is an optional leading space plus `(evidence: <existing project-relative file>)`; every byte outside that selected span must remain identical. Missing/ambiguous ready history, wrong AC identity, unsafe/missing locators and source drift refuse without applying an amendment.
+
+Supply `approval: {kind: explicit-user, actor: "human: <actual approver>", date: "YYYY-MM-DD", reason: "<actual reason>", evidence: "<actual owner task/signoff reference>"}`. Reuse existing authorization when it covers this exact operation; never invent a historical approval. Substantive edits follow the existing independent AC-review contract. The operation pins the actual ready object (including the ready parent of a departure commit), preserves complete ready-to-current wording in a dated `runtime-captured` row and records the request/approval/hashes in an indexed decision artifact. Original judgments and unrelated history stay intact; lifecycle status never changes. Exact replay adds no duplicate row/artifact; later source drift refuses replay.
+
 **Agent's Task:** Extract concrete, testable criteria that prove the requirements work. This is the most critical phase.
 
 **Say to the user:**
@@ -1855,3 +1861,132 @@ on the consumer side. The loop resolves a spec body *before* injecting it as the
 > **A well-written spec is the difference between smooth execution and frustrating back-and-forth.**
 >
 > This guide exists to prevent the latter.
+
+## Obligation-preserving replacement plans (SPEC-NS-KIT-184)
+
+An unfinished spec may be replaced through `spec_replacement.py` under the
+existing parent's lifecycle authority. Every requirement, acceptance criterion,
+manual/live checkbox and active bound NFR has one owner: scoped retained-completed
+proof, a replacement obligation, or indexed owner-authorized retirement. Existing
+independent AC-review rules still govern weakening; plan approval never waives
+them. Cost comparison includes remaining implementation, verification/setup,
+per-child overhead and shared gates, retaining unknowns. Smaller prose or more
+IDs never establishes productivity.
+
+Prepare pins original bytes/contract/checkpoint, evidence, dependent revisions
+and attempts/run/spend lineage. Apply binds the exact plan to indexed human
+approval and parent operation closure, uses the existing commit-backed
+superseded transition and leaves held Drafts. The original never becomes Done
+through replacement; completed history is immutable. Dependents retain their
+edges for separately reviewed owner follow-ups. Release dispositions preserve
+SPEC-271 terminal non-delivering behavior. Indexed context and a pending journal
+retain the plan; replay requires unchanged identities. No scheduler, lifecycle
+writer, integration authority or cleanup right is added. See
+the following prepare/apply contract for proposal/authorization fields.
+
+### Prepare/apply contract
+
+
+Use `spec_replacement.py prepare` when an owner request or AC/cost review
+recommends replacing an unfinished contract. Size/count alone is insufficient.
+Prepare writes only a versioned JSON plan, without spec or lifecycle changes.
+
+```sh
+python3 .nightshift/spec_replacement.py prepare .nightshift/specs/SPEC-ID.md proposal.json \
+  --root . --output replacement-plan.json
+python3 .nightshift/spec_replacement.py apply replacement-plan.json --root . \
+  --authorization .nightshift/reports/SPEC-ID/artifacts/OWNER-DECISION.json
+```
+
+Use `canonical/` instead of `.nightshift/` for canonical kit work. Invoke both
+commands inside the existing parent's administrative ownership. Workers never
+acquire lifecycle/integration/cleanup ownership here. Python `apply()` accepts
+an optional additional guard; it cannot substitute for indexed owner authority,
+exact revisions or actual operation closure evidence.
+
+The proposal contains `trigger` (`owner_request` or `ac_cost_review`), `reason`,
+`mappings`, one to eight `children`, `retained_evidence` relative paths,
+`dependents`, `release`, `cost`, `cumulative_spend`, and `shared_verification`.
+Every source checkbox uses its explicit R/AC/LE/M identity or section/ordinal;
+bound NFRs use `nfr:<ID>` and pin the active constraint file. Each mapping has
+`obligation` and one `disposition`:
+
+- `replacement`: `child` key and `target` obligation in its finite child.
+- `completed`: already checked source obligation and `proof` (`path`, exact
+  `sha256`, `reuse_scope`). Its retained pass verifier/validation artifact
+  binds the obligation, source `contract_sha256` and the same reuse scope.
+  Its `original_receipt` passes existing `verification_report.reuse_decision`
+  for `{selection: full, contract_sha256, scope}`; all original observations
+  pass, the original native exit is zero and the original expiry remains valid.
+  Never regenerate a receipt to authorize changed evidence or identities.
+- `retired`: `rationale` and indexed `owner_authorization` human decision;
+  `retirement` binds `obligation`, `rationale` and exact `source_sha256`.
+
+Each child declares unique `key`, `title`, `boundary`, nonempty `requirements`
+and `acceptance_criteria`, optional `manual`, `scope` globs, `after` IDs, `nfrs`,
+and `cost`. Existing ID/duplicate gates mint and recheck source-parented IDs.
+Each cost row (`cost.continue` and child `cost`) has implementation,
+verification, setup and overhead in a common estimated unit; null retains an
+unknown. `cost.shared_gate_saving` is explicit. Estimated benefit is separate
+from measured productivity. Attempts, durable history and cumulative spend
+remain attached; replacement IDs never reset hard budgets.
+
+Each actual dependent has `dependents[ID]` with
+`action: retain_edge_owner_followup` and `reason`; no dependent file is rewritten.
+`release.action` is `retain_source_declaration` or `explicit_owner_followup`,
+with a reason, retaining SPEC-271 non-delivering release semantics.
+
+Record reviewed authority with `spec_artifacts.write_artifact`, type `decision`,
+human actor, and `replacement_authorization`: exact `plan_digest`, whole
+prepared `source`, retired mapping list `retirements`, `dependent_dispositions`,
+`release_disposition`, `owner_run`, `closure_record`, and `closure_sha256`.
+The actual parent indexes a `context` closure record with `ownership`: exact
+`owner_run` and `source_checkpoint`,
+`process_state: none_running|confirmed_stopped`, `operations_closed: true`,
+and retained owned `processes` PIDs. These describe actual operation closure;
+fabricated assertions never replace settlement. Retained live PIDs are refused.
+An active source first uses existing authorized settlement, never a direct
+in_progress-to-superseded transition or automatic cancellation.
+
+Apply seals the immutable plan and pending journal before mutation, indexes the
+plan, authors held Drafts with indexed rationale, uses supported commit-backed
+supersession, commits attributable metadata, and reconciles exact committed
+source/draft identities. It never marks Done, promotes, launches, merges or
+cleans evidence. Drafts keep a promotion gap for separate parent reconciliation
+and owner readiness review. Interrupted work is `pending/reconciliation-required`;
+repeat the exact plan/authority to resume finite steps without duplicate IDs or
+transitions. Drift or failure inside a supported API requires explicit parent
+reconciliation. Do not edit the journal to manufacture success. Subsequent
+implementation still uses sole serial integration and fresh-main validation.
+
+
+### Required external input readiness
+
+A project that requires external comparison evidence declares the mandatory subset
+as `context.required_external_inputs`: a list of unique exact `external-evidence:`
+strings also present in `context.required_inputs`. Commit both before ready/new-run
+admission. No AC/prose inference or store provisioning occurs. Empty legacy inputs
+without this field retain their existing meaning; ordinary local artifact paths
+still resolve locally.
+
+Normal instruction apply and coordinator admission use the existing trusted,
+anchored committed-source resolver before implementation. Missing mandatory entries
+are `required_external_declaration_missing` (project setup); invalid subset metadata
+is `required_external_inputs_schema`. Source refusal reasons (missing, mutable,
+anchor resolution, bounds, containment) are source availability gaps. Restore clean
+committed sources or author/review declarations before a new run. Neither gap creates
+a terminal blocked transition, grants acceptance nor changes old receipts/results.
+Packet `state`/`verifierInputReadiness.eligible` must be inspected separately from
+command exit0. Bounded parallel admission defers that spec and retains independent
+eligible work. Public records contain controlled reasons, relative paths, commits,
+digests and binding hashes; they omit source locators/declarations.
+
+Checks bind the actual subject root, committed spec/baseline, requirement/declaration
+bytes, resolver and source identities/digests. The dispatcher rechecks before launch;
+changed bindings defer without starting work. Serial/context startup also rechecks.
+Early success is eligibility only. Final contained two-arm dispatch independently
+requires identical declarations, pinned projections, sanitized manifests and all
+existing acceptance gates. Candidate-only additions still fail
+`declaration_not_identical`; do not substitute a new receipt for a running candidate.
+The disposable installed fixture and refusal controls are in
+`tests/test_spec_ns_kit_175_verifier_input_readiness.py`.

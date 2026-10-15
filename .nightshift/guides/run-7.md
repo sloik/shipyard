@@ -339,3 +339,7 @@ authority.
 
 
 Native evidence, recovery and historical-count unavailability: see `run-6.md` § Structured native failures and setup recovery (SPEC-NS-KIT-160).
+
+See ORCHESTRATOR.md (BUG-NS-KIT-173).
+
+Self-spec retry: GIT.md (SPEC-NS-KIT-172).

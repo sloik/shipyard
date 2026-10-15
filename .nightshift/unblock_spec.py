@@ -12,6 +12,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import sqlite3
 import os
 import re
 from contextlib import contextmanager
@@ -445,14 +446,14 @@ def _emit_integrity(root: Path, packet: Mapping[str, Any], reason: str, ledger, 
 
 def _administrative_decision(root: Path, store: StatusStore, packet: Mapping[str, Any], fingerprint: str,
                              phase: str, *, retry_override: bool | None = None,
-                             in_flight: str | None = None) -> Decision:
+                             in_flight: str | None = None, emit: bool = True) -> Decision:
     """Apply `automatic_attempt_decision` to the durable ledger and issuance facts."""
     ledger = _attempt_ledger(Path(root), store, str(packet.get("spec_id", "")))
     decision = automatic_attempt_decision(
         ledger, fingerprint, packet, str(packet.get("run_id", "")),
         bool(packet.get("retry_override")) if retry_override is None else retry_override, phase,
         issuance=_issuance_view(store, packet, fingerprint), in_flight=in_flight)
-    if not decision.allow:
+    if not decision.allow and emit:
         _emit_integrity(Path(root), packet, decision.reason, ledger, "administrative")
     return decision
 
@@ -485,7 +486,7 @@ def _emit_refusal(root: Path, packet: Mapping[str, Any], phase: str, reason: str
 
 
 def _ordinary_decision(root: Path, store: StatusStore, packet: Mapping[str, Any], fingerprint: str, phase: str,
-                       *, in_flight: str | None = None) -> Decision:
+                       *, in_flight: str | None = None, emit: bool = True) -> Decision:
     """Apply `automatic_attempt_decision` to the ordinary durable ledger and issuance facts.
 
     A non-automatic (human-authorized) outcome is not an automatic attempt and never closes a
@@ -506,14 +507,15 @@ def _ordinary_decision(root: Path, store: StatusStore, packet: Mapping[str, Any]
             and any(entry.get("fingerprint") == fingerprint for entry in ledger)):
         # The ordinary controller never re-prepares: its caller finalizes the packet it holds.
         decision = Decision(False, RETRY_CLOSED)
-    if not decision.allow:
+    if not decision.allow and emit:
         _emit_refusal(root, packet, phase, decision.reason)
         _emit_integrity(root, packet, decision.reason, ledger, "ordinary")
     return decision
 
 
 def _issue_packet(store: StatusStore, packet: dict[str, Any], *, finalize_only: bool,
-                  route: _Route = ADMIN_ROUTE, mint_unissued: bool = False) -> dict[str, Any]:
+                  route: _Route = ADMIN_ROUTE, mint_unissued: bool = False,
+                  economics_enabled: bool = False) -> dict[str, Any]:
     """Durably issue `packet` (or reuse its current issuance); caller holds the controller lock.
 
     ``mint_unissued`` lets a finalize-only packet whose own success was adopted from a
@@ -529,6 +531,8 @@ def _issue_packet(store: StatusStore, packet: dict[str, Any], *, finalize_only: 
     payload = {"issuance_id": _issuance_key(fingerprint, sequence, route), "sequence": sequence,
                "packet_id": packet["packet_id"], "run_id": packet["run_id"], "fingerprint": fingerprint,
                "retry_override": bool(packet["retry_override"])}
+    if economics_enabled:
+        payload["economics_eligibility"] = packet["eligibility"]
     if route.name == "administrative":
         payload["invalid_run_abandonment"] = packet["invalid_run_abandonment"]
     row = store.record_terminal_decision(spec_id, payload["issuance_id"], "blocked",
@@ -573,12 +577,14 @@ def _decision_pointer(decision: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _administrative_pointer(root: Path, spec_id: str, fm: Mapping[str, Any],
-                            packet: Mapping[str, Any] | None = None) -> dict[str, str] | None:
+                            packet: Mapping[str, Any] | None = None, *,
+                            _store: StatusStore | None = None) -> dict[str, str] | None:
     offered = (packet or {}).get("invalid_run_abandonment") or fm.get("invalid_run_abandonment")
-    latest = read_durable_states_readonly(default_db_path_for_specs_dir(root / "specs"), [spec_id]).get(spec_id)
+    latest = (_store.get_state(spec_id) if _store is not None else
+              read_durable_states_readonly(default_db_path_for_specs_dir(root / "specs"), [spec_id]).get(spec_id))
     if offered is None and (not latest or latest.get("source") != "invalid-run-abandonment"):
         return None
-    store = StatusStore.for_specs_dir(root / "specs")
+    store = _store if _store is not None else StatusStore.for_specs_dir(root / "specs")
     run_id = str(latest["run_id"]) if offered is None else f"abandonment-{offered.get('invocation_id', '')}" if isinstance(offered, dict) else ""
     terminal = store.get_terminal_decision(spec_id, run_id)
     if (not terminal or terminal.get("decision") != "blocked"
@@ -957,7 +963,8 @@ def adopt_legacy_attempts(root: Path, store: StatusStore, spec_id: str, *, run_i
 
 
 def _prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override: bool = False,
-             allow_escalation: bool = False, _resume: bool = False) -> dict[str, Any]:
+             allow_escalation: bool = False, _resume: bool = False,
+             _store: StatusStore | None = None) -> dict[str, Any]:
     """Validate a blocked spec and derive its pinned packet.
 
     The ordinary controller (``_resume`` false; the caller holds the controller lock) adopts the
@@ -992,7 +999,7 @@ def _prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override
         "spec_id": fm["id"], "class": blocker_class, "reason": fm["block_reason"],
         "since": blocked_since, "evidence": evidence_ref, "sha256": evidence_hash,
     }, sort_keys=True).encode()).hexdigest()
-    store = StatusStore.for_specs_dir(spec_file.parent)
+    store = _store if _store is not None else StatusStore.for_specs_dir(spec_file.parent)
     if not _resume:
         # SPEC-NS-KIT-109 R5: ledger the pre-ledger attempt files of this spec and its parent, once.
         parent_id = fm.get("parent")
@@ -1064,6 +1071,61 @@ def _prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override
         packet["retry_override"], packet["finalize_only"] = False, True
     return packet
 
+def inspect_packet(spec_file: Path, project_root: Path, run_id: str, *,
+                   retry_override: bool = False, allow_escalation: bool = False) -> dict[str, Any]:
+    """Preview retry admission using a disposable snapshot, never an issued packet.
+
+    Run the existing adoption and retry rules on the snapshot alone. Copying the
+    DB and WAL bytes avoids even read-lock writes to the live SQLite SHM file.
+    Refuse a moving snapshot rather than infer authority from inconsistent bytes.
+    """
+    import tempfile
+    given = Path(project_root).resolve()
+    root = _install_root(given).resolve()
+    selected = Path(spec_file)
+    if not selected.is_absolute():
+        selected = given / selected if root != given and not (root / selected).exists() and (given / selected).exists() else root / selected
+    selected = selected.resolve()
+    refused = {"run_id": run_id, "executable": False, "admitted": False}
+    try:
+        parsed = parse_spec_file(selected)
+        fm = parsed.frontmatter
+        refused["spec_id"] = str(fm.get("id", ""))
+        if fm.get("status") != "blocked":
+            raise UnblockError("only currently blocked specs can be prepared")
+        if not isinstance(run_id, str) or not mpi.SAFE_ID.fullmatch(run_id):
+            raise UnblockError("invalid recovery run identity")
+        db = default_db_path_for_specs_dir(selected.parent)
+        sources = (db, Path(str(db) + "-wal"))
+        before = {path: path.read_bytes() if path.exists() else None for path in sources}
+        if before != {path: path.read_bytes() if path.exists() else None for path in sources}:
+            raise UnblockError("status store changed during inspection; inspect again")
+        if before[db] is None and before[sources[1]] is not None:
+            raise UnblockError("status store has an orphaned WAL")
+        with tempfile.TemporaryDirectory(prefix="unblock-preview-") as directory:
+            snapshot = Path(directory) / "status.db"
+            for source, data in before.items():
+                if data is not None:
+                    Path(str(snapshot) + ("-wal" if source != db else "")).write_bytes(data)
+            store = StatusStore(snapshot)
+            pointer = _administrative_pointer(root, str(fm.get("id", "")), fm, _store=store)
+            parent = fm.get("parent")
+            for spec_id in (str(fm["id"]), *([parent.strip()] if isinstance(parent, str) and parent.strip() else [])):
+                adopt_legacy_attempts(root, store, spec_id)
+            packet = _prepare(selected, root, run_id, retry_override=retry_override,
+                              allow_escalation=allow_escalation, _resume=True, _store=store)
+            if pointer is not None:
+                packet["invalid_run_abandonment"] = pointer
+                packet["administrative_revalidation_required"] = True
+                decision = _administrative_decision(root, store, packet, packet["fingerprint"], "prepare", emit=False)
+            else:
+                decision = _ordinary_decision(root, store, packet, packet["fingerprint"], "prepare", emit=False)
+            if decision.allow and _own_automatic_success(packet["prior_attempts"], packet["packet_id"], packet["fingerprint"]):
+                packet["retry_override"], packet["finalize_only"] = False, True
+            return {**packet, "executable": False, "admitted": decision.allow, "reason": decision.reason}
+    except (ValueError, OSError, KeyError, yaml.YAMLError, sqlite3.Error) as exc:
+        return {**refused, "reason": str(exc)}
+
 
 def triage(spec_file: Path, project_root: Path, run_id: str = "triage") -> dict[str, Any]:
     """Manual-triage packet for a blocker class with no automated path (it durably issues like `prepare`).
@@ -1117,16 +1179,43 @@ def _validate_authorization(authorization: Mapping[str, Any] | None) -> dict[str
     return {"authorized_by": authorized_by, "statement": statement}
 
 
+def _observe_unblock_boundary(root, packet, attempt, receipt, *, stage=None):
+    """Optional telemetry follows the existing immutable recovery/lifecycle boundary."""
+    try:
+        from loop_events import observe_delivery_boundary
+        observe_delivery_boundary(root, str(packet['spec_id']), run_id=str(packet['run_id']),
+            action_id='recovery', attempt_id=attempt.get('attempt_id'),
+            source_receipt_digest=_hash(Path(receipt)), stage=stage,
+            eligibility=attempt.get('eligibility') == 'eligible',
+            disposition='refused' if attempt.get('outcome') in {'failed', 'skipped'} else 'offered',
+            settlement_outcome='failed' if attempt.get('outcome') == 'failed' else None)
+    except Exception:
+        pass
+
+
 def _record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: str,
                    intervention: str, verification: Mapping[str, Any],
                    causal: Mapping[str, Any], automatic: bool = True,
                    reason: str = "", authorization: Mapping[str, Any] | None = None,
                    _guard=None, _administrative: bool = False) -> Path:
     """Persist one immutable, validated attempt artifact and return its path."""
+    if packet.get("executable") is False:
+        raise UnblockError("inspection preview is not an executable packet")
     if outcome not in OUTCOMES:
         raise UnblockError("unknown attempt outcome")
-    authorization_record: dict[str, Any] = {}
+    # Preserve the original legacy refusal order before any controller-store access.
     if packet.get("eligibility") == "skipped" and outcome != "skipped":
+        if automatic or outcome != "succeeded":
+            raise UnblockError("unsafe/external blocker must be recorded as skipped")
+        _validate_authorization(authorization)
+    if packet.get("eligibility") == AC_REVIEW_ELIGIBILITY and automatic and outcome != "skipped":
+        raise UnblockError(REPEATED_AC_FAILURE)
+    if outcome == "skipped" and not reason:
+        raise UnblockError("skipped attempt requires a reason")
+    _validate_causal(outcome, causal, verification)
+    eligibility = _economics_callback_guard(Path(project_root), packet, automatic=automatic, outcome=outcome)
+    authorization_record: dict[str, Any] = {}
+    if eligibility == "skipped" and outcome != "skipped":
         # The controller never dispatches or self-certifies an unsafe/external class: an
         # automatic attempt is refused unconditionally. A human operator recording a
         # non-automatic, evidence-backed success with an explicit authorization record is
@@ -1134,14 +1223,11 @@ def _record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: s
         if automatic or outcome != "succeeded":
             raise UnblockError("unsafe/external blocker must be recorded as skipped")
         authorization_record = _validate_authorization(authorization)
-    if packet.get("eligibility") == AC_REVIEW_ELIGIBILITY and automatic and outcome != "skipped":
+    if eligibility == AC_REVIEW_ELIGIBILITY and automatic and outcome != "skipped":
         # SPEC-351 R3: never dispatch a third blind automatic recovery attempt on a
         # spec/AC combination that already failed independent verification 2+ times --
         # the controller must record this as skipped (routing to AC review) instead.
         raise UnblockError(REPEATED_AC_FAILURE)
-    if outcome == "skipped" and not reason:
-        raise UnblockError("skipped attempt requires a reason")
-    _validate_causal(outcome, causal, verification)
     root = Path(project_root)
     evidence = packet.get("evidence", [])
     for item in evidence:
@@ -1178,7 +1264,7 @@ def _record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: s
             decision = _ordinary_decision(root, store, packet, fingerprint, "record")
             if not decision.allow:
                 raise UnblockError(decision.reason)
-        if current is not None and automatic and outcome != "skipped" and packet.get("eligibility") == "eligible":
+        if current is not None and automatic and outcome != "skipped" and eligibility == "eligible":
             # BUG-NS-KIT-110 R2 / SPEC-NS-KIT-109 R4: the SPEC-351 gate is re-evaluated against the
             # ledgered attempts now, not the packet pinned at prepare (this attempt is not ledgered yet).
             repeated = _repeated_failed_ac_ids(_lineage_attempts(
@@ -1268,6 +1354,7 @@ def _record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: s
     open_run_log(root, str(packet["run_id"])).emit(
         "unblock_attempt_recorded", packet["spec_id"], attempt_id=attempt_id, outcome=outcome,
         route=route.name, issuance_id=packet.get("issuance_id"))
+    _observe_unblock_boundary(root, packet, data, target)
     return target
 
 
@@ -1280,6 +1367,17 @@ def _finalize(packet: Mapping[str, Any], attempt_path: Path, project_root: Path,
     spec_path = _relative(root, str(packet["spec_path"]))
     if attempt.get("outcome") != "succeeded":
         return "blocked"
+    eligibility = _economics_callback_guard(root, packet, automatic=bool(attempt.get("automatic")), outcome="succeeded")
+    store = StatusStore.for_specs_dir(spec_path.parent)
+    route = ADMIN_ROUTE if _administrative else ORDINARY_ROUTE
+    economics_bound = "economics_eligibility" in (_issuance_view(
+        store, packet, str(packet.get("fingerprint", "")), route)["record"] or {})
+    if economics_bound and eligibility == "skipped":
+        if attempt.get("automatic"):
+            raise UnblockError("unsafe/external blocker must be recorded as skipped")
+        _validate_authorization(attempt.get("authorization"))
+    if economics_bound and eligibility == AC_REVIEW_ELIGIBILITY and attempt.get("automatic"):
+        raise UnblockError(REPEATED_AC_FAILURE)
     if not attempt.get("verification", {}).get("passed"):
         raise UnblockError("cannot finalize without passing verification")
     if not _administrative:
@@ -1337,6 +1435,7 @@ def _finalize(packet: Mapping[str, Any], attempt_path: Path, project_root: Path,
         write_spec_frontmatter(spec_path, mutate)
         open_run_log(root, str(packet["run_id"])).emit("spec_unblocked", packet["spec_id"], attempt_id=attempt["attempt_id"], transition="blocked->ready",
                                                        route="ordinary", issuance_id=packet.get("issuance_id"))
+        _observe_unblock_boundary(root, packet, attempt, attempt_path, stage='ready_restored')
         return "ready"
     store = StatusStore.for_specs_dir(spec_path.parent)
     state = store.get_state(str(packet["spec_id"]))
@@ -1365,6 +1464,7 @@ def _finalize(packet: Mapping[str, Any], attempt_path: Path, project_root: Path,
     _guard()
     open_run_log(root, str(packet["run_id"])).emit("spec_unblocked", packet["spec_id"], attempt_id=attempt["attempt_id"], transition="blocked->ready",
                                                    route="administrative", issuance_id=packet.get("issuance_id"))
+    _observe_unblock_boundary(root, packet, attempt, attempt_path, stage='ready_restored')
     return "ready"
 
 
@@ -1458,7 +1558,9 @@ def _recovery_guard(spec_file: Path, root: Path, packet, provider, phase: str = 
                 for key in ("schema_version", "packet_id", "run_id", "spec_id", "spec_path", "source_blocked_since",
                             "blocker_class", "metric_blocker_class", "block_reason", "blocker_scope",
                             "fingerprint", "evidence", "eligibility", "bounded_task", "retry_override"):
-                    if packet.get(key) != expected.get(key):
+                    actual = (_economics_callback_guard(root, packet, automatic=False, outcome="skipped")
+                              if key == "eligibility" else packet.get(key))
+                    if actual != expected.get(key):
                         raise UnblockError("administrative controller packet changed from pinned evidence")
                 fingerprint_now = expected["fingerprint"]
             # Revalidation never bypasses the retry rule: the same decision, same phase.
@@ -1486,7 +1588,7 @@ def _prepare_ordinary(selected: Path, root: Path, run_id: str, *, retry_override
             entry.get("attempt_id") == own_id and entry.get("legacy_adopted") is True
             for entry in _attempt_ledger(root, store, str(packet["spec_id"]), ORDINARY_ROUTE))
         issued = _issue_packet(store, packet, finalize_only=finalize_only, route=ORDINARY_ROUTE,
-                               mint_unissued=legacy_own)
+                               mint_unissued=legacy_own, economics_enabled=_economics_enabled(root))
         packet["issuance_id"] = issued["issuance_id"]
         packet["retry_override"] = issued["retry_override"]
         if finalize_only:
@@ -1495,8 +1597,100 @@ def _prepare_ordinary(selected: Path, root: Path, run_id: str, *, retry_override
         return packet
 
 
+def _economics_enabled(root: Path) -> bool:
+    import verification_economics as economics
+    return bool(economics.load_policy(root).get("enabled", False))
+
+
+def _economics_callback_guard(root: Path, packet: Mapping[str, Any], *, automatic: bool,
+                              outcome: str) -> str:
+    """Read controller evidence, never the caller's economics/eligibility copies."""
+    import verification_economics as economics
+    import spec_artifacts
+    if (not _economics_enabled(root)
+            and not any(key in packet for key in ("verification_economics", "existing_eligibility"))
+            and (packet.get("eligibility") == "skipped"
+                 or not {"spec_path", "spec_id", "packet_id", "fingerprint"}.issubset(packet))):
+        return str(packet.get("eligibility", ""))
+    selected = _relative(root, str(packet.get("spec_path", "")))
+    route = ADMIN_ROUTE if _is_administrative_packet(packet) else ORDINARY_ROUTE
+    store = StatusStore.for_specs_dir(selected.parent)
+    issued = _issuance_view(store, packet, str(packet.get("fingerprint", "")), route)["record"]
+    if issued is None:
+        issued = next((row for row in _issuances(store, str(packet.get("spec_id", "")),
+                       str(packet.get("fingerprint", "")), route)
+                       if row.get("packet_id") == packet.get("packet_id")
+                       and "economics_eligibility" in row), None)
+    eligibility = (issued or {}).get("economics_eligibility")
+    if eligibility is None:
+        if packet.get("eligibility") == "review_needed" or "verification_economics" in packet:
+            raise UnblockError("economics callback lacks original controller issuance; prepare again")
+        return str(packet.get("eligibility", ""))
+    if any(issued.get(key) != packet.get(key) for key in ("packet_id", "run_id", "fingerprint", "issuance_id")):
+        raise UnblockError("economics callback controller issuance mismatch")
+    try:
+        history = economics._history(spec_artifacts.reports_root_for_spec_path(selected), [str(packet["spec_id"])])
+    except ValueError as error:
+        raise UnblockError(f"economics callback history invalid: {error}") from error
+    bound = [row for row in history if row.get("controller") == {
+        "packet_id": issued["packet_id"], "issuance_id": issued["issuance_id"]}]
+    if not bound:
+        raise UnblockError("economics callback lacks indexed decision; prepare again")
+    decisions = {row["record_digest"]: row for row in bound if "disposition" not in row}
+    continued = {row["disposition"]["decision_digest"] for row in bound
+                 if row.get("disposition", {}).get("kind") == "continue"}
+    latest = next(reversed(decisions), None)
+    unresolved = latest not in continued and any(
+        row["recommendation"] == "review_needed" and digest not in continued
+        for digest, row in decisions.items())
+    if automatic and outcome != "skipped" and unresolved:
+        raise UnblockError("verification economics review_needed prevents automatic action")
+    return str(eligibility)
+
+
+def _economics_boundary(root: Path, selected: Path, run_id: str, packet: dict[str, Any],
+                        economics_context: Mapping[str, Any] | None, *, action: str) -> dict[str, Any]:
+    """Existing recovery admission stays authoritative; checkpoint cannot widen it."""
+    import verification_economics as economics
+    from nightshift_coordinator import load_yaml
+
+    policy = economics.load_policy(root)
+    if not policy.get("enabled", False):
+        return packet
+    context = dict(economics_context or {})
+    intent = context.pop("intent", {})
+    command = intent.get("command") or load_yaml(root / "config.yaml").get("commands", {}).get("test")
+    if not isinstance(command, str) or not command.strip():
+        raise UnblockError("verification economics requires the exact proposed recovery command")
+    try:
+        proposal = economics.pinned_proposal(root, selected, source_ref="HEAD", command=command,
+            action=action, action_id=intent.get("action_id", action),
+            expected_new_evidence=intent.get("expected_new_evidence", ""),
+            changed_boundary=intent.get("changed_boundary", ""))
+        # Retry packets carry durable controller issuance; resume results instead
+        # retain their immutable recovery record_digest and never enter retry callbacks.
+        controller = ({"packet_id": packet["packet_id"], "issuance_id": packet["issuance_id"]}
+                      if action == "recovery_retry" else None)
+        summary = economics.checkpoint(root, selected, run_id=run_id, proposal=proposal,
+                                       context=context, policy=policy, controller=controller)
+    except ValueError as error:
+        raise UnblockError(f"verification economics invalid: {error}") from error
+    packet["verification_economics"] = summary
+    if not summary["launch_allowed"]:
+        packet["existing_eligibility"] = packet.get("eligibility")
+        # This is a launch recommendation, not a lifecycle status. Existing callers
+        # dispatch only 'eligible'; review never becomes a worker launch or Done.
+        packet["eligibility"] = "review_needed"
+        packet["automatic_action_allowed"] = False
+        if "fast_path" in packet:
+            packet["fast_path"] = {**packet["fast_path"], "dispatch": "review_needed", "worker_run": False}
+        packet["marks_done"] = False
+    return packet
+
+
 def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override: bool = False,
-            allow_escalation: bool = False, abandonment_provider=None) -> dict[str, Any]:
+            allow_escalation: bool = False, abandonment_provider=None,
+            economics_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     given = Path(project_root).resolve()
     root = _install_root(given).resolve()
     selected = Path(spec_file)
@@ -1506,8 +1700,9 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
         selected = given / selected if root != given and not (root / selected).exists() and (given / selected).exists() else root / selected
     with _recovery_guard(selected, root, None, abandonment_provider) as (pointer, guard):
         if pointer is None:
-            return _prepare_ordinary(selected, root, run_id, retry_override=retry_override,
-                                     allow_escalation=allow_escalation)
+            packet = _prepare_ordinary(selected, root, run_id, retry_override=retry_override,
+                                       allow_escalation=allow_escalation)
+            return _economics_boundary(root, selected, run_id, packet, economics_context, action="recovery_retry")
         if not isinstance(run_id, str) or not mpi.SAFE_ID.fullmatch(run_id):
             raise UnblockError("invalid administrative recovery run identity")
         if parse_spec_file(selected).frontmatter.get("status") == "ready":
@@ -1526,17 +1721,20 @@ def prepare(spec_file: Path, project_root: Path, run_id: str, *, retry_override:
         own_ids = {f"{packet['packet_id']}-{outcome}" for outcome in OUTCOMES}
         finalize_only = any(entry.get("attempt_id") in own_ids
                             for entry in _attempt_ledger(root, store, str(packet["spec_id"])))
-        issued = _issue_packet(store, packet, finalize_only=finalize_only)
+        issued = _issue_packet(store, packet, finalize_only=finalize_only,
+                               economics_enabled=_economics_enabled(root))
         packet["issuance_id"] = issued["issuance_id"]
         packet["retry_override"] = issued["retry_override"]
         guard()
-        return packet
+        return _economics_boundary(root, selected, run_id, packet, economics_context, action="recovery_retry")
 
 
 def record_attempt(packet: Mapping[str, Any], project_root: Path, *, outcome: str,
                    intervention: str, verification: Mapping[str, Any], causal: Mapping[str, Any],
                    automatic: bool = True, reason: str = "", authorization: Mapping[str, Any] | None = None,
                    abandonment_provider=None) -> Path:
+    if packet.get("executable") is False:
+        raise UnblockError("inspection preview is not an executable packet")
     if not _is_administrative_packet(packet):
         # Ordinary controller, under the same controller lock as ordinary prepare and finalize;
         # the caller's own project_root spelling is kept (the returned path is built from it).
@@ -1740,7 +1938,7 @@ def fast_path_trailers(decision: Mapping[str, Any], eligibility: Mapping[str, An
 def resume_recovery(root: Path, record_path: Path, current: Mapping[str, Any], *, run_id: str,
                     now: datetime | None = None, operator: bool = False,
                     authorization: Mapping[str, Any] | None = None, propose_stage: str | None = None,
-                    human_action: str = "") -> dict[str, Any]:
+                    human_action: str = "", economics_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Evaluate (never execute) a recovery resume and persist a separate, immutable resume record.
 
     The original record and its receipts are read-only. The operator route needs an explicit
@@ -1781,6 +1979,13 @@ def resume_recovery(root: Path, record_path: Path, current: Mapping[str, Any], *
             for r in (record.get("stages") or {}).values() for item in r.get("evidence", [])],
         "human_action_needed": human_action or ("" if eligibility["eligible"] else eligibility["reason"]),
         "marks_done": False, "created_at": _now()}
+    spec_matches = [p for p in (root / "specs").glob("*.md")
+                    if not p.name.startswith("_") and parse_spec_file(p).frontmatter.get("id") == record["spec_id"]]
+    import verification_economics as economics
+    if economics.load_policy(root).get("enabled", False):
+        if len(spec_matches) != 1:
+            raise UnblockError("verification economics cannot resolve recovery spec")
+        result = _economics_boundary(root, spec_matches[0], run_id, result, economics_context, action="recovery_resume")
     path = _write_new(_recovery_dir(root, str(record["spec_id"])) / f"{run_id}-resume.json", result)
     open_run_log(root, run_id).emit("recovery_resume", record["spec_id"], resume_stage=stage,
                                     reused=",".join(result["reused_stages"]), fast_path=decision["fast_path"],
@@ -1822,6 +2027,7 @@ def main() -> int:
     parser.add_argument("--authorized-by", default="")
     parser.add_argument("--statement", default="")
     parser.add_argument("--propose-stage", choices=RECOVERY_STAGES)
+    parser.add_argument("--economics-context", type=Path, help="opt-in parent intent/receipt/disposition context")
     ns = parser.parse_args()
     if ns.operation == "adopt-legacy-attempts":
         if not ns.spec:
@@ -1841,13 +2047,15 @@ def main() -> int:
         out = resume_recovery(
             ns.root, ns.record, _current_from_args(ns.root, record, ns.candidate, ns.identity_file),
             run_id=ns.run_id, operator=ns.operator, propose_stage=ns.propose_stage,
-            authorization={"authorized_by": ns.authorized_by, "statement": ns.statement} if ns.operator else None)
+            authorization={"authorized_by": ns.authorized_by, "statement": ns.statement} if ns.operator else None,
+            economics_context=json.loads(ns.economics_context.read_text()) if ns.economics_context else None)
         print(json.dumps(out, indent=2))
     elif ns.operation == "triage":
         print(json.dumps(triage(ns.spec_file, ns.root, ns.run_id), indent=2))
     else:
         print(json.dumps(prepare(
             ns.spec_file, ns.root, ns.run_id, allow_escalation=ns.allow_escalation,
+            economics_context=json.loads(ns.economics_context.read_text()) if ns.economics_context else None,
         ), indent=2))
     return 0
 

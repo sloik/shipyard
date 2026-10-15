@@ -69,3 +69,43 @@ cron/launchd job or a step at the start of `/nightshift run`'s Phase A
 re-entry check, whichever the fleet operator's scheduling story already uses.
 On-demand invocation (above) remains valid at any time; the periodic run is
 additive, not a replacement.
+
+
+## Observational helper capture (SPEC-NS-KIT-168)
+
+At every ordinary handoff/report closure, always request newly authored helper metadata.
+Consult supported APIs, classify available helpers and hand the explicit list to the parent.
+The parent alone calls `run_tooling.capture_best_effort` (or `run_tooling.py capture`);
+capture is metadata/digests only and never delays correctness, recovery, Done or cleanup.
+Use `not_reported` without a reliable list; `none_authored` requires an explicit declaration.
+No temporary-root scan, source execution/copy, forced suite or historical census. Raw snapshots
+need separate owner approval. Review records one of generic_candidate, project_local,
+experiment, existing_supported or defect_adapter; single-context generic potential stays proposed.
+Eligibility requires hash-bound second-context evidence and owner/capability/privacy/check/scope
+fields with no material open choice. A recommendation grants no execution, installation or release.
+
+
+For data-only use, call `run_tooling.py capture --reports-root <reports> --project <code>
+--spec-id <ID> --run-id <run> --source-root <explicit-root> --input <private-metadata.json>`.
+The explicit candidate list has candidate_id, logical locator and category (closure, scope,
+brief, monitoring, recovery, fixture, experiment, other); optional source is relative to the
+explicit source root and never retained. Missing/inaccessible sources remain unknown.
+Use bounded symbolic labels for portable rationale, API comparison and capability fields;
+never paste commands, prompts, personal content, credentials or source. `review` takes
+candidate_id/disposition/comparison/rationale/contexts; `list` reads indexed run versions.
+An eligible review supplies owner_project/owner_spec, boundary inputs/outputs/side_effects/
+dependencies/compatibility, privacy=metadata_only, checks, write_surface and empty
+unresolved_decisions. Each context has project/evidence/sha256; evidence is a safe relative
+file under the reports root, independently retained before the eligibility decision.
+For an accepted opportunity use `review` input {"proposal": {"candidate_id": "<id>",
+"specs_dir": "<owned-specs>", "title": "<bounded title>", "dry_run": true}}.
+The supported follow-up gate routes duplicates to existing IDs; clean proposals retain a
+separate draft plus authored decision artifact with backlinks, without reserving the ID.
+Only explicit dry_run=false authors that separate Draft using the existing author-decision
+API. Review active NFR/release obligations before promotion; no sampled raw helper is promoted.
+The sole parent writer validates a complete batch before publishing one indexed snapshot;
+repeat digest/run capture and identical review reuse records; changed bytes link a new version.
+
+Optional source_project/source_spec/source_run preserve a helper's actual origin when its
+review belongs to another spec. Unknown historical run/availability stays not_reported.
+Version identity binds the predecessor, so reverting bytes preserves an unambiguous chain.

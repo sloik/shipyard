@@ -352,8 +352,16 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         else:
             blockers.append(_blocker("spec.after", "dependency cannot be verified", f"{spec_id} references missing dependency {dep}", f"Create {dep}, remove it from after:, or correct the dependency id."))
 
+    from verification_report import EXTERNAL_INPUT_PREFIX, verifier_input_readiness
+    input_readiness = verifier_input_readiness(project_root, located.path)
+    if not input_readiness["eligible"]:
+        blockers.append(_blocker("context.required_external_inputs", input_readiness["reason"],
+                                 input_readiness["category"],
+                                 "Commit required declarations before a new run; restore clean anchored sources."))
     knowledge_files = []
     for raw_path in required_inputs:
+        if isinstance(raw_path, str) and raw_path.startswith(EXTERNAL_INPUT_PREFIX):
+            continue
         p = Path(str(raw_path))
         path = p if p.is_absolute() else project_root / p
         if path.exists():
@@ -426,6 +434,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         "recommendedNextAction": next_action,
         "resultAcceptance": acceptance_binding,
         "artifactIndex": artifact_index,
+        "verifierInputReadiness": input_readiness,
     }
 
 

@@ -24,6 +24,114 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+GUIDE_MAX_BYTES = 24 * 1024
+RELEASE_INVENTORY_RECORD = "tests/fixtures/spec-229-006/le2-installed-allow.json"
+
+
+def guide_size_problems(text: str) -> list[str]:
+    size = len(text.encode("utf-8"))
+    return [f"guide is {size} bytes (max {GUIDE_MAX_BYTES})"] if size > GUIDE_MAX_BYTES else []
+
+
+def registry_guide_problems(skill_path: Path, guides_dir: Path) -> list[str]:
+    import skill_tutorial
+    problems = []
+    for entry in skill_tutorial.load_registry(skill_path):
+        guide = entry.get("guide")
+        if guide is None:
+            continue
+        prefix = ".nightshift/guides/"
+        if not isinstance(guide, str) or not guide.startswith(prefix):
+            problems.append(f"{entry['name']}: guide must be an install path under {prefix}")
+        elif not (guides_dir / guide[len(prefix):]).is_file():
+            problems.append(f"{entry['name']}: guide file {guide} is not in canonical/guides/")
+    return problems
+
+
+def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: dict | None = None,
+                                profile: str = "canonical") -> dict[str, Any]:
+    """Read-only canonical release checks, never installed admission or suite evidence."""
+    if profile != "canonical":
+        return {"applicable": False, "status": "not_applicable", "profile": profile, "reused": False}
+    import stat
+    import artifact_reachability
+    import skill_tutorial
+    import release
+
+    canonical = canonical.resolve()
+    findings = []
+    inputs = {}
+    def finding(rule, path, detail):
+        findings.append({"rule": rule, "path": path, "detail": detail})
+    def bind(path):
+        relative = path.relative_to(canonical).as_posix()
+        if path.is_file():
+            data = path.read_bytes()
+            inputs[relative] = {"sha256": hashlib.sha256(data).hexdigest(),
+                                "mode": stat.S_IMODE(path.stat().st_mode)}
+            return data
+        inputs[relative] = None
+        return None
+    guides = canonical / "guides"
+    for path in sorted(guides.rglob("*.md")):
+        data = bind(path)
+        if len(data) > GUIDE_MAX_BYTES:
+            finding("guide_byte_cap", path.relative_to(canonical).as_posix(), f"{len(data)} bytes exceeds {GUIDE_MAX_BYTES}")
+    skill = canonical / "Skills/nightshift/SKILL.md"
+    if bind(skill) is not None:
+        try:
+            for problem in registry_guide_problems(skill, guides):
+                finding("guide_registration", "Skills/nightshift/SKILL.md", problem)
+        except (ValueError, OSError) as error:
+            finding("guide_registration", "Skills/nightshift/SKILL.md", str(error))
+    elif any(str(row.get("path", "")).startswith("guides/") for row in manifest.get("files", [])):
+        finding("guide_registration", "Skills/nightshift/SKILL.md", "managed guides require the commands registry")
+    specs, errors = _load_specs(canonical / "specs")
+    for error in errors:
+        finding("report_reachability", "specs", error)
+    tracked = subprocess.run(["git", "-C", str(canonical), "ls-files", "-z", "--", "reports"], capture_output=True)
+    tracked_paths = [p.decode("utf-8", "surrogateescape") for p in tracked.stdout.split(b"\0") if p] if tracked.returncode == 0 else None
+    report_findings = artifact_reachability.sweep_reports_directory(canonical, specs, tracked_paths=tracked_paths)
+    for path, problems in report_findings.items():
+        for problem in problems:
+            finding("report_reachability", path, problem)
+    report_entries = []
+    if (canonical / "reports").is_dir():
+        report_entries = sorted(p.name for p in (canonical / "reports").iterdir()
+                                if not p.name.startswith(".") and p.name not in artifact_reachability.REPORTS_EXCLUDED_NAMES)
+        if tracked_paths is None and report_entries:
+            finding("report_ownership", "reports", "Git index ownership unavailable")
+    entries = release.release_entries(manifest)
+    inventory = {"status": "not_present", "comparison_performed": False}
+    record = canonical / RELEASE_INVENTORY_RECORD
+    data = bind(record)
+    if data is not None:
+        try:
+            saved = json.loads(data)
+            if saved.get("spec") == "SPEC-229-006" and saved.get("scenario") == "LE2":
+                observed = saved.get("stable", {}).get("manifest_files_checked")
+                expected = len(entries)  # validate_install's authoritative installed payload inventory count
+                inventory = {"status": "compatible" if type(observed) is int and observed == expected else "stale",
+                             "comparison_performed": True, "observed": observed, "expected": expected,
+                             "admission_proved": False}
+                if inventory["status"] == "stale":
+                    finding("saved_inventory", RELEASE_INVENTORY_RECORD, f"stable.manifest_files_checked={observed}; sealed inventory={expected}")
+            else:
+                inventory = {"status": "unrelated", "comparison_performed": False, "admission_proved": False}
+        except (ValueError, AttributeError, TypeError) as error:
+            finding("saved_inventory", RELEASE_INVENTORY_RECORD, f"unreadable selected record: {error}")
+    identity = {"schema_version": 1, "inputs": inputs, "spec_ids": sorted(specs),
+                "report_entries": report_entries, "tracked_reports": sorted(tracked_paths or []),
+                "sealed_inventory": sorted((row["path"], bool(row.get("executable"))) for row in entries),
+                "policy": {Path(module.__file__).name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                           for module in (artifact_reachability, skill_tutorial)},
+                "producer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"applicable": True, "profile": "canonical", "ok": not findings, "findings": findings,
+            "identity_digest": digest, "identity": identity, "inventory": inventory,
+            "checks_executed": True, "reuse_scope": "validated unchanged success lineage; no native suite evidence",
+            "reused": bool(not findings and previous and previous.get("ok") is True and previous.get("identity_digest") == digest)}
+
 try:
     import yaml
 except ImportError:  # pragma: no cover
@@ -322,6 +430,8 @@ def _load_specs(specs_dir: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if parse_spec_file is None:
         return specs, ["spec_frontmatter.py is unavailable"]
     for path in sorted(specs_dir.glob("*.md")):
+        if path.name.startswith("_"):
+            continue  # Same corpus boundary as validate_specs; templates are not specs.
         try:
             parsed = parse_spec_file(path)
         except FrontmatterError as exc:
@@ -790,3 +900,204 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+_SUITE_ENVIRONMENT_PROBE = r'''
+import importlib, importlib.metadata, json, os, pathlib, tempfile, sys, hashlib
+request = json.loads(sys.stdin.read())
+failures, modules = [], {}
+for name in request['imports']:
+    try:
+        module = importlib.import_module(name)
+        origin = getattr(module, '__file__', None)
+        try:
+            version = importlib.metadata.version({'yaml': 'PyYAML', 'xdist': 'pytest-xdist'}.get(name, name))
+        except importlib.metadata.PackageNotFoundError:
+            version = getattr(module, '__version__', None)
+        modules[name] = {'origin': origin, 'version': version,
+                         'sha256': hashlib.sha256(pathlib.Path(origin).read_bytes()).hexdigest() if origin and pathlib.Path(origin).is_file() else None}
+    except Exception:
+        failures.append('dependency_import:' + name)
+for raw in request['caches']:
+    path = pathlib.Path(raw)
+    try:
+        if not path.is_dir() or not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            raise OSError()
+        with os.scandir(path) as entries:
+            next(entries, None)
+    except OSError:
+        failures.append('cache_access')
+try:
+    with tempfile.TemporaryFile(dir=request['output']) as probe:
+        probe.write(b'setup-capability'); probe.flush(); os.fsync(probe.fileno())
+except OSError:
+    failures.append('output_access')
+print(json.dumps({'failures': failures, 'modules': modules, 'executable': sys.executable,
+                  'prefix': sys.prefix, 'version': sys.version}))
+sys.exit(1 if failures else 0)
+'''
+
+
+def suite_environment_public(result: dict) -> dict:
+    """Only reason codes and digests cross the verifier boundary; native records stay private."""
+    return {key: result[key] for key in ('schema_version', 'status', 'launch_allowed', 'is_suite_sample',
+                                         'reason_codes', 'binding_sha256', 'proof_sha256', 'reused_refusal')}
+
+
+def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revision: str,
+                                config_identity: str, output_root: Path, timeout_s: float,
+                                environment: dict[str, str] | None = None,
+                                required_imports: list[str] | None = None,
+                                cache_paths: list[Path] | None = None, previous: dict | None = None) -> dict:
+    """Bounded setup only, using the actual resolved interpreter; never run the suite or uv sync."""
+    import os
+    import shutil
+    import shlex
+    import stat
+    import math
+    env = dict(os.environ if environment is None else environment)
+    if not command or any(not isinstance(item, str) or not item for item in command):
+        raise ValueError('setup requires an exact non-empty argv')
+    if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError('setup uses the existing positive configured helper timeout')
+    arm_root, output_root = Path(arm_root).resolve(), Path(output_root).resolve()
+    selected = list(command)
+    launcher = shutil.which(selected[0], path=env.get('PATH'))
+    reasons = []
+    if os.name != 'posix':
+        reasons.append('platform_capability_unavailable')
+    if not isinstance(arm_revision, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', arm_revision):
+        reasons.append('arm_revision_unavailable')
+    if launcher is None:
+        reasons.append('executable_unavailable')
+    # A simple shell wrapper preserves its actual child argv; shell expressions are unavailable.
+    if Path(selected[0]).name in ('sh', 'bash') and len(selected) == 3 and selected[1] == '-c':
+        selected = shlex.split(selected[2])
+        if not selected or any(token in {';', '&&', '||', '|', '>', '<', '&'} for token in selected):
+            selected = []
+            reasons.append('runtime_unresolved')
+    executable = shutil.which(selected[0], path=env.get('PATH')) if selected else None
+    caches = [Path(path).resolve() for path in (cache_paths or [])]
+    runtime = executable
+    imports = list(required_imports or [])
+    if selected and Path(selected[0]).name == 'uv':
+        # --with can build an ephemeral environment. A read-only setup check must not invoke it.
+        if env.get('UV_CACHE_DIR'):
+            caches.append(Path(env['UV_CACHE_DIR']).resolve())
+        uv_flags = selected[2:]
+        supported_flags = {'--active', '--no-sync', '--offline', '--no-project'}
+        unknown_flags = any(item.startswith('-') and item not in supported_flags for item in uv_flags[:next((i for i,v in enumerate(uv_flags) if not v.startswith('-')), len(uv_flags))])
+        if (len(selected) < 2 or selected[1] != 'run' or unknown_flags or '--no-sync' not in selected or '--with' in selected or '--with-requirements' in selected
+                or not env.get('VIRTUAL_ENV') or '--active' not in selected):
+            reasons.append('uv_runtime_unresolved')
+            runtime = None
+        else:
+            runtime_path = Path(env['VIRTUAL_ENV']) / 'bin/python'
+            runtime = str(runtime_path) if runtime_path.is_file() else None
+            if not runtime:
+                reasons.append('runtime_unavailable')
+        imports = imports or ['fastapi', 'httpx', 'playwright', 'pytest', 'uvicorn', 'xdist', 'yaml']
+    elif runtime and not Path(runtime).name.startswith('python'):
+        try:
+            first = Path(runtime).read_bytes().split(b'\n', 1)[0].decode()
+        except (OSError, UnicodeError):
+            first = ''
+        if first.startswith('#!') and 'python' in first:
+            shebang = shlex.split(first[2:])
+            runtime = shutil.which(shebang[-1], path=env.get('PATH'))
+        else:
+            runtime = None
+            reasons.append('runtime_unresolved')
+    if selected and (Path(selected[0]).name == 'pytest' or any(selected[index:index + 2] == ['-m', 'pytest'] for index in range(len(selected)))):
+        imports = sorted(set(imports + ['pytest'] + (['xdist'] if any(item == '-n' or item.startswith('-n') and item[2:] in {'auto', 'logical', '2', '3', '4'} for item in selected) else [])))
+    if runtime and not os.access(runtime, os.X_OK):
+        reasons.append('runtime_unavailable')
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in imports):
+        raise ValueError('setup imports must be explicit top-level runtime modules')
+    def path_identity(path):
+        try:
+            info = Path(path).stat()
+            return {'path_sha256': hashlib.sha256(str(path).encode()).hexdigest(), 'mode': stat.S_IMODE(info.st_mode),
+                    'uid': info.st_uid, 'gid': info.st_gid, 'device': info.st_dev, 'inode': info.st_ino,
+                    'read': os.access(path, os.R_OK), 'write': os.access(path, os.W_OK), 'search': os.access(path, os.X_OK)}
+        except OSError:
+            return {'path_sha256': hashlib.sha256(str(path).encode()).hexdigest(), 'missing': True}
+    for cache in caches:
+        identity = path_identity(cache)
+        if (not cache.is_dir() or not all(identity.get(key) for key in ('read', 'write', 'search'))
+                or not identity.get('mode', 0) & 0o444 or not identity.get('mode', 0) & 0o222 or not identity.get('mode', 0) & 0o111):
+            reasons.insert(0, 'cache_access')
+    if not output_root.is_dir():
+        reasons.append('output_access')
+    runtime_sha = None
+    if runtime:
+        try:
+            runtime_sha = hashlib.sha256(Path(runtime).read_bytes()).hexdigest()
+        except OSError:
+            reasons.append('runtime_unavailable')
+    relevant = {key: value for key, value in env.items() if key.startswith(('UV_', 'PYTHON', 'PYTEST_')) or key in
+                ('PATH', 'VIRTUAL_ENV', 'TMPDIR', 'TEMP', 'TMP', 'HOME', 'LANG', 'LC_ALL')}
+    binding = {'arm_revision': arm_revision, 'arm_root_sha256': hashlib.sha256(str(arm_root).encode()).hexdigest(),
+               'command_sha256': hashlib.sha256(json.dumps(command).encode()).hexdigest(), 'config_identity': config_identity,
+               'environment_sha256': hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest(),
+               'runtime_sha256': runtime_sha, 'runtime_path_sha256': hashlib.sha256(str(runtime).encode()).hexdigest(),
+               'launcher_sha256': hashlib.sha256(Path(launcher).read_bytes()).hexdigest() if launcher else None,
+               'caches': [path_identity(path) for path in caches], 'output': path_identity(output_root),
+               'imports': imports, 'probe_sha256': hashlib.sha256(_SUITE_ENVIRONMENT_PROBE.encode()).hexdigest(), 'timeout_s': timeout_s}
+    key = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    if (isinstance(previous, dict) and previous.get('binding_sha256') == key
+            and previous.get('launch_allowed') is False and previous.get('status') == 'unavailable'):
+        return {**previous, 'reused_refusal': True}
+    import time
+    import uuid
+    started = datetime.now(timezone.utc).isoformat()
+    moment = time.monotonic()
+    native = {'invocation_identity': uuid.uuid4().hex, 'started_at': started,
+              'exit_code': None, 'timed_out': False, 'launched': False}
+    observed = {}
+    stdout, stderr = '', ''
+    if not reasons and runtime:
+        try:
+            probe_env = {**env, 'PYTHONDONTWRITEBYTECODE': '1'}
+            native['launched'] = True
+            import signal
+            process = subprocess.Popen([runtime, '-I', '-B', '-c', _SUITE_ENVIRONMENT_PROBE], cwd=arm_root, env=probe_env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            native['process_group_id'] = process.pid
+            try:
+                stdout, stderr = process.communicate(json.dumps({'imports': imports, 'caches': [str(path) for path in caches],
+                                                    'output': str(output_root)}), timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                native['timed_out'] = True
+                os.killpg(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+                reasons.append('probe_timeout')
+            native['exit_code'] = process.returncode
+            try:
+                observed = json.loads(stdout)
+                reasons.extend(observed['failures'])
+                if selected and Path(selected[0]).name == 'uv' and Path(observed.get('prefix', '')).resolve() != Path(env['VIRTUAL_ENV']).resolve():
+                    reasons.append('runtime_binding_mismatch')
+            except (ValueError, KeyError, TypeError):
+                if not native['timed_out']:
+                    reasons.append('probe_result_unavailable')
+            if process.returncode and not reasons:
+                reasons.append('probe_failed')
+        except subprocess.TimeoutExpired as error:
+            native['timed_out'] = True
+            stdout = error.stdout.decode(errors='replace') if isinstance(error.stdout, bytes) else error.stdout or ''
+            stderr = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr or ''
+            reasons.append('probe_timeout')
+        except OSError:
+            reasons.append('probe_launch_unavailable')
+    elif not reasons:
+        reasons.append('runtime_unresolved')
+    native.update(ended_at=datetime.now(timezone.utc).isoformat(), duration_s=round(time.monotonic() - moment, 6))
+    native.update(stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(), stderr_sha256=hashlib.sha256(stderr.encode()).hexdigest())
+    result = {'schema_version': 1, 'status': 'unavailable' if reasons else 'pass', 'launch_allowed': not reasons,
+              'is_suite_sample': False, 'reason_codes': sorted(set(reasons)), 'binding_sha256': key,
+              'binding': binding, 'native': native, 'reused_refusal': False,
+              'dependency_runtime_sha256': hashlib.sha256(json.dumps(observed, sort_keys=True).encode()).hexdigest(),
+              'native_stdout': stdout, 'native_stderr': stderr}
+    result['proof_sha256'] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+    return result

@@ -19,9 +19,9 @@ Design constraints (SPEC-269 R3 / AC2):
     already present.
 
 ``config.yaml`` is a multi-document YAML stream (``---``-separated); top-level keys
-are matched with a line-anchored regex exactly like ``release.kit_version()`` and
-``release_coordinator._schema_version()`` do, rather than a full YAML round-trip,
-so this migration never reformats or reorders unrelated documents or comments.
+are read with the existing strict YAML contract. Version replacement uses scalar
+source locations rather than a YAML round-trip, so unrelated documents and
+comments are never reformatted or reordered.
 """
 
 from __future__ import annotations
@@ -29,15 +29,15 @@ from __future__ import annotations
 import json
 import re
 
+import yaml
+
 # SPEC-327 R4: shared table. validate_install.py's REQUIRED_CONFIG_SECTIONS
 # and the CFG.RUNNER_POLICY invariant's section tuple live HERE, not in
 # validate_install.py, and validate_install.py imports them from this module
 # (see its `import config_migrations` and the assignments right after it).
-# This module has no reason to import validate_install (which pulls in
-# PyYAML, release.py, and managed_payload_provenance, and would break this
-# module's stated purity contract) — the dependency runs the other way, so a
-# new required section cannot be added to the validator without this
-# migration's `_ALL_REQUIRED_SECTIONS` (derived below) knowing about it too.
+# The pure duplicate-aware configuration reader also lives here; the validator
+# re-exports its existing loader/error API. This leaf imports no validator runtime,
+# release tooling or provenance machinery and performs no configuration I/O.
 REQUIRED_CONFIG_SECTIONS = (
     "project", "commands", "review", "runner", "git", "nightshift_state", "release_policy",
 )
@@ -83,14 +83,110 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     except ValueError:
         return ()
 
+class DuplicateKeyLoader(yaml.SafeLoader):
+    """The existing strict multi-document configuration loader, shared by both callers."""
+
+
+def _construct_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict:
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate/conflicting key: {key!r}", node.start_mark)
+        mapping[key] = loader.construct_object(value_node, deep=True)
+    return mapping
+
+
+DuplicateKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+
+class ConfigParseError(ValueError):
+    """config.yaml cannot be parsed under the shared strict-duplicate-key loader."""
+
+
+def load_config_documents(text: str) -> list[dict]:
+    """Parse in memory with the same structural contract as validate_install."""
+    if not text.strip():
+        raise ConfigParseError("config.yaml empty")
+    try:
+        documents = list(yaml.load_all(text, Loader=DuplicateKeyLoader))
+    except (yaml.YAMLError, TypeError) as exc:
+        raise ConfigParseError(f"config.yaml YAML syntax invalid: {exc.__class__.__name__}") from exc
+    documents = [doc for doc in documents if doc is not None]
+    if not documents:
+        raise ConfigParseError("config.yaml has no documents")
+    if any(not isinstance(doc, dict) for doc in documents):
+        raise ConfigParseError("config.yaml document is not a mapping")
+    return documents
+
+
+def merge_config_documents(documents: list[dict]) -> dict:
+    merged = {}
+    for doc in documents:
+        repeated = merged.keys() & doc.keys()
+        if repeated:
+            key = sorted(repeated, key=str)[0]
+            raise ConfigParseError(f"duplicate/conflicting top-level key across documents: {key!r}")
+        merged.update(doc)
+    return merged
+
+
+def _configuration(text: str) -> dict:
+    # The pure migration API has always accepted absent source fields/empty text.
+    return merge_config_documents(load_config_documents(text)) if text.strip() else {}
+
+
+def validate_config_structure(text: str) -> dict:
+    """Check parsing and present required-section shapes, not project readiness."""
+    config = merge_config_documents(load_config_documents(text))
+    for section in _ALL_REQUIRED_SECTIONS:
+        if section in config and not isinstance(config[section], dict):
+            raise ConfigParseError(f"config.yaml {section} must be a mapping")
+    return config
+
+
+def _version_node(text: str, key: str):
+    config = _configuration(text)
+    if key not in config:
+        return None
+    value = config[key]
+    pattern = r'\d+\.\d+\.\d+' if key == 'schema_version' else r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?'
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        raise ConfigParseError(f"config.yaml {key} must be a supported string version")
+    for document in yaml.compose_all(text, Loader=DuplicateKeyLoader):
+        if document is None:
+            continue
+        for key_node, node in document.value:
+            if key_node.value != key:
+                continue
+            raw = text[node.start_mark.index:node.end_mark.index]
+            if (not isinstance(node, yaml.ScalarNode) or node.style not in (None, '"', "'")
+                    or node.start_mark.index < key_node.end_mark.index
+                    or node.start_mark.line != key_node.start_mark.line
+                    or raw.startswith(('&', '*', '!'))):
+                raise ConfigParseError(f"config.yaml {key} has an ambiguous version scalar")
+            return node
+    raise ConfigParseError(f"config.yaml {key} has an ambiguous version field")
+
+
+def _replace_version(text: str, key: str, version: str) -> str | None:
+    node = _version_node(text, key)
+    if node is None:
+        return None
+    if node.value == version:
+        return text
+    quote = node.style or ''
+    return text[:node.start_mark.index] + quote + version + quote + text[node.end_mark.index:]
+
 
 def _has_top_level_key(text: str, key: str) -> bool:
-    return re.search(rf"^{re.escape(key)}:", text, re.MULTILINE) is not None
+    return key in _configuration(text)
 
 
 def _current_schema_version(text: str) -> str | None:
-    match = re.search(r'^schema_version:\s*"([^"]+)"', text, re.MULTILINE)
-    return match.group(1) if match else None
+    node = _version_node(text, "schema_version")
+    return node.value if node is not None else None
 
 
 def _append_block(text: str, block: str) -> str:
@@ -101,12 +197,10 @@ def _append_block(text: str, block: str) -> str:
 
 
 def _set_schema_version(text: str, version: str) -> str:
-    pattern = re.compile(r'^schema_version:\s*"[^"]+"', re.MULTILINE)
-    replacement = f'schema_version: "{version}"'
-    if pattern.search(text):
-        return pattern.sub(replacement, text, count=1)
-    # No existing field: prepend one rather than guessing a document boundary.
-    prefix = replacement + "\n"
+    replaced = _replace_version(text, "schema_version", version)
+    if replaced is not None:
+        return replaced
+    prefix = f'schema_version: "{version}"\n'
     if text and not text.startswith("\n"):
         prefix += "\n"
     return prefix + text
@@ -381,16 +475,9 @@ KIT_VERSION_LINE = re.compile(r'^(kit_version:\s*")[^"]*(")', re.MULTILINE)
 
 
 def set_kit_version(text: str, version: str) -> str:
-    """Rewrite only the quoted value on an existing ``kit_version:`` line.
-
-    BUG-326: the whole-kit release never updated an install's project-owned
-    ``kit_version``, so every delivered install failed admission on
-    ``CFG.PARSE_VERSION`` and ``KIT.MARKER`` the moment the release landed.
-    This is SPEC-127's ``write_kit_version`` semantics moved into managed
-    payload: no other byte changes, and text without the line is returned
-    unchanged (the config validator already reports the missing key).
-    """
-    return KIT_VERSION_LINE.sub(lambda m: f"{m.group(1)}{version}{m.group(2)}", text, count=1)
+    """Reconcile only the supported existing kit scalar; preserve all surrounding bytes."""
+    replaced = _replace_version(text, "kit_version", version)
+    return text if replaced is None else replaced
 
 
 def migrate(text: str, *, target: str = LATEST_SCHEMA_VERSION) -> str:

@@ -791,6 +791,53 @@ def feedback_state_from_dict(data: Mapping[str, Any]) -> FeedbackState:
     return state
 
 
+IMPLEMENTER_ASSESSED_BLOCKED = "implementer-assessed-blocked"
+
+
+def implementer_assessment_terminal_evidence(state: FeedbackState) -> dict[str, Any]:
+    """Derive a blocked-only terminal label from actual closed reducer evidence."""
+    state = feedback_state_from_dict(feedback_state_record(state))
+    diagnosis, assessment = state.blocked_attempt, state.assessment
+    if (state.phase is not FeedbackPhase.TERMINAL_BLOCKED
+            or state.recovery_source != RecoverySource.IMPLEMENTER_BLOCKED.value
+            or diagnosis is None or assessment is None
+            or not state.candidate_revision or not state.candidate_branch or not state.candidate_worktree_ref
+            or not state.original_authority or state.original_authority != diagnosis.original_authority
+            or state.initial_verifier_id is not None or state.packet is not None):
+        raise FeedbackValidationError("implementer assessment requires a validated preserved blocked attempt before verifier dispatch")
+    _validate_safe_text(state.candidate_branch, "candidate branch")
+    _validate_relative_path(state.candidate_worktree_ref, "candidate worktree reference")
+    terminals = [effect for effect in state.pending_effects if effect.kind == "terminal_resolution"]
+    parents = []
+    for effect in state.pending_effects:
+        if "verifier" in effect.kind or effect.kind in {"integrate", "integrate_candidate"}:
+            raise FeedbackValidationError("implementer assessment cannot replace verifier dispatch or delivery")
+        record = effect.payload.get("record", {}) if effect.kind == "record_outcome" else {}
+        if record.get("role") == "verifier":
+            raise FeedbackValidationError("implementer assessment has verifier actor evidence")
+        if record.get("role") == "parent" and record.get("terminal_outcome") == "blocked":
+            parents.append(record)
+    if len(terminals) != 1 or len(parents) != 1:
+        raise FeedbackValidationError("implementer assessment requires one keyed parent terminal effect")
+    payload, parent = terminals[0].payload, parents[0]
+    preserved = payload.get("preserved_candidate", {})
+    if (payload.get("outcome") != "blocked" or payload.get("reason") != state.terminal_reason
+            or payload.get("assessment") != assessment.record()
+            or preserved.get("branch") != state.candidate_branch
+            or preserved.get("worktree_ref") != state.candidate_worktree_ref
+            or parent.get("reason") != state.terminal_reason or parent.get("agent_outcome") != "blocked"
+            or parent.get("recovery_source") != RecoverySource.IMPLEMENTER_BLOCKED.value
+            or parent.get("diagnosis_class") != assessment.classification.value
+            or parent.get("candidate_preserved") is not True):
+        raise FeedbackValidationError("implementer assessment terminal evidence does not match the reducer")
+    return {"resolution_kind": IMPLEMENTER_ASSESSED_BLOCKED, "terminal_outcome": "blocked",
+            "run_id": state.run_id, "spec_id": state.spec_id, "reason": state.terminal_reason,
+            "candidate_revision": state.candidate_revision, "candidate_branch": state.candidate_branch,
+            "diagnosis_digest": diagnosis.digest(), "assessment_digest": assessment.digest(),
+            "terminal_effect_key": terminals[0].key, "verifier_actors": [],
+            "verifier_dispatches": 0, "verifier_samples": 0}
+
+
 def _verdict_digest(verdict: Mapping[str, Any]) -> str:
     return _digest(dict(verdict))
 

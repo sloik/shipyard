@@ -258,3 +258,4 @@ their closed JSON list in an ignored/private file, set the private
 `--artifact-refs-file <private-file>` to that one invocation; raw artifacts stay
 below the private artifact root.
 
+Before implementation, normal instruction apply/coordinator admission checks trusted external inputs (SPEC-NS-KIT-175); follow SPEC-GUIDE.md § Required external input readiness. Exit0 alone is not eligibility; repair setup before a new run, never replace its receipt.
