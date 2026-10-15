@@ -17,13 +17,8 @@ These blocks are read from this guide at run time by `verification_report.py` an
 # the standalone verifier surface containing `verifier-baseline`/`verifier-head`
 # -- additionally gates full scope.out_of_scope/.amended recomputation
 # (SPEC-300-002 R6) and requires [spec-file] to be supplied too.
-# SPEC-413: the scope recomputation and `## Scope Amendments` globs read the
-# spec as COMMITTED on main (`git show <main-branch>:<spec-relpath>` from
-# [main-root], default branch `main`), like check 6 -- never [spec-file]'s
-# working copy, which in practice is the head arm's copy and predates a
-# mid-run approved amendment. [spec-file] still locates the kit (scope_guard.py)
-# and the AC list. The surface has no `main` branch, so pass the project root
-# as [main-root]; without it the recomputation falls back to [spec-file].
+# SPEC-413: scope/amendments come from committed main ([main-root], branch
+# defaults to main); only legacy standalone calls fall back to [spec-file].
 import json, re, subprocess, sys
 from pathlib import Path
 
@@ -50,16 +45,8 @@ if v["verdict"] == "disputes_premise":
 
 # R4/R6 — read-only, asserted by hash, over BOTH assigned arm surfaces
 # (SPEC-282). A clean baseline arm never masks a dirty head arm or vice versa.
-# SPEC-284: the working-tree half is recomputed here as a set comparison of the
-# verdict's own porcelain_before against its porcelain_after, never an emptiness
-# test on porcelain_after. A worktree that was already dirty at dispatch is not
-# the verifier's footprint; an entry only in after (added) or only in before
-# (removed) is. That retires the single generated-artifact exclusion this block
-# used to carry — pre-existing generated output now cancels in every project,
-# with no project's tooling named here. Both fields are REQUIRED: a verdict
-# carrying only the old flat `porcelain` key has no before-set to compare
-# against, and is rejected rather than read as two empty sets, which would
-# accept real dirt.
+# SPEC-284: compare complete before/after sets; added or removed dirt fails.
+# Pre-existing dirt cancels. Missing sets cannot imply a clean footprint.
 gf = v["git_footprint"]
 if not isinstance(gf, dict) or not {"baseline","head"}.issubset(gf): die("git_footprint must report both baseline and head arms")
 for arm_label in ("baseline","head"):
@@ -85,8 +72,24 @@ if len(sys.argv) > 3:
     if len(sys.argv) <= 2: die("scope recomputation requires the spec-file argument (argv[2])")
     surface_repo, spec_file_for_scope = sys.argv[3], sys.argv[2]
     kit_dir = Path(spec_file_for_scope).resolve().parent.parent
-    sys.path.insert(0, str(kit_dir))
-    import scope_guard  # noqa: E402
+    # Only the trusted parent bootstrap supplies this object through runpy.
+    # Worker JSON and environment never select a resolver or this route.
+    scope_guard = globals().get("_nightshift_trusted_scope_guard")
+    if scope_guard is not None:
+        import types
+        if not isinstance(scope_guard, types.ModuleType):
+            die("invalid trusted scope resolver")
+    else:
+        resolver_path = kit_dir / "scope_guard.py"
+        if not resolver_path.is_file():
+            die("scope recomputation requires scope_guard.py in the intended kit")
+        sys.path.insert(0, str(kit_dir))
+        try:
+            import scope_guard  # noqa: E402
+            if Path(getattr(scope_guard, "__file__", "") or "").resolve() != resolver_path.resolve():
+                raise ImportError("scope resolver imported outside the intended kit")
+        except Exception as exc:
+            die("scope recomputation resolver unavailable: " + str(exc))
     spec_text = open(spec_file_for_scope).read()
     scope = scope_guard.resolve_scope(spec_text)
     main_root = Path(sys.argv[4]).resolve() if len(sys.argv) > 4 else None

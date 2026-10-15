@@ -110,13 +110,15 @@ HITS
    project_root, spec_relpath, main_branch, baseline, branch = sys.argv[1:6]
    project_root = Path(project_root).resolve()
    kit_dir = (project_root / spec_relpath).resolve().parent.parent
-   sys.path.insert(0, str(kit_dir))
-   try:
-       import scope_guard  # noqa: E402
-   except ImportError:
+   resolver_path = kit_dir / "scope_guard.py"
+   if not resolver_path.is_file():
        print("SCOPE-CHECK: not_run")
        print(f"WARNING: scope_guard.py not found under {kit_dir} — check 6 skipped")
        sys.exit(0)
+   sys.path.insert(0, str(kit_dir))
+   import scope_guard  # noqa: E402
+   if Path(getattr(scope_guard, "__file__", "") or "").resolve() != resolver_path.resolve():
+       raise ImportError("scope resolver imported outside the intended kit")
 
    scope = scope_guard.scope_from_main(project_root, spec_relpath, main_branch)
    spec_text_main = subprocess.run(

@@ -225,7 +225,7 @@ import sys, hashlib, importlib.metadata
 _original_finish = pytest_sessionfinish
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
-    if not hasattr(session.config, "workerinput"):
+    if _active:
         options = session.config.option
         _binding["repair_complete_selection"] = not any(
             getattr(options, key, None) for key in
@@ -250,7 +250,8 @@ def pytest_sessionfinish(session, exitstatus):
             _binding["repair_runtime_unavailable"] = True
     _original_finish(session, exitstatus)
 def pytest_deselected(items):
-    _binding["repair_deselected"] = _binding.get("repair_deselected", 0) + len(items)
+    if _active:
+        _binding["repair_deselected"] = _binding.get("repair_deselected", 0) + len(items)
 '''
 
 
@@ -302,7 +303,9 @@ def _suite_environment(junit_xml: Path | None) -> dict[str, str]:
     given ``--junitxml=<path>`` is appended to any existing ``PYTEST_ADDOPTS``
     so pytest records per-test durations without changing the command argv.
     """
+    from verification_report import _strip_owned_pytest_junit
     environment = os.environ.copy()
+    _strip_owned_pytest_junit(environment)
     for flag in ("NIGHTSHIFT_ESCALATION_SIGNOFF", "NIGHTSHIFT_ACTIVE_SPEC", "NIGHTSHIFT_COORDINATOR_SESSION", "NIGHTSHIFT_RUN_ID"):
         environment.pop(flag, None)
     if junit_xml is not None:
@@ -324,7 +327,7 @@ def _run_canonical_suite(
     same release can pass or fail based on an operator decision unrelated to
     the kit under test.
     """
-    environment = _suite_environment(junit_xml)
+    environment = _suite_environment(None)
     if junit_xml is None:
         return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False,
                               timeout=CANONICAL_SUITE_TIMEOUT_S, env=environment)
@@ -334,10 +337,10 @@ def _run_canonical_suite(
     with tempfile.TemporaryDirectory(prefix="nightshift-release-observer-") as scratch:
         module = "_nightshift_release_observer_" + uuid.uuid4().hex
         (Path(scratch) / (module + ".py")).write_text(_repair_observer_source())
-        environment["PYTEST_PLUGINS"] = ",".join(filter(None, (environment.get("PYTEST_PLUGINS", ""), module)))
-        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (environment.get("PYTHONPATH", ""), scratch)))
-        environment["NIGHTSHIFT_PYTEST_BINDING"] = json.dumps({"command": argv})
-        environment["NIGHTSHIFT_PYTEST_OBSERVATION"] = str(observation)
+        from verification_report import _pytest_observer_environment
+        environment = _pytest_observer_environment(environment, module=module,
+            observer_dir=Path(scratch), binding={"command": argv},
+            observation=observation, junit_xml=junit_xml)
         result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False,
                                 timeout=CANONICAL_SUITE_TIMEOUT_S, env=environment)
     if observation.is_file() and junit_xml.is_file():
@@ -2016,6 +2019,47 @@ def _validate_install_entry(install: Path) -> dict:
     return entry
 
 
+def _fleet_suite_setup_entry(install: Path, manifest: dict) -> dict:
+    """Observe the declared launch prerequisite before copies; never run a suite.
+
+    Delivery and installed admission retain their existing outcome semantics.
+    This observation uses the target canonical checker against current project
+    command/config/script bytes, so it is not a post-upgrade suite prediction.
+    """
+    import preflight
+    entry = {'install': str(install), 'observation_phase': 'pre_apply',
+             'checker_fingerprint': manifest['fingerprint'], 'schema_version': 1,
+             'is_suite_sample': False, 'launch_allowed': False,
+             'status': 'unavailable', 'reason_codes': [],
+             'binding_sha256': None, 'proof_sha256': None}
+    try:
+        raw = (install / 'config.yaml').read_bytes()
+        config = config_migrations.merge_config_documents(
+            config_migrations.load_config_documents(raw.decode()))
+        commands = config.get('commands', {})
+        if not isinstance(commands, dict):
+            raise ValueError('commands must be a mapping')
+        command = commands.get('test')
+        if not isinstance(command, str) or not command.strip():
+            exemption = commands.get('test_not_applicable')
+            if isinstance(exemption, str) and exemption.strip():
+                entry.update(status='not_applicable', reason_codes=['test_not_applicable'])
+            else:
+                entry['reason_codes'] = ['test_command_unavailable']
+            return entry
+        revision = _run(['git', 'rev-parse', 'HEAD'], cwd=install.parent)
+        arm_revision = revision.stdout.strip() if revision.returncode == 0 else 'unavailable'
+        with tempfile.TemporaryDirectory(prefix='nightshift-release-setup-') as output:
+            record = preflight.suite_environment_preflight(shlex.split(command),
+                arm_root=install.parent, arm_revision=arm_revision,
+                config_identity=hashlib.sha256(raw).hexdigest(), output_root=Path(output), timeout_s=5)
+        entry.update(preflight.suite_environment_public(record))
+    except (Exception, SystemExit):
+        entry.update(status='unavailable', launch_allowed=False,
+                     reason_codes=['setup_observation_unavailable'])
+    return entry
+
+
 def fleet_validation_table(entries: list[dict]) -> str:
     """Render fleet validation entries as the operator-facing table."""
     if not entries:
@@ -2434,6 +2478,10 @@ def coordinate_release(
             except (FileNotFoundError, json.JSONDecodeError):
                 old = None
             result["old_fingerprints"][str(install)] = old
+
+    # BUG-NS-KIT-212: setup observations cover every discovered target before copies.
+    targets = dict.fromkeys(row['install'] for row in result['readiness_summary']['rows'])
+    result['suite_environment_setup'] = [_fleet_suite_setup_entry(Path(name), manifest) for name in targets]
 
     if dry_run:
         # SPEC-NS-KIT-123 R1/R2: every discovered install, read-only,

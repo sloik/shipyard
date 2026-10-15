@@ -7,6 +7,13 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.1 (source cut: 2026-10-15)
+
+- Bind standalone pinned scope consumers to the intended kit resolver file, preserve the trusted parent's hardened resolver through its explicit caller-owned bootstrap, and keep missing-helper observations distinct from broken imports (BUG-NS-KIT-215).
+- Bind pytest observation and owned JUnit capture to one invocation controller so nested suites retain their native outcomes and independent evidence; isolate formal model-status fixtures while preserving the original integration checks (BUG-NS-KIT-214).
+- Resolve declared non-Python native and shell-script suite runtimes without requiring Python imports, bind script/interpreter identities and retain strict setup-only refusal semantics (BUG-NS-KIT-212).
+- Report pre-apply suite-environment setup for every discovered install separately from payload delivery, installed admission and actual suite results (BUG-NS-KIT-212).
+
 ## 3.26.0 (source cut: 2026-10-15)
 
 - Read instruction audit config through strict merged YAML, classify both managed helpers as public kit, and repair validation fixture prerequisites while retaining admission, scope and browser assertions (BUG-NS-KIT-211).

@@ -938,6 +938,108 @@ sys.exit(1 if failures else 0)
 '''
 
 
+_SUITE_NATIVE_ENVIRONMENT_PROBE = r'''
+output=$1
+probe=$2
+shift 2
+failures=''
+for cache do
+    if ! test -d "$cache" || ! test -r "$cache" || ! test -w "$cache" || ! test -x "$cache"; then
+        failures='"cache_access",'
+    fi
+done
+if ! (umask 077; set -C; printf setup-capability > "$output/$probe") 2>/dev/null; then
+    failures="$failures\"output_access\","
+elif ! /bin/rm -- "$output/$probe"; then
+    failures="$failures\"output_access\","
+fi
+case "$failures" in
+    '') printf '{"failures":[],"runtime_kind":"native"}\n' ;;
+    *) printf '{"failures":[%s],"runtime_kind":"native"}\n' "${failures%,}"; exit 1 ;;
+esac
+'''
+
+
+def _suite_executable(value: str, root: Path, env: dict[str, str]) -> str | None:
+    """Resolve with the same cwd/PATH semantics as the eventual suite launch."""
+    import os
+    import shutil
+    if '/' in value:
+        candidate = Path(os.path.abspath(root / value))
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    search = os.pathsep.join(str(root / item) if not Path(item).is_absolute() else item
+                             for item in env.get('PATH', os.defpath).split(os.pathsep))
+    return shutil.which(value, path=search)
+
+
+def _suite_native_runtime(executable: str, selected: list[str], root: Path, env: dict[str, str]):
+    """Inspect identities only; never execute a declared suite or script."""
+    import os
+    import shlex
+    import stat
+    scripts, interpreters, failures = [], [], []
+
+    def bind_script(path):
+        candidate = Path(os.path.abspath(root / path))
+        try:
+            if not candidate.is_file() or not os.access(candidate, os.R_OK):
+                raise OSError()
+            content = candidate.read_bytes()
+            scripts.append({'path_sha256': hashlib.sha256(str(candidate).encode()).hexdigest(),
+                            'sha256': hashlib.sha256(content).hexdigest(),
+                            'mode': stat.S_IMODE(candidate.stat().st_mode)})
+            return content
+        except OSError:
+            failures.append('script_unavailable')
+            return b''
+
+    runtime = executable
+    try:
+        with Path(executable).open('rb') as handle:
+            header = handle.read(4096)
+    except OSError:
+        return None, 'native', scripts, interpreters, ['runtime_unavailable']
+    if header.startswith(b'#!'):
+        bind_script(executable)
+        try:
+            # Kernels do not apply shell quoting to the interpreter or split its one argument.
+            words = header.split(b'\n', 1)[0][2:].decode().strip().split(None, 1)
+        except UnicodeError:
+            words = []
+        interpreter = _suite_executable(words[0], root, env) if words else None
+        if interpreter and Path(words[0]).name == 'env':
+            interpreters.append({'path_sha256': hashlib.sha256(interpreter.encode()).hexdigest(),
+                                 'sha256': hashlib.sha256(Path(interpreter).read_bytes()).hexdigest()})
+            argument = words[1] if len(words) == 2 else ''
+            try:
+                words = shlex.split(argument[2:].lstrip()) if argument.startswith('-S') else [argument] if argument else []
+            except ValueError:
+                words = []
+            interpreter = _suite_executable(words[0], root, env) if words and not words[0].startswith('-') else None
+        runtime = interpreter
+        if runtime is None:
+            failures.append('runtime_unavailable')
+    elif not header.startswith((b'\x7fELF', b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe',
+                                b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce',
+                                b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                                b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')):
+        failures.append('runtime_unresolved')
+        runtime = None
+    if Path(selected[0]).name in ('sh', 'bash'):
+        operands = selected[1:]
+        while operands and operands[0].startswith('-'):
+            flag = operands.pop(0)
+            if flag == '--': break
+            if flag not in ('--noprofile', '--norc') and not (flag.startswith('-') and
+                    len(flag) > 1 and set(flag[1:]) <= set('euxvfn')):
+                failures.append('runtime_unresolved')
+                break
+        if operands and not failures:
+            bind_script(operands[0])
+    kind = 'python' if runtime and Path(runtime).name.startswith('python') else 'native'
+    return runtime, kind, scripts, interpreters, failures
+
+
 def suite_environment_public(result: dict) -> dict:
     """Only reason codes and digests cross the verifier boundary; native records stay private."""
     return {key: result[key] for key in ('schema_version', 'status', 'launch_allowed', 'is_suite_sample',
@@ -949,7 +1051,7 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
                                 environment: dict[str, str] | None = None,
                                 required_imports: list[str] | None = None,
                                 cache_paths: list[Path] | None = None, previous: dict | None = None) -> dict:
-    """Bounded setup only, using the actual resolved interpreter; never run the suite or uv sync."""
+    """Bounded setup only, under the actual launch identity; never run the suite or uv sync."""
     import os
     import shutil
     import shlex
@@ -962,7 +1064,7 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
         raise ValueError('setup uses the existing positive configured helper timeout')
     arm_root, output_root = Path(arm_root).resolve(), Path(output_root).resolve()
     selected = list(command)
-    launcher = shutil.which(selected[0], path=env.get('PATH'))
+    launcher = _suite_executable(selected[0], arm_root, env)
     reasons = []
     if os.name != 'posix':
         reasons.append('platform_capability_unavailable')
@@ -972,13 +1074,25 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
         reasons.append('executable_unavailable')
     # A simple shell wrapper preserves its actual child argv; shell expressions are unavailable.
     if Path(selected[0]).name in ('sh', 'bash') and len(selected) == 3 and selected[1] == '-c':
-        selected = shlex.split(selected[2])
-        if not selected or any(token in {';', '&&', '||', '|', '>', '<', '&'} for token in selected):
+        expression = selected[2]
+        try:
+            lexer = shlex.shlex(expression, posix=True, punctuation_chars=';&|<>()')
+            lexer.whitespace_split = True
+            lexer.commenters = ''
+            tokens = list(lexer)
+            selected = shlex.split(expression)
+        except ValueError:
+            selected, tokens = [], []
+        if (not selected or any(token and set(token) <= set(';&|<>()') for token in tokens)
+                or any(character in expression for character in ('$','`','\n'))):
             selected = []
             reasons.append('runtime_unresolved')
-    executable = shutil.which(selected[0], path=env.get('PATH')) if selected else None
+    executable = _suite_executable(selected[0], arm_root, env) if selected else None
+    if selected and executable is None:
+        reasons.append('executable_unavailable')
     caches = [Path(path).resolve() for path in (cache_paths or [])]
     runtime = executable
+    runtime_kind, scripts, interpreters = 'python', [], []
     imports = list(required_imports or [])
     if selected and Path(selected[0]).name == 'uv':
         # --with can build an ephemeral environment. A read-only setup check must not invoke it.
@@ -999,17 +1113,15 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
         imports = imports or ['fastapi', 'httpx', 'playwright', 'pytest', 'uvicorn', 'xdist', 'yaml']
     elif runtime and not Path(runtime).name.startswith('python'):
         try:
-            first = Path(runtime).read_bytes().split(b'\n', 1)[0].decode()
-        except (OSError, UnicodeError):
-            first = ''
-        if first.startswith('#!') and 'python' in first:
-            shebang = shlex.split(first[2:])
-            runtime = shutil.which(shebang[-1], path=env.get('PATH'))
-        else:
-            runtime = None
-            reasons.append('runtime_unresolved')
+            runtime, runtime_kind, scripts, interpreters, runtime_failures = _suite_native_runtime(executable, selected, arm_root, env)
+            reasons.extend(runtime_failures)
+        except OSError:
+            runtime, runtime_kind = None, 'native'
+            reasons.append('runtime_unavailable')
     if selected and (Path(selected[0]).name == 'pytest' or any(selected[index:index + 2] == ['-m', 'pytest'] for index in range(len(selected)))):
         imports = sorted(set(imports + ['pytest'] + (['xdist'] if any(item == '-n' or item.startswith('-n') and item[2:] in {'auto', 'logical', '2', '3', '4'} for item in selected) else [])))
+    if runtime_kind == 'native':
+        imports = []
     if runtime and not os.access(runtime, os.X_OK):
         reasons.append('runtime_unavailable')
     if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in imports):
@@ -1027,7 +1139,14 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
         if (not cache.is_dir() or not all(identity.get(key) for key in ('read', 'write', 'search'))
                 or not identity.get('mode', 0) & 0o444 or not identity.get('mode', 0) & 0o222 or not identity.get('mode', 0) & 0o111):
             reasons.insert(0, 'cache_access')
-    if not output_root.is_dir():
+        if runtime_kind == 'native':
+            try:
+                with os.scandir(cache) as entries:
+                    next(entries, None)
+            except OSError:
+                reasons.insert(0, 'cache_access')
+    if (not output_root.is_dir() or runtime_kind == 'native' and
+            (not path_identity(output_root).get('mode', 0) & 0o222 or not os.access(output_root, os.W_OK | os.X_OK))):
         reasons.append('output_access')
     runtime_sha = None
     if runtime:
@@ -1037,13 +1156,33 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
             reasons.append('runtime_unavailable')
     relevant = {key: value for key, value in env.items() if key.startswith(('UV_', 'PYTHON', 'PYTEST_')) or key in
                 ('PATH', 'VIRTUAL_ENV', 'TMPDIR', 'TEMP', 'TMP', 'HOME', 'LANG', 'LC_ALL')}
+    if runtime_kind == 'native':
+        relevant = env
+    probe = _SUITE_NATIVE_ENVIRONMENT_PROBE if runtime_kind == 'native' else _SUITE_ENVIRONMENT_PROBE
+    probe_runtime = runtime
+    if runtime_kind == 'native' and (not runtime or Path(runtime).name not in ('sh', 'bash')):
+        probe_runtime = _suite_executable('/bin/sh', arm_root, env)
+    if runtime_kind == 'native' and not probe_runtime:
+        reasons.append('probe_launch_unavailable')
+    def identity_sha(path, failure):
+        if path is None:
+            return None
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            reasons.append(failure)
+            return None
+    launcher_sha = identity_sha(launcher, 'runtime_unavailable')
+    probe_runtime_sha = identity_sha(probe_runtime, 'probe_launch_unavailable')
     binding = {'arm_revision': arm_revision, 'arm_root_sha256': hashlib.sha256(str(arm_root).encode()).hexdigest(),
                'command_sha256': hashlib.sha256(json.dumps(command).encode()).hexdigest(), 'config_identity': config_identity,
                'environment_sha256': hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest(),
                'runtime_sha256': runtime_sha, 'runtime_path_sha256': hashlib.sha256(str(runtime).encode()).hexdigest(),
-               'launcher_sha256': hashlib.sha256(Path(launcher).read_bytes()).hexdigest() if launcher else None,
+               'launcher_sha256': launcher_sha,
                'caches': [path_identity(path) for path in caches], 'output': path_identity(output_root),
-               'imports': imports, 'probe_sha256': hashlib.sha256(_SUITE_ENVIRONMENT_PROBE.encode()).hexdigest(), 'timeout_s': timeout_s}
+               'imports': imports, 'probe_sha256': hashlib.sha256(probe.encode()).hexdigest(), 'timeout_s': timeout_s,
+               'runtime_kind': runtime_kind, 'scripts': scripts, 'interpreters': interpreters,
+               'probe_runtime_sha256': probe_runtime_sha}
     key = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     if (isinstance(previous, dict) and previous.get('binding_sha256') == key
             and previous.get('launch_allowed') is False and previous.get('status') == 'unavailable'):
@@ -1061,7 +1200,11 @@ def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revis
             probe_env = {**env, 'PYTHONDONTWRITEBYTECODE': '1'}
             native['launched'] = True
             import signal
-            process = subprocess.Popen([runtime, '-I', '-B', '-c', _SUITE_ENVIRONMENT_PROBE], cwd=arm_root, env=probe_env,
+            probe_argv = [runtime, '-I', '-B', '-c', probe]
+            if runtime_kind == 'native':
+                probe_argv = [probe_runtime, '-c', probe, 'nightshift-setup', str(output_root),
+                              '.nightshift-setup-' + native['invocation_identity'], *[str(path) for path in caches]]
+            process = subprocess.Popen(probe_argv, cwd=arm_root, env=probe_env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             native['process_group_id'] = process.pid
             try:

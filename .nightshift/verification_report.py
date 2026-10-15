@@ -6134,52 +6134,102 @@ def _configured_test_at_ref(repository: Path, ref: str, config_path: str) -> str
     return command.strip() if isinstance(command, str) else None
 
 
-_EXPECTED_FIX_PYTEST_OBSERVER = r'''import json, os
+_EXPECTED_FIX_PYTEST_OBSERVER = r'''import json, os, shlex
 from pathlib import Path
 import pytest
 _binding = json.loads(os.environ["NIGHTSHIFT_PYTEST_BINDING"])
 _collections, _reports, _workers, _errors = {}, [], set(), []
 _config = None
+_active = False
+_target = None
 def pytest_configure(config):
-    global _config
+    global _config, _active, _target
     _config = config
+    # Only the selected invocation's controller captures. Real xdist workers
+    # forward collection and phase reports to that controller through xdist.
+    _active = (os.environ.get("NIGHTSHIFT_PYTEST_OWNER") == __name__
+        and not hasattr(config, "workerinput")
+        and os.environ.get("NIGHTSHIFT_PYTEST_CONTROLLER_PID", str(os.getpid())) == str(os.getpid()))
+    if not _active:
+        return
+    os.environ["NIGHTSHIFT_PYTEST_CONTROLLER_PID"] = str(os.getpid())
+    _target = Path(os.environ["NIGHTSHIFT_PYTEST_OBSERVATION"])
+    # Own options are already parsed. Children must not inherit this destination.
+    owned = os.environ.pop("NIGHTSHIFT_PYTEST_OWNED_JUNIT", None)
+    if owned is not None:
+        os.environ["PYTEST_ADDOPTS"] = shlex.join([
+            option for option in shlex.split(os.environ.get("PYTEST_ADDOPTS", ""))
+            if option != "--junitxml=" + owned])
 def pytest_collection_finish(session):
-    if not hasattr(session.config, "workerinput") and not session.config.getoption("numprocesses", default=0):
+    if _active and not session.config.getoption("numprocesses", default=0):
         _collections["serial"] = [item.nodeid for item in session.items]
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_node_collection_finished(node, ids):
+    if not _active:
+        return
     worker = node.gateway.id
     if worker in _collections:
         _errors.append("duplicate worker collection")
     _collections[worker] = list(ids)
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodeready(node):
-    _workers.add(node.gateway.id)
+    if _active:
+        _workers.add(node.gateway.id)
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
-    if error:
+    if _active and error:
         _errors.append("worker terminated: " + str(error))
 def pytest_collectreport(report):
-    if report.failed:
+    if _active and report.failed:
         _errors.append("collection error")
 def pytest_runtest_logreport(report):
-    if _config is not None and not hasattr(_config, "workerinput"):
+    if _active:
         _reports.append({"nodeid": report.nodeid, "when": report.when,
             "outcome": report.outcome, "wasxfail": hasattr(report, "wasxfail") or str(report.longrepr).startswith("[XPASS(strict)]"),
             "rerun": hasattr(report, "rerun") or report.outcome == "rerun"})
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
-    if hasattr(session.config, "workerinput"):
+    if not _active:
         return
     data = {"schema_version": "1.0.0", "binding": _binding,
         "collections": _collections, "workers": sorted(_workers),
         "reports": _reports, "errors": _errors,
         "session_exitstatus": int(exitstatus), "completed": True}
-    target = Path(os.environ["NIGHTSHIFT_PYTEST_OBSERVATION"])
-    temporary = target.with_suffix(".tmp")
+    temporary = _target.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, sort_keys=True))
-    temporary.replace(target)
+    temporary.replace(_target)
 '''
+
+
+def _strip_owned_pytest_junit(environment: dict[str, str]) -> None:
+    """Remove only a previous Nightshift owner's inherited JUnit option."""
+    import shlex
+    owned = environment.pop("NIGHTSHIFT_PYTEST_OWNED_JUNIT", None)
+    if owned is not None:
+        options = shlex.split(environment.get("PYTEST_ADDOPTS", ""))
+        environment["PYTEST_ADDOPTS"] = shlex.join([
+            option for option in options if option != "--junitxml=" + owned])
+
+
+def _pytest_observer_environment(environment: Mapping[str, str], *, module: str,
+                                 observer_dir: Path, binding: Mapping[str, Any],
+                                 observation: Path, junit_xml: Path | None = None) -> dict[str, str]:
+    """Start a distinct observer owner without inheriting its parent's capture."""
+    import shlex
+    env = dict(environment)
+    _strip_owned_pytest_junit(env)
+    env.pop("NIGHTSHIFT_PYTEST_CONTROLLER_PID", None)
+    env["NIGHTSHIFT_PYTEST_OWNER"] = module
+    env["PYTEST_PLUGINS"] = ",".join(filter(None, (env.get("PYTEST_PLUGINS", ""), module)))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (env.get("PYTHONPATH", ""), str(observer_dir))))
+    env["NIGHTSHIFT_PYTEST_BINDING"] = json.dumps(binding, sort_keys=True)
+    env["NIGHTSHIFT_PYTEST_OBSERVATION"] = str(observation)
+    if junit_xml is not None:
+        existing = env.get("PYTEST_ADDOPTS", "").strip()
+        option = shlex.quote("--junitxml=" + str(junit_xml))
+        env["PYTEST_ADDOPTS"] = (existing + " " + option).strip()
+        env["NIGHTSHIFT_PYTEST_OWNED_JUNIT"] = str(junit_xml)
+    return env
 
 
 def _expected_fix_observer_digest() -> str:
@@ -6234,11 +6284,8 @@ def run_expected_baseline_fix_sample(plan: Mapping[str, Any], *, arm: str,
     observer_path.write_text(_EXPECTED_FIX_PYTEST_OBSERVER)
     observation_path = output_dir / "pytest-observation.json"
     binding = _expected_fix_observer_binding(plan, arm, invocation_identity)
-    env = dict(os.environ)
-    env["PYTEST_PLUGINS"] = ",".join(filter(None, (env.get("PYTEST_PLUGINS", ""), module)))
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, (env.get("PYTHONPATH", ""), str(observer_dir))))
-    env["NIGHTSHIFT_PYTEST_BINDING"] = json.dumps(binding, sort_keys=True)
-    env["NIGHTSHIFT_PYTEST_OBSERVATION"] = str(observation_path)
+    env = _pytest_observer_environment(os.environ, module=module, observer_dir=observer_dir,
+        binding=binding, observation=observation_path)
     import shlex
     import preflight
     setup = verification_environment_setup(shlex.split(command), root=root, output_root=output_dir, environment=env)
@@ -7805,9 +7852,13 @@ def safe_canonical_protocol_files(kit_dir: Path) -> frozenset[str] | None:
 
 
 def harden_scope_guard() -> Any:
-    """Import this kit's scope_guard (into sys.modules) with candidate-code loads replaced."""
+    """Pin this kit's physical resolver before replacing candidate-code loads."""
+    expected = Path(__file__).resolve().with_name("scope_guard.py")
+    if not expected.is_file():
+        raise ImportError("trusted kit scope_guard.py is unavailable")
     import scope_guard
-
+    if Path(getattr(scope_guard, "__file__", "") or "").resolve() != expected:
+        raise ImportError("scope resolver imported outside the trusted kit")
     scope_guard._canonical_protocol_files = safe_canonical_protocol_files
     return scope_guard
 
@@ -7941,10 +7992,10 @@ def run_embedded_validator(
 ) -> subprocess.CompletedProcess[str]:
     """Run the embedded validator with this (trusted) kit's scope_guard pinned in sys.modules.
 
-    The validator inserts the spec file's kit directory (the candidate's, from the head arm) at
-    the front of sys.path before importing scope_guard; importing the trusted copy first makes
-    the cached module win, so the candidate cannot supply the scope classifier.  Bytecode is
-    not written (it would dirty the arm).
+    Verify and harden this kit's physical resolver before reading worker data, then pass
+    that exact object through caller-owned runpy globals. The standalone validator's
+    intended-kit import route is not used, so candidate code cannot supply the classifier.
+    Bytecode is not written (it would dirty the arm).
     """
     with tempfile.TemporaryDirectory(prefix="ns-validator-") as scratch:
         script = Path(scratch) / "validate_verdict.py"
@@ -7958,11 +8009,11 @@ def run_embedded_validator(
         anchor_path.write_text(json.dumps(_sampling_anchor_payload(sampling_anchor)))
         bootstrap = (
             "import runpy, sys, json; sys.path.insert(0, sys.argv[1]); import verification_report as v; "
-            "v.harden_scope_guard(); plan=json.load(open(sys.argv[2])); "
+            "scope=v.harden_scope_guard(); plan=json.load(open(sys.argv[2])); "
             "anchor=v._sampling_anchor_from_payload(json.load(open(sys.argv[3]))); sys.argv = sys.argv[4:]; "
             "runpy.run_path(sys.argv[0], run_name='__main__', init_globals={"
             "'_nightshift_sampling_checker':lambda *a,**kw:v.validate_expected_baseline_fix(*a,sampling_anchor=anchor,**kw),"
-            "'_nightshift_dispatch_plan':plan})"
+            "'_nightshift_dispatch_plan':plan,'_nightshift_trusted_scope_guard':scope})"
         )
         return subprocess.run(
             [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent), str(plan_path), str(anchor_path), str(script), *argv],
