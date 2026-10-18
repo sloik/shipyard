@@ -39,6 +39,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/EXTENSIONS.md", ".nightshift/GIT.md", ".nightshift/HUMAN-REVIEW.md",
     ".nightshift/LOOP-DOMAIN-MAP.md", ".nightshift/LOOP.md", ".nightshift/ORCHESTRATOR.md",
     ".nightshift/REVIEW.md", ".nightshift/SPEC-GUIDE.md", ".nightshift/Skills/nightshift/SKILL.md",
+    ".nightshift/Skills/nightshift/prompts/prebuilt.json",
     ".nightshift/VOCABULARY.md", ".nightshift/WATCHER.md", ".nightshift/ac_review.py",
     ".nightshift/analyze_metrics.py", ".nightshift/argo_home.py", ".nightshift/audit_nfr.py",
     ".nightshift/board.py", ".nightshift/board.sh", ".nightshift/check_followup_spec.py",

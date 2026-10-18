@@ -1,0 +1,68 @@
+[
+  {
+    "id": "promote-drafts",
+    "title": "Promote Drafts",
+    "scope": "prebuilt",
+    "tags": ["triage", "promotion"],
+    "body": "Using the board at {{board_url}}, review every spec in draft status and promote to ready the ones that meet the promotion gate in the nightshift skill; for the rest, leave a comment explaining what's missing.",
+    "harness_overrides": {},
+    "variables": ["board_url"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  },
+  {
+    "id": "work-queue-to-done",
+    "title": "Work Queue To Done",
+    "scope": "prebuilt",
+    "tags": ["drive-to-done"],
+    "body": "Using the board at {{board_url}}, work every spec in draft, ready, and blocked status to completion, following the nightshift skill and kit conventions, until nothing actionable remains.",
+    "harness_overrides": {},
+    "variables": ["board_url"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  },
+  {
+    "id": "clear-blocked",
+    "title": "Clear Blocked",
+    "scope": "prebuilt",
+    "tags": ["triage", "blocked"],
+    "body": "Using the board at {{board_url}}, go through every blocked spec and either unblock it (resolve the dependency, split it, or fix the drift) or state precisely why it must stay blocked.",
+    "harness_overrides": {},
+    "variables": ["board_url"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  },
+  {
+    "id": "kickoff-single-spec",
+    "title": "Kickoff Single Spec",
+    "scope": "prebuilt",
+    "tags": ["kickoff", "single-spec"],
+    "body": "Using the board at {{board_url}}, load spec {{spec_id}} and implement it end-to-end per the nightshift worker brief.",
+    "harness_overrides": {},
+    "variables": ["board_url", "spec_id"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  },
+  {
+    "id": "verify-in-progress-batch",
+    "title": "Verify In Progress Batch",
+    "scope": "prebuilt",
+    "tags": ["verify"],
+    "body": "Using the board at {{board_url}}, independently verify every spec currently in_progress and report pass/fail with evidence for each.",
+    "harness_overrides": {},
+    "variables": ["board_url"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  },
+  {
+    "id": "drift-health-check",
+    "title": "Drift Health Check",
+    "scope": "prebuilt",
+    "tags": ["health", "doctor"],
+    "body": "Using the board at {{board_url}}, run a doctor-style pass over this board: report spec/status drift, orphaned handoffs, and stale in_progress entries.",
+    "harness_overrides": {},
+    "variables": ["board_url"],
+    "created_at": "2026-09-22T00:00:00Z",
+    "updated_at": "2026-09-22T00:00:00Z"
+  }
+]

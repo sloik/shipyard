@@ -1761,7 +1761,7 @@ def _skill_manifest_entry(manifest: dict) -> dict | None:
 
 
 def _skill_delivery_entries(manifest: dict) -> list[tuple[str, str, dict]]:
-    """(canonical source, release-root target, manifest entry): SKILL.md, then its guides.
+    """(canonical source, release-root target, manifest entry): skill, guides, assets.
 
     BUG-NS-KIT-102: the slim skill's command bodies live in ``guides/``; the global
     skill is only usable with those guides beside it, so they travel with SKILL.md.
@@ -1785,6 +1785,10 @@ def _skill_delivery_entries(manifest: dict) -> list[tuple[str, str, dict]]:
             entry,
         )
         for entry in guides
+    ] + [
+        (entry["path"], entry["path"], entry)
+        for entry in sorted(manifest.get("files", []), key=lambda entry: entry["path"])
+        if entry["path"] in release_handoff.SKILL_ASSET_PATHS
     ]
 
 

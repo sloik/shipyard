@@ -26,6 +26,7 @@ HANDOFF_DIR = "release-handoffs"
 DELIVERY_RECEIPT_SCHEMA_VERSION = 1
 DELIVERY_RECEIPT_REPORT = "coordinator-positive-delivery-receipt-v1"
 SKILL_MANAGED_PATH = "Skills/nightshift/SKILL.md"
+SKILL_ASSET_PATHS = frozenset({"Skills/nightshift/prompts/prebuilt.json"})
 # A handoff author cannot know the fingerprint of the release that will carry
 # their implementation.  This exact sentinel is the only permitted unpinned
 # value; the coordinator replaces it immediately before delivery validation.
@@ -778,6 +779,8 @@ def _skill_allowlist(manifest: Mapping[str, Any]) -> set[str]:
     allowed = {SKILL_MANAGED_PATH}
     for entry in manifest.get("files", []):
         path = str(entry.get("path", "")) if isinstance(entry, Mapping) else ""
+        if path in SKILL_ASSET_PATHS:
+            allowed.add(path)
         if path.startswith("guides/"):
             allowed.add(f"Skills/nightshift/{path}")
     return allowed

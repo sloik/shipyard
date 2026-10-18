@@ -7,6 +7,10 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.4 (source cut: 2026-10-18)
+
+- Ship the existing immutable six-prompt prebuilt library with every managed install and the global Nightshift skill. Preserve source bytes, writable-store boundaries and strict delivery receipts; align managed version labels with the cut (BUG-NS-KIT-242).
+
 ## 3.26.3 (source cut: 2026-10-18)
 
 - Restore independent formal test collection, exact functional search reference fixtures, deterministic unit phase clocks and complete guide headers/route inventory. Enroll the three continuation guides in the exact public-kit inventory; preserve frozen benchmark code, evidence and release gates (BUG-NS-KIT-235). This cut carries the preceding undelivered 3.26.2 changes.
