@@ -79,6 +79,9 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/token_usage.py",
     # SPEC-417-001: on-demand guides.
     ".nightshift/guides/board-and-api.md",
+    ".nightshift/guides/board-prompt-library.md",
+    ".nightshift/guides/pinned-baselines.md",
+    ".nightshift/guides/worker-local-config.md",
     ".nightshift/guides/board-performance-comparisons.md",
     # SPEC-417-004: the rules guide.
     ".nightshift/guides/rules.md",
@@ -107,6 +110,12 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/guides/worker-small.md",
     # SPEC-417-002: read-only board client.
     ".nightshift/board_ctl.py",
+    # BUG-NS-KIT-225: managed search runtime and benchmark guide.
+    ".nightshift/board_search.py",
+    ".nightshift/prompt_snippets.py",
+    ".nightshift/prompt_snippets_ui.py",
+    ".nightshift/worktree_local_config.py",
+    ".nightshift/guides/board-search-benchmarks.md",
     # SPEC-417-003: the status-write gate shared by board.py and board_ctl.py.
     ".nightshift/status_transition.py",
     # SPEC-NS-KIT-003: the reduced-dependency-graph helper.

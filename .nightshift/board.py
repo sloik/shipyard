@@ -22,6 +22,7 @@ except ImportError as e:
     sys.exit(1)
 
 import errno
+import ipaddress
 import json
 import logging
 import math
@@ -55,6 +56,9 @@ import lifecycle
 import skill_tutorial
 import spec_artifacts
 import spec_id as spec_id_grammar
+import board_search
+import prompt_snippets
+import prompt_snippets_ui
 
 # SPEC-332: the status-sync rule is shared with validate_specs.py; the module
 # is stdlib-only managed payload, so it is always importable.
@@ -230,6 +234,12 @@ class CacheEntry:
     rationale: tuple = ("absent", None)
 
 
+@lru_cache(maxsize=32768)
+def _search_path(value: str) -> Path:
+    """Reuse immutable path values; file metadata and bodies stay live."""
+    return Path(value)
+
+
 class SpecCache:
     """mtime-keyed two-tier cache.
 
@@ -237,13 +247,18 @@ class SpecCache:
     Tier 2 — body markdown, lazy (loaded on first access per spec).
     """
 
-    def __init__(self, specs_dir: Path, status_store=None) -> None:
+    def __init__(self, specs_dir: Path, status_store=None, *, project_code=None, archive_observed_at=None) -> None:
         self._specs_dir = specs_dir
+        self._search_project_code = project_code
+        self._search_archive_observed_at = board_search.archive_observation(archive_observed_at)
         self._status_store = status_store
         self._activity_inputs = {}
         self._last_heartbeat_text = {}
         self._dir_mtime: float = 0.0
         self._entries: dict[str, CacheEntry] = {}  # keyed by spec id
+        # Generic Tier 1 identity lookup; aliases the same entries/bodies rather
+        # than building a separate search index or scanning all ids per path.
+        self._entries_by_path: dict[Path, CacheEntry] = {}
         self._dependency_resolver = DependencyRegistryResolver(specs_dir)
         self._dependency_resolution = DependencyResolution()
         # SPEC-303 R5: handlers run in Starlette's threadpool, so entry
@@ -732,48 +747,58 @@ class SpecCache:
             return entry.path if entry else None
 
     def search(self, q: str) -> list[dict]:
-        """In-memory case-insensitive search over frontmatter fields + body."""
+        """Compatibility list response; omitted facets mean All."""
+        return self.search_metadata(q)["results"]
+
+    def search_metadata(self, q: str, filters=None, *, offset=0, limit=None) -> dict:
         with self._lock:
-            return self._search_locked(q)
+            return self._search_locked(q, filters, offset=offset, limit=limit)
 
-    def _search_locked(self, q: str) -> list[dict]:
-        self.get_all_frontmatter()  # ensure Tier 1 is fresh
-
-        # Warm all bodies for changed/new files
+    def _search_locked(self, q: str, filters=None, *, offset=0, limit=None) -> dict:
+        # Search needs fresh source fields and effective status, not the board's
+        # unrelated readiness/explanation projections. Keep that work out of
+        # every search while applying the same read-only status authority rule.
+        dir_m = os.stat(self._specs_dir).st_mtime
+        if dir_m != self._dir_mtime:
+            self._reconcile(dir_m)
         with os.scandir(self._specs_dir) as entries:
             for de in entries:
                 if not de.name.endswith(".md"):
                     continue
-                path = Path(de.path)
+                path = _search_path(de.path)
                 mtime = de.stat().st_mtime
                 entry = self._entry_by_path(path)
-                if entry is not None and entry.body_md is None:
+                if entry is None:
+                    self._load_entry(path, mtime, retain_body=True)
+                elif entry.mtime != mtime:
+                    self._reload_entry(entry, mtime, retain_body=True)
+                elif entry.body_md is None:
                     entry.body_md = self._read_body(path)
-                elif entry is not None and entry.mtime != mtime:
-                    self._reload_entry(entry, mtime)
-                    if entry.body_md is None:
-                        entry.body_md = self._read_body(path)
 
-        ql = q.lower()
-        results = []
+        db_path = getattr(self._status_store, "db_path", None)
+        states = (
+            status_store_module.read_durable_states_readonly(db_path, self._entries)
+            if db_path is not None else self._durable_states(list(self._entries))
+        ) or {}
+
+        project = self._search_project_code
+        if project is None:
+            project = _search_project_code(self._specs_dir)
+        now = self._search_archive_observed_at if self._search_archive_observed_at is not None else time.time()
+        effective_filters = {**(filters or {}), "project": project, "archive_observed_at": now}
+        records = []
         for entry in self._entries.values():
-            spec_id = entry.frontmatter.get("id", "")
-            title = entry.frontmatter.get("_title", "")
-            body = entry.body_md or ""
-            haystack = (spec_id + " " + title + " " + body).lower()
-            idx = haystack.find(ql)
-            if idx == -1:
-                continue
-            start = max(0, idx - 60)
-            end = min(len(haystack), idx + len(ql) + 60)
-            excerpt = "..." + haystack[start:end] + "..."
-            results.append({
-                "id": spec_id,
-                "title": title or spec_id,
-                "status": self._effective_status(entry.frontmatter),
-                "excerpt": excerpt,
-            })
-        return results
+            fm = entry.frontmatter
+            status = status_store_module.effective_status_view(
+                str(fm.get("status", "draft")), states.get(fm.get("id")),
+                entry.mtime, entry.path,
+            )["effective"]
+            records.append({"id": fm.get("id", ""), "title": fm.get("_title", ""),
+                            "body": entry.body_md or "", "status": status,
+                            "type": fm.get("type", "feature"), "tags": fm.get("tags") or [],
+                            "version": fm.get("version"),
+                            "archived": status == "done" and bool(entry.mtime) and now - entry.mtime > 14 * 86400})
+        return board_search.search_records(records, q, effective_filters, offset=offset, limit=limit)
 
     def update_status(
         self, spec_id: str, status: str, *, reason: str | None = None,
@@ -1001,6 +1026,7 @@ class SpecCache:
         """Wipe cache and re-warm all frontmatter from disk."""
         with self._lock:
             self._entries.clear()
+            self._entries_by_path.clear()
             self._dir_mtime = 0.0
             self._invalidate_projection()
             self._dependency_resolver.invalidate()
@@ -1022,31 +1048,33 @@ class SpecCache:
         # Remove entries whose files were deleted
         to_remove = [sid for sid, e in self._entries.items() if e.path not in on_disk]
         for sid in to_remove:
+            self._entries_by_path.pop(self._entries[sid].path, None)
             del self._entries[sid]
 
         # New files will be picked up by the scandir loop in get_all_frontmatter
 
     def _entry_by_path(self, path: Path) -> Optional[CacheEntry]:
-        for e in self._entries.values():
-            if e.path == path:
-                return e
-        return None
+        return self._entries_by_path.get(path)
 
-    def _load_entry(self, path: Path, mtime: float) -> None:
+    def _load_entry(self, path: Path, mtime: float, *, retain_body: bool = False) -> None:
         """Parse a spec file and store it in cache."""
         fm, body = _parse_spec_file(path)
         spec_id = fm.get("id")
         if not spec_id:
             return  # Skip files without an id field
         entry = CacheEntry(
-            path=path, mtime=mtime, frontmatter=fm, body_md=None,
+            path=path, mtime=mtime, frontmatter=fm, body_md=body if retain_body else None,
             rationale=spec_artifacts.parse_rationale_section(body),
         )
-        # We don't store body in Tier 1 — only load it on demand
+        # Search can reuse the body it just parsed; ordinary Tier 1 warm stays lazy.
+        previous = self._entries.get(spec_id)
+        if previous is not None:
+            self._entries_by_path.pop(previous.path, None)
         self._entries[spec_id] = entry
+        self._entries_by_path[path] = entry
         self._invalidate_projection()
 
-    def _reload_entry(self, entry: CacheEntry, mtime: float) -> None:
+    def _reload_entry(self, entry: CacheEntry, mtime: float, *, retain_body: bool = False) -> None:
         """Re-parse a changed file in-place."""
         fm, body = _parse_spec_file(entry.path)
         new_id = fm.get("id")
@@ -1054,13 +1082,16 @@ class SpecCache:
         entry.mtime = mtime
         entry.frontmatter = fm
         entry.rationale = spec_artifacts.parse_rationale_section(body)
-        entry.body_md = None  # Invalidate Tier 2 on file change
+        entry.body_md = body if retain_body else None
         self._invalidate_projection()
         if new_id and new_id != old_id:
             # ID changed — re-key
             if old_id in self._entries:
                 del self._entries[old_id]
             if new_id:
+                previous = self._entries.get(new_id)
+                if previous is not None and previous is not entry:
+                    self._entries_by_path.pop(previous.path, None)
                 self._entries[new_id] = entry
 
     def _read_body(self, path: Path) -> str:
@@ -1767,111 +1798,78 @@ def _snippet_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _prompt_library() -> prompt_snippets.PromptLibrary:
+    return prompt_snippets.PromptLibrary(
+        _current_project_snippet_paths(), board_url=_board_url(),
+        known_actions=_known_nightshift_actions(),
+    )
+
+
+def _library_response(operation, *, created=False):
+    try:
+        result = operation()
+        return JSONResponse(status_code=201 if created else 200, content=result)
+    except prompt_snippets.LibraryError as exc:
+        content = {"error": exc.code, **exc.details}
+        if exc.code in {"conflict", "precondition_required", "store_unavailable", "write_failed", "malformed_store"}:
+            content["message"] = exc.message
+        return JSONResponse(status_code=exc.status, content=content)
+
+
 @app.get("/api/prompts")
 def list_prompts() -> JSONResponse:
-    """R1/R8: merged snippet list across all three scopes for the current
-    project. Repo scope is simply omitted (no error) when unresolvable."""
-    paths = _current_project_snippet_paths()
-    merged: list[dict] = []
-    for scope in SNIPPET_SCOPES:
-        merged.extend(load_snippets(scope, paths[scope]))
-    return JSONResponse(merged)
+    # Retain the legacy list response shape; all transports share one authority.
+    return _library_response(lambda: _prompt_library().snapshot()["items"])
 
 
 @app.get("/api/prompts/{scope}/{id}")
 def get_prompt(scope: str, id: str) -> JSONResponse:
-    """R2: single snippet lookup, or 404/400 per the spec's flat error shape."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    paths = _current_project_snippet_paths()
-    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-    return JSONResponse(snippet)
+    return _library_response(lambda: _prompt_library()._find(scope, id))
 
 
 @app.post("/api/prompts/{scope}")
-def create_prompt(scope: str, payload: dict) -> JSONResponse:
-    """R3/R4/R8: create a repo/project snippet; prebuilt is never writable,
-    and a fresh id may not collide with the *other two* scopes."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-
-    title = payload.get("title", "")
-    new_id = payload.get("id") or _slugify_prompt_title(title)
-
-    for other in SNIPPET_SCOPES:
-        if other == scope:
-            continue
-        if find_snippet(new_id, load_snippets(other, paths[other])) is not None:
-            return _prompt_error(409, error="id_collision", existing_scope=other)
-
-    now = _snippet_utc_now()
-    entry = {
-        "id": new_id,
-        "title": title,
-        "scope": scope,
-        "body": payload.get("body", ""),
-        "tags": payload.get("tags", []),
-        "variables": payload.get("variables", []),
-        "harness_overrides": payload.get("harness_overrides", {}),
-        "created_at": now,
-        "updated_at": now,
-    }
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    snippets.append(entry)
-    save_snippets(target_path, snippets)
-    return JSONResponse(status_code=201, content=entry)
+def create_prompt(scope: str, payload: dict, request: Request) -> JSONResponse:
+    return _library_response(lambda: _prompt_library().mutate(
+        scope, "create", payload, request.headers.get("if-match") or payload.get("revision")
+    )["item"], created=True)
 
 
 @app.put("/api/prompts/{scope}/{id}")
-def update_prompt(scope: str, id: str, payload: dict) -> JSONResponse:
-    """R5: update title/body/tags/variables/harness_overrides; id/scope are
-    immutable; bumps updated_at. prebuilt/missing behave like R3/R2."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    snippet = find_snippet(id, snippets)
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-    for field in ("title", "body", "tags", "variables", "harness_overrides"):
-        if field in payload:
-            snippet[field] = payload[field]
-    snippet["updated_at"] = _snippet_utc_now()
-    save_snippets(target_path, snippets)
-    return JSONResponse(snippet)
+def update_prompt(scope: str, id: str, payload: dict, request: Request) -> JSONResponse:
+    return _library_response(lambda: _prompt_library().mutate(
+        scope, "update", {**payload, "id": id}, request.headers.get("if-match") or payload.get("revision")
+    )["item"])
 
 
 @app.delete("/api/prompts/{scope}/{id}")
-def delete_prompt(scope: str, id: str) -> JSONResponse:
-    """R6: delete a repo/project snippet; last-snippet delete leaves an empty
-    JSON list on disk (via save_snippets), not a deleted file."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    if find_snippet(id, snippets) is None:
-        return _prompt_error(404, error="not_found")
-    remaining = [s for s in snippets if s.get("id") != id]
-    save_snippets(target_path, remaining)
-    return JSONResponse({"ok": True})
+def delete_prompt(scope: str, id: str, request: Request) -> JSONResponse:
+    def remove():
+        _prompt_library().mutate(scope, "delete", {"id": id}, request.headers.get("if-match"))
+        return {"ok": True}
+    return _library_response(remove)
+
+
+@app.middleware("http")
+async def _guard_prompt_library(request: Request, call_next):
+    if request.url.path.startswith(("/api/prompt-library", "/api/prompts")):
+        host = request.url.hostname
+        try:
+            local_host = host == "localhost" or ipaddress.ip_address(host or "").is_loopback
+        except ValueError:
+            local_host = host == "testserver"
+        peer = request.client.host if request.client else ""
+        try:
+            local_peer = ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            local_peer = peer == "testclient"
+        origin = request.headers.get("origin")
+        same_origin = not origin or origin.rstrip("/") == str(request.base_url).rstrip("/")
+        if not local_host or not local_peer or not same_origin or request.headers.get("sec-fetch-site") == "cross-site":
+            return _prompt_error(403, error="local_api_only")
+    return await call_next(request)
+
+
+prompt_snippets.register_library_routes(app, lambda request: _prompt_library())
 
 
 # --- SPEC-371-003: prompt snippet render endpoint -----------------------------
@@ -1928,43 +1926,8 @@ def _stale_command_warnings(text: str, known_actions: set) -> list:
 
 @app.post("/api/prompts/{scope}/{id}/render")
 def render_prompt(scope: str, id: str, payload: "dict | None" = None) -> JSONResponse:
-    """R1-R6: render a stored snippet into copy-ready text.
-
-    Lookup mirrors get_prompt's (SPEC-371-002) exact pattern, including its
-    404/400 error shapes (R6)."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    paths = _current_project_snippet_paths()
-    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-
-    body = payload or {}
-    harness = body.get("harness") or "other"
-    variables = dict(body.get("variables") or {})
-    variables["board_url"] = _board_url()  # R4: never client-overridable
-
-    overrides = snippet.get("harness_overrides") or {}
-    text = overrides.get(harness)  # R2: harness_overrides[harness] ?? body
-    if text is None:
-        text = snippet.get("body", "")
-
-    warnings: list = []
-
-    def _substitute(match: "re.Match") -> str:
-        name = match.group(1)
-        if name in variables:
-            return str(variables[name])
-        if name not in warnings_seen:
-            warnings_seen.add(name)
-            warnings.append(f"missing_variable:{name}")
-        return match.group(0)
-
-    warnings_seen: set = set()
-    text = _PROMPT_VARIABLE_RE.sub(_substitute, text)
-
-    warnings.extend(_stale_command_warnings(text, _known_nightshift_actions()))
-    return JSONResponse({"text": text, "warnings": warnings})
+    """Explicit legacy rendering keeps overrides, variables and warning shape."""
+    return _library_response(lambda: _prompt_library().render(scope, id, payload))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1974,6 +1937,8 @@ def index() -> HTMLResponse:
     html = html.replace("__PROJECT__", project_name)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project_name)
+    html = html.replace('"__ARCHIVE_OBSERVED_AT_JSON__"', json.dumps(getattr(cache, '_search_archive_observed_at', None)))
+    html = html.replace("</body>", prompt_snippets_ui.html() + "<script>" + prompt_snippets_ui.javascript() + "</script></body>")
     return HTMLResponse(html)
 
 
@@ -2135,10 +2100,9 @@ def get_specs() -> list[dict]:
     return items
 
 
-@app.get("/api/spec-metadata")
-def get_spec_metadata_policy() -> dict:
-    """SPEC-419: the project's spec_metadata policy (read-only; the board filter's choices and diagnostics)."""
-    policy = spec_metadata_policy_for_specs_dir(Path(cache._specs_dir))
+def _spec_metadata_payload(specs_path: Path) -> dict:
+    """One live/export representation of the project's read-only facet policy."""
+    policy = spec_metadata_policy_for_specs_dir(specs_path)
     return {
         "fields": {
             name: {"required": item.required,
@@ -2147,6 +2111,11 @@ def get_spec_metadata_policy() -> dict:
         },
         "errors": list(policy.errors),
     }
+
+@app.get("/api/spec-metadata")
+def get_spec_metadata_policy() -> dict:
+    """SPEC-419: the project's spec_metadata policy (read-only; the board filter's choices and diagnostics)."""
+    return _spec_metadata_payload(Path(cache._specs_dir))
 
 
 @app.get("/api/statuses")
@@ -2350,11 +2319,34 @@ def get_status_history(spec_id: str) -> dict:
     return {"spec_id": spec_id, "history": store.get_state_history(spec_id)}
 
 
+def _search_project_code(specs_path: Path) -> str:
+    """Use the selected registered root/code; never infer ownership from matches."""
+    from board_ctl import Ctx, project_name_for_root, project_root_for_specs_dir
+    import argparse
+    ctx = Ctx(argparse.Namespace(project=None, specs_dir=str(specs_path)))
+    entry = ctx._own_registry_entry()
+    if entry and spec_id_grammar.code_status(entry.get("code")) == "ok":
+        return str(entry["code"])
+    root = project_root_for_specs_dir(specs_path)
+    name = "NIGHTSHIFT-CANONICAL" if specs_path.parent.name == "canonical" else project_name_for_root(root)
+    return spec_id_grammar.PROJECT_CODES.get(name, "")
+
+
 @app.get("/api/search")
-def search(q: str = "") -> list[dict]:
-    if not q:
-        return []
-    return cache.search(q)
+def search(q: str = "", filters: str = "", metadata: bool = False,
+           offset: int = 0, limit: Optional[int] = None):
+    if not q.strip() and not metadata:
+        return []  # Preserve the existing empty-query compatibility path.
+    try:
+        facets = json.loads(filters) if filters else {}
+        if not isinstance(facets, dict):
+            raise ValueError("filters must be an object")
+        if 'archive_observed_at' in facets:
+            raise ValueError('archive observation is fixture-owned, not a live query override')
+        result = cache.search_metadata(q, facets, offset=offset, limit=limit)
+        return result if metadata else result["results"]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/graph")
@@ -4721,6 +4713,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <button class="btn" id="btn-deps" onclick="toggleDeps()">⌥ DEPS</button>
     <button class="btn" id="btn-graph" onclick="showGraph()">▣ GRAPH</button>
     <button class="btn" id="btn-all-reports" onclick="openReportsViewFromHeader()" title="Browse all human-review reports across the project">📋 REPORTS</button>
+    <button class="btn" id="btn-prompt-library" onclick="window.PromptLibraryUI.open({endpoint:'/api/prompt-library',contextKey:location.origin,contextName:document.title})" title="Shared prompt library">PROMPT LIBRARY</button>
     <button class="btn" id="btn-snippets" onclick="openSnippetsViewFromHeader()" title="Browse prompt snippets (prebuilt, repo, project scopes)">⧉ SNIPPETS</button>
     <button class="btn" id="btn-archived" onclick="toggleArchived()">🗄 ARCHIVED</button>
     <button class="btn" id="btn-fit-cols" onclick="fitColumns()" title="Distribute visible expanded columns to fill board width — resets manual resize gaps">⇔ FIT</button>
@@ -4971,6 +4964,7 @@ let isDragging = false;             // true while a SortableJS drag is in progre
 let renderBoardQueued = false;      // renderBoard() was called during a drag — flush on onCardDrop
 const ARCHIVED_AGE_DAYS = 14;
 const ARCHIVED_AGE_SECONDS = ARCHIVED_AGE_DAYS * 24 * 60 * 60;
+const ARCHIVE_OBSERVED_AT = "__ARCHIVE_OBSERVED_AT_JSON__";
 
 // A spec is "archived" when it's effectively `done` AND its file mtime is
 // older than ARCHIVED_AGE_DAYS. Pure display behavior — not a real status.
@@ -4979,7 +4973,9 @@ function isArchived(spec) {
   if (effectiveStatus(spec) !== 'done') return false;
   const m = spec._mtime;
   if (!m) return false;
-  return (Date.now() / 1000) - m > ARCHIVED_AGE_SECONDS;
+  const archiveNow = window.__STATIC__ && window.STATIC ? window.STATIC.searchObservedAt :
+    typeof ARCHIVE_OBSERVED_AT === 'number' ? ARCHIVE_OBSERVED_AT : Date.now() / 1000;
+  return archiveNow - m > ARCHIVED_AGE_SECONDS;
 }
 
 // Reports panel state
@@ -5856,6 +5852,8 @@ async function loadLoopObservability() {
 }
 
 function renderBoard() {
+  const queryControl=document.getElementById('search');
+  if(queryControl && queryControl.value.trim() && JSON.stringify(currentSearchFilters())!==searchScopeSignature) scheduleSearch();
   if (!Array.isArray(specs)) return;
   // Block re-renders mid-drag: renderBoard() clears boardView.innerHTML, which
   // removes the dragged element. When SortableJS then drops it, the element is
@@ -8255,66 +8253,80 @@ async function showBoard() {
   }
 }
 
-// Search
+// Search: generation binds query, facets and paging, including clear/error paths.
 const searchInput = document.getElementById('search');
-searchInput.addEventListener('input', (e) => {
+let searchGeneration = 0;
+let searchAbort = null;
+let searchScopeSignature = '';
+function currentSearchFilters() {
+  return {types: activeTypeFilters.size ? [...activeTypeFilters] : 'all',
+    tags: tagFilter.size ? [...tagFilter] : 'all', version: versionFilter,
+    include_archived: showArchived, statuses: COLUMNS.filter(c => !hiddenColumns.has(c.id)).map(c => c.id)};
+}
+function scheduleSearch(offset=0) {
+  const generation = ++searchGeneration;
   clearTimeout(searchTimer);
-  const q = e.target.value.trim();
-  const clearBtn = document.getElementById('btn-clear-search');
-  clearBtn.classList.toggle('visible', q.length > 0);
+  if (searchAbort) searchAbort.abort();
+  const q = searchInput.value.trim(), filters = currentSearchFilters();
+  searchScopeSignature = JSON.stringify(filters);
+  document.getElementById('btn-clear-search').classList.toggle('visible', !!q);
   if (!q) {
     document.getElementById('search-results').classList.remove('visible');
     if (activeTab === 'board') document.getElementById('board-view').style.display = 'flex';
     return;
   }
-  searchTimer = setTimeout(() => doSearch(q), 250);
-});
-
-function clearSearch() {
-  searchInput.value = '';
-  document.getElementById('btn-clear-search').classList.remove('visible');
-  document.getElementById('search-results').classList.remove('visible');
-  if (activeTab === 'board') document.getElementById('board-view').style.display = 'flex';
-  // Panel intentionally left open
+  searchTimer = setTimeout(() => doSearch(q, filters, generation, offset), 250);
 }
-
-async function doSearch(q) {
-  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-  const results = await r.json();
-
-  const el = document.getElementById('search-results');
-  document.getElementById('board-view').style.display = 'none';
-
-  if (!results.length) {
-    el.innerHTML = '<div class="search-empty">no results</div>';
-    el.classList.add('visible');
-    return;
+searchInput.addEventListener('input', () => scheduleSearch());
+function clearSearch() { searchInput.value = ''; scheduleSearch(); }
+function clearSearchFilters() {
+  hiddenColumns.clear(); activeTypeFilters.clear(); tagFilter.clear(); versionFilter='all'; showArchived=true;
+  document.getElementById('btn-type-filter').classList.remove('active');
+  saveSettings(); applyArchivedBtnState(); buildTypeFilterDropdown(); buildColVisDropdown(); syncTagFilterControls(); renderBoard();
+  scheduleSearch();
+}
+async function doSearch(q, filters=currentSearchFilters(), generation=++searchGeneration, offset=0) {
+  const abort = new AbortController(); searchAbort=abort;
+  const params = new URLSearchParams({q, metadata:'true', filters:JSON.stringify(filters), offset:String(offset), limit:'50'});
+  try {
+    const r = await fetch('/api/search?' + params, {signal:abort.signal});
+    if (!r.ok) throw new Error('Search request failed ('+r.status+')');
+    const data = await r.json();
+    if (!data || !Array.isArray(data.results) || !Number.isInteger(data.total)) throw new Error('Invalid search response');
+    if (generation!==searchGeneration || searchInput.value.trim()!==q || JSON.stringify(currentSearchFilters())!==JSON.stringify(filters)) return;
+    const el=document.getElementById('search-results');
+    el.replaceChildren(); document.getElementById('board-view').style.display='none';
+    const info=document.createElement('div'); info.className='search-scope';
+    info.textContent=data.total+' results · project '+(data.scope.project||'unregistered (legacy IDs only)')+' · archive observation (UTC epoch seconds) '+data.scope.archive_observed_at+' · filters '+JSON.stringify(filters);
+    el.appendChild(info);
+    const clear=document.createElement('button'); clear.className='btn'; clear.textContent='Clear filters'; clear.onclick=clearSearchFilters; el.appendChild(clear);
+    if (!data.results.length) {
+      const empty=document.createElement('div'); empty.className='search-empty';
+      empty.textContent=data.excluded_by_filters ? data.excluded_by_filters+' matching specs excluded by active filters' : 'No identity or text matches in this project';
+      el.appendChild(empty);
+    }
+    const list=document.createElement('div'); list.className='search-list';
+    for(const res of data.results){
+      const card=document.createElement('div'); card.className='card'; card.dataset.id=res.id; card.dataset.status=res.status;
+      const header=document.createElement('div'); header.className='card-header';
+      const id=document.createElement('span'); id.className='card-id'; id.textContent=res.id; header.appendChild(id); card.appendChild(header);
+      const title=document.createElement('div'); title.className='card-title'; title.textContent=res.title||res.id; card.appendChild(title);
+      const excerpt=document.createElement('div'); excerpt.textContent=res.excerpt||''; card.appendChild(excerpt);
+      card.onclick=()=>openPanel(res.id); card.tabIndex=0; card.onkeydown=e=>{if(e.key==='Enter')openPanel(res.id);}; list.appendChild(card);
+    }
+    el.appendChild(list);
+    for(const [label,next] of [['Previous',offset-50],['Next',offset+50]]){
+      if((label==='Previous'&&offset===0)||(label==='Next'&&!data.has_more))continue;
+      const button=document.createElement('button'); button.className='btn'; button.textContent=label; button.onclick=()=>scheduleSearch(Math.max(0,next)); el.appendChild(button);
+    }
+    el.classList.add('visible'); el.dataset.query=q; el.dataset.generation=String(generation);
+    el.dispatchEvent(new CustomEvent('nightshift:search-published',{detail:{generation,query:q,total:data.total}}));
+  } catch(error) {
+    if(generation!==searchGeneration || error.name==='AbortError')return;
+    const el=document.getElementById('search-results'); el.replaceChildren();
+    const message=document.createElement('div'); message.className='search-error'; message.setAttribute('role','alert'); message.textContent='Search error: '+error.message;
+    el.appendChild(message); el.classList.add('visible'); document.getElementById('board-view').style.display='none';
   }
-
-  const listEl = document.createElement('div');
-  listEl.className = 'search-list';
-
-  for (const res of results) {
-    const spec = specs.find(s => s.id === res.id) || { status: res.status };
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.dataset.id = res.id;
-    const status = effectiveStatus(spec);
-    card.dataset.status = status;
-    card.innerHTML = `
-      <div class="card-header">
-        <span class="card-id">${res.id}</span>
-      </div>
-      <div class="card-title">${res.title || res.id}</div>
-      <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">${res.excerpt || ''}</div>
-    `;
-    card.addEventListener('click', () => openPanel(res.id));
-    listEl.appendChild(card);
-  }
-
-  el.innerHTML = '';
-  el.appendChild(listEl);
-  el.classList.add('visible');
 }
 
 // True when the currently focused element is a text-entry control (input or
@@ -9279,7 +9291,7 @@ function openEditPromptEditor(scope, id) {
   if (!snippet) return;
   expandedSnippetId = null;
   snippetEditor = {
-    anchor: id, mode: 'edit', scope, id,
+    anchor: id, mode: 'edit', scope, id, revision: snippet.revision,
     title: snippet.title || '', body: snippet.body || '',
     tagsText: (snippet.tags || []).join(', '), error: null,
   };
@@ -9294,7 +9306,7 @@ function openDuplicatePromptEditor(scope, id) {
   if (!snippet) return;
   expandedSnippetId = null;
   snippetEditor = {
-    anchor: id, mode: 'duplicate', scope: 'project', id: null,
+    anchor: id, mode: 'duplicate', scope: 'project', id: null, variables: snippet.variables, harness_overrides: snippet.harness_overrides, kind: snippet.kind,
     title: (snippet.title || '') + ' (copy)', body: snippet.body || '',
     tagsText: (snippet.tags || []).join(', '), error: null,
   };
@@ -9329,7 +9341,21 @@ async function submitSnippetEditor() {
   snippetEditor.error = null;
   const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
   const payload = { title, body, tags };
+  if (snippetEditor.mode === 'duplicate') {
+    payload.variables = snippetEditor.variables || [];
+    payload.harness_overrides = snippetEditor.harness_overrides || {};
+    payload.kind = snippetEditor.kind || 'plain';
+  }
+  const original = promptsCache.find(s => s.scope === scope && s.id === snippetEditor.id);
+  payload.revision = snippetEditor.revision || (original && original.revision);
+
   try {
+    if (!payload.revision) {
+      const snapshotResponse = await fetch('/api/prompt-library');
+      if (!snapshotResponse.ok) throw new Error('library unavailable');
+      const snapshot = await snapshotResponse.json();
+      payload.revision = snapshot.stores[scope] && snapshot.stores[scope].revision;
+    }
     let r;
     if (snippetEditor.mode === 'edit') {
       r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(snippetEditor.id)}`, {
@@ -9346,7 +9372,7 @@ async function submitSnippetEditor() {
     }
     if (r.status === 409) {
       const err = await r.json().catch(() => ({}));
-      snippetEditor.error = `id already exists in ${err.existing_scope || 'another'} scope — rename and resubmit`;
+      snippetEditor.error = err.error === 'conflict' ? 'Conflict: store changed. Keep this input and reopen/reapply in Prompt library.' : `id already exists in ${err.existing_scope || 'another'} scope — rename and resubmit`;
       renderSnippetsList();
       return;
     }
@@ -9376,7 +9402,7 @@ async function submitSnippetEditor() {
 async function deleteSnippetById(scope, id) {
   if (!confirm('Delete this prompt snippet? This cannot be undone.')) return;
   try {
-    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`, { method: 'DELETE', headers: {'If-Match': (promptsCache.find(s => s.scope === scope && s.id === id) || {}).revision || ''} });
     if (!r.ok) {
       showToast('⚠ delete failed');
       return;
@@ -10161,6 +10187,7 @@ def export_board_html(
     lib_fetcher=None,
     reports_dir: Optional[Path] = None,
     worktree_status: Optional[dict] = None,
+    archive_observed_at: Optional[float] = None,
 ) -> str:
     """Build and return a self-contained static HTML snapshot of the board.
 
@@ -10211,7 +10238,7 @@ def export_board_html(
     fetcher = lib_fetcher or _default_lib_fetcher
 
     # ── 1. Gather spec data ─────────────────────────────────────────────
-    _cache = SpecCache(specs_dir)
+    _cache = SpecCache(specs_dir, archive_observed_at=archive_observed_at)
     _cache.warm()
     all_fm = _cache.get_all_frontmatter()
 
@@ -10344,8 +10371,16 @@ def export_board_html(
         vocabulary_blob = {"registry_version": 0, "concepts": []}
 
     # ── 5. Build STATIC blob ────────────────────────────────────────────
+    search_observed_at = board_search.archive_observation(archive_observed_at)
+    if search_observed_at is None:
+        search_observed_at = time.time()
+    search_project = _cache._search_project_code if _cache._search_project_code is not None else _search_project_code(specs_dir)
+    search_metadata_policy = _spec_metadata_payload(specs_dir)
     static_blob = {
         "specs": all_fm,
+        "searchProject": search_project,
+        "searchObservedAt": search_observed_at,
+        "specMetadata": search_metadata_policy,
         "bodies": bodies,
         "artifacts": artifacts_meta,
         "explanations": explanations,
@@ -10385,6 +10420,9 @@ def export_board_html(
     _struct_json = json.dumps(
         {
             "specs": all_fm,
+            "searchProject": search_project,
+            "searchObservedAt": search_observed_at,
+            "specMetadata": search_metadata_policy,
             "artifacts": artifacts_meta,
             "explanations": explanations,
             "graph": graph_data,
@@ -10412,6 +10450,7 @@ def export_board_html(
     html = html.replace("__PROJECT__", project)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project)
+    html = html.replace('"__ARCHIVE_OBSERVED_AT_JSON__"', json.dumps(search_observed_at))
 
     # Remove Google Fonts link (AC6 — no external resources)
     html = html.replace(_REMOVE_GOOGLE_FONTS, "")
@@ -10469,12 +10508,16 @@ def _build_static_shim(static_json: str, marked_js: str, vis_js: str) -> str:
 {marked_js}
 </script>
 <script>
+{board_search.javascript()}
+</script>
+<script>
 /* ── vis-network ── */
 {vis_js}
 </script>
 <style>
 /* ── SPEC-083: hide static-irrelevant live-only UI ── */
 html.static-export #btn-refresh {{ display: none !important; }}
+html.static-export #btn-prompt-library {{ display: none !important; }}
 html.static-export .wt-badge {{ display: none !important; }}
 html.static-export .chip[data-external="1"] {{ display: none !important; }}
 </style>
@@ -10567,17 +10610,18 @@ window.Sortable.prototype = {{ destroy: function() {{}} }};
       return _json({{ filename: fname, content: content }});
     }}
 
-    /* /api/search?q=... — client-side substring filter */
-    var searchMatch = u.match(/^\\/api\\/search\\?q=(.*)$/);
-    if (searchMatch) {{
-      var q = decodeURIComponent(searchMatch[1]).toLowerCase();
-      if (!q) return _json([]);
-      var results = (S.specs || []).filter(function(s) {{
-        return (s.id + ' ' + (s._title || '') + ' ' + (s.status || '')).toLowerCase().includes(q);
-      }}).slice(0, 20).map(function(s) {{
-        return {{ id: s.id, title: s._title || s.id, status: s.status || 'draft', excerpt: '' }};
-      }});
-      return _json(results);
+    if (u === '/api/spec-metadata') return _json(S.specMetadata);
+
+    /* BUG225 same declared search contract, complete snapshot bodies, explicit facets. */
+    if (u.startsWith('/api/search?')) {{
+      const params=new URLSearchParams(u.slice(u.indexOf('?')+1));
+      try {{
+        const filters=JSON.parse(params.get('filters')||'{{}}'); filters.project=S.searchProject||''; filters.archive_observed_at=S.searchObservedAt;
+        const records=(S.specs||[]).map(s=>({{id:s.id,title:s._title||s.id,body:(S.bodies||{{}})[s.id]||'',status:s.status||'draft',type:s.type||'feature',tags:s.tags||[],version:s.version,
+          archived:(s.status==='done'&&!!s._mtime&&(S.searchObservedAt-s._mtime)>14*86400)}}));
+        const result=window.NightshiftSearch.search(records,params.get('q')||'',filters,Number(params.get('offset')||0),params.has('limit')?Number(params.get('limit')):null);
+        return _json(params.get('metadata')==='true'?result:result.results);
+      }} catch(error) {{ return Promise.resolve({{ok:false,status:400,json:()=>Promise.resolve({{detail:String(error)}})}}); }}
     }}
 
     /* /api/external-spec/<port>/<id> — always unreachable in static mode */

@@ -77,6 +77,9 @@ REPORTS_NAMED_DOC_ALLOWLIST_MINIMUM = frozenset(
 REPORTS_NAMED_DOC_ALLOWLIST = REPORTS_NAMED_DOC_ALLOWLIST_MINIMUM | {
     "GAP-ANALYTICS-STATUS.json",
     "REGRESSION-STATUS.json",
+    # Shared dated audit owned by216–224 and the explicitly commissioned227/228/225/226 queue.
+    # Exact project-level named-doc registration; neighboring audit names remain orphaned.
+    "formal-audit-20261015",
 }
 
 # R4: the closed list of pre-existing entries that predate this sweep and

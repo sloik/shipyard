@@ -1,14 +1,13 @@
-Load when: authoring identity/placement, spec discovery, status moves or stale board cards.
-Covers: registry/retention, board launch/port, status authority, HTTP routes/recipes and CLI selection.
-Not here: spec interview (`/nightshift spec`), kickoff or validator rules (`/nightshift validate`).
-Requires: an installed `.nightshift/` with `board.py`, `status_store.py`, `lifecycle.py`; a running board for the curl recipes.
+Load when: finding specs, authoring placement or moving status.
+Covers: board discovery, status authority, routes and CLI.
+Not here: spec interview, kickoff or validation rules; use their command guides.
+Requires: installed board.py, status_store.py and lifecycle.py; a board for HTTP recipes.
 
 # Board and API guide
 
-Source of truth is the code: `board.py` (routes, write gate `SpecCache._update_status_locked`),
-`status_store.py` (`StatusStore.transition_commit_backed`), `lifecycle.py`, and, in the
-kit repository, `nightshift-master.py` (Control). Paths below are install-relative
-(`.nightshift/...`); in the kit repository the same files sit under `canonical/`.
+Authority: board.py routes/SpecCache._update_status_locked, status_store.py's
+StatusStore.transition_commit_backed, lifecycle.py and Control (nightshift-master.py).
+Paths are install-relative (.nightshift/); source files live in canonical/.
 
 ## 1. Launch, port, runtime
 
@@ -143,7 +142,7 @@ Rows marked **UI-only** exist for the board page; agents should not call them.
 | POST | `/api/spec/{spec_id}/transfer-refusal` | record a refusal text (`{reason}`); UI-only | W |
 | DELETE | `/api/spec/{spec_id}/transfer-refusal` | dismiss a refusal; UI-only | W |
 | POST | `/api/spec/{spec_id}/deployment-authorization` | owner approve/reject for a held deployment candidate (`{action, actor, sha, environment}`); writes a decision artifact | W |
-| GET | `/api/search` | `?q=` case-insensitive substring over id, title and body; `[{id,title,status,excerpt}]` | R |
+| GET | `/api/search` | `?q=` ranked exact/abbreviated/numeric ID or literal title/body phrase; default `[{id,title,status,excerpt}]` | R |
 | GET | `/api/graph` | dependency graph `{nodes, edges, parent_edges}` | R |
 | POST | `/api/refresh` | drop the cache and re-read all specs; `{count}` | S |
 | GET | `/api/status-sync` | spec files vs durable store: `{checked, mismatches[]}` | R |
@@ -265,7 +264,7 @@ command, its arguments, whether it writes (section 6 only) and this guide's path
 | --- | --- | --- |
 | `list [--status S]... [--layer N] [--type T] [--parent ID] [--text Q]` | which specs match, by effective status | no |
 | `show <id> [--body]` | frontmatter, run-state explanation, artifact index | no |
-| `search <q>` | substring over id, title and body | no |
+| `search <q>` | ranked ID or title/body search; explicit facets/paging, optional offline snapshot | no |
 | `deps <id>` | what the spec waits on and what waits on it | no |
 | `history <id>`, `artifacts <id> [--path P]` | status checkpoints; artifact index or one artifact | yes |
 | `who` | `in_progress` specs joined with other-worktree status | yes |
@@ -352,8 +351,15 @@ click/Enter/Space: full activity.
 Replacement: see `../SPEC-GUIDE.md` (SPEC-NS-KIT-184).
 
 
-Graph **Load diagnostics**: invocation→first draw+next frame; fetch/decode,
-preparation/paint. Diagnostic budget: 2,000ms; warn above it; aggregate p95 needs
-five successes. Exclude hidden windows; errors/cancellations separate.
-128 successes/key reset on process restart; server time separate.
-Exports: local timing; server aggregates unavailable; no POST.
+Search/snapshot details and load diagnostic boundaries: [search and benchmarks](board-search-benchmarks.md).
+
+## Shared prompt library routes
+
+Read [prompt-library details](board-prompt-library.md) before using these routes.
+
+| Method | Board path | Contract |
+| --- | --- | --- |
+| GET | `/api/prompt-library` | Read snapshot |
+| POST | `/api/prompt-library/{scope}/mutate` | Revision-bound mutation |
+| POST | `/api/prompt-library/{scope}/{id}/copy` | Copy |
+| POST | `/api/prompt-library/{scope}/{id}/render` | Render |

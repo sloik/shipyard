@@ -1097,6 +1097,23 @@ git:
   # pinned for inspection with a .nightshift-keep file at the worktree root.
   worktrees: "auto"
 
+  # Type: mapping; Required: no. Default values are shown below.
+  # Copies untracked local configuration after worktree ownership verify and
+  # before launch. Never edits permissions, tracked files or existing content.
+  worktree_local_config:
+    # Type: list[string]; Required: no; Default: [".claude/settings.local.json"].
+    # Valid: exact repo-relative file paths only; no globs, absolute paths,
+    # parent traversal, directories, symlinks or outside-root resolutions.
+    copy: [".claude/settings.local.json"]
+    # Type: list[string]; Required: no; Default: []. Gitignore-style deny globs
+    # extend (cannot remove) .env, .env.*, *.pem, *.key, .netrc, id_rsa*,
+    # *credentials*. Content is also checked by the existing secret scanner.
+    deny: []
+    # Type: boolean; Required: no; Default: false; Valid: true | false.
+    # True stops preparation before launch for refused/failed copies. False
+    # leaves those as warnings. Missing files report absent and are non-errors.
+    required: false
+
   # Type:     string
   # Required: no
   # Default:  "no-ff"

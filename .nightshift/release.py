@@ -27,13 +27,14 @@ CANONICAL_SUITE = {
         "fastapi",
         "uvicorn[standard]",
         "httpx",
-        "playwright",
+        "playwright==1.62.0",
         "pytest-xdist",
+        "psutil==7.2.2",
     ],
     "probe": [
         "python",
         "-c",
-        "import fastapi,httpx,playwright,pytest,uvicorn,xdist,yaml",
+        "import fastapi,httpx,playwright,psutil,pytest,uvicorn,xdist,yaml",
     ],
     # SPEC-395: per-test parallelism, default capped at 4 workers. The worker
     # count can be lowered per run with PYTEST_XDIST_AUTO_NUM_WORKERS=<n>.

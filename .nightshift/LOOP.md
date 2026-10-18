@@ -2562,3 +2562,18 @@ gates remain strict.
   a same PID/start/owner row with an exiting argv keeps draining; only a complete inventory with
   the positive control and no row proves absence; PID reuse, changed start, foreign or unknown
   identity, an incomplete inventory or an expired drain is a cleanup gap, never a native failure.
+
+## Approval waits in the active loop (SPEC-NS-KIT-231)
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.

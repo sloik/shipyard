@@ -7,6 +7,20 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.3 (source cut: 2026-10-18)
+
+- Restore independent formal test collection, exact functional search reference fixtures, deterministic unit phase clocks and complete guide headers/route inventory. Enroll the three continuation guides in the exact public-kit inventory; preserve frozen benchmark code, evidence and release gates (BUG-NS-KIT-235). This cut carries the preceding undelivered 3.26.2 changes.
+
+## 3.26.2 (source cut: 2026-10-18)
+
+- Split oversized guides into managed continuations, preserve runtime pinned blocks and refresh the reviewed installed-inventory count for the whole-kit release (SPEC-NS-KIT-234).
+
+- Mirror an allowlisted, secret-checked local config file into verified worker worktrees and show declared owner-approval waits distinctly from stalls (SPEC-NS-KIT-231). Existing heartbeat-only liveness and terminal states remain; no new permission rule or live prompt integration is added.
+
+- Share the board/Control prompt library authority, revisioned cross-process transactions, flat folders, all-tag filtering and exact plain/Codex/Claude copy choices (SPEC-NS-KIT-226). Legacy list stores migrate only on mutation with exact backups; all writers must upgrade before schema2 writes. Root Control and managed kit delivery remain coordinated through the pending whole-kit handoff.
+
+- Add deterministic ID-aware ranked/filtered board search with shared API, offline CLI and export semantics; enroll the shared runtime module and canonical verification dependency (BUG-NS-KIT-225). Benchmark qualification and final acceptance remain separately evidenced; no fleet delivery is claimed.
+
 ## 3.26.1 (source cut: 2026-10-15)
 
 - Bind standalone pinned scope consumers to the intended kit resolver file, preserve the trusted parent's hardened resolver through its explicit caller-owned bootstrap, and keep missing-helper observations distinct from broken imports (BUG-NS-KIT-215).

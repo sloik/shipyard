@@ -928,6 +928,8 @@ WT=$(python3 .nightshift/worktree_paths.py plan --repo "$PROJECT_ROOT" --spec "$
 git -C "$PROJECT_ROOT" worktree add -b "nightshift/$SPEC_ID" "$WT"
 python3 "$PROJECT_ROOT/.nightshift/worktree_paths.py" verify \
   --repo "$PROJECT_ROOT" --worktree "$WT"
+python3 "$PROJECT_ROOT/.nightshift/worktree_local_config.py" copy \
+  --repo "$PROJECT_ROOT" --worktree "$WT"
 ```
 
 The resolver uses a deterministic local temporary namespace containing a hash of
@@ -1281,3 +1283,34 @@ history for the append-only proof and outcomes. Durable/public proof records use
 relative paths, controlled reasons and hashes, never private spec bodies/host locators.
 A successful integration still needs its normal pending whole-kit release; no
 installed patch, extra worker, LLM conflict resolver, or file-only rollout is added.
+
+## Worktree local config (SPEC-NS-KIT-231)
+
+After worktree ownership verify, `worktree_local_config.py copy --repo <project>
+--worktree <path>` copies only `git.worktree_local_config.copy` exact repo-relative
+files (default `.claude/settings.local.json`). Built-in secret path rules,
+project `deny` globs and the existing scanner prevent secret copies. Absolute,
+parent-traversing, outside-root, symlink and directory sources are refused.
+Tracked files and existing destinations are never overwritten. An identical
+existing destination is `unchanged`, a different one is `skipped/exists`; bytes,
+file mode and permission rules are otherwise unchanged. No new permission or
+`additionalDirectories` entry is added. Retain the JSON result list in the run
+report; the kit's preparation path also persists it beside the handle's events.
+
+`git.worktree_local_config.required: true` makes refused/failed copies fatal
+before launch; `absent` remains a successful non-error. Without required mode,
+copy failures warn and worktree creation continues. A harness-created isolated
+worktree needs the parent to invoke this same helper after ownership verify.
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.

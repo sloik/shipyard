@@ -24,6 +24,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 import yaml
 
+from worktree_local_config import copy_local_config, load_local_config, required_failed, LocalConfigError
+
 from record_metrics import render_terminal_trailers
 
 from status_store import (
@@ -177,6 +179,8 @@ class WorktreeHandle:
     # When present, the serialized queue must apply this object rather than the
     # mutable branch ref and must refuse any branch-tip drift.
     verified_revision: Optional[str] = None
+    local_config_results: List[Dict[str, str]] = field(default_factory=list)
+    local_config_report_path: Optional[str] = None
 
 
 @dataclass
@@ -434,8 +438,12 @@ class BoundedWorktreeDispatcher:
         handle.declared_touches = list(spec.touches)
         handle.events_dir = handle.worktree_path / ".nightshift" / "runs" / worker_run_id / spec.spec_id / "events"
         handle.checkpoint_dir = handle.worktree_path / ".nightshift" / "runs" / worker_run_id / spec.spec_id / "checkpoints"
-        prepare = self.prepare or prepare_worktrees
-        prepared = prepare([handle], self.repo_root)[0]
+        if self.prepare is None:
+            prepared = prepare_worktrees(
+                [handle], self.repo_root, local_config=load_local_config(self.project_root),
+            )[0]
+        else:
+            prepared = self.prepare([handle], self.repo_root)[0]
         if prepared.status == "failed":
             self.status_store.update_state(
                 spec.spec_id, "pending", run_id=worker_run_id, source="coordinator",
@@ -4381,6 +4389,8 @@ def fan_out(
 def prepare_worktrees(
     handles: List[WorktreeHandle],
     repo_root: Path,
+    *,
+    local_config: Optional[dict] = None,
 ) -> List[WorktreeHandle]:
     """
     Create actual git worktrees for each handle.
@@ -4427,11 +4437,19 @@ def prepare_worktrees(
                 continue
             assert_worktree_owner(repo_root, handle.worktree_path)
 
+            settings = load_local_config(repo_root) if local_config is None else local_config
+            handle.local_config_results = copy_local_config(repo_root, handle.worktree_path, config=settings)
+
             # Create events and checkpoint directories
             handle.events_dir.mkdir(parents=True, exist_ok=True)
             handle.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            report = handle.events_dir.parent / "worktree-local-config.json"
+            report.write_text(json.dumps(handle.local_config_results, indent=2) + "\n", encoding="utf-8")
+            handle.local_config_report_path = str(report)
+            if required_failed(handle.local_config_results, settings):
+                handle.status = "failed"
 
-        except (OSError, subprocess.SubprocessError, WorktreePathError):
+        except (OSError, subprocess.SubprocessError, WorktreePathError, LocalConfigError):
             handle.status = "failed"
 
     return handles

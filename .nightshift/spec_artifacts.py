@@ -1386,8 +1386,8 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
     ``expected_duration_min`` and an age computed from its declared timestamp to the existing
     ``liveness_classifier.classify_heartbeat``. File mtime, commits and branch movement are never
     inputs. Returns ``{"result", "text", "diagnostic"}``; ``text`` is built only from the
-    classifier result, the declared state (a closed set) and the age, so free text (phase, blockers,
-    evidence) can never reach an explanation or a static export. Anything unusable is ``unknown``
+    classifier result, the declared state (a closed set) and the age, with narrowly bounded
+    approval-wait command text. Other free text (phase, blockers, evidence) never reaches an export. Anything unusable is ``unknown``
     with a typed diagnostic.
     """
     spec_id = str(spec_id)
@@ -1420,7 +1420,7 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
             raise _HeartbeatProblem("heartbeat_unparsable")
     except _HeartbeatProblem as problem:
         return _heartbeat_unknown(spec_id, problem.code)
-    import liveness_classifier  # the existing heartbeat-only classifier, reused unchanged (SPEC-225)
+    import liveness_classifier  # shared heartbeat-only classifier (SPEC-225 / SPEC-231)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -1434,7 +1434,16 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
             entry["expected_duration_min"] = expected
     except (KeyError, ValueError):
         pass
+    if fields.get("waiting_on") == "owner_approval":
+        entry["waiting_on"] = "owner_approval"
     result = str(liveness_classifier.classify_heartbeat(entry))
+    if result == "waiting_on_approval":
+        command = liveness_classifier.sanitize_waiting_command(fields.get("waiting_command"))
+        wait_age = liveness_classifier.waiting_age_min(fields.get("waiting_since"), now=current)
+        duration = "wait age unknown" if wait_age is None else f"waiting {int(wait_age)} min"
+        return {"result": result, "diagnostic": None, "waiting_on": "owner_approval",
+                "waiting_command": command, "waiting_age_min": wait_age,
+                "text": f"{result} ({state}, {duration}; command: {command or 'not declared'})"}
     return {"result": result, "diagnostic": None,
             "text": f"{result} ({state}, {int(age)} min since its declared timestamp)"}
 

@@ -24,6 +24,8 @@ WT=$(python3 <main-repo-abs>/.nightshift/worktree_paths.py plan \
 git -C <main-repo-abs> worktree add -b nightshift/{spec-id}-<run-id> "$WT"
 python3 <main-repo-abs>/.nightshift/worktree_paths.py verify \
   --repo <main-repo-abs> --worktree "$WT"
+python3 <main-repo-abs>/.nightshift/worktree_local_config.py copy \
+  --repo <main-repo-abs> --worktree "$WT"
 ```
 
 The verify command is a hard gate before launch, merge, or cleanup: it proves the
@@ -374,3 +376,9 @@ owner/no-new-evidence/each configured soft trigger; unauthorized waiver, fabrica
 zero, budget reset and terminal-Done refusal; healthy-operation and opt-out controls.
 First delivery observes only the two disposable LE1 entrypoints with actual decision
 artifacts and launch dispositions. Measurement is not an adoption/savings claim.
+
+Before this step, read [Worker local config and owner approval waits](worker-local-config.md) for the required continuation instructions.
+
+Before any command that may prompt, declare `waiting_on: owner_approval`,
+`waiting_command` and `waiting_since` in the heartbeat; remove these fields
+when you resume. Follow the linked guide for the complete copy/wait contract.

@@ -1,11 +1,9 @@
-Load when: you compose, hand off or check a verifier brief in `/nightshift run` or `/nightshift kickoff` (Step 5c a); `verification_report.py` reads these blocks here at run time.
-Covers: the pinned verifier brief, the no-test-suite verifier brief and the canonical verdict-JSON template, each byte-for-byte.
-Not here: the run steps that use them (`run-5.md`, `run-6.md`), the brief check and scope gate (`pinned-checks.md`), the verdict validator (`pinned-validator.md`).
-Requires: nothing read first; code finds each block by its marker name, so never move a block between guides or retype it.
+Load when: composing/checking run/kickoff Step5c a briefs.
+Covers: byte-exact runtime brief, no-suite brief and verdict JSON.
+Not here: run steps (run-5.md, run-6.md), checks (pinned-checks.md), validator (pinned-validator.md).
+Requires: no prior read. Runtime/tests find markers here; never relocate/retype blocks. Spec contract changes.
 
 # Pinned verifier blocks: briefs and verdict template
-
-These blocks are read from this guide at run time by `verification_report.py` and by tests, so they stay here byte-for-byte; the run guides refer to them by marker name. Edit one only through a spec that changes what it checks.
 
 **Verifier brief (Step 5c a).**
 
@@ -13,6 +11,19 @@ These blocks are read from this guide at run time by `verification_report.py` an
 <!-- NIGHTSHIFT-VERIFIER-BRIEF-BEGIN -->
 You are the independent verifier for Nightshift spec {spec-id}. You did not write
 this code and you are not told what its author concluded.
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.
 
 Inputs (the only five you get):
 - Branch content under test: {branch}, materialized as `verifier-head` in the assigned standalone verifier surface
@@ -164,6 +175,19 @@ Rules:
 <!-- NIGHTSHIFT-VERIFIER-BRIEF-NOSUITE-BEGIN -->
 You are the independent verifier for Nightshift spec {spec-id}. You did not write
 this code and you are not told what its author concluded.
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.
 
 Inputs (the only five you get):
 - Branch content under test: {branch}, materialized as `verifier-head` in the assigned standalone verifier surface
@@ -344,9 +368,4 @@ Rules:
 
 This is the canonical verdict-JSON template block.
 
-### Predeclared baseline corrections (BUG-NS-KIT-170)
-
-Before any suite execution, the trusted dispatch caller may supply `expected_baseline_fix` with `schema_version: 1.0.0`, current `spec_id`, exact `source: {baseline_commit, head_commit, spec_sha256}`, unchanged complete configured `command`, and `targets: [{test_id, ac_id}]`.
-Legacy nodes require literal AC bindings. Operational tuples use a parent `SamplingAnchor`/`sampling_provider`: retain approval bytes, expected digest and pinned contract outside author/verifier surfaces; freeze reviewed mappings and full ordered collections before dispatch. Plan, environment, rationale or human-labelled rows cannot authenticate themselves.
-Use `run_expected_baseline_fix_sample` in both arms with unique invocation IDs, private external output and configured timeout. Operational members receive exact `command` and separate `sampling_anchor=dispatch.sampling_anchor`. Run every member in order with plugins/options, raw exits, closure and full collection; no masked shell tuple.
-Ask the trusted shared eligibility/count helper for the independently reproduced decision using the original plan and both footprints before resampling. Only an eligible baseline-only correction may use one complete actual sample per arm; head/unexpected failures, changed tests/assertions, skips/xfails, flakes, launch gaps, missing proof and legacy plans keep the strict rule.
+Read [baseline corrections](pinned-baselines.md) before dispatch.

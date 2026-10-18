@@ -134,3 +134,22 @@ launch to `TERMINAL`; `verifier-wall-s` is the sum of the dispatch durations rec
 value the parent could not measure is `unavailable`, never 0.
 
 Before implementation, normal instruction apply/coordinator admission checks trusted external inputs (SPEC-NS-KIT-175); follow SPEC-GUIDE.md § Required external input readiness. Exit0 alone is not eligibility; repair setup before a new run, never replace its receipt.
+
+## Worker local config and approval waits (SPEC-NS-KIT-231)
+
+After worktree ownership verify, use the same `worktree_local_config.py copy`
+command documented in run-3.md before launch, including harness-created
+worktrees. Include the following declaration contract in the worker brief:
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.

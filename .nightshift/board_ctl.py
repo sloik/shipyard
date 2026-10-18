@@ -352,23 +352,48 @@ def cmd_show(ctx: Ctx, args) -> int:
 
 
 def cmd_search(ctx: Ctx, args) -> int:
+    import board_search
+    import spec_id
+    # Direct command callers predating scoped search pass only q/json.
+    args = argparse.Namespace(**{
+        "offset": 0, "limit": None, "archive_observed_at": None, "offline": False,
+        "status": [], "type": [], "tag": [], "version": "all", "hide_archived": False,
+        **vars(args),
+    })
+    if args.offset < 0 or (args.limit is not None and args.limit <= 0):
+        raise CtlError(EXIT_USAGE, "invalid_search_page", "offset must be nonnegative and limit positive")
+    try:
+        archive_now = board_search.archive_observation(args.archive_observed_at)
+    except ValueError as exc:
+        raise CtlError(EXIT_USAGE, "invalid_archive_observation", str(exc)) from exc
+    if archive_now is not None and not args.offline:
+        raise CtlError(EXIT_USAGE, "archive_observation_requires_offline", "--archive-observed-at requires --offline; live defaults remain unchanged")
+    facets = {"statuses": args.status or "all", "types": args.type or "all", "version": args.version,
+              "tags": args.tag or "all", "include_archived": not args.hide_archived}
+    entry = ctx._entry or ctx._own_registry_entry()
+    name = "NIGHTSHIFT-CANONICAL" if ctx.specs_dir.parent.name == "canonical" else project_name_for_root(ctx.project_root)
+    project = str(entry.get("code", "")) if entry else spec_id.PROJECT_CODES.get(name, "")
     def offline():
-        needle, hits = args.q.lower(), []
-        for spec_id, rec in _offline_specs(ctx.specs_dir).items():
-            haystack = f"{spec_id} {rec['title']} {rec['body']}".lower()
-            idx = haystack.find(needle)
-            if idx == -1:
-                continue
-            excerpt = "..." + haystack[max(0, idx - 60):idx + len(needle) + 60] + "..."
-            hits.append({"id": spec_id, "title": rec["title"] or spec_id, "status": rec["status"], "excerpt": excerpt})
-        return hits
-
-    source, data = _board_or_offline(ctx, "/api/search?q=" + urllib.parse.quote(args.q, safe=""), offline) \
-        if args.q else ("board", [])
-    rows = sorted(({"id": h["id"], "title": h.get("title"), "status": h.get("status"), "excerpt": h.get("excerpt")}
-                   for h in data), key=lambda r: r["id"])
-    text = "\n".join([f"# source: {source}  count: {len(rows)}"] + [f"{r['id']}\t{r['status']}\t{r['title']}" for r in rows])
-    _emit(args, {"source": source, "query": args.q, "count": len(rows), "results": rows}, text)
+        rows = []
+        now = archive_now if archive_now is not None else time.time()
+        for sid, rec in _offline_specs(ctx.specs_dir).items():
+            fm = rec["fm"]
+            rows.append({"id": sid, "title": rec["title"], "body": rec["body"], "status": rec["status"],
+                         "type": fm.get("type", "feature"), "tags": fm.get("tags") or [], "version": fm.get("version"),
+                         "archived": rec["status"] == "done" and bool(rec["mtime"]) and now - rec["mtime"] > 14 * 86400})
+        return board_search.search_records(rows, args.q, {**facets, "project": project, "archive_observed_at": now}, offset=args.offset, limit=args.limit)
+    params = urllib.parse.urlencode({"q": args.q, "metadata": "true", "filters": json.dumps(facets), "offset": args.offset,
+                                     **({"limit": args.limit} if args.limit is not None else {})})
+    source, data = ("offline", offline()) if args.offline else _board_or_offline(ctx, "/api/search?" + params, offline)
+    # Older listeners remain readable; explicit scoped metadata requires upgrade.
+    if isinstance(data, list):
+        if any([args.status, args.type, args.tag, args.version != "all", args.hide_archived, args.offset, args.limit]):
+            raise CtlError(EXIT_USAGE, "search_upgrade_required", "listener lacks scoped search; upgrade or use offline mode")
+        data = {"results": data, "total": len(data)}
+    rows = data["results"]
+    text = "\n".join([f"# source: {source}  count: {len(rows)}  total: {data['total']}"] +
+                     [f"{r['id']}\t{r['status']}\t{r['title']}" for r in rows])
+    _emit(args, {**data, "source": source, "query": args.q, "count": len(rows), "results": rows}, text)
     return EXIT_OK
 
 
@@ -1262,7 +1287,7 @@ COMMANDS: dict[str, tuple] = {
     "list": (cmd_list, ["[--status S]...", "[--layer N]", "[--type T]", "[--parent ID]", "[--text Q]"], False, True,
              "filter specs (effective status)"),
     "show": (cmd_show, ["<id>", "[--body]"], False, True, "frontmatter, run-state explanation, artifact index"),
-    "search": (cmd_search, ["<q>"], False, True, "substring over id, title and body"),
+    "search": (cmd_search, ["<q>"], False, True, "ranked identity or literal title/body search"),
     "history": (cmd_history, ["<id>"], False, False, "status checkpoints, newest first"),
     "deps": (cmd_deps, ["<id>"], False, True, "what a spec waits on and what waits on it"),
     "artifacts": (cmd_artifacts, ["<id>", "[--path P]"], False, False, "artifact index or one artifact"),
@@ -1334,7 +1359,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("show", COMMANDS["show"][4])
     p.add_argument("id")
     p.add_argument("--body", action="store_true")
-    add("search", COMMANDS["search"][4]).add_argument("q")
+    p = add("search", COMMANDS["search"][4])
+    p.add_argument("q")
+    p.add_argument("--status", action="append", default=[])
+    p.add_argument("--type", action="append", default=[])
+    p.add_argument("--tag", action="append", default=[])
+    p.add_argument("--version", default="all")
+    p.add_argument("--hide-archived", action="store_true")
+    p.add_argument("--offline", action="store_true", help="search this declared file/status snapshot without contacting a listener")
+    p.add_argument("--archive-observed-at", type=float, default=None, help="offline-only archive observation in UTC epoch seconds; performance clocks stay real")
+    p.add_argument("--offset", type=int, default=0)
+    p.add_argument("--limit", type=int, default=None)
     add("deps", COMMANDS["deps"][4]).add_argument("id")
     p = add("artifacts", COMMANDS["artifacts"][4])
     p.add_argument("id")
