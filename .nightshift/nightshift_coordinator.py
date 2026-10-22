@@ -23,6 +23,7 @@ Exit codes:
 """
 
 import json
+import dependency_registry
 import re
 import sys
 import hashlib
@@ -2385,11 +2386,24 @@ class Coordinator:
             except SpecReadyError as e:
                 raise CoordinatorError(f"Spec {spec_id} not ready: {e}")
 
+            # Opt-in parallel dispatch already filters each consumer through
+            # its frontier. A batch-level refusal here would stop independent
+            # siblings (NFR-001 I4); this backstop is for the sequential path.
+            if not self.parallel_dispatch_enabled():
+                gate = dependency_registry.start_gate(spec_file.parent, frontmatter)
+                if not gate["ok"]:
+                    raise CoordinatorError("; ".join(reason["message"] for reason in gate["reasons"]))
+
             if frontmatter.get('type') == 'main':
                 for child_spec_id in frontmatter.get('implementation_order') or frontmatter.get('children') or []:
                     child_spec_file = self._child_spec_path(spec_file, child_spec_id)
                     if not child_spec_file.exists():
                         raise CoordinatorError(f"Child spec file not found for {child_spec_id}: {child_spec_file}")
+                    child_fm, _ = read_spec_frontmatter(child_spec_file)
+                    if not self.parallel_dispatch_enabled():
+                        gate = dependency_registry.start_gate(child_spec_file.parent, child_fm)
+                        if not gate["ok"]:
+                            raise CoordinatorError("; ".join(reason["message"] for reason in gate["reasons"]))
                     try:
                         validate_spec_readiness(child_spec_file, child_spec_id)
                     except SpecReadyError as e:

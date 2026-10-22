@@ -330,3 +330,5 @@ union without double-counting rerun reader cases. A fresh probe and all ordinary
 whole-kit delivery/serial ownership/safety gates remain required. No additional
 worker or acceptance authority is introduced. Raw native proof remains private;
 share the controlled outcome/counts and evidence digests, not host locators.
+
+Frozen legacy-ID acceptance is local. project_owned_commit_msg: back up/adopt per [doctor](doctor.md).

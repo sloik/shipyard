@@ -1081,7 +1081,7 @@ RULE_ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
                   "blocker-evidence-unresolved")),
     ("scope", "SPEC-GUIDE.md#write-scope", ()),
     ("release-handoff", "ORCHESTRATOR.md#versioned-release-handoff-spec-189",
-     ("release-handoff-*", "*release*handoff*")),
+     ("release-handoff-*", "*release*handoff*", "release-plan-*")),
     ("nfr", "SPEC-GUIDE.md#creating-an-nfr-spec", ("nfr-*", "scope-tags-shape")),
     ("real-use-evidence", "SPEC-GUIDE.md#interactive-spec-creation-guide", ("real-use-evidence", "real-use-evidence-*", "live-item-evidence-*")),
     ("amendments", "SPEC-GUIDE.md#ac-amendments", ("ac-amendment-*",)),
@@ -1193,6 +1193,16 @@ def _dependency_line(ctx: Ctx, rec: dict, specs: dict[str, dict]) -> dict:
     return _line("lifecycle/dependencies", "pass", "resolved: " + (", ".join(seen) if seen else "no after: or requires_specs:"))
 
 
+def _start_prerequisites_line(ctx: Ctx, rec: dict) -> dict:
+    import dependency_registry
+    if rec["status"] not in {"ready", "in_progress"}:
+        return _line("lifecycle/start_prerequisites", "not_applicable", "only ready/in_progress specs are start candidates")
+    gate = dependency_registry.start_gate(ctx.specs_dir, rec["fm"])
+    return _line("lifecycle/start_prerequisites", "pass" if gate["ok"] else "fail",
+                 "startable: all cross-project prerequisites are done" if gate["ok"] else
+                 "not startable: " + "; ".join(reason["message"] for reason in gate["reasons"]))
+
+
 def _promotion_line(ctx: Ctx, rec: dict) -> dict:
     sys.path.insert(0, str(HERE))
     import spec_frontmatter  # noqa: PLC0415
@@ -1270,6 +1280,7 @@ def cmd_rules(ctx: Ctx, args) -> int:
     lines = _validator_lines(Path(rec["path"]))
     lines.insert(1, _type_line(rec))
     lines.append(_dependency_line(ctx, rec, specs))
+    lines.append(_start_prerequisites_line(ctx, rec))
     lines.append(_promotion_line(ctx, rec))
     lines.append(_diff_line(ctx, spec_id, args.diff, args.main))
     failed = [l for l in lines if l["status"] == "fail"]

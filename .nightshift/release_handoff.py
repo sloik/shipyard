@@ -45,6 +45,7 @@ MISSING_RELEASE_HANDOFF_DECLARATION_ERROR = (
     "release_handoff declaration required: choose impact: required "
     "or impact: exempt with a reason"
 )
+RELEASE_PLAN_REQUIRED_ERROR = "release-impact spec requires a valid release_plan before Ready"
 # A pending handoff whose target manifest was superseded before delivery can
 # never complete as written: ``complete_pending_handoffs`` skips it by
 # fingerprint forever.  It is a distinct situation from "authored against the
@@ -953,9 +954,12 @@ def validate_spec_handoff(
         # keeps every other status (including "done") on the unchanged gate
         # below.
         return []
+    plan_errors = validate_release_plan(frontmatter, manifest)
     artifact = artifact_path(canonical, str(frontmatter.get("id", "")))
     if not artifact.is_file():
-        return ["release-impact spec requires a release handoff artifact"]
+        if str(frontmatter.get("status", "")) not in {"draft", "planned", "ready", "in_progress", "blocked"}:
+            return plan_errors + ["release-impact spec requires a release handoff artifact"]
+        return plan_errors
     try:
         data = json.loads(artifact.read_text())
     except json.JSONDecodeError:
@@ -967,6 +971,32 @@ def validate_spec_handoff(
         errors.append(
             "WARNING: release handoff awaits coordinator re-pin at the next qualifying release"
         )
+    return plan_errors + errors
+
+
+def validate_release_plan(frontmatter: Mapping[str, Any], manifest: Mapping[str, Any]) -> list[str]:
+    """Validate the reviewed pre-implementation plan needed at Ready and later."""
+    declaration = frontmatter.get("release_handoff")
+    if (not isinstance(declaration, Mapping) or declaration.get("impact") != "required"
+            or str(frontmatter.get("status", "")) not in {"ready", "in_progress", "done"}):
+        return []
+    plan = frontmatter.get("release_plan")
+    if not isinstance(plan, Mapping):
+        return [RELEASE_PLAN_REQUIRED_ERROR]
+    errors = []
+    paths = plan.get("expected_managed_paths")
+    if not isinstance(paths, list) or not paths or not all(isinstance(item, str) and item for item in paths):
+        errors.append("release_plan expected_managed_paths must be a non-empty list of paths")
+    else:
+        unknown = sorted(set(paths) - managed_paths(manifest))
+        if unknown:
+            errors.append("release_plan names unmanaged paths: " + ", ".join(unknown))
+    if not isinstance(plan.get("required_migrations"), list) or not all(isinstance(item, str) for item in plan["required_migrations"]):
+        errors.append("release_plan required_migrations must be a list of strings")
+    if plan.get("fleet_sync_scope") not in {"all-managed-installs", "eligible-managed-installs"}:
+        errors.append("release_plan fleet_sync_scope is invalid")
+    if not isinstance(plan.get("summary"), str) or not plan["summary"].strip():
+        errors.append("release_plan summary requires non-empty text")
     return errors
 
 
@@ -1349,6 +1379,40 @@ def _folded_repin_candidate(
     ):
         return None
     return candidate
+
+
+def pending_handoff_reachability(canonical: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Classify pending handoffs without re-pinning, completing, or writing bytes."""
+    results = []
+    directory = canonical / HANDOFF_DIR
+    if not directory.is_dir():
+        return results
+    current = manifest.get("kit_version")
+    for path in sorted(directory.glob("*.json")):
+        raw = path.read_bytes()
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            results.append({"path": path.name, "classification": "unresolved", "reason": "invalid JSON",
+                            "sha256": hashlib.sha256(raw).hexdigest()})
+            continue
+        entry = {"path": path.name, "spec_id": data.get("spec_id"),
+                 "sha256": hashlib.sha256(raw).hexdigest(), "target_version": data.get("target_version")}
+        if data.get("status") != "pending":
+            results.append({**entry, "classification": "non_applicable", "reason": "not pending"})
+        elif _has_pending_manifest_placeholder(data):
+            results.append({**entry, "classification": "non_applicable", "reason": "awaits a future coordinator release"})
+        elif _matches_current_manifest_fingerprint(data, manifest):
+            results.append({**entry, "classification": "exact_target", "reason": "candidate fingerprint matches"})
+        elif _folded_repin_candidate(canonical, data, manifest) is not None:
+            results.append({**entry, "classification": "eligible_future_repin", "reason": "existing folded-repin predicate accepts"})
+        elif data.get("disposition", {}).get("decision") == "fold" and data.get("target_version") == current:
+            results.append({**entry, "classification": "stranded", "reason": "same version has a different fingerprint"})
+        elif data.get("target_version") != current:
+            results.append({**entry, "classification": "non_applicable", "reason": "targets another release version"})
+        else:
+            results.append({**entry, "classification": "unresolved", "reason": "pending handoff is not reachable by existing predicates"})
+    return results
 
 
 def repin_folded_handoffs(canonical: Path, manifest: Mapping[str, Any]) -> list[str]:

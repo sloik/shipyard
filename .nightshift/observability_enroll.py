@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from observability_store import ObservabilityStoreError, StoreContext, enroll
+from observability_store import ObservabilityStoreError, StoreContext, enroll, load_observability_sink, PRIVATE_DROPBOX
 
 MANAGED_PUBLIC_PREFIXES = (
     ".nightshift/hooks/", ".nightshift/prompts/", ".nightshift/scenarios/",
@@ -324,7 +324,7 @@ def history_remediation(repo: Path, *, apply: bool = False, operator_authority: 
 def release_disposition(install: Path) -> dict[str, str] | None:
     """Return a safe release skip for enrolled projects with unresolved artifacts."""
     config = Path(install) / "config.yaml"
-    if not config.is_file() or "sink: private-dropbox" not in config.read_text(errors="replace"):
+    if not config.is_file() or load_observability_sink(config) != PRIVATE_DROPBOX:
         return None
     audit = audit_project(Path(install))
     if audit["audit_clean"]:

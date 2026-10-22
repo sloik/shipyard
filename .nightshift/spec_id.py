@@ -18,6 +18,11 @@ a private regex.
 from __future__ import annotations
 
 import re
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
@@ -196,6 +201,7 @@ PROJECT_CODES: Mapping[str, str] = {
     "CRAFTJOBQUOTE": "CJQ",
     "GAMENIGHTLEDGER": "GNL",
     "WORKSHOPFRACTIONSHEET": "WFS",
+    "CLOUDSYNCKIT": "CSK",  # Owner-authority addition, SPEC-NS-KIT-248 (2026-10-22).
 }
 
 
@@ -284,3 +290,76 @@ def mint_id(kind: str, code: str, used_ids: Iterable[str]) -> str:
         number += 1
         candidate = f"{kind}-{code}-{number:03d}"
     return candidate
+
+
+# BUG-NS-KIT-246: commit hooks need only registry identity and one frozen list,
+# never a scan of fleet specs or a network lookup.
+def commit_project_legacy_ids(install: Path, project_root: Path) -> tuple[str | None, set[str], str | None]:
+    """Return registered code, frozen membership and an optional one-line warning.
+
+    Unknown/unregistered projects retain grammar-only validation. Linked worktrees
+    resolve through their primary checkout, preserving the checkout subdirectory.
+    """
+    install, project_root = install.resolve(), project_root.resolve()
+    registry = install / "projects-registry.json"
+    if not registry.is_file():
+        registry = install / ".nightshift" / "projects-registry.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+        rows = payload["projects"]
+        if not isinstance(rows, list):
+            return None, set(), None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, set(), None
+    roots = {project_root}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-prefix"],
+            cwd=project_root, text=True, capture_output=True, timeout=5,
+        )
+        lines = result.stdout.splitlines()
+        if result.returncode == 0 and lines:
+            roots.add((Path(lines[0]).parent / (lines[1] if len(lines) > 1 else "")).resolve())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    codes = set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            continue
+        registered = Path(os.path.expandvars(os.path.expanduser(row["path"].replace("{{HOME}}", str(Path.home()))))).resolve()
+        if registered in roots and code_shape_error(row.get("code")) is None:
+            codes.add(row["code"])
+    if len(codes) != 1:
+        return None, set(), None
+    code = codes.pop()
+    path = install / "spec-id-legacy" / f"{code}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ids = data["ids"]
+        if not isinstance(ids, list) or not all(isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", item) for item in ids):
+            raise ValueError("ids must contain only alphanumeric legacy ID tokens")
+        if data.get("project_code", code) != code:
+            raise ValueError("project code does not match registered owner")
+        return code, set(ids), None
+    except (OSError, ValueError, KeyError, TypeError):
+        return code, set(), f"[nightshift commit-msg] WARNING: unreadable legacy ID list {path}; grammar only"
+
+
+def commit_id_ere(install: Path, project_root: Path) -> str:
+    """POSIX ERE union of the unchanged grammar and exact local legacy tokens."""
+    _code, ids, warning = commit_project_legacy_ids(install, project_root)
+    if warning:
+        print(warning, file=sys.stderr)
+    # Frozen tokens allow historical letter suffixes too; no token can contain ERE syntax.
+    return "(" + "|".join([COMMIT_ID_ERE, *sorted(ids)]) + ")" if ids else COMMIT_ID_ERE
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Offline commit-hook ID membership")
+    parser.add_argument("--commit-id-ere", action="store_true", required=True)
+    parser.add_argument("--install", type=Path, required=True)
+    parser.add_argument("--project-root", type=Path, required=True)
+    args = parser.parse_args()
+    print(commit_id_ere(args.install, args.project_root))

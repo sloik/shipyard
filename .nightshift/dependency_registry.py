@@ -11,12 +11,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
+
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True
 
 import spec_id as spec_id_grammar
 
@@ -168,12 +173,33 @@ def propose_new_id(
 
 
 def _worktree_origin(path: Path) -> Path | None:
-    """Map ``<root>/.claude/worktrees/<name>/<rest>`` to ``<root>/<rest>``."""
-    parts = path.parts
-    for index in range(len(parts) - 3):
-        if parts[index] == ".claude" and parts[index + 1] == "worktrees":
-            return Path(*parts[:index], *parts[index + 3:])
-    return None
+    """Map any linked worktree path to the same path in its primary checkout.
+
+    Git, rather than a directory naming convention, establishes repository
+    identity. Preserve nested monorepo install paths; never consult the network.
+    """
+    path = path.resolve()
+    # Ordinary checkouts and non-Git directories need no origin probe. A linked
+    # checkout has a .git file at its root (possibly above a nested install).
+    # This also avoids coupling unrelated board subprocess operations to Git.
+    metadata = next((parent / ".git" for parent in (path, *path.parents)
+                     if (parent / ".git").exists()), None)
+    if metadata is None or not metadata.is_file():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--show-toplevel",
+             "--git-common-dir", "--is-bare-repository"],
+            cwd=path, capture_output=True, text=True, timeout=5,
+        )
+        lines = result.stdout.splitlines()
+        if result.returncode or len(lines) != 3 or lines[2] != "false":
+            return None
+        top, common = Path(lines[0]).resolve(), Path(lines[1]).resolve()
+        origin = common.parent / path.relative_to(top)
+        return origin if origin != path else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def _match_project(projects: Sequence[ProjectRef], specs_dir: Path) -> ProjectRef | None:
@@ -193,7 +219,7 @@ def _match_project(projects: Sequence[ProjectRef], specs_dir: Path) -> ProjectRe
 def _parse_spec(path: Path) -> tuple[str, str, dict[str, Any]] | None:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     if not text.startswith("---"):
         return None
@@ -222,14 +248,17 @@ class DependencyRegistryResolver:
         cache_seconds: float = 5.0,
     ) -> None:
         self.specs_dir = Path(specs_dir).resolve()
-        if registry_path:
-            self.registry_path = Path(registry_path).resolve()
-        else:
-            beside = self.specs_dir.parent / "projects-registry.json"
-            # The kit's own checkout keeps its registry under canonical/.nightshift/
-            # (it has no .nightshift/ of its own); SPEC-416 resolves it from there.
-            nested = self.specs_dir.parent / ".nightshift" / "projects-registry.json"
-            self.registry_path = nested.resolve() if not beside.is_file() and nested.is_file() else beside.resolve()
+        # Explicit selection is authoritative, including when missing. Otherwise
+        # precedence is beside specs, kit nested layout, then the same paths in
+        # the main checkout of this Git repository. Existing invalid files never
+        # fall through to a lower-priority (possibly stale) registry.
+        beside = self.specs_dir.parent / "projects-registry.json"
+        nested = self.specs_dir.parent / ".nightshift" / "projects-registry.json"
+        candidates = [Path(registry_path).resolve()] if registry_path is not None else [beside, nested]
+        if registry_path is None and not any(path.exists() for path in candidates) and (origin := _worktree_origin(self.specs_dir)) is not None:
+            candidates += [origin.parent / "projects-registry.json", origin.parent / ".nightshift" / "projects-registry.json"]
+        self.registry_candidates = tuple(dict.fromkeys(path.resolve() for path in candidates))
+        self.registry_path = next((path for path in self.registry_candidates if path.exists()), self.registry_candidates[0])
         self.cache_seconds = max(0.0, cache_seconds)
         self._loaded_at = 0.0
         self._records: dict[str, list[SpecRecord]] = {}
@@ -290,8 +319,8 @@ class DependencyRegistryResolver:
     def current_project(self) -> ProjectRef | None:
         """The registered project owning ``specs_dir`` (``None`` when unregistered).
 
-        A checkout under ``<root>/.claude/worktrees/<name>/`` resolves to the
-        registered project at ``<root>`` so a worker's commit sees its project.
+        Any Git linked worktree resolves to its registered primary checkout,
+        preserving the install-relative path within a monorepo.
         """
         self._refresh_if_stale()
         return self._current
@@ -312,7 +341,7 @@ class DependencyRegistryResolver:
         self._refresh_if_stale()
         normalized_project = str(project_name).strip().upper()
         normalized_spec = str(spec_id).strip()
-        projects, _ = self._load_projects()
+        projects = self._projects
         matches = [project for project in projects if project.name.upper() == normalized_project]
         if not matches:
             return None, f"unknown project {normalized_project}"
@@ -373,7 +402,8 @@ class DependencyRegistryResolver:
         scan_targets.extend(
             (project, project_specs)
             for project in projects
-            if (project_specs := specs_dir_for_project(project.path)) is not None
+            if project != registered_current
+            and (project_specs := specs_dir_for_project(project.path)) is not None
         )
 
         seen_paths: set[Path] = set()
@@ -401,21 +431,103 @@ class DependencyRegistryResolver:
             return [], "projects-registry.json missing"
         try:
             payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             return [], str(exc)
         rows = payload.get("projects") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             return [], "projects must be a list"
         projects: list[ProjectRef] = []
         for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-                continue
+            if (not isinstance(row, dict) or not isinstance(row.get("path"), str)
+                    or not row["path"].strip()
+                    or ("name" in row and (not isinstance(row["name"], str) or not row["name"].strip()))):
+                return [], "projects entries must have a path and a non-empty name when supplied"
             port = row.get("port")
             code = row.get("code")
+            try:
+                project_path = _expand_path(row["path"])
+            except (OSError, ValueError, RuntimeError) as exc:
+                return [], f"invalid project path: {exc}"
             projects.append(ProjectRef(
                 str(row.get("name") or Path(row["path"]).name).upper(),
-                _expand_path(row["path"]),
+                project_path,
                 port if isinstance(port, int) else None,
                 code if isinstance(code, str) and code else None,
             ))
         return projects, None
+
+
+START_EDIT_ROUTE = "To start anyway, edit or remove requires_specs in a committed spec change."
+
+
+def start_gate(specs_dir: Path, frontmatter: Mapping[str, Any], *, registry_path: Path | None = None) -> dict[str, Any]:
+    """Read-only start admission; only exact, uniquely resolved Done targets pass.
+
+    Empty declarations require no registry. Reasons retain declaration order and
+    belong only to this consumer. There is deliberately no dependency override.
+    """
+    consumer = str(frontmatter.get("id") or "<unknown consumer>")
+    requirements, malformed = parse_requires_specs(frontmatter)
+    reasons: list[dict[str, Any]] = []
+
+    def refuse(code: str, project: str, spec: str, status: str | None, detail: str) -> None:
+        reasons.append({"code": code, "project": project, "spec": spec, "status": status,
+                        "message": f"{code}: consumer {consumer}, project {project}, spec {spec}: {detail}. {START_EDIT_ROUTE}"})
+
+    if malformed:
+        refuse("requires_specs_malformed", "<malformed>", "<malformed>", None, malformed)
+        return {"ok": False, "reasons": reasons}
+    if not requirements:
+        return {"ok": True, "reasons": []}
+    resolver = DependencyRegistryResolver(specs_dir, registry_path=registry_path)
+    _, registry_error = resolver.records_for(())
+    for project, spec in requirements:
+        if registry_error:
+            if not resolver.registry_path.exists():
+                refuse("cross_project_registry_missing", project, spec, None,
+                       "registry missing; tried " + ", ".join(str(path) for path in resolver.registry_candidates))
+            else:
+                refuse("cross_project_registry_invalid", project, spec, None,
+                       f"invalid registry {resolver.registry_path}: {registry_error}")
+            continue
+        record, error = resolver.resolve_in_project(project, spec)
+        if error:
+            code = ("cross_project_ambiguous" if error.startswith("ambiguous") else
+                    "cross_project_unknown_project" if error.startswith("unknown project") else
+                    "cross_project_missing_spec")
+            refuse(code, project, spec, None, error)
+        elif record is not None and record.status != "done":
+            refuse("cross_project_prerequisite_not_done", project, spec, record.status,
+                   f"observed status {record.status}; done is required")
+    return {"ok": not reasons, "reasons": reasons, "registry_path": str(resolver.registry_path),
+            "registry_paths_tried": [str(path) for path in resolver.registry_candidates]}
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Read-only cross-project start prerequisites")
+    sub = parser.add_subparsers(dest="command", required=True)
+    gate = sub.add_parser("start-gate", help="check prerequisites before any start mutation")
+    gate.add_argument("--specs-dir", type=Path, required=True)
+    gate.add_argument("spec_id")
+    gate.add_argument("--registry", type=Path)
+    gate.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    records = [parsed for path in sorted(args.specs_dir.glob("*.md"))
+               if not path.name.startswith("_") and (parsed := _parse_spec(path)) is not None
+               and parsed[0] == args.spec_id]
+    if len(records) != 1:
+        result = {"ok": False, "reasons": [{"code": "consumer_spec_missing" if not records else "consumer_spec_ambiguous",
+                  "project": "<consumer>", "spec": args.spec_id, "status": None,
+                  "message": f"consumer {args.spec_id} must resolve to exactly one spec in {args.specs_dir}. {START_EDIT_ROUTE}"}]}
+    else:
+        result = start_gate(args.specs_dir, records[0][2], registry_path=args.registry)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("\n".join(reason["message"] for reason in result["reasons"]) or f"{args.spec_id}: start prerequisites satisfied")
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

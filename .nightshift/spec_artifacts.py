@@ -15,6 +15,8 @@ frontmatter.
 """
 from __future__ import annotations
 
+import dependency_registry
+
 import argparse
 import base64
 import errno
@@ -1778,7 +1780,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     spec_path = Path(ns.spec_file).resolve()
-    spec_id = str(parse_spec_file(spec_path).frontmatter.get("id") or "")
+    frontmatter = parse_spec_file(spec_path).frontmatter
+    if ns.from_status == "ready" and ns.to_status == "in_progress":
+        gate = dependency_registry.start_gate(spec_path.parent, frontmatter)
+        if not gate["ok"]:
+            print(json.dumps({"ok": False, "error": "The frontmatter flip must be reverted. " + "; ".join(r["message"] for r in gate["reasons"]), "reasons": gate["reasons"]}))
+            return 1
+    spec_id = str(frontmatter.get("id") or "")
     if not spec_id:
         print(json.dumps({"ok": False, "error": f"spec id missing from {spec_path.name}"}))
         return 1

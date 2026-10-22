@@ -22,6 +22,29 @@ FIRST_LINE=$(head -1 "$COMMIT_MSG_FILE")
 # SPEC-416: the ID group below is spec_id.COMMIT_ID_ERE (SPEC|BUG|NFR|QUESTIONS kinds,
 # legacy and project-prefixed shapes); test_spec_id.py pins this text to the parser.
 
+# BUG-NS-KIT-246: keep the grammar fallback when no registered frozen list is
+# available. The helper reads only local registry/list data. Release replay supplies
+# explicit read-only identity; its cwd stays an empty disposable directory.
+COMMIT_ID_ERE='(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+'
+GRAMMAR_ID_ERE="$COMMIT_ID_ERE"
+PROJECT_ROOT="${NIGHTSHIFT_COMMIT_PROJECT_ROOT:-$PWD}"
+ID_INSTALL="${NIGHTSHIFT_COMMIT_ID_INSTALL:-$PROJECT_ROOT/.nightshift}"
+ID_HELPER="$(cd "$(dirname "$0")/.." && pwd)/spec_id.py"
+if [ ! -f "$ID_HELPER" ]; then ID_HELPER="$ID_INSTALL/spec_id.py"; fi
+if [ ! -f "$ID_HELPER" ] && [ -f "$PROJECT_ROOT/canonical/spec_id.py" ]; then
+    ID_HELPER="$PROJECT_ROOT/canonical/spec_id.py"
+    ID_INSTALL="$PROJECT_ROOT/canonical"
+    PROJECT_ROOT="$PROJECT_ROOT/canonical"
+fi
+if [ "$ID_INSTALL" = "$PROJECT_ROOT/.nightshift" ] && [ -f "$PROJECT_ROOT/spec_id.py" ]; then
+    ID_INSTALL="$PROJECT_ROOT"
+fi
+if [ -f "$ID_HELPER" ] && command -v python3 >/dev/null 2>&1; then
+    if EXTENDED_ID_ERE=$(python3 "$ID_HELPER" --commit-id-ere --install "$ID_INSTALL" --project-root "$PROJECT_ROOT") && [ -n "$EXTENDED_ID_ERE" ]; then
+        COMMIT_ID_ERE="$EXTENDED_ID_ERE"
+    fi
+fi
+
 # Allow merge commits and reverts without prefix
 if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
     exit 0
@@ -30,7 +53,7 @@ fi
 # SPEC-NS-KIT-118 R4: record_metrics reads lifecycle marks only in the exact `chore: mark <ID> ...`
 # form, so a bracketed `[<ID>] chore: mark ...` commit (any status, trailers or not) would pass
 # this hook and then be silently skipped by metrics. Reject it before any other rule.
-if echo "$FIRST_LINE" | grep -qE '^\[(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+\] chore: mark '; then
+if echo "$FIRST_LINE" | grep -qE "^\[${COMMIT_ID_ERE}\] chore: mark "; then
     echo ""
     echo "[nightshift commit-msg] ERROR: bracketed lifecycle subject is not accepted; use \`chore: mark <ID> done|blocked|in_progress\`"
     echo ""
@@ -42,9 +65,9 @@ fi
 # Terminal lifecycle commits are emitted by the parent and consumed by
 # record_metrics.py.  The evidence contract is author-independent: a worker
 # cannot bypass it by writing a canonical lifecycle subject itself.
-if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+ (done|blocked)$'; then
-    SPEC_ID=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ((SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+) (done|blocked)$/\1/p')
-    TERMINAL=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ((SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+) (done|blocked)$/\4/p')
+if echo "$FIRST_LINE" | grep -qE "^chore: mark ${COMMIT_ID_ERE} (done|blocked)$"; then
+    SPEC_ID=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ([^ ]+) (done|blocked)$/\1/p')
+    TERMINAL=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ([^ ]+) (done|blocked)$/\2/p')
     REQUIRED_LIFECYCLE_TRAILERS=(
         "Nightshift-Evidence-Report"
         "Nightshift-Evidence-Tests"
@@ -103,7 +126,7 @@ fi
 # superseded, retired) the run guide (Step 2b/2c) commits and
 # record_metrics.find_in_progress_sha reads. Anchored, so it cannot match done|blocked and
 # carries no terminal trailer requirement.
-if echo "$FIRST_LINE" | grep -qE '^chore: mark (SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+ (draft|planned|ready|in_progress|superseded|retired)$'; then
+if echo "$FIRST_LINE" | grep -qE "^chore: mark ${COMMIT_ID_ERE} (draft|planned|ready|in_progress|superseded|retired)$"; then
     exit 0
 fi
 
@@ -169,12 +192,12 @@ if echo "$FIRST_LINE" | grep -qE '^chore(\([^)]*\))?!?: mark '; then
 fi
 
 # Ordinary commits: spec prefix, separator, and non-empty subject.
-if echo "$FIRST_LINE" | grep -qE '^\[(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+\] .+'; then
+if echo "$FIRST_LINE" | grep -qE "^\[${COMMIT_ID_ERE}\] .+"; then
     exit 0
 fi
 
 # E. `<ID>: description`
-if echo "$FIRST_LINE" | grep -qE '^(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+: .+'; then
+if echo "$FIRST_LINE" | grep -qE "^${COMMIT_ID_ERE}: .+"; then
     exit 0
 fi
 
@@ -186,7 +209,8 @@ fi
 # D. Conventional subjects are accepted only when the subject line carries an ID
 #    (in the scope or the text, unanchored).
 if echo "$FIRST_LINE" | grep -qE '^(feat|fix|docs|test|refactor|perf|build|ci|style|chore|spec|evidence|audit|draft|formal|research|wip)(\([^)]*\))?!?: .+' && \
-   echo "$FIRST_LINE" | grep -qE '(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+'; then
+   { echo "$FIRST_LINE" | grep -qE "$GRAMMAR_ID_ERE" ||
+     echo "$FIRST_LINE" | grep -qE "(^|[^[:alnum:]-])${COMMIT_ID_ERE}([^[:alnum:]-]|$)"; }; then
     exit 0
 fi
 

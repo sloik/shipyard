@@ -7,6 +7,41 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.12 (source cut: 2026-10-22)
+
+- Preserve valid frontmatter when replacing or clearing wrapped refusal scalars, including retained records and aliases. Repair incomplete release fixtures without changing their behavioral assertions; map release-plan findings in rules documentation and CLI routing (SPEC-NS-KIT-249).
+
+## 3.26.11 (source cut: 2026-10-22)
+
+- Give missing and malformed release plans distinct finding families. Record the reviewed 331 historical Done records missing the intentionally required plan through SPEC-337 R3 floor policy; retain prior floor families/counts, per-spec validation and new Ready refusal (SPEC-NS-KIT-249).
+
+## 3.26.10 (source cut: 2026-10-22)
+
+- Read explicit observability configuration when deciding private-artifact release eligibility; commented examples no longer enroll projects and quoted enabled sinks retain the privacy gate. Repair release guide fixtures and review the functional-only search pin after checkpoint-identity changes, preserving benchmark sources and all original assertions (SPEC-NS-KIT-249).
+
+## 3.26.9 (unreleased)
+
+- Register CloudSyncKit as `CLOUDSYNCKIT` / `CSK` and ship its empty frozen legacy list (SPEC-NS-KIT-248). The existing registry job imports canonical directly and needs no install rollout to generate the CSK entry; installed validators receive the table and legacy list through a future whole-kit release.
+
+## 3.26.8 (unreleased)
+
+- Enforce `requires_specs` through one shared read-only gate on every named start path, including sequential and worker-limit1 starts, without changing frontier selection or adding concurrency (SPEC-NS-KIT-247). Registry precedence: explicit selection, beside specs, kit nested layout, then the same install-relative paths in the primary Git worktree.
+- Migration: no config changes. Nonempty `requires_specs` with no main-checkout registry now refuses with `cross_project_registry_missing`; repair through `nightshift-sync.py registry`. Install-owned helpers must call `dependency_registry.py start-gate` before flipping Ready to InProgress; record-transition is a backstop and a refused flip must be reverted. No override flag: edit/remove the prerequisite in a committed spec change.
+
+## 3.26.7 (unreleased)
+
+- Accept exact frozen project legacy IDs in commit subjects and history replay; report project-owned commit-msg forks with compatibility probes and manual adoption guidance in release and doctor (BUG-NS-KIT-246).
+
+## 3.26.6 (unreleased)
+
+- Emit correlated staged-validator progress and heartbeats on stderr, retain per-invocation events under Git common state, and report terminal outcome, native exit code and report digest without changing gate decisions (SPEC-NS-KIT-245).
+
+- Preserve primary-checkout status checkpoint paths across disposable linked worktrees and recover recognized legacy locators without weakening unrelated-path or terminal-state guards (BUG-NS-KIT-244).
+
+## 3.26.5 (source cut: 2026-10-18)
+
+- Require a reviewed release plan before a release-impact spec can become Ready, while retaining source-bound handoffs for Done and whole-kit delivery (SPEC-NS-KIT-243).
+
 ## 3.26.4 (source cut: 2026-10-18)
 
 - Ship the existing immutable six-prompt prebuilt library with every managed install and the global Nightshift skill. Preserve source bytes, writable-store boundaries and strict delivery receipts; align managed version labels with the cut (BUG-NS-KIT-242).

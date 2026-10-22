@@ -14,8 +14,11 @@ Exit code is 0 when no blocking preflight failures are found, 1 otherwise.
 
 from __future__ import annotations
 
+import dependency_registry
+
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -26,11 +29,112 @@ from typing import Any
 
 GUIDE_MAX_BYTES = 24 * 1024
 RELEASE_INVENTORY_RECORD = "tests/fixtures/spec-229-006/le2-installed-allow.json"
+GUIDE_FRONT_KEYS = ("Load when:", "Covers:", "Not here:", "Requires:")
+GUIDE_UI_ONLY = frozenset({
+    ("POST", "/api/performance/client"), ("POST", "/api/reports/read"),
+    ("POST", "/api/reports/read-all"), ("POST", "/api/open/spec/{spec_id}"),
+    ("POST", "/api/open/spec/{spec_id}/finder"), ("POST", "/api/open/spec/{spec_id}/terminal"),
+    ("POST", "/api/open/report/{filename}"), ("GET", "/api/prompts"),
+    ("GET", "/api/prompts/{scope}/{id}"), ("POST", "/api/prompts/{scope}"),
+    ("PUT", "/api/prompts/{scope}/{id}"), ("DELETE", "/api/prompts/{scope}/{id}"),
+    ("POST", "/api/prompts/{scope}/{id}/render"),
+    ("POST", "/api/spec/{spec_id}/transfer-refusal"),
+    ("DELETE", "/api/spec/{spec_id}/transfer-refusal"),
+})
+_ROUTE_DECORATOR_RE = re.compile(r"@app\.(get|post|put|patch|delete)\(")
+_ROUTE_RE = re.compile(r'@app\.(get|post|put|patch|delete)\(\s*"([^"]+)"')
 
 
 def guide_size_problems(text: str) -> list[str]:
     size = len(text.encode("utf-8"))
     return [f"guide is {size} bytes (max {GUIDE_MAX_BYTES})"] if size > GUIDE_MAX_BYTES else []
+
+
+def guide_front_block_problems(text: str) -> list[str]:
+    """Validate the bounded guide front block shared by release and guide tests."""
+    block = []
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        block.append(line)
+    problems = []
+    if len(block) > 5:
+        problems.append(f"front block has {len(block)} lines (max 5)")
+    found = [next((key for key in GUIDE_FRONT_KEYS if line.startswith(key)), None) for line in block]
+    problems.extend(f"front block lacks '{key}'" for key in GUIDE_FRONT_KEYS if key not in found)
+    return problems
+
+
+def _normal_route(path: str) -> str:
+    return re.sub(r"\{(\w+):\w+\}", r"{\1}", path)
+
+
+def board_routes(board_text: str) -> set[tuple[str, str]]:
+    """Read literal board routes plus inert shared-service registration."""
+    found = {(match.group(1).upper(), _normal_route(match.group(2))) for match in _ROUTE_RE.finditer(board_text)}
+    decorators = len(_ROUTE_DECORATOR_RE.findall(board_text))
+    if not decorators or decorators != len(_ROUTE_RE.findall(board_text)) or decorators < len(found):
+        raise ValueError("board route decorator parse is incomplete")
+    if "prompt_snippets.register_library_routes(app," in board_text:
+        from fastapi import FastAPI
+        import prompt_snippets
+        registered = FastAPI()
+        prompt_snippets.register_library_routes(registered, lambda request: None)
+        found.update((method, _normal_route(route.path))
+                     for route in registered.routes if route.path.startswith("/api/prompt-library")
+                     for method in route.methods)
+    return found
+
+
+def guide_route_problems(board_text: str, guide_text: str,
+                         ui_only: frozenset[tuple[str, str]] = GUIDE_UI_ONLY) -> list[str]:
+    routes = board_routes(board_text)
+    table = {}
+    for line in guide_text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            table[(cells[0], _normal_route(cells[1].strip("`")))] = line
+    problems = [f"route not in the guide table: {method} {path}"
+                for method, path in sorted(routes - set(table) - set(ui_only))]
+    problems += [f"stale ui_only entry (no such route): {method} {path}"
+                 for method, path in sorted(set(ui_only) - routes)]
+    problems += [f"guide row for a route that does not exist: {method} {path}"
+                 for method, path in sorted(set(table) - routes)]
+    problems += [f"ui-only route not marked UI-only in the guide: {method} {path}"
+                 for key, row in sorted(table.items()) if key in ui_only and "UI-only" not in row]
+    return problems
+
+
+def guide_enrollment_problems(canonical: Path, manifest: dict, guide_paths: list[Path]) -> list[tuple[str, str]]:
+    """Check manifest, sync, and public classification through their authorities."""
+    import observability_enroll
+    import release
+    sync_path = canonical.parent / "nightshift-sync.py"
+    if not sync_path.is_file():
+        return []
+    try:
+        module_spec = importlib.util.spec_from_file_location("nightshift_sync_preflight", sync_path)
+        if module_spec is None or module_spec.loader is None:
+            raise ValueError("sync module unavailable")
+        sync = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(sync)
+        sync_paths = set(sync.CANONICAL_PROTOCOL_FILES)
+    except (OSError, ValueError, ImportError) as error:
+        return [("sync_enrollment", f"nightshift-sync.py: {error}")]
+    manifest_paths = {str(item.get("path")) for item in release.release_entries(manifest)}
+    problems = []
+    for guide in guide_paths:
+        relative = guide.relative_to(canonical).as_posix()
+        install_path = ".nightshift/" + relative
+        if relative not in manifest_paths:
+            problems.append(("guide_manifest_enrollment", f"{relative} is absent from the managed manifest"))
+        if relative not in sync_paths:
+            problems.append(("guide_sync_enrollment", f"{relative} is absent from CANONICAL_PROTOCOL_FILES"))
+        if observability_enroll.classify_path(install_path) != "managed_public_kit":
+            problems.append(("guide_public_classification", f"{install_path} is not managed_public_kit"))
+    return problems
 
 
 def registry_guide_problems(skill_path: Path, guides_dir: Path) -> list[str]:
@@ -55,8 +159,10 @@ def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: di
         return {"applicable": False, "status": "not_applicable", "profile": profile, "reused": False}
     import stat
     import artifact_reachability
+    import observability_enroll
     import skill_tutorial
     import release
+    import release_handoff
 
     canonical = canonical.resolve()
     findings = []
@@ -73,10 +179,13 @@ def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: di
         inputs[relative] = None
         return None
     guides = canonical / "guides"
-    for path in sorted(guides.rglob("*.md")):
+    guide_paths = sorted(guides.rglob("*.md"))
+    for path in guide_paths:
         data = bind(path)
         if len(data) > GUIDE_MAX_BYTES:
             finding("guide_byte_cap", path.relative_to(canonical).as_posix(), f"{len(data)} bytes exceeds {GUIDE_MAX_BYTES}")
+        for problem in guide_front_block_problems(data.decode("utf-8")):
+            finding("guide_front_block", path.relative_to(canonical).as_posix(), problem)
     skill = canonical / "Skills/nightshift/SKILL.md"
     if bind(skill) is not None:
         try:
@@ -86,9 +195,26 @@ def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: di
             finding("guide_registration", "Skills/nightshift/SKILL.md", str(error))
     elif any(str(row.get("path", "")).startswith("guides/") for row in manifest.get("files", [])):
         finding("guide_registration", "Skills/nightshift/SKILL.md", "managed guides require the commands registry")
+    for rule, detail in guide_enrollment_problems(canonical, manifest, guide_paths):
+        finding(rule, "guides", detail)
+    board = canonical / "board.py"
+    board_data = bind(board)
+    board_guide = guides / "board-and-api.md"
+    if board_data is not None and board_guide.is_file():
+        try:
+            for problem in guide_route_problems(board_data.decode("utf-8"), board_guide.read_text(encoding="utf-8")):
+                finding("guide_route_contract", "guides/board-and-api.md", problem)
+        except (ImportError, ValueError, OSError) as error:
+            finding("guide_route_contract", "guides/board-and-api.md", str(error))
     specs, errors = _load_specs(canonical / "specs")
     for error in errors:
         finding("report_reachability", "specs", error)
+    handoff_reachability = release_handoff.pending_handoff_reachability(canonical, manifest)
+    for item in handoff_reachability:
+        handoff = canonical / "release-handoffs" / item["path"]
+        bind(handoff)
+        if item["classification"] in {"stranded", "unresolved"}:
+            finding("handoff_reachability", f"release-handoffs/{item['path']}", item["reason"])
     tracked = subprocess.run(["git", "-C", str(canonical), "ls-files", "-z", "--", "reports"], capture_output=True)
     tracked_paths = [p.decode("utf-8", "surrogateescape") for p in tracked.stdout.split(b"\0") if p] if tracked.returncode == 0 else None
     report_findings = artifact_reachability.sweep_reports_directory(canonical, specs, tracked_paths=tracked_paths)
@@ -123,8 +249,15 @@ def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: di
     identity = {"schema_version": 1, "inputs": inputs, "spec_ids": sorted(specs),
                 "report_entries": report_entries, "tracked_reports": sorted(tracked_paths or []),
                 "sealed_inventory": sorted((row["path"], bool(row.get("executable"))) for row in entries),
-                "policy": {Path(module.__file__).name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-                           for module in (artifact_reachability, skill_tutorial)},
+                "handoff_reachability": handoff_reachability,
+                "policy": {
+                    **{Path(module.__file__).name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                       for module in (artifact_reachability, observability_enroll, skill_tutorial)},
+                    "nightshift-sync.py": (
+                        hashlib.sha256((canonical.parent / "nightshift-sync.py").read_bytes()).hexdigest()
+                        if (canonical.parent / "nightshift-sync.py").is_file() else None
+                    ),
+                },
                 "producer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"applicable": True, "profile": "canonical", "ok": not findings, "findings": findings,
@@ -723,6 +856,11 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
             result["blocking_failures"].append(
                 f"Spec {spec_id} has status {status!r}; expected one of: {allowed}."
             )
+
+        if status in {"ready", "in_progress"}:
+            cross = dependency_registry.start_gate(specs_dir, frontmatter)
+            result["checks"]["cross_project_dependencies"] = cross
+            result["blocking_failures"].extend(reason["message"] for reason in cross["reasons"])
 
         deps = _dependency_state(frontmatter, specs)
         result["checks"]["dependencies"] = deps

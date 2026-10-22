@@ -1059,11 +1059,11 @@ def _walk_admission_gates(ctx: _Ctx) -> None:
 
 
 def _qualified_gate(ctx: _Ctx) -> dict[str, Any] | None:
-    """requires_specs prerequisites: evaluated by parallel admission, not by ``derive_admission``."""
+    """Explain requires_specs separately from the unchanged primary projection."""
     fm = ctx.fm
     if "requires_specs" not in fm or fm.get("requires_specs") in (None, []):
         return None
-    note = "lifecycle admission does not consult requires_specs; parallel admission does"
+    note = "every start path enforces requires_specs through the shared start gate at any worker limit; primary lifecycle projection unchanged"
     qualified = ctx.qualified
     if not qualified:
         return _gate("qualified_dependencies", "not_evaluated", f"{note}; no resolution was supplied")

@@ -13,13 +13,21 @@ Usage:
   python3 validate_specs.py <file_or_directory> [--format json|text]
 """
 
+import argparse
 import functools
+import hashlib
 import json
+import math
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 if __name__ == "__main__":
@@ -842,6 +850,8 @@ _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
     ("block-reason-as-title", "first body H1 is 'Block Reason'"),
     ("missing-frontmatter-open-delimiter", "missing opening frontmatter delimiter"),
     ("missing-frontmatter-close-delimiter", "missing closing frontmatter delimiter"),
+    ("release-plan-required", "release-impact spec requires a valid release_plan before Ready"),
+    ("release-plan-invalid", "release_plan "),
     ("release-handoff-artifact-required", "release-impact spec requires a release handoff artifact"),
     ("release-handoff-awaiting-repin", "release handoff awaits coordinator re-pin"),
     # SPEC-332: delivered-but-not-closed and board/file status divergence.
@@ -1022,6 +1032,12 @@ def finding_family_summary(results: dict, frontmatters: list[dict]) -> dict:
     counts: dict[str, int] = {}
     for errors in results.values():
         for msg in errors:
+            # Status and commit gates deliberately expose advisory diagnostics.
+            # They cannot participate in the failure floor: otherwise a valid
+            # pending handoff that the status gate accepts as Done becomes an
+            # unowned fatal finding at commit time.
+            if _is_warning(msg):
+                continue
             key = classify_finding_family(msg)
             counts[key] = counts.get(key, 0) + 1
 
@@ -3046,6 +3062,107 @@ class StagedValidationError(RuntimeError):
     """SPEC-358 R3: the staged-index snapshot cannot be validated as-is."""
 
 
+class ValidationProgress:
+    """Advisory invocation evidence; never a validation or lifecycle authority.
+
+    A missing terminal event means unknown. In particular SIGKILL, power loss,
+    or losing the command session cannot be converted into a passed result.
+    """
+
+    def __init__(self, repo_root: Path, *, events_out: Path | None = None,
+                 interval: float = 5.0):
+        self.run_id = uuid.uuid4().hex
+        self.started = time.monotonic()
+        self.interval = interval
+        self.phase = "startup"
+        self.completed = 0
+        self.total = None
+        self.sequence = 0
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.events_path = events_out
+        self.events_ref = None
+        self.sink_status = "available"
+        self.thread = None
+        self.finished = False
+        if self.events_path is None:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode or not result.stdout.strip():
+                    raise OSError("Git common directory unavailable")
+                common = Path(result.stdout.strip())
+                if not common.is_absolute():
+                    common = repo_root / common
+                self.events_ref = f"nightshift/validation/{self.run_id}.jsonl"
+                self.events_path = common / self.events_ref
+            except (OSError, subprocess.SubprocessError):
+                self.sink_status = "unavailable"
+
+    def emit(self, event: str, **fields) -> None:
+        with self.lock:
+            self.sequence += 1
+            record = {
+                "schema_version": 1, "event": event, "run_id": self.run_id,
+                "sequence": self.sequence,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "elapsed_seconds": round(time.monotonic() - self.started, 3),
+                "phase": self.phase, "completed": self.completed,
+                "total": self.total, "events_ref": self.events_ref,
+                "sink_status": self.sink_status, **fields,
+            }
+            if self.events_path is not None and self.sink_status == "available":
+                try:
+                    self.events_path.parent.mkdir(parents=True, exist_ok=True)
+                    with self.events_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, sort_keys=True) + "\n")
+                        handle.flush()
+                except (OSError, ValueError):
+                    self.sink_status = "unavailable"
+                    record["sink_status"] = "unavailable"
+            try:
+                print(json.dumps(record, sort_keys=True), file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass  # A broken telemetry consumer must not alter gate results.
+
+    def start(self) -> None:
+        self.emit("validation_started")
+        self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self.thread.start()
+
+    def _heartbeat(self) -> None:
+        while not self.stop.wait(self.interval):
+            with self.lock:
+                if self.finished:
+                    return
+                self.emit("validation_progress", heartbeat=True)
+
+    def update(self, phase: str, completed: int = 0, total: int | None = None) -> None:
+        with self.lock:
+            changed = phase != self.phase
+            completed_phase = total is not None and completed == total and completed != self.completed
+            self.phase, self.completed, self.total = phase, completed, total
+            if changed or completed_phase:
+                self.emit("validation_progress", heartbeat=False)
+
+    def finish(self, outcome: str, exit_code: int, *, report: dict | None = None) -> None:
+        self.stop.set()
+        with self.lock:
+            if self.finished:
+                return
+            self.finished = True
+            fields = {}
+            if report is not None:
+                encoded = json.dumps(report, sort_keys=True, ensure_ascii=True).encode()
+                fields["report_sha256"] = hashlib.sha256(encoded).hexdigest()
+                fields["finding_count"] = sum(len(rows) for rows in report["results"].values())
+            self.emit("validation_finished", outcome=outcome, exit_code=exit_code, **fields)
+        if self.thread is not None:
+            self.thread.join(timeout=1)
+
+
 def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
     """Read-only Git plumbing only -- never checkout/stash/read-tree (R3)."""
     return subprocess.run(
@@ -3309,7 +3426,7 @@ def _referenced_index_closure(repo_root: Path, entries: dict, blobs: dict, kit: 
     return selected
 
 
-def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
+def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs", *, progress=None) -> dict:
     """Validate inert files from one captured index, running only this trusted module.
 
     The scratch tree is not a checkout: no Git operations write it, no copied
@@ -3318,6 +3435,8 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
     the owning kit; invalid links remain findings rather than filesystem reads.
     """
     repo_root = Path(repo_root).resolve()
+    notify = progress or (lambda *args: None)
+    notify("capture_index")
     if not lifecycle.is_safe_relative_posix_path(specs_relative_dir):
         raise StagedValidationError("spec root must be a safe repository-relative path")
     entries = staged_index_entries(repo_root)
@@ -3347,6 +3466,7 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
     if sum(len(data) for data in external_blobs.values()) > 8 * 1024 * 1024:
         raise StagedValidationError("project evidence index closure exceeds 8 MiB")
     blobs.update(external_blobs)
+    notify("materialize_snapshot")
     with tempfile.TemporaryDirectory(prefix="nightshift-index-") as scratch:
         snapshot = Path(scratch).resolve()
         links = []
@@ -3379,6 +3499,7 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             policy_errors = spec_frontmatter.load_spec_metadata_policy(config).errors
             if policy_errors:
                 results[f"{kit}/config.yaml"] = [f"spec_metadata policy: {error}" for error in policy_errors]
+        notify("load_corpus")
         corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
         # SPEC-386 R4: the warning key (the store path) is resolved lazily,
         # only if some staged spec's status actually changed this commit --
@@ -3436,10 +3557,12 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
 
         skip_tokens = _untouched_spec_skip_tokens(repo_root, kit, entries, baseline_revision)
         staged_id_candidates: list[tuple[str, Path]] = []
+        spec_paths = [path for path in sorted(entries) if path.startswith(prefix)
+                      and path.endswith(".md") and not Path(path).name.startswith("_")]
+        notify("validate_specs", 0, len(spec_paths))
         try:
-            for path in sorted(entries):
-                if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
-                    continue
+            for position, path in enumerate(spec_paths):
+                notify("validate_specs", position, len(spec_paths))
                 # R2 (SPEC-380): determine is_new/bytes_changed from the blob sha
                 # up front -- by index sha, not decoded text -- so the gate below
                 # applies uniformly to every branch that can populate `results`
@@ -3541,7 +3664,9 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 if new_findings:
                     results[path] = new_findings
             # SPEC-416 R4: one fleet pass for every spec this commit adds or edits.
+            notify("validate_specs", len(spec_paths), len(spec_paths))
             if staged_id_candidates:
+                notify("check_fleet_ids", 0, len(staged_id_candidates))
                 id_findings = new_id_findings(
                     snapshot / specs_relative_dir,
                     [spec_path for _, spec_path in staged_id_candidates],
@@ -3553,6 +3678,7 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                         results.setdefault(rel_path, []).extend(
                             finding.replace(str(snapshot), "<index>") for finding in extra)
         finally:
+            notify("cleanup")
             if _baseline_snapshot_holder:
                 shutil.rmtree(_baseline_snapshot_holder[0], ignore_errors=True)
     return {"baseline": "head" if has_head else "none", "results": results,
@@ -3599,13 +3725,32 @@ def _spec_metadata_audit_main(args: list[str]) -> int:
     return 1 if policy.errors or any(row["severity"] == "error" for row in rows) else 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if any(arg == "--staged" for arg in argv):
-        rest = [arg for arg in argv if arg != "--staged"]
-        repo_root = Path(rest[0]) if rest else Path(".")
-        if len(rest) > 1:
-            specs_relative_dir = rest[1]
+def _positive_progress_interval(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("progress interval must be finite and positive")
+    return number
+
+
+def _staged_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Validate the captured Git index")
+    parser.add_argument("repo_root", nargs="?", default=".", type=Path)
+    parser.add_argument("specs_dir", nargs="?")
+    parser.add_argument("--events-out", type=Path)
+    parser.add_argument("--progress-interval", type=_positive_progress_interval, default=5.0)
+    args = parser.parse_args([arg for arg in argv if arg != "--staged"])
+    repo_root = args.repo_root.resolve()
+    observer = ValidationProgress(repo_root, events_out=args.events_out,
+                                  interval=args.progress_interval)
+    observer.start()
+    old_term = None
+    if threading.current_thread() is threading.main_thread():
+        def interrupted(signum, frame):
+            raise SystemExit(128 + signum)
+        old_term = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        if args.specs_dir is not None:
+            specs_relative_dir = args.specs_dir
         else:
             # Explicit hook calls use BUG-338's per-path resolver. A standalone
             # invocation without a spec root retains preflight's single-root
@@ -3620,20 +3765,40 @@ def main(argv: list[str] | None = None) -> int:
                     kit_root = _preflight.resolve_kit_root(repo_root)
                 except _preflight.KitRootError as exc:
                     # R4: ambiguity/no-root refuses rather than choosing silently.
-                    print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
-                    return 1
+                    raise StagedValidationError(str(exc)) from exc
                 specs_relative_dir = f"{kit_root.relative_to(Path(repo_root).resolve()).as_posix()}/specs"
-        try:
-            report = validate_staged(repo_root, specs_relative_dir)
-        except StagedValidationError as exc:
-            print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
-            return 1
+        report = validate_staged(repo_root, specs_relative_dir, progress=observer.update)
         has_errors = any(
             any(not _is_warning(finding) for finding in findings)
             for findings in report["results"].values()
         )
-        print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 1 if has_errors else 0
+        print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
+        code = 1 if has_errors else 0
+        observer.finish("failed" if has_errors else "passed", code, report=report)
+        return code
+    except StagedValidationError as exc:
+        print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr, flush=True)
+        observer.finish("refused", 1)
+        return 1
+    except KeyboardInterrupt:
+        observer.finish("interrupted", 130)
+        return 130
+    except SystemExit as exc:
+        code = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+        observer.finish("interrupted" if code >= 128 else "error", code)
+        raise
+    except BaseException:
+        observer.finish("error", 1)
+        raise
+    finally:
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if any(arg == "--staged" for arg in argv):
+        return _staged_main(argv)
     if argv and argv[0] == "--generate-legacy-ids":
         # SPEC-416 R5: freeze each registered project's legacy-ID list (generated, never hand-written).
         rest = argv[1:]
@@ -3657,7 +3822,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
             "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH] [--base-revision REV]\n"
-            "       python3 validate_specs.py --staged <repo-root> [<kit>/specs]\n"
+            "       python3 validate_specs.py --staged <repo-root> [<kit>/specs] "
+            "[--events-out FILE] [--progress-interval SECONDS]\n"
             "       python3 validate_specs.py --spec-metadata-audit <specs-dir> [--config PATH] "
             "[--field version|tags] [--required] [--allowed v1,v2]\n"
             "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]"

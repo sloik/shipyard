@@ -1148,6 +1148,7 @@ class SpecCache:
                     "durable": (found or {}).get("durable", (state or {}).get("status")),
                     "effective": effective,
                     "reason": (found or {}).get("reason", status_store_module.SYNC_DURABLE_STALE_BEHIND),
+                    **({"recovery_action": found["recovery_action"]} if (found or {}).get("recovery_action") else {}),
                     "spec_path": str(entry.path),
                 })
         return {"checked": len(entries), "mismatches": mismatches,
@@ -1172,7 +1173,16 @@ class SpecCache:
                         file_status,
                         source="frontmatter-reconcile",
                         note="newer frontmatter status repaired stale durable status",
-                        payload={"file_mtime": file_mtime},
+                        payload={
+                            **(state.get("payload") or {}),
+                            "file_mtime": file_mtime,
+                            "spec_path": str(self._entries[spec_id].path.resolve()),
+                            "canonical_spec_path": str(self._entries[spec_id].path.resolve()),
+                            **({"previous_spec_path": state["payload"]["spec_path"]}
+                               if (state.get("payload") or {}).get("spec_path")
+                               and state["payload"]["spec_path"] != str(self._entries[spec_id].path.resolve())
+                               else {}),
+                        },
                     )
                     return file_status
                 return str(state["status"])

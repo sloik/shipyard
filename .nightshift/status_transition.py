@@ -2,11 +2,14 @@
 
 ``board.py`` calls ``gate_status_write`` from its single durable-writer path and
 ``board_ctl.py transition`` calls the same function with the board down, so a
-refusal is the same text and leaves the same transfer-refusal record either way.
+refusal uses the same text either way. Cross-project start refusals are read-only;
+other refusals retain the existing transfer-refusal record.
 Nothing here imports FastAPI; PyYAML is the only third-party module.
 """
 
 from __future__ import annotations
+
+import dependency_registry
 
 import json
 import os
@@ -39,7 +42,8 @@ def sanitize_transfer_refusal_text(text: str) -> str:
 
 def render_scalar_field_line(key: str, value: str) -> str:
     """Render ``key: value`` as one safely-quoted YAML mapping line."""
-    dumped = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True)
+    dumped = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True,
+                            width=1_000_000)
     return dumped.rstrip("\n")
 
 
@@ -48,6 +52,43 @@ def upsert_or_remove_field_line(fm_block: str, key: str, rendered_line: str | No
 
     Every other line (order, list style, date quoting) is preserved byte-for-byte.
     """
+    # Older refusal records may be wrapped quoted scalars. Removing only their
+    # first physical line leaves a dangling continuation and corrupts the spec.
+    # YAML source marks identify the entire scalar without reserializing any
+    # neighboring field, comment, list style or date.
+    try:
+        mapping = yaml.compose(fm_block)
+    except yaml.YAMLError as exc:
+        raise ValueError("malformed frontmatter scalar field") from exc
+    spans = []
+    if mapping is not None:
+        if not isinstance(mapping, yaml.MappingNode):
+            raise ValueError("frontmatter must be a mapping")
+        for key_node, value_node in mapping.value:
+            if key_node.value != key or key_node.start_mark.column != 0:
+                continue
+            if not isinstance(value_node, yaml.ScalarNode):
+                raise ValueError(f"{key} must be a scalar")
+            end = value_node.end_mark.index
+            if end < key_node.start_mark.index:
+                # compose resolves aliases to the earlier anchored node; only
+                # the alias field itself belongs to this edit.
+                end = key_node.end_mark.index
+            if end <= key_node.end_mark.index or value_node.end_mark.column:
+                newline = fm_block.find("\n", end)
+                end = len(fm_block) if newline < 0 else newline + 1
+            spans.append((key_node.start_mark.index, end))
+    if spans:
+        out, cursor = [], 0
+        for index, (start, end) in enumerate(spans):
+            out.append(fm_block[cursor:start])
+            if index == 0 and rendered_line is not None:
+                out.append(rendered_line)
+                if fm_block[start:end].endswith("\n"):
+                    out.append("\n")
+            cursor = end
+        out.append(fm_block[cursor:])
+        return "".join(out)
     lines = fm_block.split("\n")
     prefix = f"{key}:"
     out: list[str] = []
@@ -131,6 +172,11 @@ def gate_status_write(
             record_refusal(message)
         raise ValueError(message)
 
+    if status == "in_progress":
+        gate = dependency_registry.start_gate(specs_dir, frontmatter)
+        if not gate["ok"]:
+            # No transfer-refusal stamp: a denied start must not mutate the spec.
+            raise ValueError("; ".join(reason["message"] for reason in gate["reasons"]))
     if status not in VALID_SPEC_STATUSES:
         raise ValueError(f"invalid status: {status}")
     if status not in allowed_statuses_for_spec(dict(frontmatter)):
@@ -138,7 +184,7 @@ def gate_status_write(
     refusal = promotion_transition_error(frontmatter, status, specs_dir=specs_dir)
     if refusal:
         refuse(refusal)
-    if status == "done":
+    if status in {"ready", "in_progress", "done"}:
         # BUG-337: release-manifest.json is canonical-only release bookkeeping, never
         # distributed to installs; an install with no manifest skips this check.
         import release_handoff
@@ -152,7 +198,7 @@ def gate_status_write(
                 raise ValueError(f"release handoff validation unavailable: {exc}") from exc
             from validate_specs import split_findings
             errors, advisory = split_findings(
-                release_handoff.validate_spec_handoff(dict(frontmatter), Path(canonical_dir), manifest)
+                release_handoff.validate_spec_handoff({**dict(frontmatter), "status": status}, Path(canonical_dir), manifest)
             )
             if warnings is not None:
                 warnings.extend(advisory)

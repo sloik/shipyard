@@ -359,6 +359,31 @@ Nightshift ships two git hooks:
 
 ### Staged spec validation (SPEC-358)
 
+**Invocation evidence (SPEC-NS-KIT-245).** Staged CLI validation keeps the existing
+JSON report on stdout and emits flushed JSONL on stderr: `validation_started`,
+`validation_progress` and `validation_finished`. Each record carries `run_id`,
+monotonic `sequence`, elapsed seconds, phase and phase-local processed/total
+counts. A heartbeat every five seconds proves only that the observer is alive;
+unchanged counts can mean a slow operation. `completed` counts traversed specs,
+including unchanged specs safely skipped by the existing staged differential.
+
+Events are also retained in the Git common directory at the relative
+`events_ref` printed in each event (`nightshift/validation/<run_id>.jsonl`). Resolve
+that root with `git rev-parse --git-common-dir`; linked worktrees share the root
+but every invocation has a unique file. `--events-out FILE` overrides the sink;
+`--progress-interval SECONDS` changes the finite positive heartbeat interval.
+`sink_status: unavailable` explicitly reports failure to retain the events while
+leaving the validation result unchanged. Raw findings remain in the stdout report.
+
+Match the run ID and read its final `validation_finished`: `outcome` is passed,
+failed, refused, error or interrupted; `exit_code` is the validator's result.
+Completed reports include `report_sha256`, SHA256 of their parsed JSON serialized
+with Python `json.dumps(report, sort_keys=True, ensure_ascii=True).encode()`.
+**No final event means unknown/incomplete**, including SIGKILL or machine loss.
+Keep polling/resuming the native command session until it returns its exit code;
+a finished validator does not prove that later hook gates or the Git commit passed.
+Progress and retained events never authorize acceptance, release or lifecycle moves.
+
 `hooks/pre-commit` validates specs by invoking
 `python3 validate_specs.py --staged <repo-root>`, which reads the Git
 **index snapshot** (`git ls-files --stage` + `git cat-file`) — never the
@@ -1314,3 +1339,25 @@ report "owner needed". Do not kill, restart or retry the worker because of this
 wait; ask the worker and the owner before any stall action. Terminal states still
 win. Without a valid wait declaration, the existing phase/20/40-minute ladder
 and silent-worker stall behavior remain unchanged.
+
+
+### Frozen legacy IDs and project hook adoption (BUG-NS-KIT-246)
+
+The kit hook provides local, offline **legacy-ID acceptance**: the existing
+commit ID grammar also accepts exact IDs (including suffixed forms) from the
+registered project's `spec-id-legacy/<CODE>.json`. An unreadable list emits one
+warning naming its path and keeps grammar-only validation. Existing lifecycle
+trailers and bracketed-lifecycle rejection still apply. History replay uses the
+same project membership without running project configuration or terminal checks.
+
+Release dry-run/apply and doctor report `project_owned_commit_msg` for an active
+project-owned fork, with four new-grammar probes (SPEC, BUG, NFR, QUESTIONS), up
+to three frozen legacy probes, and the subjects the fork rejects. The fork stays
+project-owned; `doctor --fix` never replaces it. To adopt the managed hook,
+resolve the active path with `git rev-parse --git-path hooks/commit-msg`, back it
+up to `commit-msg.nightshift-prev`, copy `.nightshift/hooks/commit-msg` over the
+active hook and make it executable (`chmod +x`). Then let the next whole-kit
+release refresh the recognized kit hook. Retain the backup for rollback; release
+refresh also uses that backup name, so archive an original fork separately if it
+must survive later refreshes. Fartownik's FART-OPS-026 fork is the known affected
+installation; adoption there is a separate project follow-up.

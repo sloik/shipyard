@@ -1,6 +1,6 @@
 ---
 name: nightshift
-version: 3.26.4
+version: 3.26.12
 description: "Interactive companion for the Nightshift Kit autonomous dev loop. Use this skill whenever the user mentions nightshift, night shift, autonomous dev loop, creating specs, bootstrapping a dev loop, retrofitting a project with nightshift, spec drift, spec sync, or anything related to setting up or managing an autonomous code execution pipeline. Also triggers on: 'write a spec', 'create a spec', 'add nightshift', 'check specs', 'spec drift', 'nightshift config', 'nightshift status', 'nightshift validate', 'nightshift board', 'board api', 'spec status transition', 'search specs', 'check rules'. If the user is working with .nightshift/ folders, specs/ directories, config.yaml for dev loops, or mentions LOOP.md / BOOTSTRAP.md / ORCHESTRATOR.md, use this skill."
 ---
 
@@ -938,3 +938,5 @@ controller recovery alone reaches ready. Preserve old evidence and candidate;
 never accept, merge, complete or clean the old run. A new run requires its own
 original admission. Ordinary installed, authoring, expiry and parallel callback
 gates remain strict.
+
+Commit hooks accept exact registered frozen legacy IDs offline. Release and doctor report `project_owned_commit_msg` with compatibility probes and a manual backup/adoption path; doctor never replaces forks. See GIT.md and guides/doctor.md (BUG-NS-KIT-246).

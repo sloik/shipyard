@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from pathlib import Path
 import config_migrations
 import release
 import release_handoff
+import spec_id
 from observability_enroll import classify_path as observability_classify
 from observability_enroll import release_disposition
 
@@ -315,6 +317,71 @@ def _suite_environment(junit_xml: Path | None) -> dict[str, str]:
             f"{existing} {junit_option}" if existing else junit_option
         )
     return environment
+
+
+RELEASE_PREPARATION_FORMAL = (
+    "tests/test_formal_audit_trace_mutations.py",
+    "tests/test_formal_current_trace_capture.py",
+)
+RELEASE_PREPARATION_SENTINELS = (
+    "tests/test_board_search_benchmark.py::test_production_guard_has_no_functional_window_override_and_caps_arm",
+    "tests/test_board_search_benchmark.py::test_execution_phase_collection_orders_reuses_and_retains_first_abort",
+)
+
+
+def _release_preparation(canonical: Path, manifest: dict, runner: SuiteRunner) -> tuple[dict, list[str]]:
+    """Run the bounded release-environment checks before the full suite."""
+    started = time.monotonic()
+    managed = {str(entry.get("path")) for entry in manifest.get("files", [])}
+    if "release_coordinator.py" not in managed:
+        return {"status": "not_applicable", "reason": "release coordinator is not in this payload"}, []
+    reference_path = canonical / "tests/search_reference.py"
+    try:
+        module_spec = importlib.util.spec_from_file_location("release_search_reference", reference_path)
+        if module_spec is None or module_spec.loader is None:
+            raise ValueError("search reference module unavailable")
+        reference = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(reference)
+        search_compatibility = reference.compatibility_preflight(canonical / "board.py")
+    except (OSError, ValueError, ImportError) as exc:
+        return {"status": "failed", "search_compatibility": {"error": str(exc)}}, [
+            f"functional search compatibility failed: {exc}"
+        ]
+    try:
+        command = _suite_argv(manifest["canonical_suite"], "command")
+    except (KeyError, ValueError) as exc:
+        return {"status": "unavailable", "error": str(exc)}, [f"release preparation unavailable: {exc}"]
+    selected = {
+        "formal_collection": [*command[:-1], "--collect-only", *RELEASE_PREPARATION_FORMAL],
+        "harness_sentinels": [*command[:-1], *RELEASE_PREPARATION_SENTINELS],
+    }
+    source_paths = (*RELEASE_PREPARATION_FORMAL, "tests/test_board_search_benchmark.py")
+    missing_sources = [path for path in source_paths if not (canonical / path).is_file()]
+    evidence = {"status": "passed", "interpreter": str(Path(sys.executable).resolve()),
+                "environment_sha256": _repair_environment_digest(),
+                "search_compatibility": search_compatibility,
+                "sources": {path: hashlib.sha256((canonical / path).read_bytes()).hexdigest() for path in source_paths},
+                "steps": {}}
+    errors = [f"release preparation source missing: {path}" for path in missing_sources]
+    if missing_sources:
+        evidence["sources"] = {}
+        evidence["status"] = "failed"
+        evidence["elapsed_s"] = round(time.monotonic() - started, 3)
+        return evidence, errors
+    for name, argv in selected.items():
+        result = _run_canonical_suite_step(runner, argv, canonical)
+        evidence["steps"][name] = {"argv": argv, "returncode": result.returncode,
+                                   "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]}
+        if result.returncode:
+            errors.append(f"release preparation {name} failed: {(result.stderr or result.stdout).strip()[-500:]}")
+        if name == "formal_collection" and result.stdout and any(path not in result.stdout for path in RELEASE_PREPARATION_FORMAL):
+            errors.append("release preparation formal_collection omitted selected node IDs")
+        if name == "harness_sentinels" and "skipped" in (result.stdout + result.stderr).lower():
+            errors.append("release preparation harness_sentinels reported skips")
+    evidence["elapsed_s"] = round(time.monotonic() - started, 3)
+    if errors:
+        evidence["status"] = "failed"
+    return evidence, errors
 
 
 def _run_canonical_suite(
@@ -1556,14 +1623,14 @@ def _commit_msg_hook_target(root: Path) -> Path | None:
     return directory / "commit-msg"
 
 
-def _hook_verdict(hook: Path, message_file: Path, scratch: Path) -> tuple[bool, str]:
+def _hook_verdict(hook: Path, message_file: Path, scratch: Path, *, identity: dict | None = None) -> tuple[bool, str]:
     """Run one hook on one message file from an empty directory (SPEC-NS-KIT-143 R2).
 
     The working directory holds no ``.nightshift`` tree and is not a git
     repository, so the hook's SPEC-183 path and terminal-outcome check are inert
     and nothing in any project can be written. The environment is minimal.
     """
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(scratch), "LC_ALL": "C"}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(scratch), "LC_ALL": "C", **(identity or {})}
     try:
         proc = subprocess.run(
             ["bash", str(hook), str(message_file)],
@@ -1578,7 +1645,27 @@ def _hook_verdict(hook: Path, message_file: Path, scratch: Path) -> tuple[bool, 
     return False, re.sub(r"^\[nightshift commit-msg\] ERROR:\s*", "", reason)[:200]
 
 
-def _replay_commit_msg_history(root: Path, new_hook: Path, old_hook: Path) -> dict:
+def _commit_msg_probe_identity(root: Path, install: Path, scratch: Path) -> dict:
+    """Snapshot only local identity/membership; no config, scanner or project cwd.
+
+    Put the snapshot outside the hook cwd so no project-side hook feature is
+    enabled. Expand the registry identity before HOME is isolated for execution.
+    """
+    context = scratch / "id-context"
+    context.mkdir()
+    shutil.copyfile(Path(spec_id.__file__), context / "spec_id.py")
+    code, ids, _warning = spec_id.commit_project_legacy_ids(install, root)
+    rows = [{"path": str(root.resolve()), "code": code}] if code else []
+    (context / "projects-registry.json").write_text(json.dumps({"projects": rows}))
+    if code:
+        (context / "spec-id-legacy").mkdir()
+        # Keep unreadable membership grammar-only; do not fabricate membership.
+        if _warning is None:
+            (context / "spec-id-legacy" / f"{code}.json").write_text(json.dumps({"project_code": code, "ids": sorted(ids)}))
+    return {"NIGHTSHIFT_COMMIT_PROJECT_ROOT": str(root.resolve()), "NIGHTSHIFT_COMMIT_ID_INSTALL": str(context)}
+
+
+def _replay_commit_msg_history(root: Path, new_hook: Path, old_hook: Path, *, install: Path | None = None) -> dict:
     """SPEC-NS-KIT-143 R2: replay recent commit messages through the new and current hooks.
 
     Window: reachable from HEAD, authored in the last 30 days, merges excluded, at most 500.
@@ -1604,14 +1691,15 @@ def _replay_commit_msg_history(root: Path, new_hook: Path, old_hook: Path) -> di
     examples: list[str] = []
     with tempfile.TemporaryDirectory(prefix="ns-commit-msg-replay-") as tmp:
         scratch = Path(tmp)
+        identity = _commit_msg_probe_identity(root, install or root / ".nightshift", scratch)
         message_file = scratch / "COMMIT_EDITMSG"
         for sha in shas:
             body = _run(["git", "log", "-1", "--format=%B", sha], cwd=root).stdout
             message_file.write_text(body)
-            new_ok, reason = _hook_verdict(new_hook, message_file, scratch)
+            new_ok, reason = _hook_verdict(new_hook, message_file, scratch, identity=identity)
             if new_ok:
                 continue
-            old_ok, _old_reason = _hook_verdict(old_hook, message_file, scratch)
+            old_ok, _old_reason = _hook_verdict(old_hook, message_file, scratch, identity=identity)
             if not old_ok:
                 already_rejected += 1
                 continue
@@ -1628,6 +1716,43 @@ def _replay_commit_msg_history(root: Path, new_hook: Path, old_hook: Path) -> di
     }
 
 
+def project_owned_commit_msg(root: Path, source: Path, install: Path) -> dict | None:
+    """Report a fork's compatibility without writing the active hook or its mode."""
+    if not source.is_file():
+        return None
+    target = _commit_msg_hook_target(root)
+    if target is None or not target.is_file():
+        return None
+    try:
+        if COMMIT_MSG_HOOK_HEADER in target.read_bytes()[:300].decode("utf-8", errors="replace"):
+            return None
+    except OSError:
+        return None
+    code, legacy, warning = spec_id.commit_project_legacy_ids(install, root)
+    probe_code = code or "DEMO"
+    ids = [f"{kind}-{probe_code}-001" for kind in spec_id.ID_KINDS] + sorted(legacy)[:3]
+    probes = []
+    with tempfile.TemporaryDirectory(prefix="ns-commit-msg-probes-") as tmp:
+        scratch = Path(tmp)
+        identity = _commit_msg_probe_identity(root, install, scratch)
+        message = scratch / "COMMIT_EDITMSG"
+        for token in ids:
+            subject = f"[{token}] docs: compatibility probe"
+            message.write_text(subject + "\n")
+            kit_ok, kit_reason = _hook_verdict(source, message, scratch, identity=identity)
+            fork_ok, fork_reason = _hook_verdict(target, message, scratch, identity=identity)
+            probes.append({"subject": subject, "kit_accepts": kit_ok, "fork_accepts": fork_ok,
+                           "kit_reason": kit_reason, "fork_reason": fork_reason})
+    rejected = [p["subject"] for p in probes if not p["fork_accepts"]]
+    remediation = (f"Back up {target} to {target.with_name('commit-msg.nightshift-prev')}; "
+                   f"replace the fork with {install / 'hooks' / 'commit-msg'} and make it executable, "
+                   "then let the next whole-kit release refresh it. No automatic replacement by doctor --fix.")
+    summary = "project_owned_commit_msg; fork rejects: " + ("; ".join(rejected) or "none of the probes")
+    return {"finding": "project_owned_commit_msg", "summary": summary,
+            "probes": probes, "rejected_probes": rejected, "remediation": remediation,
+            "legacy_warning": warning}
+
+
 def plan_commit_msg_refresh(
     plan: RepositoryPlan, source: Path, *, mode: str, dry_run: bool
 ) -> dict | None:
@@ -1636,7 +1761,7 @@ def plan_commit_msg_refresh(
     Never creates a hook (D1). Defers when the replay finds commits the new hook
     would reject (D2) unless ``mode == "force"`` (D3). ``dry_run`` writes nothing.
     """
-    if mode == "never" or not source.is_file():
+    if not source.is_file():
         return None
     record: dict = {"repository": str(plan.root)}
     target = _commit_msg_hook_target(plan.root)
@@ -1647,10 +1772,13 @@ def plan_commit_msg_refresh(
     except OSError:
         return {**record, "commit_msg_hook": "absent", "summary": "absent"}
     if COMMIT_MSG_HOOK_HEADER not in existing[:300].decode("utf-8", errors="replace"):
-        return {**record, "commit_msg_hook": "project_owned", "summary": "project_owned"}
+        finding = project_owned_commit_msg(plan.root, source, plan.installs[0])
+        return {**record, "commit_msg_hook": "project_owned", **(finding or {"summary": "project_owned"})}
+    if mode == "never":
+        return None
     if existing == source.read_bytes():
         return {**record, "commit_msg_hook": "unchanged", "summary": "unchanged"}
-    replay = _replay_commit_msg_history(plan.root, source, target)
+    replay = _replay_commit_msg_history(plan.root, source, target, install=plan.installs[0])
     record.update(replay)
     rejects = replay["would_reject"]
     if rejects and mode != "force":
@@ -1683,6 +1811,8 @@ def commit_msg_hook_table(entries: list[dict]) -> str:
     lines = ["commit-msg hook refresh", "repository  ->  outcome"]
     for entry in entries:
         lines.append(f"{entry['repository']}  ->  {entry['summary']}")
+        if entry.get("remediation"):
+            lines.append(f"    {entry['remediation']}")
         for example in entry.get("examples", []):
             lines.append(f"    e.g. {example}")
     return "\n".join(lines)
@@ -2470,6 +2600,15 @@ def coordinate_release(
         ),
     }
 
+    # Report forks even when policy, dirty state or preflight later prevents a
+    # rollout. These are read-only observations, independent of refresh mode.
+    fork_repositories = set()
+    for plan in plans:
+        finding = project_owned_commit_msg(plan.root, canonical / "hooks" / "commit-msg", plan.installs[0])
+        if finding:
+            result["commit_msg_hooks"].append({"repository": str(plan.root), "commit_msg_hook": "project_owned", **finding})
+            fork_repositories.add(plan.root)
+
     result["readiness_summary"] = {"discovery_complete": True, "rows": [
         {"install": str(install), "repository": str(plan.root)} for plan in plans for install in plan.installs
     ] + [{"install": entry["install"], "repository": entry.get("repository")} for entry in initial_skips]}
@@ -2525,6 +2664,24 @@ def coordinate_release(
                     "repository": str(plan.root),
                     "installs": [str(item) for item in plan.installs],
                 }
+                for plan in plans
+            ]
+            result["duration_s"] = round(time.monotonic() - started, 3)
+            result["completed_at"] = datetime.now(UTC).isoformat()
+            _set_outcome(result)
+            return result
+        preparation_runner = canonical_suite_runner or (
+            lambda argv, cwd: _run_canonical_suite(argv, cwd)
+        )
+        preparation, preparation_errors = _release_preparation(
+            canonical, manifest, preparation_runner
+        )
+        result["release_preparation"] = preparation
+        if preparation_errors:
+            result["failure_class"] = "canonical_preflight"
+            result["unexpected_failure"] = "; ".join(preparation_errors)
+            result["untouched"] = [
+                {"repository": str(plan.root), "installs": [str(item) for item in plan.installs]}
                 for plan in plans
             ]
             result["duration_s"] = round(time.monotonic() - started, 3)
@@ -2761,7 +2918,7 @@ def coordinate_release(
                 hook = wire_pre_commit_hook(install, dry_run=True)
                 if hook:
                     result["hooks_wired"].append(hook)
-            refreshed = plan_commit_msg_refresh(
+            refreshed = None if plan.root in fork_repositories else plan_commit_msg_refresh(
                 plan,
                 canonical / "hooks" / "commit-msg",
                 mode=refresh_commit_msg_hooks,
@@ -2811,7 +2968,7 @@ def coordinate_release(
 
         # SPEC-NS-KIT-143: refresh the wired commit-msg hook (replay-gated) so the
         # release commit below runs the new grammar; first install is the shared source.
-        refreshed = plan_commit_msg_refresh(
+        refreshed = None if plan.root in fork_repositories else plan_commit_msg_refresh(
             plan,
             next(
                 (i / "hooks" / "commit-msg" for i in plan.installs if (i / "hooks" / "commit-msg").is_file()),
@@ -2966,6 +3123,42 @@ def discover_installs(
             sync.EXTRA_SCAN_ROOTS = extras
     installs = [path for path in found if path.resolve() != canonical.resolve()]
     return installs, [str(r) for r in roots]
+
+
+def rehearse_candidate(
+    canonical: Path, manifest: dict, installs: Iterable[Path], *, release_root: Path,
+    canonical_suite_runner: SuiteRunner, protected_inputs: Iterable[Path] = (),
+    controlled_writer: Callable[[], None] | None = None,
+) -> dict:
+    """Apply one controlled candidate rehearsal only to installs below ``release_root``."""
+    root = release_root.resolve()
+    selected = [Path(install).resolve() for install in installs]
+    outside = [str(install) for install in selected if not install.is_relative_to(root)]
+    if outside:
+        return {"status": "refused", "reason": "install outside rehearsal root", "outside": outside,
+                "qualified": False}
+    protected = [Path(path).resolve() for path in protected_inputs]
+    outside_inputs = [str(path) for path in protected if not path.is_relative_to(root)]
+    if outside_inputs:
+        return {"status": "refused", "reason": "protected input outside rehearsal root",
+                "outside": outside_inputs, "qualified": False}
+    before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in protected}
+    if controlled_writer is not None:
+        controlled_writer()
+    changed = [path for path in protected if not path.is_file() or
+               hashlib.sha256(path.read_bytes()).hexdigest() != before[str(path)]]
+    if changed:
+        return {"status": "refused", "reason": "rehearsal protected input changed after planning",
+                "changed": [str(path) for path in changed], "qualified": False,
+                "controlled_writer": controlled_writer is not None}
+    result = coordinate_release(
+        canonical, selected, manifest, dry_run=False, release_root=root,
+        canonical_suite_runner=canonical_suite_runner,
+    )
+    return {"status": "passed" if result.get("failure_class") is None else "failed",
+            "qualified": False, "controlled_suite_runner": True,
+            "root": str(root), "installs": [str(path) for path in selected],
+            "result": result}
 
 
 def main() -> int:

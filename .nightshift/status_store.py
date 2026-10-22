@@ -112,6 +112,97 @@ def _json_loads(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _git_path(path: Path, *args: str) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _primary_worktree(path: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    return next((Path(line.removeprefix("worktree ")).resolve() for line in result.stdout.splitlines() if line.startswith("worktree ")), None)
+
+
+def _checkpoint_path_identity(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    source = Path(value).expanduser().resolve()
+    top, git_dir, common_dir = (_git_path(source.parent, flag) for flag in ("--show-toplevel", "--git-dir", "--git-common-dir"))
+    if top is None or git_dir is None or common_dir is None:
+        return None
+    try:
+        relative = source.relative_to(top).as_posix()
+    except ValueError:
+        return None
+    if git_dir == common_dir:
+        return {"spec_path": str(source), "project_relative_spec_path": relative}
+    primary = _primary_worktree(source.parent)
+    if primary is None:
+        return None
+    return {"spec_path": str((primary / relative).resolve()), "project_relative_spec_path": relative, "worktree_spec_path": str(source)}
+
+
+def _normalize_checkpoint_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    normalized = dict(payload)
+    identity = _checkpoint_path_identity(normalized.get("canonical_spec_path") or normalized.get("spec_path"))
+    if identity is None:
+        return normalized
+    normalized.update({"spec_path": identity["spec_path"], "canonical_spec_path": identity["spec_path"], "project_relative_spec_path": identity["project_relative_spec_path"]})
+    if "worktree_spec_path" in identity:
+        normalized["worktree_spec_path"] = identity["worktree_spec_path"]
+    return normalized
+
+
+def _legacy_worktree_path_matches(checkpoint_path: Any, spec_path: Path) -> bool:
+    if not isinstance(checkpoint_path, str) or not checkpoint_path or not Path(checkpoint_path).is_absolute():
+        return False
+    current = spec_path.resolve()
+    top = _git_path(current.parent, "--show-toplevel")
+    if top is None:
+        return False
+    try:
+        expected = current.relative_to(top).parts
+    except ValueError:
+        return False
+    parts = Path(checkpoint_path).expanduser().resolve().parts
+    for i, part in enumerate(parts):
+        if parts[i:i + 2] == (".claude", "worktrees") and len(parts) > i + 3:
+            if (Path(*parts[:i]) == top and parts[i + 2].startswith("agent-")
+                    and tuple(parts[i + 3:]) == expected):
+                return True
+        if part == "nightshift-worktrees" and len(parts) > i + 3:
+            temporary_root = parts[:3] == ("/", "var", "folders") or parts[:4] == ("/", "private", "var", "folders")
+            if temporary_root and tuple(parts[i + 3:]) == expected:
+                return True
+    return False
+
+
+def _checkpoint_path_matches(payload: dict[str, Any], spec_path: Path) -> bool:
+    checkpoint_path = payload.get("spec_path")
+    if not checkpoint_path or Path(str(checkpoint_path)).expanduser().resolve() == spec_path.resolve():
+        return True
+    # Relative metadata alone cannot authorize an unrelated absolute locator.
+    identity = _checkpoint_path_identity(str(spec_path))
+    if identity and Path(str(checkpoint_path)).expanduser().resolve() == Path(identity["spec_path"]):
+        return True
+    return _legacy_worktree_path_matches(checkpoint_path, spec_path)
+
+
 def is_canonical_repository_relative_path(
     value: Any, *, allow_directory_marker: bool = False,
 ) -> bool:
@@ -1285,6 +1376,7 @@ class StatusStore:
             raise ValueError("spec_id required")
         if not status:
             raise ValueError("status required")
+        payload = _normalize_checkpoint_payload(payload)
         timestamp = created_at or _utc_now()
         with closing(self._connect()) as conn:
             with conn:
@@ -1370,7 +1462,7 @@ class StatusStore:
             if before_administrative_write is not None:
                 before_administrative_write()
             checkpoint = self.get_state(spec_id) if before_administrative_write is not None else None
-            payload = {"spec_path": str(path), "canonical_spec_path": str(path), **(extra_payload or {})}
+            payload = _normalize_checkpoint_payload({"spec_path": str(path), "canonical_spec_path": str(path), **(extra_payload or {})})
             if not (checkpoint and checkpoint.get("status") == status and checkpoint.get("run_id") == run_id
                     and checkpoint.get("source") == source and checkpoint.get("note") == (note or reason_text)
                     and checkpoint.get("payload") == payload):
@@ -1679,8 +1771,7 @@ def should_reconcile_frontmatter_status(
         return False
     payload = durable_state.get("payload")
     if spec_path is not None and isinstance(payload, dict):
-        checkpoint_path = payload.get("spec_path")
-        if checkpoint_path and Path(str(checkpoint_path)) != spec_path:
+        if not _checkpoint_path_matches(payload, spec_path):
             return False
     checkpoint_mtime = checkpoint_epoch(durable_state)
     if checkpoint_mtime is None:
@@ -1715,7 +1806,11 @@ def classify_status_sync(
         if durable_status in TERMINAL_DURABLE_STATUSES
         else SYNC_DURABLE_STALE_BEHIND
     )
-    return {"durable": durable_status, "effective": durable_status, "reason": reason}
+    result = {"durable": durable_status, "effective": durable_status, "reason": reason}
+    payload = durable_state.get("payload")
+    if reason == SYNC_DURABLE_STALE_BEHIND and spec_path is not None and isinstance(payload, dict) and _legacy_worktree_path_matches(payload.get("spec_path"), spec_path):
+        result["recovery_action"] = "recognized legacy linked-worktree checkpoint: make the primary spec newer than the checkpoint and refresh; the board will reconcile it automatically"
+    return result
 
 
 def effective_status_view(

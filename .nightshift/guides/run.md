@@ -11,6 +11,8 @@ Requires: a ready spec in an installed project; read the parts in order: `run.md
 - Find `specs/SPEC-{spec-id}-*.md` (or exact filename match)
 - Validate `status: ready` — if not, error with current status and a suggestion (e.g. "status is draft — promote it with `/nightshift spec` first")
 
+- Check `requires_specs` before any claim, status flip, branch, worktree or commit: run `python3 .nightshift/dependency_registry.py start-gate --specs-dir .nightshift/specs <SPEC-ID> --json`; halt on a non-zero exit.
+
 **If no `spec-id`:**
 - Scan all specs for `status: ready`
 - Sort by layer (ascending), then priority (ascending)

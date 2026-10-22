@@ -13,6 +13,7 @@ Exit codes:
 
 import argparse
 import json
+import dependency_registry
 import os
 import re
 import sys
@@ -2397,6 +2398,11 @@ def dispatch_spec_command(args) -> int:
             f"Error: spec {args.spec_id} not found under {specs_dir}",
             file=sys.stderr,
         )
+        return 1
+
+    gate = dependency_registry.start_gate(specs_dir, spec_frontmatter)
+    if not gate["ok"]:
+        print(json.dumps({"spec_id": args.spec_id, "status": "refused", **gate}, indent=2))
         return 1
 
     # Optional config load (for custom handlers + runner.domain fallback).

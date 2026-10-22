@@ -25,10 +25,12 @@ explicitly approving any future-index cleanup. Never infer authority for a
 history rewrite: `history-remediation` is a separate dry-run-first operator
 operation with ref inventory and post-rewrite leak evidence.
 
-**Release handoff (SPEC-189):** When a spec changes a managed canonical protocol,
-runtime helper, schema, hook, config reference, or synced skill, add
-`release_handoff: {impact: required}` and create the matching portable
-`release-handoffs/<SPEC-ID>.json` artifact. Documentation-only or non-managed
+**Release plan and handoff (SPEC-243):** A release-impact spec declares
+`release_handoff: {impact: required}`. Before Ready it also needs a reviewed
+`release_plan` containing expected managed paths, required migrations, fleet
+sync scope, and a scope summary. The source-bound portable
+`release-handoffs/<SPEC-ID>.json` artifact is authored only after implementation
+creates a committed range, and remains required at Done and delivery. Documentation-only or non-managed
 work must instead record `impact: exempt` with a reason. Author a required
 artifact with `manifest_fingerprint:
 "pending-release-manifest-fingerprint-v1"` and the spec's declared target
@@ -950,8 +952,7 @@ is `not_evaluated`; so is a gate whose input was never supplied (for example no
 prerequisite snapshot). Absence of a check is never a `pass`. If a `not_before`
 time has elapsed the producer still gates on field presence: the state stays
 `time_gated` and a `time_gate_elapsed` diagnostic reports the discrepancy.
-`requires_specs` prerequisites are consulted only by parallel admission, and the
-gate says so.
+`requires_specs` prerequisites are enforced by the shared `dependency_registry.start_gate` on every start path at any worker limit. The primary lifecycle projection remains unchanged; qualified dependencies are also shown as a separate explanation gate.
 
 **Non-admission records.** `done`, `superseded`, blocked, NFR, QUESTIONS,
 main-container, unregistered-status and running (`in_progress`, unless held for
@@ -1163,6 +1164,20 @@ reconciling any bounded read-only review.
 ---
 
 ## Stacking Metadata
+
+Every start path enforces `requires_specs` through `dependency_registry.start_gate`
+at any worker limit, including named run/kickoff, preflight, record-transition,
+board status writes, sequential coordinator (also main-spec children), dispatch-spec,
+and rules check. A Ready spec may wait: resolvability and startability are separate.
+Before any claim or flip, helpers run
+`python3 .nightshift/dependency_registry.py start-gate --specs-dir .nightshift/specs <SPEC-ID> --json`.
+A refusal has no override flag: edit or remove the entry in a committed spec change.
+Registry precedence is explicit `--registry`/`registry_path` (authoritative even if
+missing), beside specs, kit nested layout, then the same install-relative paths in
+the main worktree of the same non-bare Git repository (parent of the absolute Git
+common directory). There is no environment/age/network fallback. Missing or invalid
+registry data refuses only consumers with nonempty prerequisites. Regenerate a
+missing main-checkout registry with `nightshift-sync.py registry`.
 
 Optional fields `provides`, `requires`, and `touches` help the board/orchestrator explain sequencing without replacing dependency declarations. `after:` is the hard dependency graph **within this project only**. For a prerequisite owned by another registered project, use `requires_specs:` with an explicit project and spec ID; admission reads that project without mutating it and refuses only the consumer if it is not `done`, unknown, missing, or malformed. `requires` warnings tell an agent that a capability provider is missing or should probably be declared as a hard dependency. `touches` warnings prevent unsafe parallel work when two ready specs edit the same protocol file or capability.
 

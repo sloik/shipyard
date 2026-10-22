@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import lifecycle
+import release_handoff
 import spec_artifacts
 from spec_frontmatter import (
     parse_spec_file,
@@ -120,6 +121,13 @@ def promote_to_ready(
         fm, parsed.body, reviewed=readiness_reviewed, specs_dir=path.parent)
     if readiness_refused:
         raise PromotionError(readiness_refused)
+    manifest_path = path.parent.parent / "release-manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        errors = release_handoff.validate_spec_handoff({**fm, "status": target_status}, path.parent.parent, manifest)
+        blocking = [item for item in errors if not item.startswith("WARNING:")]
+        if blocking:
+            raise PromotionError(f"promotion refused: {spec_id} release-plan validation: " + "; ".join(blocking))
 
     declared_gap = fm.get("promotion_gap")
     gap_kind = declared_gap.get("kind") if isinstance(declared_gap, Mapping) else None

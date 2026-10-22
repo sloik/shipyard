@@ -46,3 +46,25 @@ harness-launched worker (SPEC-300-004-001)" under Step 5 above for the
 definitive answer and its evidence. Only the hook's two universal rules
 fire in that case; the git guard and evidence gate remain the working
 backstops.
+
+
+### Frozen legacy IDs and project hook adoption (BUG-NS-KIT-246)
+
+The kit hook provides local, offline **legacy-ID acceptance**: the existing
+commit ID grammar also accepts exact IDs (including suffixed forms) from the
+registered project's `spec-id-legacy/<CODE>.json`. An unreadable list emits one
+warning naming its path and keeps grammar-only validation. Existing lifecycle
+trailers and bracketed-lifecycle rejection still apply. History replay uses the
+same project membership without running project configuration or terminal checks.
+
+Release dry-run/apply and doctor report `project_owned_commit_msg` for an active
+project-owned fork, with four new-grammar probes (SPEC, BUG, NFR, QUESTIONS), up
+to three frozen legacy probes, and the subjects the fork rejects. The fork stays
+project-owned; `doctor --fix` never replaces it. To adopt the managed hook,
+resolve the active path with `git rev-parse --git-path hooks/commit-msg`, back it
+up to `commit-msg.nightshift-prev`, copy `.nightshift/hooks/commit-msg` over the
+active hook and make it executable (`chmod +x`). Then let the next whole-kit
+release refresh the recognized kit hook. Retain the backup for rollback; release
+refresh also uses that backup name, so archive an original fork separately if it
+must survive later refreshes. Fartownik's FART-OPS-026 fork is the known affected
+installation; adoption there is a separate project follow-up.
