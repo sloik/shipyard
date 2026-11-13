@@ -6,8 +6,17 @@ script="$here/rotate-launchd-logs.sh"
 root=$(mktemp -d "${TMPDIR:-/tmp}/shipyard-rotate-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-size() { stat -f %z "$1"; }
-inode() { stat -f %i "$1"; }
+size() { wc -c <"$1" | tr -d ' '; }
+inode() { ls -i "$1" | awk '{print $1}'; }
+
+# BUG-SHIPYD-002: neither this test nor the script may depend on stat(1); its
+# flags differ between BSD and GNU. A shim that always fails goes first on PATH.
+shim="$root/shim"
+mkdir -p "$shim"
+printf '#!/bin/sh\necho "stat: must not be called (BUG-SHIPYD-002)" >&2\nexit 1\n' >"$shim/stat"
+chmod +x "$shim/stat"
+PATH="$shim:$PATH"
+export PATH
 
 # Missing dir is created; nothing to do exits 0.
 d="$root/missing/logs"

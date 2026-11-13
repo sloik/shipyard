@@ -11,5 +11,7 @@ func freeDiskBytes(dir string) (uint64, bool) {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, false
 	}
-	return uint64(st.Bavail) * uint64(st.Bsize), true
+	// Field types differ by platform (Bsize is int64 on Linux, Bavail is int64
+	// on FreeBSD); blocksToBytes clamps and saturates instead of wrapping.
+	return blocksToBytes(st.Bavail, st.Bsize), true
 }
