@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-003",
+  "type": "status-transition",
+  "created": "2026-11-13T11:30:30Z",
+  "actor": "coordinator",
+  "summary": "draft -> ready: Root cause confirmed: runner cache holds Go 1.26.10, go.dev lists 1.26.11 with the fix; owner asked for green CI on 2026",
+  "from": "draft",
+  "to": "ready",
+  "reason": "Root cause confirmed: runner cache holds Go 1.26.10, go.dev lists 1.26.11 with the fix; owner asked for green CI on 2026-11-13",
+  "evidence": [],
+  "run_id": "local-LuckyOrangeDolphin",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "ready",
+    "reason": "Root cause confirmed: runner cache holds Go 1.26.10, go.dev lists 1.26.11 with the fix; owner asked for green CI on 2026-11-13",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}
