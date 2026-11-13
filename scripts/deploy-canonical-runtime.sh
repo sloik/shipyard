@@ -63,7 +63,16 @@ fail_and_restore() {
 }
 
 cd "$repo_root"
-[[ -f "$legacy_plist" ]] || { print -u2 "missing legacy launchd plist: $legacy_plist"; exit 1; }
+# Template for the canonical plist: the legacy plist on a first migration,
+# otherwise the already-installed canonical plist (the legacy job was retired).
+if [[ -f "$legacy_plist" ]]; then
+  template_plist="$legacy_plist"
+elif [[ -f "$plist" ]]; then
+  template_plist="$plist"
+else
+  print -u2 "missing launchd plist: neither $legacy_plist nor $plist exists"
+  exit 1
+fi
 
 # This proves the replacement source before touching either launchd or bin/.
 "$make_cmd" smoke-full
@@ -81,7 +90,7 @@ fi
 
 # macOS rejects a rebuilt executable under the old ad-hoc-signed label. Clone
 # its operating settings to a fresh label, then start the canonical binary.
-cp "$legacy_plist" "$plist"
+[[ "$template_plist" == "$plist" ]] || cp "$template_plist" "$plist"
 "$plist_buddy_cmd" -c "Set :Label $label" "$plist"
 if [[ -e "$canonical_bin" ]]; then
   cp -p "$canonical_bin" "$prior_runtime"
