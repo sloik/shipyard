@@ -40,7 +40,8 @@ rotate() {
 
 for f in "$log_dir"/*.log; do
   [ -f "$f" ] || continue
-  size=$(stat -f %z "$f")
+  # wc -c, not stat: stat flags differ between BSD and GNU (BUG-SHIPYD-002).
+  size=$(wc -c <"$f" | tr -d ' ')
   if [ "$size" -gt "$max_bytes" ]; then
     rotate "$f"
   fi
