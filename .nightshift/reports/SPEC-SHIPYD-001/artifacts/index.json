@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-SHIPYD-001",
+  "entries": [
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T08:17:01Z",
+      "actor": "argo",
+      "summary": "draft -> ready: Owner approved retention policy 2026-11-13",
+      "path": "artifacts/20261113T081701Z-status-transition-draft-ready-owner-approved-retention-pol.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T08:17:01Z",
+      "actor": "argo",
+      "summary": "ready -> in_progress: Delegating to two worktree workers (capture store; launchd log rotation)",
+      "path": "artifacts/20261113T081701Z-status-transition-ready-in-progress-delegating-to-two-work.json"
+    }
+  ]
+}
