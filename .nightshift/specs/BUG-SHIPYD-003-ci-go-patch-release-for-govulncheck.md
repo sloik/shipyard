@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 0
 type: bugfix
-status: in_progress
+status: done
 after:
 - SPEC-BUG-159
 violates:
@@ -64,20 +64,20 @@ and only downloads when nothing cached satisfies it. Without `check-latest: true
 
 ## Requirements
 
-- [ ] R1: Every `actions/setup-go` step in `.github/workflows/` resolves the newest released patch
+- [x] R1: Every `actions/setup-go` step in `.github/workflows/` resolves the newest released patch
       of the requested Go minor, not the runner's cached one.
-- [ ] R2: The Go minor line (1.26) and the pinned action SHA are unchanged.
-- [ ] R3: The CI job `test` passes `make security` on `ubuntu-latest`.
+- [x] R2: The Go minor line (1.26) and the pinned action SHA are unchanged.
+- [x] R3: The CI job `test` passes `make security` on `ubuntu-latest`.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Each of the five `actions/setup-go` steps (`ci.yml` x2, `release.yml`, `desktop.yml`,
+- [x] AC1: Each of the five `actions/setup-go` steps (`ci.yml` x2, `release.yml`, `desktop.yml`,
       `smoke.yml`) sets `check-latest: true`; a count of `setup-go` uses equals a count of
       `check-latest: true` lines.
-- [ ] AC2: `actionlint` passes on all workflows (`make script-check`).
-- [ ] AC3: On the PR that carries this change, job `test` passes, including the step "Run reachable
+- [x] AC2: `actionlint` passes on all workflows (`make script-check`).
+- [x] AC3: On the PR that carries this change, job `test` passes, including the step "Run reachable
       vulnerability and Go security analysis", and the job log shows Go 1.26.11 or newer.
-- [ ] AC4: `go-version` values and action SHAs in the diff are unchanged. The SPEC-BUG-159
+- [x] AC4: `go-version` values and action SHAs in the diff are unchanged. The SPEC-BUG-159
       reachable-vulnerability gate passes again on `main` after merge.
 
 ## Scope Amendments
@@ -110,10 +110,10 @@ and only downloads when nothing cached satisfies it. Without `check-latest: true
 
 ```yaml
 schema_version: 1
-status: in_progress
-reason: mechanical transition to 'in_progress' via run run-20261113-shipyd003
+status: done
+reason: mechanical transition to 'done' via run run-20261113-shipyd003
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261113T174745Z-status-transition-ready-in-progress-mechanical-transition-.json
+record: artifacts/20261113T180143Z-status-transition-in-progress-done-mechanical-transition-t.json
 ```
