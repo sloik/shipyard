@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 0
 type: bugfix
-status: ready
+status: in_progress
 after:
 - SPEC-BUG-159
 violates:
@@ -104,10 +104,10 @@ and only downloads when nothing cached satisfies it. Without `check-latest: true
 
 ```yaml
 schema_version: 1
-status: ready
-reason: 'Root cause confirmed: runner cache holds Go 1.26.10, go.dev lists 1.26.11 with the fix; owner asked for green CI on 2026-11-13'
+status: in_progress
+reason: mechanical transition to 'in_progress' via run run-20261113-shipyd003
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261113T113030Z-status-transition-draft-ready-root-cause-confirmed-runner-.json
+record: artifacts/20261113T174745Z-status-transition-ready-in-progress-mechanical-transition-.json
 ```
