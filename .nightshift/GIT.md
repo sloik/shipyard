@@ -67,9 +67,10 @@ to the existing `StatusStore`. The durable local event supplies the stable run
 ID. Workers cannot transition state, and terminal transitions are idempotent.
 
 - When a spec is selected: set `status: in_progress` and commit
-  `[<spec-id>] chore: mark in_progress`.
+  `chore: mark <spec-id> in_progress` (no trailers; the hook accepts exactly this form).
 - When a spec completes: set `status: done` and commit
-  `[<spec-id>] chore: mark done`.
+  `chore: mark <spec-id> done` (with the terminal trailers, SPEC-221). The bracketed
+  `[<spec-id>] chore: mark ...` form is rejected: metrics reads only the exact form.
 - In orchestrator mode, the parent marks `in_progress` on `main` before launching
   a worktree sub-agent. Worktree-local status changes are not visible to the board
   until merged.
@@ -94,6 +95,103 @@ it during admission or recovery. Dirty mixed or
 opposite terminal edits are retained for explicit recovery; a clean tracked
 opposite value is safely corrected with the canonical `chore: mark` commit and
 trailers.
+
+
+### Complete first terminal projection (BUG-NS-KIT-167)
+
+The public parent queue seals v12 completion inputs before its first `started`
+receipt: exact candidate/run/decision/repository bindings, accepted evidence and
+verifier classifications, measured or unavailable parent tally, rationale and
+hash-bound existing checked-LE proof. Its immutable closure contains the spec,
+official status-transition artifact and index, committed together through normal
+hooks. No requirement, AC, scope, dependency or checkbox fact is manufactured.
+Staged validation reads inert captured index proof blobs, including referenced
+project-root files; worktree replacements cannot override the captured proof.
+
+An accepted application decision remains `done` if tracked projection or cleanup
+is pending. API/board/CLI diagnostics name the actual reason and
+`queue.recover_terminal_projection(handle)` action. Retry reuses the sealed
+closure and existing candidate/fresh-main acceptance: no application test, merge
+or replacement admission is replayed. A pending kit release remains separate
+from application completion. Genuine older status-only receipts retain the
+receipt-bound recovery path below.
+
+Pending projection: read `terminal_projection` diagnostics in API/board/CLI; this section records the recovery action.
+
+### Receipt-bound completion metadata recovery (SPEC-NS-KIT-150)
+
+For a v12 pending `done` projection rejected by rationale or checked-LE evidence
+validation, the parent may call
+`queue.recover_terminal_projection(handle, metadata_recovery=request)`. Keep the
+accepted candidate, merge, fresh-main proof, immutable terminal decision and
+original `started` projection event. The exact old status-only target must still
+be present. By default recovery requires its original base HEAD. No application
+suite is invoked.
+
+Build `request` from that original event's entire `payload`, adding exactly:
+
+```python
+request = {
+    **original_event["payload"],
+    "original_event_id": original_event["event_id"],
+    "spec_id": handle.spec_id,
+    "run_id": handle.terminal_run_id,
+    "reason": "Parent accepted completion with the retained evidence",
+    "created": "2026-10-09T18:01:00Z",  # explicit UTC, retained for replay
+    "le_evidence": {
+        "LE1": {"path": "canonical/reports/existing-proof.json",
+                "sha256": sha256(existing_proof_bytes).hexdigest()},
+    },
+}
+queue.recover_terminal_projection(handle, metadata_recovery=request)
+```
+
+If unrelated committed work has advanced main, the parent may add exactly one
+optional field: `request["recovery_base_head"] = pinned_full_commit_sha`. Capture
+the current HEAD's complete 40-character commit identity separately; a branch
+name, `HEAD` alias or an unpinned observation is invalid. The pinned commit must
+descend from the immutable original receipt base, and its committed spec blob
+must equal the original before blob. Initial working spec bytes must still equal
+the original pending target. Recovery preserves the descendant's unrelated
+committed and staged content, derives artifact history from that pinned snapshot,
+and appends the separate recovery base to its metadata link before any write.
+The one terminal commit and crash replay must prove that exact pinned parent.
+Unexpected movement after pinning, a non-descendant, changed committed original
+spec or edited pending bytes refuses recovery. Omitting this field retains the
+original-base-only refusal; never replace the original event, base or hashes.
+
+Evidence paths are repository-relative safe regular local files: no absolute,
+parent escape, symlink, hardlink or remote locator. Existing proof must remain
+available with the bound content hash during recovery and replay. Only already
+checked LE items lacking inline references may be annotated. Recovery never
+checks an item or changes its wording, R/AC text or checkboxes, scope,
+dependencies or release ownership. Supply every missing reference; an incomplete
+or invalid target fails the ordinary validator before integration-tree writes.
+The reason is a parent declaration: structural validation does not establish
+that an observation is true.
+
+The implementation derives a deterministic target through the official indexed
+status-transition/rationale capture routine in a disposable snapshot. It appends
+`metadata_started` linking the original event/request to all target closure
+hashes, then writes and commits only the spec plus its changed artifact/index
+closure. Ordinary hooks remain enabled; unrelated index entries and files are
+preserved. Postconditions bind the exact parent, terminal subject/trailers,
+changed paths and committed blobs before `metadata_completed` or queue cleanup.
+The original `started` event remains unchanged. A competing request is refused.
+
+After a crash or hook refusal, repeat the same public call. Once the recovery
+link exists, `queue.recover_terminal_projection(handle)` can also replay its
+stored request. Before-write, after-write and after-commit interruptions converge
+without another terminal commit. Edited pending bytes, moved HEAD, changed proof
+or unrelated closure/index content require explicit parent diagnosis; do not
+rewrite the receipt or reset unrelated state to force recovery.
+
+This API is a canonical portable rehearsal until a qualifying whole-kit release.
+Canonical authoring still requires the original SPEC-365 admission receipts and
+independent exact-candidate acceptance through the existing parent-owned
+`authoring_provider` seam. The pending release handoff and whole-kit rollout
+remain coordinator-owned. A rehearsal is no claim of released CJQ closure and
+provides no installed-copy or receipt-refresh exception.
 
 Main-merge failures use a separate coordinator-owned durable classification.
 Before `git merge`, append the exact main/candidate identity and retry number.
@@ -185,7 +283,7 @@ Examples:
 ```text
 [SPEC-033] feat: handler registry with pluggable domains
 [SPEC-033] test: add handler isolation tests
-[SPEC-033] chore: mark in_progress
+chore: mark SPEC-033 in_progress
 ```
 
 Rules:
@@ -198,6 +296,40 @@ Rules:
 - Merge commits and revert commits are exempt from the prefix rule.
 - Bootstrap commits may use simple setup messages before specs exist.
 
+### Coordinator subjects (SPEC-NS-KIT-118)
+
+`hooks/commit-msg` accepts these forms (`<ID>` is `SPEC|BUG|NFR|QUESTIONS-...-<number>`):
+
+| Form | Example | Rule |
+| --- | --- | --- |
+| Ordinary | `[SPEC-033] feat: handler registry` | `[<ID>] ` plus text |
+| ID-led | `BUG-022: execute the plan` | `<ID>: ` plus text |
+| Lifecycle | `chore: mark <ID> done\|blocked` | need all `Nightshift-*` trailers (SPEC-221); the bracketed `[<ID>] chore: mark ...` form is rejected for every status (metrics reads only the exact form) |
+| Status mark | `chore: mark <ID> draft\|planned\|ready\|in_progress\|superseded\|retired` | no trailers |
+| Maintenance | `merge: SPEC-NS-KIT-134`, `telemetry: ...`, `release: ...`, `chore: ...` | no ID required |
+| Conventional | `spec(BUG-NS-KIT-132,BUG-NS-KIT-133): ...`, `fix: ... (BUG-320 recurrence)` | type in feat, fix, docs, test, refactor, perf, build, ci, style, chore, spec, evidence, audit, draft, formal, research, wip; the subject line must contain an `<ID>` |
+| Git-generated | `Merge ...`, `Revert ...` | exempt |
+
+Any other `chore: mark ...` or `chore(scope): mark ...` subject (multi-ID, suffixed, `(container)`) is rejected as a malformed lifecycle subject, and a
+conventional subject without an ID (`docs(specs): x`) is rejected. Install and roll back
+(worktrees share the repository's `.git/hooks`, so this affects every worktree at once):
+
+```bash
+cp hooks/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg   # install
+rm .git/hooks/commit-msg                                                        # roll back
+```
+
+A whole-kit release refreshes a recognised kit `.git/hooks/commit-msg` (SPEC-NS-KIT-143), never a project-owned
+or absent one, after replaying the last 30 days of commits through the new hook. If any would be newly rejected the
+refresh is deferred (release output: `commit_msg_hook: deferred`, with the reasons and example subjects). Clear it by
+writing `chore: mark <ID> done|blocked|in_progress` subjects and terminal commits with
+`record_metrics.py --commit-terminal`; the next release then refreshes the hook. The previous hook is kept as
+`commit-msg.nightshift-prev`; roll back with one line:
+
+```bash
+mv .git/hooks/commit-msg.nightshift-prev .git/hooks/commit-msg
+```
+
 ## Hooks
 
 Nightshift ships two git hooks:
@@ -206,12 +338,51 @@ Nightshift ships two git hooks:
   thresholds via `scanner.py`, validates staged specs when `validate_specs.py`
   is present, then runs configured `lint` and `type_check` commands from
   `.nightshift/config.yaml`.
+  A command that cannot run is reported as `LINT TOOL UNAVAILABLE` /
+  `TYPE CHECK TOOL UNAVAILABLE`, not as findings: exit 127, 126 or 78,
+  `<python> -m <module>` with that module not installed, or a failing
+  `commands.lint_probe` / `commands.type_check_probe`. It blocks the commit by
+  default; a missing tool only warns when `commands.on_tool_unavailable: warn`
+  is set (the hook then prints `gates not run: ...` at the end). Findings
+  always block. `commands.lint_staged` (with `{files}`) opts in to linting only
+  the staged files, minus `commands.lint_exclude` (default `.nightshift/*`);
+  `commands.lint` stays the full-tree command. `hooks/pre-commit --check-tools`
+  lists each install's configured commands and whether their tools are usable,
+  read-only.
 - `hooks/commit-msg`: enforces the `[SPEC-ID]` prefix when
   `git.commit_prefix: "spec-id"`, subject to `git.unprefixed_paths` (below),
   and rejects `chore: mark <id> done|blocked` unless every required terminal
-  lifecycle trailer is present and non-empty.
+  lifecycle trailer is present and non-empty. The non-terminal
+  `chore: mark <id> in_progress` marker is accepted without trailers. This
+  canonical repository must wire the hook like any install
+  (`cp hooks/commit-msg .git/hooks/`) so the grammar is exercised here too.
 
 ### Staged spec validation (SPEC-358)
+
+**Invocation evidence (SPEC-NS-KIT-245).** Staged CLI validation keeps the existing
+JSON report on stdout and emits flushed JSONL on stderr: `validation_started`,
+`validation_progress` and `validation_finished`. Each record carries `run_id`,
+monotonic `sequence`, elapsed seconds, phase and phase-local processed/total
+counts. A heartbeat every five seconds proves only that the observer is alive;
+unchanged counts can mean a slow operation. `completed` counts traversed specs,
+including unchanged specs safely skipped by the existing staged differential.
+
+Events are also retained in the Git common directory at the relative
+`events_ref` printed in each event (`nightshift/validation/<run_id>.jsonl`). Resolve
+that root with `git rev-parse --git-common-dir`; linked worktrees share the root
+but every invocation has a unique file. `--events-out FILE` overrides the sink;
+`--progress-interval SECONDS` changes the finite positive heartbeat interval.
+`sink_status: unavailable` explicitly reports failure to retain the events while
+leaving the validation result unchanged. Raw findings remain in the stdout report.
+
+Match the run ID and read its final `validation_finished`: `outcome` is passed,
+failed, refused, error or interrupted; `exit_code` is the validator's result.
+Completed reports include `report_sha256`, SHA256 of their parsed JSON serialized
+with Python `json.dumps(report, sort_keys=True, ensure_ascii=True).encode()`.
+**No final event means unknown/incomplete**, including SIGKILL or machine loss.
+Keep polling/resuming the native command session until it returns its exit code;
+a finished validator does not prove that later hook gates or the Git commit passed.
+Progress and retained events never authorize acceptance, release or lifecycle moves.
 
 `hooks/pre-commit` validates specs by invoking
 `python3 validate_specs.py --staged <repo-root>`, which reads the Git
@@ -298,6 +469,14 @@ must not change lifecycle state or merge. The hook does not trust author identit
 if a worker authors a terminal lifecycle subject, it is held to the same trailer
 contract and is rejected when that evidence is absent or empty. Ordinary commits
 and `in_progress` markers remain outside this terminal gate.
+
+Build the block with `record_metrics.py --render-terminal-trailers`, or let
+`record_metrics.py --commit-terminal` assemble the message and commit explicit
+`--path`s (BUG-NS-KIT-139); it refuses before git when an input is missing and
+works without this hook installed. `--parent-tool-calls unavailable` is the
+explicit "not tallied" value. A bracketed `[<id>] chore: mark <id> done|blocked`
+commit is not a terminal transition: `--mark-commit` refuses it, and only
+`--correct-commit` reads one, to repair its existing metrics row.
 
 ### Project terminal outcome records (SPEC-224)
 
@@ -407,6 +586,17 @@ and the canonical spec plus whole-kit release remedy. Because Git permits
 compares the admitted receipt with disk at result acceptance. A deny or
 indeterminate result occurs before lifecycle, merge, post-merge validation, or
 cleanup and preserves HEAD, index, branch, worktree, and divergent payload.
+Only an `allow` fills the one-per-receipt acceptance slot; a deny, a mismatch and
+`NS-MPI-RELEASE-SUPERSEDED` (a sealed release landed after admission) are recorded
+once as attempts under `acceptance/attempts/` and never consume it. A stored allow
+is read back (`receipt_check.check="stored-result"`) unless the call does not bind
+the run or any payload drift is observed, which reports a mismatch or deny.
+
+Kickoff (SPEC-NS-KIT-007): the result receipt is admitted against and checked at the worker worktree's
+install; the control-plane receipt is admitted against the parent's. A control-plane
+`NS-MPI-RELEASE-SUPERSEDED` earns one fresh shared admission and one re-check; a result-receipt one
+ends the run `superseded` (branch and worktree preserved, spec returned to ready, re-admit and re-run);
+the old candidate is never accepted under a successor's receipt.
 
 Hooks are enforcement implementations. If this policy changes, update this file
 first, then update hooks and drift checks to match.
@@ -492,6 +682,36 @@ authorization refuses bootstrap. Changed candidate bytes require fresh independe
 verification and a new authorization ID. Normal scope/release metadata gates,
 independent verdict, full canonical suite, exact fresh-main suite and lifecycle
 gates remain mandatory; the versioned release handoff remains pending.
+
+### Pre-execution operational sampling authority (BUG-NS-KIT-179)
+
+The parent injects a distinct `SamplingAnchor` through `sampling_provider` into
+`prepare_verifier_dispatch`. It retains immutable approved bytes outside candidate
+and verifier surfaces, an externally expected SHA-256 and pinned exact contract.
+Before execution, source review pins exact requirement/amendment text, target
+assertions/artifact relationship and the complete ordered command/collection tuple.
+The returned `dispatch.sampling_anchor` additionally seals the neutral dispatch;
+pass it separately to observation, assembly and executable public validation.
+Never obtain this context from a plan, verdict, environment or self-digest. A
+human-labelled amendment alone supplies no authentication. Terminal AuthoringAnchor
+and original admission receipts retain their separate acceptance obligations.
+
+Every approved member runs separately on both arms, including clean non-target
+members. Tuple-wide native collection, invocation order, raw exits, source identity,
+unchanged assertions and read-only footprints are independently rechecked before
+one observed correction pair qualifies. Missing or altered authority/proof retains
+escalation; late issue/freeze cannot be repaired by rewriting timestamps. Legacy
+schema 1.0 configured declarations are unchanged. No retrospective application to
+old runs, reliability/savings claim, lifecycle, merge or release authorization follows.
+
+### Main test-status ledger commits (SPEC-NS-KIT-002-002)
+
+The ledger is a tracked file written only by the serialized fresh-main step's parent: after a real
+fresh-main run, or a deduplicated one (`reports/_wip/ledger-pending-<spec>.json`), the parent
+commits the new ledger with explicit paths in its own bookkeeping commit. Spec- and report-only
+commits do not change the ledger identity; a test, resource, config, gate-script or toolchain
+change does. Every non-pass entry names a BUG spec and carries age and expiry; an expired entry
+excuses nothing.
 
 ### The kit's own detector fixtures (SPEC-197)
 
@@ -733,6 +953,8 @@ WT=$(python3 .nightshift/worktree_paths.py plan --repo "$PROJECT_ROOT" --spec "$
 git -C "$PROJECT_ROOT" worktree add -b "nightshift/$SPEC_ID" "$WT"
 python3 "$PROJECT_ROOT/.nightshift/worktree_paths.py" verify \
   --repo "$PROJECT_ROOT" --worktree "$WT"
+python3 "$PROJECT_ROOT/.nightshift/worktree_local_config.py" copy \
+  --repo "$PROJECT_ROOT" --worktree "$WT"
 ```
 
 The resolver uses a deterministic local temporary namespace containing a hash of
@@ -832,3 +1054,310 @@ Human review should inspect commits as the durable audit trail:
 
 The review question is not only "did tests pass"; it is whether the history tells
 a coherent, reversible story for each spec.
+
+
+## Receipt-bound invalid-run abandonment (SPEC-387-001)
+
+This bounded installed-project recovery applies only to an original wrong-run
+identity rejection followed by an immutable corrected-retry contradiction. It
+never authorizes terminal acceptance, candidate merge, completion or cleanup.
+Canonical authoring remains the separate SPEC-365 contract above. Expired
+receipts may be inspected for this rejected administrative decision only;
+`verify_terminal_integrity` still rejects expired result acceptance.
+
+The parent injects `managed_payload_provenance.AbandonmentAnchor` through a
+callable `abandonment_provider(install, spec_id)`. Its positional inputs are an
+externally retained authority JSON path, exact SHA-256, frozen old candidate
+checkout, and, for successor B, canonical release source and release root.
+Authorization and independent-verifier validation are parent responsibilities;
+worker packets, environment variables and configuration cannot supply them.
+The authority must reside outside the project, candidate, source and consumer
+Git repositories and every linked checkout of them (fail closed if checkouts
+cannot be enumerated).
+
+Automatic-retry rule. It is implemented once, in
+`unblock_spec.automatic_attempt_decision`, whose docstring carries this exact
+text; `prepare`, `record_attempt` and the packet revalidation before every
+administrative mutation call it directly, and the ordinary `prepare`,
+`record_attempt` and `finalize` call it through `_ordinary_decision`:
+
+<!-- automatic-retry-rule -->
+Automatic recovery attempts are keyed by the current blocker fingerprint. This
+rule governs every automatic attempt, administrative and ordinary alike. Retry
+state is the durable status-store ledger alone: durably issued packets and
+recorded attempt outcomes with their digests, on both routes. An attempt file is
+evidence bound to its ledger digest. A ledger entry whose file is missing,
+unsafe, corrupted, digest-mismatched or not bound to a durable issuance fails
+closed with a named reason: it never reopens the fingerprint, never counts as no
+outcome and never permits a further automatic attempt. A file without a ledger
+entry is not an outcome. Any completed outcome (failed, skipped or succeeded)
+recorded in the ledger on the current fingerprint by any run closes that
+fingerprint to further automatic attempts; after a succeeded outcome only
+finalize is permitted. `retry_override` (human) is the only way to open a closed
+fingerprint. The sole exemption is a crash replay: the same run, on the same
+fingerprint, presenting the same durably issued packet, with no outcome yet
+recorded in the ledger for that packet; it may record exactly one outcome. A
+succeeded-but-unfinalized run may finalize idempotently and may not record
+again; an ordinary run whose own automatic succeeded attempt is on file may
+re-prepare finalize-only (the same packet, which can only finalize). A packet is
+bound to the run and fingerprint for which prepare durably issued it; a packet
+copied to another run, issued for another fingerprint, or superseded is refused
+at record_attempt.
+<!-- /automatic-retry-rule -->
+
+For both routes, `prepare` durably issues each packet (an append-only,
+per-fingerprint issuance sequence in the status store recording run, packet,
+fingerprint and `retry_override`, under the controller lock); the latest
+issuance on a fingerprint supersedes earlier ones, and a packet's
+`retry_override` counts only as its issuance recorded it. A same-run
+finalize-only re-prepare reuses its issuance. An administrative attempt is
+always automatic: a manual flag never bypasses the rule. Each outcome is
+recorded in the same durable ledger with its attempt id, run, fingerprint,
+outcome, evidence path and SHA-256; that ledger, never a directory listing of
+`knowledge/attempts/`, is what the rule reads. The named fail-closed reasons are
+`NS-UNBLOCK-ATTEMPT-EVIDENCE-MISSING`, `NS-UNBLOCK-ATTEMPT-EVIDENCE-UNSAFE`,
+`NS-UNBLOCK-ATTEMPT-EVIDENCE-MISMATCH` and `NS-UNBLOCK-ATTEMPT-LEDGER-ORPHANED`.
+Before writing an attempt file, `record_attempt` durably records a write intent
+(stamp and digest); only that ledgered intent lets a crash replay rebuild the
+identical bytes; the ledger entry follows the file. A file already at the target
+path without a ledger entry is refused as `NS-UNBLOCK-ATTEMPT-LEDGER-ORPHANED`
+and is never read, and `finalize` accepts only a succeeded attempt whose ledger
+entry is bound to the packet's issuance and whose file matches the entry's
+digest. A non-automatic, human-authorized outcome is ledgered as evidence but is
+not an automatic attempt and never closes a fingerprint. The SPEC-351
+repeated-failure gate reads the ledgered attempts of the spec and its parent; an
+entry whose file is not intact counts as a failed attempt and is listed by name
+as `integrity_failures` in the packet.
+
+An install that predates the ordinary ledger needs no operator step: the first
+ordinary `prepare` of a spec (and of its parent) adopts every parseable
+`unblock_attempt` file of that spec that has no ledger entry, once, recording
+its current digest as `legacy_adopted` (it has no issuance and stands as its
+own, so a closed fingerprint stays closed), reports unparsable files by name and
+emits `unblock_legacy_attempts_adopted`. A file that appears after adoption has
+no ledger entry and is not an outcome. `unblock_spec.py adopt-legacy-attempts
+--spec <ID>` runs the same idempotent adoption by hand.
+
+<!-- ledger-integrity-wedge -->
+**Integrity wedge and its human exits (both routes).** When a ledgered attempt
+file is missing, unsafe or corrupt, the fingerprint is closed to every run,
+including `retry_override`, with the `NS-UNBLOCK-ATTEMPT-EVIDENCE-*` reason
+above; this is by design and is the only way a fingerprint can be stuck. The
+exits are human: (a) re-evidence the blocker, which gives a new fingerprint (the
+decision record stays in the ledger); (b) restore the file's exact bytes, whose
+digest is in the ledger entry; (c) repair the status store outside the protocol,
+which is outside the threat model and must be recorded by hand. There is no
+protocol repair action by design (owner decision on SPEC-421 F6).
+<!-- /ledger-integrity-wedge -->
+
+`record_attempt` and `finalize` route by the presented packet alone: a packet
+carrying `invalid_run_abandonment` (stamped by administrative `prepare`) is
+verified against the durable decision and issuance ledger, and a forged marker
+is refused; any other packet runs the ordinary controller, whose `issuance_id`
+is its own durable issuance. A stripped administrative packet's attempt file
+has no ledger entry, so it is never an outcome, and ordinary `finalize` refuses
+to move an administrative blocker to ready; ordinary `record_attempt` refuses an
+administrative blocker the same way, before writing. The SPEC-351
+repeated-failure gate is re-evaluated at `record_attempt` from the ledgered
+attempts, not from the packet pinned at prepare; both refusals emit
+`unblock_decision_refused`.
+
+Abandonment fails closed over a live unrelated blocker: if the spec is already
+blocked for any reason other than this same rejected run's retained evidence, it
+refuses with a named reason and changes nothing; a human resolves that blocker
+first. The check runs inside the same controller lock as the administrative
+blocked write, and a related prior blocker's fields are moved into
+`unblock_history` as `superseded_blocker`, never silently overwritten. A failed write of the sanitized rejected-replay quarantine record never
+turns a rejection into success and is named in the rejection reason. The record uses schema `1.0.0` and policy
+`receipt-bound-invalid-run-abandonment-v1` with these exact fields:
+
+- `authorization_id`, `user_authorization_sha256`, `binding`, `spec_id`, `spec_path`;
+- `receipt_ref`, `receipt_sha256`, original `invocation_id`, rejected `wrong_run_id`;
+- original `baseline_revision`, frozen `candidate_commit`, `candidate_tree`,
+  `candidate_binding`, enumerated `control_paths`;
+- `retained_evidence`: exact `admission`, `acceptance`, `quarantine`,
+  `failed_verifier` references, each `{path, sha256}`;
+- `independent_verification`: the existing normalized AuthoringAnchor verifier
+  identity/verdict digest, candidate commit/tree and policy contract;
+- `active_release`: exact `fingerprint`, `inventory_sha256`, `marker_sha256`,
+  `installed_revision`, and `rollout` (null only for complete original A).
+
+Bindings are the existing `_git_binding` project/common-directory/checkout/install
+hashes, independently reconstructed by the parent. A lifecycle commit SHA is
+never the receipt invocation identity. Control paths are selected spec and
+explicit report files only; application changes and other evidence changes stop
+recovery. Every release proof reconstructs the complete inventory and modes from
+pinned Git blobs and checks current bytes, markers, manifests and unsafe aliases.
+
+For B, `rollout` contains `source_binding`, `source_relative`, `source_commit`,
+`source_tree`, `release_root_binding`, `report`, `invocation` and `lineage`.
+Lineage is exactly `{predecessor: A_fingerprint, successor: B_fingerprint,
+authorization_sha256: user_authorization_sha256}`. Retain the original successful,
+non-dry-run target-only `release_coordinator.coordinate_release(canonical,
+installs=[exact_install], manifest=manifest, dry_run=False, release_root=root)`
+report using official `release_coordinator.write_metrics`. Both report and actual
+invocation evidence live in ignored target-local `reports/_wip/` paths with
+externally pinned digests. The actual invocation record contains exactly `api`,
+`metrics_writer`, `canonical`, `installs`, `dry_run`, `release_root`,
+`manifest_sha256`, `source_observed_inventory`, `source_commit`, `source_tree`,
+`report_sha256`. The observed inventory has path, actual SHA-256 and executable
+mode for every source entry and must equal committed B. Independently pin it at
+the original invocation. A later replay, no-commit replay report, CLI fleet
+release, partial or replaced report cannot substitute for that proof. The report
+must establish one verified target, A's predecessor fingerprint, the exact
+committed installed B revision, passing real suite and smokes, and no conflict,
+rollback, skipped target or file patch. Central skill delivery is separately
+represented by the exact authorized release root.
+
+Supported parent APIs (no administrative CLI or worker-deserialized authority):
+
+1. `managed_payload_provenance.verify_invalid_run_abandonment(install,
+   spec_id=..., abandonment_provider=...)` performs read-only proof.
+2. `unblock_spec.abandon_invalid_run(spec_file, install,
+   abandonment_provider=...)` persists one distinct atomic rejection decision
+   (via `managed_payload_provenance.record_invalid_run_abandonment`)
+   and the existing durable administrative **blocked** projection.
+3. Only existing `unblock_spec.prepare`, `record_attempt` and `finalize`, each
+   with the same `abandonment_provider`, may verify recovery and reach ready.
+   Every mutation/restart revalidates all original A and exact active B proofs.
+4. `Coordinator(..., abandonment_provider=...).abandon_invalid_run(spec_id)`
+   and `nightshift-instructions.py::abandon_instruction_run(packet,
+   nightshift_dir=..., spec_file=..., official_path=...,
+   abandonment_provider=...)` route official coordinator, inline-run, kickoff,
+   board-copied-kickoff, direct-loop and direct-orchestrator recovery here.
+   Parallel terminal callbacks retain coordinator-owned strict acceptance.
+
+The distinct decision is `reports/_wip/managed-payload-integrity/abandonment/`
+plus the original invocation JSON filename; it declares `rejected-old-run`,
+reason `NS-MPI-INVALID-RUN-ABANDONED`, eligible controller, demonstrated causal
+confidence and no additional human action. Sanitized contradictory replays are
+quarantined in that separate namespace. Old receipt, admission, strict rejection,
+quarantine, verifier and frozen candidate bytes remain unchanged. Identical
+replay resumes matching ownership without a second successful outcome. After
+ready, admit a genuinely new worker/run from the fresh baseline and retain its
+own original receipt. The abandoned invocation, result and candidate remain
+permanently rejected.
+
+### Implementer-assessed terminal blocks (BUG-NS-KIT-173)
+
+`implementer-assessed-blocked` is a blocked-only resolution kind backed by the
+actual closed reducer state. Use `record_metrics.py --commit-terminal` with
+`--assessment-state` instead of a verdict; stage the state and lifecycle evidence.
+The normal commit hook validates state digest, original candidate and inventories.
+It cannot mark Done, claim a verifier or replace a later independent check.
+
+Pending release handoff source ranges use `release_handoff.pin_commit_range` before their normal authoring commit (SPEC-NS-KIT-192). Preserve original spellings and bind actual immutable endpoints, repository and bounded diff; unresolved legacy history stays unresolved. Checked cleanup requires main ancestry or its exact owned recovery ref to retain both endpoints, preserving uncommitted disposable handoff evidence and refusing unknown provenance. A SHA string is not a Git reachability root. The sole integration/cleanup owner and completed receipts remain unchanged.
+
+
+### Equivalent self-spec reconciliation
+
+SPEC-NS-KIT-172 adds an opt-in parent-provider capability to the existing
+`SerializedIntegrationQueue`; it is not semantic merging. Default queues retain
+strict conflict refusal. First obtain the ordinary durable held conflict under
+the original accepted immutable candidate/run. The existing single retry is the
+only mutation attempt available; no new run, rebase or candidate verification is
+manufactured to reset that budget.
+
+A trusted parent supplies `SelfSpecReconciliationAuthority(approval_path,
+approval_sha256, verification_path, verification_sha256)` through
+`selfspec_reconciliation_provider(handle)`. Both hash-pinned JSON files must be
+outside the subject/worker repositories. Candidate config, spec text, handle
+outcome and checkbox claims grant no authority. Require the original managed
+admission receipt and current terminal integrity check, accepted completion input,
+and a configured real fresh-main gate. A custom `merge_runner` is ineligible.
+
+Both parent records bind `spec_id`, original `run_id`, unique original `base`,
+`main_before`, original `candidate`, assigned repository-relative `spec_path`,
+original receipt `binding`/`receipt_sha256`, and `contract_sha256` of the narrowly
+normalized complete spec. Approval additionally requires `approved_by: human:<owner>`
+and `amendments_sha256` over the exact Scope Amendments and AC Amendments section
+bodies in that order (missing sections contribute no bytes). The parent's accepted
+independent-verifier projection additionally requires `producer: independent-verifier`,
+`independent: true`, `verdict: pass`, and sorted exact `checked_items` for every
+candidate-checked R/AC. This projection must come from original accepted independent
+evidence; the reconciler does not author acceptance or approvals.
+
+Call `queue.propose_selfspec_reconciliation(handle)` after the first held conflict
+for the deterministic proposal. Only existing identified Requirements/Acceptance
+Criteria checkbox marker bytes normalize; IDs, order, prose, whitespace, metadata,
+LE, comments, fenced examples and amendment/history bytes remain significant.
+The main/candidate normalized blobs must match exactly; candidate checked items
+must strictly extend main's checked items and all require accepted evidence.
+Only that assigned spec may conflict. The output blob is the original candidate
+blob, never edited prose or a newly ticked item.
+
+Reset the held handle's scheduler status to completed and submit it to the same
+queue API under the same run to consume its one existing retry. The queue persists
+the exact blobs, parent/receipt/authority digests, original held-event linkage and
+expected whole tree before any resolution write. It uses normal Git merge/commit
+hooks and Git's ordinary merge result for every other path. Exact two parents and
+the entire reproducible tree must match afterward. Arbitrary resolutions, additional
+conflicts, stale authority, moved tips, changed receipts or changed source refuse.
+No provider may choose a different resolution or approve another scope.
+
+The merge does not establish Done. Actual configured fresh-main validation on the
+exact resulting revision precedes ordinary terminal projection and checked cleanup.
+Failed validation follows existing checked-revert ownership rules. Hook rejection,
+partial writes, proof mismatch, concurrent user/index work or exhausted retries
+preserve resources and produce a controlled hold/failure; unowned state is never
+aborted or overwritten. A persisted owned merge commit can resume validation after
+interruption without a second merge. Before/after-write crashes otherwise converge
+only under existing exact ownership proof or stay safely held/terminally failed;
+they never reset the retry budget. Query the original StatusStore merge-attempt
+history for the append-only proof and outcomes. Durable/public proof records use
+relative paths, controlled reasons and hashes, never private spec bodies/host locators.
+A successful integration still needs its normal pending whole-kit release; no
+installed patch, extra worker, LLM conflict resolver, or file-only rollout is added.
+
+## Worktree local config (SPEC-NS-KIT-231)
+
+After worktree ownership verify, `worktree_local_config.py copy --repo <project>
+--worktree <path>` copies only `git.worktree_local_config.copy` exact repo-relative
+files (default `.claude/settings.local.json`). Built-in secret path rules,
+project `deny` globs and the existing scanner prevent secret copies. Absolute,
+parent-traversing, outside-root, symlink and directory sources are refused.
+Tracked files and existing destinations are never overwritten. An identical
+existing destination is `unchanged`, a different one is `skipped/exists`; bytes,
+file mode and permission rules are otherwise unchanged. No new permission or
+`additionalDirectories` entry is added. Retain the JSON result list in the run
+report; the kit's preparation path also persists it beside the handle's events.
+
+`git.worktree_local_config.required: true` makes refused/failed copies fatal
+before launch; `absent` remains a successful non-error. Without required mode,
+copy failures warn and worktree creation continues. A harness-created isolated
+worktree needs the parent to invoke this same helper after ownership verify.
+
+**Owner approval wait (SPEC-NS-KIT-231).** Before any command that may prompt,
+write `waiting_on: owner_approval`, `waiting_command: <one-line command or reason>`
+and `waiting_since: <ISO-8601 UTC>` in the same heartbeat file; keep
+`heartbeat_state: worker-started`. If a prompt is unexpected, declare the wait
+at once. Remove these fields when you resume. Never include environment values;
+command text has control characters removed and is limited to 200 characters.
+A valid non-terminal declaration is `waiting_on_approval` at any age: show the
+sanitized command and wait age (unknown for an absent/invalid timestamp), and
+report "owner needed". Do not kill, restart or retry the worker because of this
+wait; ask the worker and the owner before any stall action. Terminal states still
+win. Without a valid wait declaration, the existing phase/20/40-minute ladder
+and silent-worker stall behavior remain unchanged.
+
+
+### Frozen legacy IDs and project hook adoption (BUG-NS-KIT-246)
+
+The kit hook provides local, offline **legacy-ID acceptance**: the existing
+commit ID grammar also accepts exact IDs (including suffixed forms) from the
+registered project's `spec-id-legacy/<CODE>.json`. An unreadable list emits one
+warning naming its path and keeps grammar-only validation. Existing lifecycle
+trailers and bracketed-lifecycle rejection still apply. History replay uses the
+same project membership without running project configuration or terminal checks.
+
+Release dry-run/apply and doctor report `project_owned_commit_msg` for an active
+project-owned fork, with four new-grammar probes (SPEC, BUG, NFR, QUESTIONS), up
+to three frozen legacy probes, and the subjects the fork rejects. The fork stays
+project-owned; `doctor --fix` never replaces it. To adopt the managed hook,
+resolve the active path with `git rev-parse --git-path hooks/commit-msg`, back it
+up to `commit-msg.nightshift-prev`, copy `.nightshift/hooks/commit-msg` over the
+active hook and make it executable (`chmod +x`). Then let the next whole-kit
+release refresh the recognized kit hook. Retain the backup for rollback; release
+refresh also uses that backup name, so archive an original fork separately if it
+must survive later refreshes. Fartownik's FART-OPS-026 fork is the known affected
+installation; adoption there is a separate project follow-up.

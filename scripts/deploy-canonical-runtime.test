@@ -24,15 +24,25 @@ label="com.argo.shipyard.app.canonical"
 print -- "$*" >> "$log"
 case "$1" in
   print)
+    # bootout is asynchronous: the job stays visible for a few polls.
+    if [[ "$(<"$state")" == unloading ]]; then
+      n=$(( $(<"${state}.unload") - 1 ))
+      print $n > "${state}.unload"
+      (( n > 0 )) || print unloaded > "$state"
+      exit 0
+    fi
     [[ "$(<"$state")" == loaded ]] || exit 1
     print "program = $SHIPYARD_TEST_CANONICAL_BIN"
     print "pid = $(<"${state}.pid")"
     ;;
   bootout)
-    print unloaded > "$state"
+    if [[ "$(<"$state")" == loaded ]]; then
+      print unloading > "$state"
+      print 2 > "${state}.unload"
+    fi
     ;;
   bootstrap)
-    [[ "$(<"$state")" != loaded ]] || { print -u2 "Bootstrap failed: 5: Input/output error"; exit 5; }
+    [[ "$(<"$state")" == unloaded ]] || { print -u2 "Bootstrap failed: 5: Input/output error"; exit 5; }
     print loaded > "$state"
     ;;
   kickstart)
@@ -63,6 +73,8 @@ EOF
 #!/usr/bin/env zsh
 if [[ "${SHIPYARD_TEST_HEALTH:-ok}" == ok ]]; then
   print '{"servers":[{"name":"child","tool_count":2}]}'
+elif [[ "${SHIPYARD_TEST_HEALTH}" == partial ]]; then
+  print '{"servers":[{"name":"child","tool_count":2},{"name":"idle","tool_count":0}]}'
 else
   print '{"servers":[{"name":"child","tool_count":0}]}'
 fi
@@ -78,11 +90,16 @@ run_fixture() {
   local name="$1"
   local initial_state="$2"
   local health="$3"
+  local legacy="${4:-legacy}"
   local fixture_root="$test_root/$name"
   mkdir -p "$fixture_root/repo/scripts" "$fixture_root/home/Library/LaunchAgents" "$fixture_root/repo/bin"
   cp "$script" "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
   chmod +x "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
-  print legacy-plist > "$fixture_root/home/Library/LaunchAgents/com.argo.shipyard.app.plist"
+  if [[ "$legacy" == legacy ]]; then
+    print legacy-plist > "$fixture_root/home/Library/LaunchAgents/com.argo.shipyard.app.plist"
+  elif [[ "$legacy" == canonical-only ]]; then
+    print canonical-plist > "$fixture_root/home/Library/LaunchAgents/com.argo.shipyard.app.canonical.plist"
+  fi
   print "$initial_state" > "$fixture_root/state"
   print 100 > "$fixture_root/state.pid"
   [[ "$initial_state" == loaded ]] && print prior-runtime > "$fixture_root/repo/bin/shipyard"
@@ -102,6 +119,7 @@ run_fixture() {
   SHIPYARD_TEST_LOG="$fixture_root/launchctl.log" \
   SHIPYARD_TEST_CANONICAL_BIN="$fixture_root/repo/bin/shipyard" \
   SHIPYARD_TEST_HEALTH="$health" \
+  SHIPYARD_HEALTH_ALLOW_EMPTY="${ALLOW_EMPTY:-}" \
   "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
 }
 
@@ -120,5 +138,28 @@ fi
 [[ "$(<"$test_root/rollback/repo/bin/shipyard")" == prior-runtime ]] || fail "rollback did not restore prior runtime"
 [[ "$(<"$test_root/rollback/state")" == loaded ]] || fail "rollback did not restore prior canonical service"
 [[ "$(<"$test_root/rollback/state.pid")" == 102 ]] || fail "rollback did not restart prior service"
+
+# Legacy job retired: the installed canonical plist is the template.
+run_fixture canonical-only loaded ok canonical-only
+[[ "$(<"$test_root/canonical-only/state.pid")" == 101 ]] || fail "canonical-only deploy did not change live PID"
+[[ "$(<"$test_root/canonical-only/home/Library/LaunchAgents/com.argo.shipyard.app.canonical.plist")" == canonical-plist ]] || fail "canonical-only deploy lost the canonical plist"
+
+# Neither plist present: refuse before touching launchd.
+if run_fixture no-plist loaded ok none 2>/dev/null; then
+  fail "deploy without any plist unexpectedly passed"
+fi
+[[ ! -s "$test_root/no-plist/launchctl.log" ]] || fail "deploy without any plist touched launchctl"
+
+# A child reporting 0 tools fails the gate unless explicitly exempted.
+if run_fixture partial-strict loaded partial 2>/dev/null; then
+  fail "a child with 0 tools unexpectedly passed the strict gate"
+fi
+[[ "$(<"$test_root/partial-strict/repo/bin/shipyard")" == prior-runtime ]] || fail "strict gate failure did not restore prior runtime"
+ALLOW_EMPTY=idle run_fixture partial-allowed loaded partial
+[[ "$(<"$test_root/partial-allowed/repo/bin/shipyard")" == new-runtime ]] || fail "exempted empty child did not deploy"
+# Exempting every child is not enough: one non-exempt child must have tools.
+if ALLOW_EMPTY=idle,child run_fixture all-exempt loaded partial 2>/dev/null; then
+  fail "gate passed with every child exempted"
+fi
 
 print "canonical deployment shell fixtures passed"

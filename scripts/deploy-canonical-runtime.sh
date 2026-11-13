@@ -16,6 +16,7 @@ go_cmd="${SHIPYARD_GO:-go}"
 curl_cmd="${SHIPYARD_CURL:-curl}"
 sleep_cmd="${SHIPYARD_SLEEP:-sleep}"
 health_attempts="${SHIPYARD_HEALTH_ATTEMPTS:-15}"
+unload_attempts="${SHIPYARD_UNLOAD_ATTEMPTS:-120}"
 legacy_plist="$home_root/Library/LaunchAgents/com.argo.shipyard.app.plist"
 legacy_label="com.argo.shipyard.app"
 legacy_service="gui/$launchd_uid/$legacy_label"
@@ -36,8 +37,24 @@ prior_pid=""
 cleanup() { rm -f "$candidate" "$prior_runtime" "$prior_plist" "$live_payload" "$prior_service_state"; }
 trap cleanup EXIT
 
+# `launchctl bootout` returns before the job has exited; a bootstrap issued
+# while it is still shutting down fails with error 5. Wait until launchd no
+# longer knows the service (the gateway can take a while to checkpoint a large
+# capture DB on shutdown).
+bootout_and_wait() {
+  local svc="$1"
+  "$launchctl_cmd" bootout "$svc" 2>/dev/null || true
+  local i
+  for i in {1..$unload_attempts}; do
+    "$launchctl_cmd" print "$svc" >/dev/null 2>&1 || return 0
+    "$sleep_cmd" 1
+  done
+  print -u2 "warning: $svc still loaded after ${unload_attempts}s"
+  return 0
+}
+
 restore_legacy() {
-  "$launchctl_cmd" bootout "$service" 2>/dev/null || true
+  bootout_and_wait "$service"
   "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$legacy_plist" 2>/dev/null || true
   "$launchctl_cmd" kickstart -k "$legacy_service" 2>/dev/null || true
 }
@@ -46,7 +63,7 @@ restore_prior_runtime() {
   if [[ "$had_prior_runtime" == true ]]; then
     mv "$prior_runtime" "$canonical_bin"
   fi
-  "$launchctl_cmd" bootout "$service" 2>/dev/null || true
+  bootout_and_wait "$service"
   if [[ "$had_prior_service" == true ]]; then
     [[ -s "$prior_plist" ]] && cp -p "$prior_plist" "$plist"
     "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$plist" 2>/dev/null || true
@@ -63,7 +80,16 @@ fail_and_restore() {
 }
 
 cd "$repo_root"
-[[ -f "$legacy_plist" ]] || { print -u2 "missing legacy launchd plist: $legacy_plist"; exit 1; }
+# Template for the canonical plist: the legacy plist on a first migration,
+# otherwise the already-installed canonical plist (the legacy job was retired).
+if [[ -f "$legacy_plist" ]]; then
+  template_plist="$legacy_plist"
+elif [[ -f "$plist" ]]; then
+  template_plist="$plist"
+else
+  print -u2 "missing launchd plist: neither $legacy_plist nor $plist exists"
+  exit 1
+fi
 
 # This proves the replacement source before touching either launchd or bin/.
 "$make_cmd" smoke-full
@@ -81,7 +107,7 @@ fi
 
 # macOS rejects a rebuilt executable under the old ad-hoc-signed label. Clone
 # its operating settings to a fresh label, then start the canonical binary.
-cp "$legacy_plist" "$plist"
+[[ "$template_plist" == "$plist" ]] || cp "$template_plist" "$plist"
 "$plist_buddy_cmd" -c "Set :Label $label" "$plist"
 if [[ -e "$canonical_bin" ]]; then
   cp -p "$canonical_bin" "$prior_runtime"
@@ -92,10 +118,10 @@ chmod 755 "$canonical_bin"
 
 "$plist_buddy_cmd" -c "Set :ProgramArguments:0 $canonical_bin" "$plist"
 "$plutil_cmd" -lint "$plist"
-"$launchctl_cmd" bootout "$legacy_service" 2>/dev/null || true
+bootout_and_wait "$legacy_service"
 # bootstrap fails with error 5 for an already-loaded label. Unload the canonical
 # service first so both initial installation and replacement use one path.
-"$launchctl_cmd" bootout "$service" 2>/dev/null || true
+bootout_and_wait "$service"
 if ! "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$plist"; then
   fail_and_restore "canonical launchd bootstrap failed; restored the prior runtime and service"
 fi
@@ -123,12 +149,17 @@ for _ in {1..$health_attempts}; do
   if "$curl_cmd" --fail --silent --show-error "$health_url" > "$live_payload"; then
     if python3 - "$live_payload" <<'PY'
 import json
+import os
 import sys
 
+# SHIPYARD_HEALTH_ALLOW_EMPTY: comma-separated server names allowed to report
+# tool_count 0 (e.g. a backend that is offline). They must still publish an
+# integer tool_count, and at least one non-exempt child must have tools.
+allow_empty = {n.strip() for n in os.environ.get("SHIPYARD_HEALTH_ALLOW_EMPTY", "").split(",") if n.strip()}
 payload = json.load(open(sys.argv[1]))
 servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
 children = [server for server in servers if not server.get("is_self")]
-if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and server["tool_count"] > 0 for server in children):
+if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and (server["tool_count"] > 0 or server.get("name") in allow_empty) for server in children) and any(server.get("name") not in allow_empty and server["tool_count"] > 0 for server in children):
     print(f"live child tool counts verified for {len(children)} managed servers")
     raise SystemExit(0)
 raise SystemExit(1)
@@ -141,12 +172,17 @@ PY
 done
 if ! python3 - "$live_payload" <<'PY'
 import json
+import os
 import sys
 
+# SHIPYARD_HEALTH_ALLOW_EMPTY: comma-separated server names allowed to report
+# tool_count 0 (e.g. a backend that is offline). They must still publish an
+# integer tool_count, and at least one non-exempt child must have tools.
+allow_empty = {n.strip() for n in os.environ.get("SHIPYARD_HEALTH_ALLOW_EMPTY", "").split(",") if n.strip()}
 payload = json.load(open(sys.argv[1]))
 servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
 children = [server for server in servers if not server.get("is_self")]
-raise SystemExit(0 if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and server["tool_count"] > 0 for server in children) else 1)
+raise SystemExit(0 if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and (server["tool_count"] > 0 or server.get("name") in allow_empty) for server in children) and any(server.get("name") not in allow_empty and server["tool_count"] > 0 for server in children) else 1)
 PY
 then
   fail_and_restore "Shipyard did not expose populated managed-child tool counts; restored the prior runtime and service"

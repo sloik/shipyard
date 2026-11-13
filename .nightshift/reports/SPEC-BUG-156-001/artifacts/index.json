@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T15:55:59Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose",
+      "path": "artifacts/20261003T155559Z-decision-state-rationale-authored-draft-authored-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:55:59Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: User chose deletion on 2026-10-03; fully specified, mechanical removal.",
+      "path": "artifacts/20261003T155559Z-status-transition-draft-ready-user-chose-deletion-on-2026-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:56:01Z",
+      "actor": "coordinator",
+      "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run coord-20261003-bug156-001",
+      "path": "artifacts/20261003T155601Z-status-transition-ready-in-progress-mechanical-transition-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T16:07:44Z",
+      "actor": "coordinator",
+      "summary": "in_progress -> done: mechanical transition to 'done' via run coord-20261003-bug156-001",
+      "path": "artifacts/20261003T160744Z-status-transition-in-progress-done-mechanical-transition-t.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T17:42:21Z",
+      "actor": "coordinator",
+      "summary": "done -> in_progress: AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owne",
+      "path": "artifacts/20261003T174221Z-status-transition-done-in-progress-ac5-is-not-met-as-writt.json"
+    }
+  ]
+}

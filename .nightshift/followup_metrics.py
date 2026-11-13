@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import statistics
 import tempfile
 from collections import Counter, defaultdict
@@ -17,6 +18,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 import yaml
+
+from spec_id import is_bug_spec_filename, is_spec_filename
 
 SCHEMA_VERSION = 1
 CAUSE_DETAILS = {
@@ -51,17 +54,97 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _spec_frontmatter(path: Path) -> Mapping[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        raise ValueError(f"spec has no frontmatter: {path}")
-    end = text.find("\n---", 3)
-    if end < 0:
-        raise ValueError(f"spec has no closing frontmatter: {path}")
-    parsed = yaml.safe_load(text[3:end]) or {}
-    if not isinstance(parsed, Mapping) or not isinstance(parsed.get("id"), str):
-        raise ValueError(f"spec has no id: {path}")
+def _frontmatter(text: str) -> Mapping[str, Any]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("spec has no frontmatter")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise ValueError("spec has no closing frontmatter")
+    try:
+        parsed = yaml.safe_load("\n".join(lines[1:end]))
+    except (yaml.YAMLError, ValueError):
+        raise ValueError("spec has malformed YAML frontmatter") from None
+    if not isinstance(parsed, Mapping):
+        raise ValueError("spec frontmatter must be a mapping")
+    if not isinstance(parsed.get("id"), str) or not parsed["id"].strip():
+        raise ValueError("spec has no non-empty string id")
     return parsed
+
+
+def _spec_frontmatter(path: Path) -> Mapping[str, Any]:
+    try:
+        return _frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        raise ValueError("spec frontmatter cannot be read") from None
+
+
+def discover_specs(specs_dir: Path) -> dict[str, Path]:
+    """Skip plain notes; strictly parse candidates and resolve only parsed IDs."""
+    specs: dict[str, Path] = {}
+    for path in sorted(specs_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise ValueError("lineage corpus entry cannot be read") from None
+        lines = text.splitlines()
+        leading = bool(lines and lines[0].strip() == "---")
+        header = []
+        if leading:
+            end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), len(lines))
+            header = lines[1:end]
+        content = [line for line in header if line.strip() and not line.lstrip().startswith("#")]
+        base_indent = min((len(line) - len(line.lstrip()) for line in content), default=0)
+        keys = r"(?:id|status|type|template_version)"
+        key_pattern = rf"^(?:-\s+)?(?:{keys}|\"{keys}\"|'{keys}')\s*:"
+        signal = is_spec_filename(path.name) or is_bug_spec_filename(path.name) or any(
+            len(line) - len(line.lstrip()) == base_indent and
+            re.match(key_pattern, line[base_indent:]) for line in content)
+        try:
+            parsed = _frontmatter(text)
+        except ValueError as error:
+            if signal:
+                raise ValueError(f"lineage corpus candidate {json.dumps(path.name)}: {error}") from None
+            continue
+        spec_id = parsed["id"]
+        if spec_id in specs:
+            raise ValueError("duplicate parsed spec IDs in lineage corpus")
+        specs[spec_id] = path
+    return specs
+
+
+def _validate_corpus(record: Mapping[str, Any], specs: Mapping[str, Path]) -> list[str]:
+    errors = []
+    source = specs.get(record.get("source_spec_id"))
+    child_id = record.get("child_spec_id")
+    if source is None:
+        errors.append("source_spec_id does not resolve")
+    elif _sha(source.read_bytes()) != record.get("source_hash"):
+        errors.append("source_hash disagrees with current source")
+    if child_id is not None:
+        child = specs.get(child_id)
+        if child is None:
+            errors.append("child_spec_id does not resolve")
+        else:
+            errors.extend(_validate_child(record, _spec_frontmatter(child)))
+            if record.get("child_hash") is not None and _sha(child.read_bytes()) != record["child_hash"]:
+                errors.append("child_hash disagrees with current child")
+        if child_id == record.get("source_spec_id"):
+            errors.append("child_spec_id may not self-reference source")
+    return errors
+
+
+def _validate_child(record: Mapping[str, Any], child: Mapping[str, Any]) -> list[str]:
+    errors = []
+    if child.get("id") != record.get("child_spec_id"):
+        errors.append("child ID disagrees with lineage decision")
+    backlink = child.get("followup")
+    if (not isinstance(backlink, Mapping) or
+            backlink.get("source_spec_id") != record.get("source_spec_id") or
+            backlink.get("outcome") != "created" or
+            not _safe_reference(backlink.get("lineage_record"))):
+        errors.append("child backlink disagrees with lineage decision")
+    return errors
 
 
 def derive_source_contract_incomplete(cause_class: str) -> bool | None:
@@ -120,13 +203,7 @@ def validate_lineage_record(record: Mapping[str, Any], *, specs_dir: Path | None
     if isinstance(source_hash, str) and (len(source_hash) != 64 or any(ch not in "0123456789abcdef" for ch in source_hash.lower())):
         errors.append("source_hash must be a SHA-256 hex digest")
     if specs_dir is not None:
-        ids = {str(_spec_frontmatter(path)["id"]) for path in specs_dir.glob("*.md") if not path.name.startswith("_")}
-        if record.get("source_spec_id") not in ids:
-            errors.append("source_spec_id does not resolve")
-        if child is not None and child not in ids:
-            errors.append("child_spec_id does not resolve")
-        if child == record.get("source_spec_id"):
-            errors.append("child_spec_id may not self-reference source")
+        errors.extend(_validate_corpus(record, discover_specs(specs_dir)))
     return errors
 
 
@@ -145,11 +222,16 @@ def build_record(*, project_id: str, run_id: str, source_spec_id: str, child_spe
 def _atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".tmp-", delete=False) as handle:
-        handle.write(encoded)
-        handle.flush(); os.fsync(handle.fileno())
-        temp = Path(handle.name)
-    os.replace(temp, path)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".tmp-", delete=False) as handle:
+            temp = Path(handle.name)
+            handle.write(encoded)
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def append_record(store_path: Path, record: Mapping[str, Any], *, specs_dir: Path | None = None) -> tuple[dict[str, Any], bool]:
@@ -168,8 +250,8 @@ def append_record(store_path: Path, record: Mapping[str, Any], *, specs_dir: Pat
     with lock_path.open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         existing = json.loads(store_path.read_text()) if store_path.exists() else []
-        if not isinstance(existing, list):
-            raise ValueError("lineage store must be a JSON array")
+        if not isinstance(existing, list) or any(not isinstance(row, Mapping) or not isinstance(row.get("operation_key"), str) or not row["operation_key"] for row in existing):
+            raise ValueError("lineage store must be a JSON array of records")
         for prior in existing:
             if prior.get("operation_key") == record["operation_key"]:
                 if prior != dict(record):
@@ -190,25 +272,61 @@ def process_decision(*, store_path: Path, specs_dir: Path, record: Mapping[str, 
     its discovery phase and outcome rather than encoding a special flow here.
     """
     data = dict(record)
+    errors = validate_lineage_record(data)
+    if errors:
+        raise ValueError("; ".join(errors))
+    specs = discover_specs(specs_dir)
+    if store_path.is_symlink():
+        raise ValueError("lineage store may not be a symlink")
+    prior_rows = json.loads(store_path.read_text()) if store_path.exists() else []
+    if not isinstance(prior_rows, list) or any(not isinstance(row, Mapping) or not isinstance(row.get("operation_key"), str) or not row["operation_key"] for row in prior_rows):
+        raise ValueError("lineage store must be a JSON array of records")
+    replay = any(row.get("operation_key") == data["operation_key"] for row in prior_rows)
+    created_bytes: bytes | None = None
     if data.get("outcome") == "created":
         if child_path is None or child_markdown is None:
             raise ValueError("created decision requires child_path and child_markdown")
-        if child_path.exists():
-            existing = _spec_frontmatter(child_path)
-            if existing.get("id") != data.get("child_spec_id"):
-                raise ValueError("existing child ID disagrees with decision")
-        else:
-            child_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = child_path.with_suffix(child_path.suffix + ".tmp")
-            tmp.write_text(child_markdown, encoding="utf-8")
-            os.replace(tmp, child_path)
-        child = _spec_frontmatter(child_path)
-        backlink = child.get("followup")
-        if not isinstance(backlink, Mapping) or backlink.get("source_spec_id") != data.get("source_spec_id") or backlink.get("outcome") != "created":
-            raise ValueError("child backlink disagrees with lineage decision")
-        if child.get("id") != data.get("child_spec_id"):
-            raise ValueError("child ID disagrees with lineage decision")
-    return append_record(store_path, data, specs_dir=specs_dir)
+        if child_path.parent.resolve() != specs_dir.resolve() or child_path.suffix != ".md":
+            raise ValueError("child path must be a discoverable corpus Markdown entry")
+        if replay and not child_path.exists():
+            raise ValueError("child_spec_id does not resolve for recorded operation")
+        if child_path.is_symlink():
+            raise ValueError("child path may not be a symlink")
+        child = _spec_frontmatter(child_path) if child_path.exists() else _frontmatter(child_markdown)
+        errors.extend(_validate_child(data, child))
+        child_bytes = child_path.read_bytes() if child_path.exists() else child_markdown.encode("utf-8")
+        if data.get("child_hash") is not None and _sha(child_bytes) != data["child_hash"]:
+            errors.append("child_hash disagrees with current child")
+        if not child_path.exists():
+            if data["child_spec_id"] in specs:
+                errors.append("child_spec_id already resolves to another corpus entry")
+        # Validate source proof and controls before publishing the prospective child.
+        source = specs.get(data["source_spec_id"])
+        if source is None:
+            errors.append("source_spec_id does not resolve")
+        elif _sha(source.read_bytes()) != data["source_hash"]:
+            errors.append("source_hash disagrees with current source")
+        if data["child_spec_id"] == data["source_spec_id"]:
+            errors.append("child_spec_id may not self-reference source")
+        if errors:
+            raise ValueError("; ".join(errors))
+        if not child_path.exists():
+            created_bytes = child_markdown.encode("utf-8")
+            try:
+                with child_path.open("xb") as handle:
+                    handle.write(created_bytes)
+            except FileExistsError:
+                created_bytes = None
+                raise ValueError("child path appeared during processing") from None
+            except OSError:
+                child_path.unlink(missing_ok=True)
+                raise
+    try:
+        return append_record(store_path, data, specs_dir=specs_dir)
+    except Exception:
+        if created_bytes is not None and child_path is not None and child_path.read_bytes() == created_bytes:
+            child_path.unlink()
+        raise
 
 
 def zero_suggestion_record(*, project_id: str, run_id: str, source_spec_id: str, source_hash: str,

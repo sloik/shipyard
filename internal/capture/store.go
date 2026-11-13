@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -329,7 +330,9 @@ type TrafficPage struct {
 type Store struct {
 	db      *sql.DB
 	dbPath  string
-	jsonlF  *os.File
+	jsonlF  *jsonlFile
+	cfg     Config
+	now     func() time.Time
 	mu      sync.Mutex
 	pending map[string]pendingRequest // keyed by message_id
 
@@ -338,6 +341,12 @@ type Store struct {
 	accessClosing  bool
 	accessFailures atomic.Uint64
 	accessErr      error
+
+	pruneMu     sync.Mutex // serialises Prune calls
+	pruneCancel context.CancelFunc
+	pruneWG     sync.WaitGroup
+	lastPruneMu sync.Mutex
+	lastPrune   PruneResult
 }
 
 type PerformanceStats struct {
@@ -345,6 +354,12 @@ type PerformanceStats struct {
 	TrafficRows        int64 `json:"traffic_rows"`
 	SchemaSnapshotRows int64 `json:"schema_snapshot_rows"`
 	AccessLogRows      int64 `json:"access_log_rows"`
+	// JSONLTotalBytes is the size of the JSONL backup including rotated files.
+	JSONLTotalBytes int64 `json:"jsonl_total_bytes"`
+	// LastPruneAt is the RFC3339 time of the last traffic prune ("" if none yet).
+	LastPruneAt          string `json:"last_prune_at"`
+	LastPruneRowsDeleted int64  `json:"last_prune_rows_deleted"`
+	LastPruneError       string `json:"last_prune_error,omitempty"`
 }
 
 type pendingRequest struct {
@@ -353,8 +368,14 @@ type pendingRequest struct {
 	method    string
 }
 
-// NewStore creates a new capture store backed by SQLite and a JSONL file.
+// NewStore creates a new capture store backed by SQLite and a JSONL file,
+// using the default retention policy (DefaultConfig).
 func NewStore(dbPath, jsonlPath string) (*Store, error) {
+	return NewStoreWithConfig(dbPath, jsonlPath, DefaultConfig())
+}
+
+// NewStoreWithConfig is NewStore with explicit retention/rotation limits.
+func NewStoreWithConfig(dbPath, jsonlPath string, cfg Config) (*Store, error) {
 	db, err := openSQLiteDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -367,6 +388,9 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// One-time conversion to auto_vacuum=INCREMENTAL (never fails startup).
+	ensureIncrementalVacuum(db, dbPath, cfg, time.Now)
 
 	// Create schema (safety net for fresh databases)
 	_, err = db.Exec(`
@@ -458,18 +482,22 @@ func NewStore(dbPath, jsonlPath string) (*Store, error) {
 	// Enable WAL mode for better concurrent read/write
 	_, _ = db.Exec("PRAGMA journal_mode=WAL")
 
-	jsonlF, err := openJSONLFile(jsonlPath)
+	jsonlF, err := openRotatingJSONL(jsonlPath, cfg.JSONLMaxBytes, cfg.JSONLKeep)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open jsonl: %w", err)
 	}
 
-	return &Store{
+	s := &Store{
 		db:      db,
 		dbPath:  dbPath,
 		jsonlF:  jsonlF,
+		cfg:     cfg,
+		now:     time.Now,
 		pending: make(map[string]pendingRequest),
-	}, nil
+	}
+	s.startPruneLoop()
+	return s, nil
 }
 
 func (s *Store) PerformanceStats() (PerformanceStats, error) {
@@ -494,6 +522,15 @@ func (s *Store) PerformanceStats() (PerformanceStats, error) {
 		if err := s.db.QueryRow("SELECT COUNT(*) FROM " + c.table).Scan(c.dest); err != nil {
 			return stats, fmt.Errorf("count %s: %w", c.table, err)
 		}
+	}
+	stats.JSONLTotalBytes = s.jsonlF.totalBytes()
+	s.lastPruneMu.Lock()
+	lp := s.lastPrune
+	s.lastPruneMu.Unlock()
+	if !lp.At.IsZero() {
+		stats.LastPruneAt = lp.At.Format(time.RFC3339)
+		stats.LastPruneRowsDeleted = lp.RowsDeleted
+		stats.LastPruneError = lp.Err
 	}
 	return stats, nil
 }
@@ -583,8 +620,9 @@ func (s *Store) Insert(entry *TrafficEntry) (int64, *int64) {
 		"status":      entry.Status,
 		"latency_ms":  latencyMs,
 	})
-	s.jsonlF.Write(jsonLine)
-	s.jsonlF.Write([]byte("\n"))
+	if err := s.jsonlF.writeLine(jsonLine); err != nil {
+		slog.Error("failed to append jsonl", "error", err)
+	}
 
 	return rowID, latencyMs
 }
@@ -1132,8 +1170,9 @@ func (s *Store) InsertWithSession(entry *TrafficEntry, sessionID int64) (int64, 
 		"latency_ms":  latencyMs,
 		"session_id":  sessionIDVal,
 	})
-	s.jsonlF.Write(jsonLine)
-	s.jsonlF.Write([]byte("\n"))
+	if err := s.jsonlF.writeLine(jsonLine); err != nil {
+		slog.Error("failed to append jsonl", "error", err)
+	}
 
 	return rowID, latencyMs
 }
@@ -1575,6 +1614,7 @@ func (s *Store) Close() error {
 	s.accessMu.Lock()
 	s.accessClosing = true
 	s.accessMu.Unlock()
+	s.stopPruneLoop()
 	drainErr := s.DrainAccessLog()
 	jsonlErr := s.jsonlF.Close()
 	dbErr := s.db.Close()

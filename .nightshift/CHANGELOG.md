@@ -7,6 +7,927 @@
 >
 > **Rule:** Every change to canonical files MUST bump `kit_version` and add an entry here.
 
+## 3.26.12 (source cut: 2026-10-22)
+
+- Preserve valid frontmatter when replacing or clearing wrapped refusal scalars, including retained records and aliases. Repair incomplete release fixtures without changing their behavioral assertions; map release-plan findings in rules documentation and CLI routing (SPEC-NS-KIT-249).
+
+## 3.26.11 (source cut: 2026-10-22)
+
+- Give missing and malformed release plans distinct finding families. Record the reviewed 331 historical Done records missing the intentionally required plan through SPEC-337 R3 floor policy; retain prior floor families/counts, per-spec validation and new Ready refusal (SPEC-NS-KIT-249).
+
+## 3.26.10 (source cut: 2026-10-22)
+
+- Read explicit observability configuration when deciding private-artifact release eligibility; commented examples no longer enroll projects and quoted enabled sinks retain the privacy gate. Repair release guide fixtures and review the functional-only search pin after checkpoint-identity changes, preserving benchmark sources and all original assertions (SPEC-NS-KIT-249).
+
+## 3.26.9 (unreleased)
+
+- Register CloudSyncKit as `CLOUDSYNCKIT` / `CSK` and ship its empty frozen legacy list (SPEC-NS-KIT-248). The existing registry job imports canonical directly and needs no install rollout to generate the CSK entry; installed validators receive the table and legacy list through a future whole-kit release.
+
+## 3.26.8 (unreleased)
+
+- Enforce `requires_specs` through one shared read-only gate on every named start path, including sequential and worker-limit1 starts, without changing frontier selection or adding concurrency (SPEC-NS-KIT-247). Registry precedence: explicit selection, beside specs, kit nested layout, then the same install-relative paths in the primary Git worktree.
+- Migration: no config changes. Nonempty `requires_specs` with no main-checkout registry now refuses with `cross_project_registry_missing`; repair through `nightshift-sync.py registry`. Install-owned helpers must call `dependency_registry.py start-gate` before flipping Ready to InProgress; record-transition is a backstop and a refused flip must be reverted. No override flag: edit/remove the prerequisite in a committed spec change.
+
+## 3.26.7 (unreleased)
+
+- Accept exact frozen project legacy IDs in commit subjects and history replay; report project-owned commit-msg forks with compatibility probes and manual adoption guidance in release and doctor (BUG-NS-KIT-246).
+
+## 3.26.6 (unreleased)
+
+- Emit correlated staged-validator progress and heartbeats on stderr, retain per-invocation events under Git common state, and report terminal outcome, native exit code and report digest without changing gate decisions (SPEC-NS-KIT-245).
+
+- Preserve primary-checkout status checkpoint paths across disposable linked worktrees and recover recognized legacy locators without weakening unrelated-path or terminal-state guards (BUG-NS-KIT-244).
+
+## 3.26.5 (source cut: 2026-10-18)
+
+- Require a reviewed release plan before a release-impact spec can become Ready, while retaining source-bound handoffs for Done and whole-kit delivery (SPEC-NS-KIT-243).
+
+## 3.26.4 (source cut: 2026-10-18)
+
+- Ship the existing immutable six-prompt prebuilt library with every managed install and the global Nightshift skill. Preserve source bytes, writable-store boundaries and strict delivery receipts; align managed version labels with the cut (BUG-NS-KIT-242).
+
+## 3.26.3 (source cut: 2026-10-18)
+
+- Restore independent formal test collection, exact functional search reference fixtures, deterministic unit phase clocks and complete guide headers/route inventory. Enroll the three continuation guides in the exact public-kit inventory; preserve frozen benchmark code, evidence and release gates (BUG-NS-KIT-235). This cut carries the preceding undelivered 3.26.2 changes.
+
+## 3.26.2 (source cut: 2026-10-18)
+
+- Split oversized guides into managed continuations, preserve runtime pinned blocks and refresh the reviewed installed-inventory count for the whole-kit release (SPEC-NS-KIT-234).
+
+- Mirror an allowlisted, secret-checked local config file into verified worker worktrees and show declared owner-approval waits distinctly from stalls (SPEC-NS-KIT-231). Existing heartbeat-only liveness and terminal states remain; no new permission rule or live prompt integration is added.
+
+- Share the board/Control prompt library authority, revisioned cross-process transactions, flat folders, all-tag filtering and exact plain/Codex/Claude copy choices (SPEC-NS-KIT-226). Legacy list stores migrate only on mutation with exact backups; all writers must upgrade before schema2 writes. Root Control and managed kit delivery remain coordinated through the pending whole-kit handoff.
+
+- Add deterministic ID-aware ranked/filtered board search with shared API, offline CLI and export semantics; enroll the shared runtime module and canonical verification dependency (BUG-NS-KIT-225). Benchmark qualification and final acceptance remain separately evidenced; no fleet delivery is claimed.
+
+## 3.26.1 (source cut: 2026-10-15)
+
+- Bind standalone pinned scope consumers to the intended kit resolver file, preserve the trusted parent's hardened resolver through its explicit caller-owned bootstrap, and keep missing-helper observations distinct from broken imports (BUG-NS-KIT-215).
+- Bind pytest observation and owned JUnit capture to one invocation controller so nested suites retain their native outcomes and independent evidence; isolate formal model-status fixtures while preserving the original integration checks (BUG-NS-KIT-214).
+- Resolve declared non-Python native and shell-script suite runtimes without requiring Python imports, bind script/interpreter identities and retain strict setup-only refusal semantics (BUG-NS-KIT-212).
+- Report pre-apply suite-environment setup for every discovered install separately from payload delivery, installed admission and actual suite results (BUG-NS-KIT-212).
+
+## 3.26.0 (source cut: 2026-10-15)
+
+- Read instruction audit config through strict merged YAML, classify both managed helpers as public kit, and repair validation fixture prerequisites while retaining admission, scope and browser assertions (BUG-NS-KIT-211).
+
+- Join declared retained delivery evidence, distinguish observed stages and unknown coverage, and add fail-tolerant parent observations without changing eligibility or lifecycle authority (SPEC-NS-KIT-209).
+
+- Report delivery and observed admission separately for each discovered install, preserve release exit semantics, and derive informational recovery guidance from the recorded exact target (SPEC-NS-KIT-208).
+
+- Align small/full worker operation ownership with broker intents and explicit route authority; retain failed parent obligations while admissible independent frontier work continues after safe-main settlement (BUG-NS-KIT-206).
+
+- Forward opt-in ledger reuse through gated handoff, capture independent native head proof, retain it only through accepted merge admission and consume matching proof through the existing fresh-main fallback path (BUG-NS-KIT-199).
+
+- Bind migration candidates to reviewed source bytes and release targets, share the existing strict YAML reader with the pure migration engine, support all three version quote styles, and revalidate complete candidate batches before repository writes (BUG-NS-KIT-207).
+
+- Make recovery-ladder preview read-only and nonexecutable; report persisted failure as an authorization-required continuation through existing durable retry issuance, and prevent invalid AC review from returning success guidance (BUG-NS-KIT-205).
+
+- Add explicitly commissioned finite graph captures and immutable, identity-qualified offline comparisons; retain partial outcomes and distinguish suspected degradation from the separate 2,000ms diagnostic budget (SPEC-NS-KIT-201).
+
+- Limit board card titles to two visual lines and activity to one line, retaining full title previews, full activity details and visible wait/incomplete indicators in live and exported boards (SPEC-NS-KIT-199).
+
+- Show graph load status, phase diagnostics and qualified 2,000ms warnings through the existing process-local timing registry; keep failures/cancellations separate and static exports local-only (SPEC-NS-KIT-200).
+
+- Capture explicit helper metadata without execution, review reuse candidates through existing artifacts, and retain duplicate-checked separate draft recommendations at nonblocking parent closure (SPEC-NS-KIT-168).
+
+- Preserve main test-status ledger reuse over declared non-input changes; bind opt-in include/exclude policies and resolved inputs, retain mandatory code/config/hooks/resources and conservative fallback for unresolved commands, and keep independent head verification (BUG-NS-KIT-197).
+
+- Reconcile only parent-approved byte-equivalent self-spec R/AC conflicts within the original serialized retry; bind original accepted evidence/receipts, full tree/parents, durable recovery and exact fresh-main validation (SPEC-NS-KIT-172).
+
+- Compose an explicitly approved inventory-only repair with complete native failed-full and normal reader proof; preserve the failure and share one strict reuse/delivery validator (SPEC-NS-KIT-189).
+
+- Check mandatory external verifier inputs before implementation; recognize anchored declarations in instruction packets and defer unavailable inputs without lifecycle mutation (SPEC-NS-KIT-175).
+
+### Check verifier setup before suite launch (SPEC-NS-KIT-157)
+
+Bounded actual-runtime probes check executable/dependency availability, existing
+cache access and disposable output access. Dispatch, parent and sample launch
+share privacy-safe setup eligibility; failures retain native gaps and launch no
+suite. Setup never counts as completed tests or replaces final verifier evidence.
+Unresolved ephemeral runtimes remain explicit setup gaps; no automatic repair.
+
+### Show recorded activity and human waits (SPEC-NS-KIT-156)
+
+Durable metadata boundaries separate reasoning, human involvement, tools, tests,
+scripts and explicit human waits. Cards and detail show known in-progress totals,
+independent overlapping categories, unclassified gaps and recorded next actions.
+Discussion episodes close only at takeover; answer arrivals end outstanding waits.
+Heartbeat retains sole liveness authority; unsupported capture remains unknown.
+
+### Author exact approved AC evidence amendments (SPEC-NS-KIT-188)
+
+The existing artifact CLI records selected evidence-locator edits against the
+actual ready Git object, preserving exact wording, approval, hashes and history.
+Substantive changes, unknown baselines and concurrent drift refuse mutation;
+unchanged replay adds no duplicate amendment. Lifecycle and verdicts stay intact.
+
+### Preserve immutable handoff source ranges (SPEC-NS-KIT-192)
+
+Resolve actual handoff endpoints and retain original spelling, source repository
+identity and bounded diff. Pending repins label unknown legacy history explicitly.
+Checked cleanup retains source roots unless main or the existing exact owned
+recovery ref durably contains both endpoints. Completed deliveries stay immutable.
+
+### Finalize source-cut dates before sealing (BUG-NS-KIT-193)
+
+An authorized pre-seal command labels and binds the ISO source-cut date without
+attesting delivery. Apply refuses unreleased or changed source-cut metadata
+before expensive gates or copies; development validation/dry-run remain available.
+Completed same-version cuts remain immutable. Delivered3.25.1 is unchanged.
+
+### Audit declared project instruction pins (SPEC-NS-KIT-194)
+
+Read-only project declarations distinguish active drift, historical examples and
+unknown/undeclared coverage against exact installed marker/config identity.
+Optional drift stays advisory; explicit required pins block the audit. Approved
+exact corrections use normal project Git hooks, retain old/new evidence and
+preserve unrelated staged work. No project instruction joins the managed payload.
+
+### Review installed inventory evidence maintenance (SPEC-NS-KIT-191)
+
+The existing LE2 recorder accepts inventory upkeep only with owner review bound
+to the old record, sealed manifest and recorder source. Only the installed-allow
+`stable.manifest_files_checked` may change; all other stable fields stay strict.
+Original/proposed evidence and the approved diff are retained before replacement.
+Normal reader-module validation with record mode unset remains required; recording
+does not grant admission or suite reuse. Pending release only; no rollout claimed.
+
+### Reject deterministic release invariant failures early (SPEC-NS-KIT-187)
+
+The shared read-only release preflight checks guide byte caps/registry, report
+reachability/index ownership, and the reviewed LE2 saved inventory count before
+floor scans and native validation. Failures name the rule and path; no evidence
+is rewritten and count equality never grants installed admission. Relevant
+bytes, modes and inventory bind success lineage; unrelated application bytes
+stay outside this canonical-only check. Existing later gates remain required.
+Migration: run `release.py check-release-invariants` during report preparation
+and final cut. Pending whole-kit release only; no installed rollout claimed.
+
+### Record validated implementer-assessed terminal blocks (BUG-NS-KIT-173)
+
+`implementer-assessed-blocked` records a schema-bound parent Blocked assessment
+before verifier dispatch. The terminal renderer accepts closed reducer state
+instead of a verdict; normal hooks check staged proof, candidate and inventory.
+Metrics and outcome adapters report zero verifier activity and no verified delivery.
+The kind cannot mark Done or replace later independent verification. Bare new
+self-verification refuses; experimental designation remains required. Inherited
+scope/schema guidance is consolidated under the unchanged guide byte caps.
+Migration: stage actual state and use `--assessment-state` with the blocked-only
+kind. Pending whole-kit release; no installed rollout claimed.
+
+### Bind verdict scope to the assigned head arm (BUG-NS-KIT-177)
+
+Assembly and public verdict validation classify exact Git changes with the
+assigned head arm and matching spec/kit. The containment repository remains
+the inventory source. Missing, swapped, foreign, stale or altered bindings
+refuse; existing private candidate identity and real scope denials stay enforced.
+Migration: explicit spec overrides must name the committed corresponding head
+spec. Pending whole-kit release only; no installed rollout is claimed.
+
+### Complete generated verifier scope summaries (BUG-NS-KIT-176)
+
+Suite and no-suite briefs include the canonical implicit scope rule exactly once.
+Absent or empty write scope displays `project root (default)`, retaining declared
+read and deny constraints. Already-complete parent summaries remain compatible.
+Public historical-attempt placeholders and trusted scope enforcement stay intact.
+Migration: none; pending whole-kit release, with no installed rollout claimed.
+
+### Match contamination object schemas (BUG-NS-KIT-182)
+
+The embedded verifier validator rejects unsupported contamination keys and
+non-string optional detail, matching strict final validation. Malformed class
+or timing values produce schema rejection. Null, empty lists and supported
+exposures retain their existing behavior; independence checks remain intact.
+Migration: keep explanations in string detail or outside the closed exposure
+object. Pending whole-kit release only; no installed rollout is claimed.
+
+### Review marginal verification evidence before another launch (SPEC-NS-KIT-183)
+
+An opt-in parent checkpoint records exact action/obligation identities, original
+receipt lineage and separately scoped observed costs before handoff preparation
+or recovery retries. Owner signals, repeated proof without named new evidence
+and explicitly configured soft limits recommend review. A pinned owner disposition
+can continue with named evidence and a finite budget, apply existing eligible
+reuse, propose amendment or recommend replacement. Unknown costs stay unknown.
+Existing mandatory gates, healthy operations, hard budgets, sampling and the
+sole lifecycle/integration owner remain intact. Full/small/recovery summaries agree.
+Migration: explicitly opt in with `verification_economics.enabled: true` and supply
+parent action context. No numeric soft defaults, rollout or efficacy claim.
+
+
+### Preserve exact checkpoint path identities (BUG-NS-KIT-190)
+
+Checkpoint plans use NUL-delimited Git identities, retaining literal pathname
+bytes and both rename paths. Copies stage only their changed destination while
+source associations remain subject to existing safety exclusions. Malformed status
+and Git failure refuse without parser repair writes. Migration: none. Distribution
+remains pending the normal whole-kit release.
+
+### Restore canonical-suite margin and isolate formal regeneration fixtures (BUG-NS-KIT-190)
+
+The release coordinator keeps the existing two-times headroom criterion and
+raises its internal canonical-suite limit to 7200 seconds against the retained
+3330.842-second measurement. Formal regeneration unit fixtures use copied private
+config layouts, retaining the original hash, trace and negative-control assertions.
+Migration: none. Distribution remains pending the normal whole-kit release.
+
+### Preserve obligations when replacing unfinished specs (SPEC-NS-KIT-184)
+
+The prepare/apply CLI pins a finite replacement plan to source, lifecycle and
+retained evidence identities. Every obligation has one explicit disposition;
+exact indexed owner authority and actual run closure are required before apply.
+Recoverable journals retain Draft replacements and reconcile interrupted
+metadata commits without launching work or claiming the source Done.
+Migration: none. Existing lifecycle and serialized integration gates remain.
+Distribution is pending the normal whole-kit release.
+
+## 3.25.1 (unreleased)
+
+### Resolve spec identity and retain board evidence (SPEC-NS-KIT-185)
+
+The canonical skill resolves the registered project and watched spec root before
+assigning IDs, distinguishes branch durability, board visibility and main
+integration, and retains indexed author decisions and durable evidence.
+Board discovery uses the supported health, refresh, list and detail workflow.
+Migration: none. Distribution uses the normal whole-kit skill delivery route.
+
+### Complete the first tracked terminal projection (BUG-NS-KIT-167)
+
+The coordinator seals complete first-projection metadata before terminal
+persistence. A pending projection retains the accepted terminal decision and
+recovers through the supported queue without replaying application gates,
+remerging the candidate or replacing the original admission.
+Migration: none. Existing ownership and commit-backed recovery guards remain.
+
+### Isolate follow-up lineage from non-spec Markdown (BUG-NS-KIT-178)
+
+Follow-up lineage processing distinguishes actual specs from unrelated Markdown
+in the spec directory, preserving real-spec validation, evidence references,
+source hashing and safe writes. Unrelated notes no longer abort processing.
+Migration: none. No application build or test command is added.
+
+
+### Retain suite-sample native evidence before presentation (BUG-NS-KIT-181)
+
+Unsafe sample output identifiers and unusable sinks refuse before child launch.
+A preopened private binary spool and native journal retain exact output and the
+actual child exit independently of final-name, summary or timing failures.
+Storage and wrapper errors stay separate; children are drained without replay.
+Migration: use a short suite label and put command argv after `--`. Pending
+whole-kit release; no installed-copy rollout or historical native exit inferred.
+
+### Check final canonical packaging before configured suites (SPEC-NS-KIT-162)
+
+A supported read-only final-manifest command binds final managed bytes, modes,
+manifest and pending handoff membership, naming stale paths before an expensive
+configured launch. Canonical preflight applies the check before project commands;
+installed-profile behavior is unchanged. Regeneration remains explicit and serial.
+Migration: none. Pending whole-kit release; no rollout claimed.
+
+### Explain optional external asset evidence setup (SPEC-NS-KIT-169)
+
+README and spec authoring links lead to the existing run guide's practical
+per-spec declaration workflow, sharing boundaries and consumer approval
+commit/digest cross-check. Existing importer safeguards and runtime behavior
+are unchanged. Migration: none. Pending whole-kit release; no rollout claimed.
+
+### Disambiguate generated verifier inventory revisions (BUG-NS-KIT-180)
+
+Suite and no-suite verifier briefs append the Git revision/path separator to
+the complete rename-aware changed-path command. Materialized arm directories
+can now share their verifier ref names without an ambiguity error. Scope
+classification and denied-path checks retain the complete inventory.
+Migration: none. Pending whole-kit handoff; no installed-copy rollout claimed.
+
+### Bind approved operational sampling before execution (BUG-NS-KIT-179)
+
+A separate parent-held sampling anchor authenticates the exact ordered operational
+command tuple and source-reviewed requirement/amendment bindings before execution.
+Native observer, assembly and independent validation require complete collection
+on both arms, unchanged assertions and every clean non-target member. One eligible
+pair establishes an observed correction only; invalid/late authority preserves
+strict escalation. Legacy configured schema 1.0 and original receipts remain intact.
+Migration: none. Pending whole-kit handoff; no rollout or production-savings claim.
+
+### Order required-deliverable verifier intake (BUG-NS-KIT-166)
+
+Both suite and no-suite verifier briefs first derive relevant source behavior,
+test assertions and native results, then inspect the real required authored
+deliverable against the exact assigned arms. Generated composition refuses a
+stale template lacking that order. Actual early exposure remains rejected;
+identity, read-only footprints and exposed-failure reproduction stay strict.
+This is an instruction contract, without staged access or placeholder substitution.
+
+### Align completion warning severity (BUG-NS-KIT-165)
+
+Board completion and the shared status gate distinguish genuine validator warnings
+from blocking errors. Pending re-pin warnings remain visible in API responses and
+both UI controls; invalid handoffs still refuse before persistence. Commit-backed
+checkpoint/recovery, CLI owner guards and installed-project exemptions are unchanged.
+Migration: none. Whole-kit release and installed adoption remain pending.
+
+### Preserve verifier release contracts (BUG-NS-KIT-163)
+
+Neutral verifier specs retain the exact release-handoff declaration and its proof
+hash in both assigned-contract arms. Required, exempt and absent semantics remain
+unchanged; withheld author-artifact mentions and tampering refuse preparation.
+Corpus identity, existence, tracking and deny-scope checks remain strict.
+Migration: none. Whole-kit release and installed adoption remain pending.
+
+### Bound resampling for predeclared baseline fixes (BUG-NS-KIT-170)
+
+Trusted pre-execution AC/test/source declarations can establish one complete
+configured suite pair for a narrowly observed baseline-only correction. The
+checker independently verifies unchanged target assertions/files, actual native
+collection, names/counts/exits, identities and both footprints; missing proof,
+head/unexpected failures and instability retain strict escalation. Original raw
+diagnostics and all five observation classifications remain intact. One pair
+makes no statistical determinism or future-flake claim. Migration: none.
+Trusted native pytest observations also support unchanged quiet/xdist commands,
+retaining agreed collection and every test phase in private external artifacts.
+Inherited options/plugins/import paths survive; incomplete or conflicting transport
+keeps strict sampling. Whole-kit release and installed adoption remain pending.
+
+### Native verification failures stay separate from diagnostics (SPEC-NS-KIT-160)
+
+Suite invocations retain their arm, identity, native exit and raw hash with a
+completed/unavailable process record. Pytest's final outer summary owns failure
+membership; captured child failures remain separate diagnostics. Missing or
+conflicting summaries, denied launches and timeouts remain evidence gaps.
+Hash-bound diagnostic hypotheses do not excuse failures or replace controls.
+Stable setup evidence records one next action and actor for the existing unblock
+fingerprint/attempt guard; unchanged prerequisites do not grant another retry.
+The conditional one/three-per-arm policy remains unchanged. Migration: none.
+Whole-kit release and installed adoption remain pending.
+
+### Pending terminal metadata recovery stays bound to the original receipt (SPEC-NS-KIT-150)
+
+An explicit parent-pinned descendant recovery base now permits unrelated committed main work while retaining the original receipt, hashes and default original-base refusal. Recovery and crash replay bind the exact separate parent and preserve unrelated committed/index bytes.
+
+The serialized integration queue accepts explicit `metadata_recovery` input for
+v12 pending done projections. It derives matching official rationale/transition
+artifacts and inline references on already checked LE items, binds existing safe
+local evidence hashes and the complete artifact closure, and appends recovery
+links without replacing the original status-only receipt or terminal decision.
+Crash/retry and hook rejection remain recoverable; ordinary validation/hooks and
+exact commit postconditions precede completion and cleanup. GIT.md documents the
+operator call. No installed copy or live pending application run is changed;
+whole-kit release and rollout remain pending. Migration: none.
+
+### The rules guide maps the blocker-evidence-unresolved validator family to the lifecycle row (BUG-NS-KIT-144)
+The `lifecycle` row of `guides/rules.md` and `board_ctl.RULE_ROWS` name `blocker-evidence-unresolved` and state that a blocked spec's `blocker_evidence` must name an existing evidence file, so `tests/test_board_ctl_rules.py` passes again.
+
+### Release refreshes a wired kit commit-msg hook after replaying recent history (SPEC-NS-KIT-143)
+
+The whole-kit release now refreshes a recognised kit `.git/hooks/commit-msg` (never creating or overwriting a project-owned one), keeps the old bytes as `commit-msg.nightshift-prev`, and defers the refresh with a report when the last 30 days of commits include a subject the new hook would reject; `--refresh-commit-msg-hooks auto|force|never` overrides. Projects clear a deferral by writing `chore: mark <ID> done|blocked|in_progress` and using `record_metrics.py --commit-terminal`.
+
+### unblock_spec resolves a project root to the install, and mark_spec_blocked writes real blocker evidence (BUG-NS-KIT-142)
+`unblock_spec.py` accepts a project root or the install directory for `--root`/`project_root` and keeps all state under the install (a directory with neither layout raises `NS-UNBLOCK-ROOT-NOT-INSTALL` before any write), `mark_spec_blocked` takes `blocker_class`/`blocker_scope`/`blocker_evidence`/`unblock_condition` and writes `reports/failures/<ts>-blocked-<stem>.json` as default evidence (`persist_failure` passes its own report), and `validate_specs.py` warns `blocker_evidence_unresolved` for blocked specs whose evidence is not an existing install-relative file.
+
+### assemble-verdict reads unittest and xcodebuild samples and treats null arm windows as absent (BUG-NS-KIT-141)
+`parse_raw_sample` parses `python -m unittest` and `xcodebuild test` output (failing names required, ambiguous or unknown text refused with the accepted formats listed), a `started_at`/`ended_at` that is null, empty, `"None"` or `"null"` is absent (one end alone is refused as `arm_isolation_invalid`), the verdict records no absent window fields, and the suite brief and `run-6.md` state the accepted sample forms and the structured sample shape.
+
+### The verifier sees AC Amendments and can take its contract from main (BUG-NS-KIT-140)
+The verifier's spec copy now includes `## AC Amendments` (briefs state the latest row names the criterion in force), `validate_specs.py` warns `ac_amendment_unapplied` for new rows whose AC line was not edited, and `verification_report.py prepare-dispatch --contract-ref main` projects both arms' spec from main without touching the candidate.
+
+### Terminal lifecycle trailers come from a builder (BUG-NS-KIT-139)
+`record_metrics.py --render-terminal-trailers` / `--commit-terminal` build the eleven required trailers from the verifier verdict (no hand-filled block, explicit `unavailable` tally), `parallel_executor` shares the renderer, a done commit with no evidence trailers no longer defaults to `pass` (`evidence_source` verdict|none), and `--correct-commit` reads legacy bracketed marks.
+
+### Commit-msg hook accepts the coordinator's subject forms (SPEC-NS-KIT-118)
+
+`hooks/commit-msg`: besides `[<ID>] ...`, the hook now accepts `<ID>: ...`, maintenance subjects (`chore|telemetry|release|merge: ...`, no ID) and conventional subjects (`spec(BUG-NS-KIT-132,BUG-NS-KIT-133): ...`, `fix: ... (BUG-320 recurrence)`) that carry an ID; status marks `chore: mark <ID> draft|planned|ready|in_progress|superseded|retired` need no trailers; `chore(<ID>): ...` is accepted; a bracketed `[<ID>] chore: mark ...` subject is rejected for every status (metrics never reads it; GIT.md no longer prescribes it); any other `chore: mark ...` subject is rejected as a malformed lifecycle subject. Lifecycle trailer requirements are unchanged. `GIT.md` documents the forms and the install/rollback command.
+
+### Board graph keeps the selected spec out from under the details panel (SPEC-NS-KIT-134)
+
+`board.py`: selecting a node in the graph view (click, card, deep link) now places it at the center of the canvas area the details panel does not cover (right, left or bottom dock, using the panel's real size), keeps the current zoom (at least 1.2), and leaves the camera still when the node is already inside that area with a 48 px margin; with the panel closed the focus is unchanged. Migration: none.
+
+### Pre-commit gate tells a missing lint/type tool from findings and can lint only staged files (BUG-NS-KIT-135)
+
+`hooks/pre-commit` reports a lint or type_check command that cannot run (exit 127, 126 or 78, `<python> -m <module>` with that module missing, or a failing `commands.lint_probe` / `type_check_probe`) as `LINT TOOL UNAVAILABLE` / `TYPE CHECK TOOL UNAVAILABLE` instead of `FAILED`; it still blocks by default and only warns with `commands.on_tool_unavailable: warn`. New opt-in `commands.lint_staged` (with `{files}`) and `commands.lint_exclude` lint only the staged files, and `hooks/pre-commit --check-tools` lists each install's gate commands and whether their tools are usable (read-only); documented in `config-reference.yaml` and `GIT.md`. No config change is required.
+
+### Release coordinator `--isolated-root` scans the given root alone (BUG-NS-KIT-133)
+
+`release_coordinator.py --isolated-root` restricts install discovery to `--root` (no `EXTRA_SCAN_ROOTS`) in `--dry-run`, `--apply` and `--checkpoint-plan`; the result records `discovery` (`isolated`, scanned `roots`) and the apply rerun command keeps the flag. Without the flag coverage is unchanged. `guides/release.md` tells rehearsals to use it.
+
+### Write-scope hook classifies checkouts that live under a scratch root (BUG-NS-KIT-136)
+
+`write-scope-hook.sh` no longer treats an absolute path inside the project root as scratch just because the checkout sits under `/tmp`, `/private/tmp` or `/var/folders`; such paths are classified (narrowing the carve-out only; symlink escapes stay `outside_root`).
+
+### Skill-touching and folded release handoffs can complete (BUG-NS-KIT-132)
+
+`validate_positive_delivery` accepts a skill commit of SKILL.md plus manifest-derived guides; `repin_folded_handoffs` re-pins the preceding release's `fold` records before completion; the coordinator result gains `release_handoffs_not_completed`.
+
+### Register WorkshopFractionSheet project code WFS (SPEC-ARGO-127)
+
+`spec_id.PROJECT_CODES` gains `"WORKSHOPFRACTIONSHEET": "WFS"` for SideGigs app 3; native `SPEC-WFS-*` IDs, no legacy ID file.
+
+### Release coordinator exit status separates skips from failure (BUG-NS-KIT-131)
+
+`release_coordinator.py` exits `0` (`outcome: completed`), `3` (`completed_with_skips`: known skips only), `1` (`failed`: any `failure_class` or `unexpected_failure`) or `2` (invalid manifest), the same in dry-run and apply; `guides/release.md` Step 5 carries the table.
+
+### Scanner ignores spec-ID digits; suite summary is committable; pre-commit scans repo-root paths (BUG-NS-KIT-130)
+
+`scanner.py` no longer reads digits wholly inside a spec ID as a card number (grammar pinned to `spec_id.TOKEN_PATTERN`); `release_coordinator.py` writes `canonical-suite-test-summary-<stamp>Z.json` (totals and duration per test file, no ids or output) beside the raw JUnit file; `hooks/pre-commit` resolves an ambiguous repo-root path to the `canonical` install so its scanner runs, and prints "No config.yaml found" only when no install config exists.
+
+### Release runbook hygiene (SPEC-NS-KIT-129)
+
+`guides/release.md` gains a "Release roles" section: one suite owner, background suites polled between tool calls, no commits outside the named steps, and cut-dependent ACs written as "the value at the cut" plus a check.
+
+### Policy-aware pre-release checkpoint plan (SPEC-NS-KIT-128)
+
+`release_coordinator.py --root <root> --checkpoint-plan` is a read-only third mode: per repository it prints the dirty path count, the paths a checkpoint commit may take, the excluded paths with a reason (`private_artifact`, `generated_registry`, `spec_wrong_home`) and the classification the dry-run would give it (same `_repository_refusal` the dry-run uses). It writes nothing into any repository; `guides/release.md` gains a Step 0, "Dirty-tree audit and checkpoints".
+
+### Done gate names referenced files that are not in git; coordinator reports uncommitted handoffs (BUG-NS-KIT-127)
+
+`spec_artifacts.py untracked-refs <spec-file>` lists the files a spec's evidence references (checked LE evidence, `proof/evidence.json` sources, `index.json` entries, a required release handoff) that are neither tracked nor staged, split into `stage_with_done` and `outside` (exit 1 when `outside` is non-empty). The `done` transition in `status_transition.gate_status_write` refuses and names every `outside` path; `guides/run-7.md` and `guides/kickoff.md` run the check before the done commit, and `release_coordinator.py` records `release_handoffs_uncommitted` (see `guides/release.md` Step 5).
+
+### Release dry-run validates every install; apply records post-sync validation (SPEC-NS-KIT-123)
+
+`release_coordinator.py --dry-run` now runs installed-profile validation in process for every discovered install (read-only: no artifact or receipt is written) and reports `fleet_validation` (verdict, failed invariants classed `fixed_by_release` or `pre_existing`, duration) plus a table on stderr; `--apply` records `post_sync_validation` per verified install without changing commit, stop or exit semantics. `guides/release.md` Steps 2 and 5 name both.
+
+### Cheap release checks run before the canonical suite (SPEC-NS-KIT-124)
+
+`release_coordinator.py --dry-run` now reports the finding-family floor and suite headroom (`finding_family_regression_*`, `canonical_suite_headroom_*`); `--apply` enforces both before the probe and suite, refusing with `canonical_preflight` and `canonical_suite_runs: 0`. New `release.py finding-floor [--canonical <dir>]` (exit 1 on regression, SKIP without a baseline) is called per merge from `guides/run-7.md` and `guides/kickoff.md`; `guides/release.md` lists the apply gates.
+
+### The apply reuses a recent green suite record for release-mechanical diffs (SPEC-NS-KIT-126)
+
+Suite duration records now carry `canonical_commit`, `tree_clean_start`, `tree_clean_end` and `phase`; `release_coordinator.py --apply` runs the `RELEASE_MECHANICAL_TESTS` subset instead of the full suite when the newest record passed, is under 24 hours old, was clean at both ends, the tree is clean and every changed path is in `RELEASE_MECHANICAL_PATHS` (result `canonical_suite_result: reused`, `canonical_suite_reused_from`, `canonical_suite_subset_result`); the release handoff accepts a verified reuse as it does a passed run. New `--record-suite-run --duration-s <s> (--passed|--failed)` writes a `merge`-phase record and a WARNING appears at 1.6x growth over the newest `release_apply` record; `guides/release.md` and `guides/run-7.md` document both.
+
+## 3.25.0 (2026-10-07)
+
+**The fleet catch-up release.** Installs move from 3.24.12 (3.24.10 for Fartownik,
+Fartownik/BE and superforecasting) straight to 3.25.0: 3.24.13 … 3.24.22 were sealed but never
+synced, so every entry below arrives together (SPEC-NS-KIT-116). Config schema stays 3.2.0, so no
+migration. Operator-visible changes: coded spec IDs are mandatory for new specs (SPEC-416; the
+CJQ and BENCH legacy lists are re-frozen at this cut); commit subjects use `[KIND-CODE-NNN]`;
+`chore: mark … in_progress` needs no trailers, while done/blocked lifecycle commits need the
+full trailer set including `Nightshift-Parent-Tool-Calls` and `Nightshift-Resolution-Kind`;
+`board_ctl.py`; the slim skill with its `guides/`; `hooks/main-freeze.sh`; opt-in
+`spec_metadata` version/tags policies; `validate_specs.py --staged`; and `lane` telemetry via
+`loop_events.py lane`.
+
+`release_coordinator.CANONICAL_SUITE_TIMEOUT_S` rises from 4800 to 6000: the release preflight
+measured the canonical suite at 2441-2731s, so 4800 no longer gave the required 2x headroom
+(SPEC-377 guard; SPEC-NS-KIT-116).
+
+### Every validator finding code maps to a named family (BUG-NS-KIT-119)
+
+`validate_specs.py` now maps the finding codes that still fell into `unclassified-finding` (resolved-blocker residue, incomplete live execution, missing live-item evidence references, orphan or unindexed artifacts, the SPEC-416 spec-ID grammar family, registry codes, staged configuration, deploy environment, board column defaults, deleted ACs) to named finding families, and a test fails when an emitted code has no family, so the SPEC-337 floor keeps seeing regressions in them. Undocumented AC edits from the 2026-10-03 batch were recorded in each spec's `## AC Amendments` and the floor baseline was re-reviewed.
+
+### Unregistered spec type is an audit warning on finished specs (BUG-NS-KIT-118)
+
+An unregistered `type:` stays a validator error for `draft`, `planned`, `ready` and `in_progress` specs but is an audit WARNING (`WARNING: audit: ... history is not rewritten`, the BUG-NS-KIT-100 dangling-`after:` wording) on `done`, `superseded`, `retired` and `blocked` specs, in file, directory and `--staged` modes; `NFR-` ids keep their exemption. `board_ctl.py rules check` reports that case as a passing `spec-format/type` line starting `warning:`, and `guides/rules.md` states the rule, so project-local types on old records no longer fail validation after sync.
+
+### LOOP.md header kit version realigned (BUG-NS-KIT-116)
+
+The `**Kit Version:**` header in `LOOP.md` had been left at 3.18.1 by every version bump since the SPEC-325 cut; it now equals `config.yaml`'s `kit_version`, and the repo-root drift checker reads the registry-backed status universe and parenthesised `VALID_SPEC_STATUSES` imports correctly.
+
+### Generated projects-registry.json is ignored and untracked (BUG-NS-KIT-117)
+
+The managed `.gitignore` now ignores `projects-registry.json` (machine-local discovery state written by `nightshift-sync.py registry`), so a rescan no longer dirties installs. When a release reaches a repository that still tracks `.nightshift/projects-registry.json`, `release_coordinator.py` untracks exactly that path (`git rm --cached`, file kept on disk) inside the same exact-path release commit, and the dry-run result lists it under `registry_untracks`.
+
+### Parent context spend by lane from telemetry (SPEC-223)
+
+`verification_report.py lane-spend-report` (beside `throughput-report`) reads the SPEC-NS-KIT-108 `lane_recorded` events, the SPEC-NS-KIT-002-001 `verification` block, the SPEC-298 parent `token_usage` events and the `Nightshift-Parent-Tool-Calls` / `Nightshift-Resolution-Kind` commit trailers, and applies one pre-declared method (small vs full lane, both independently verified, arm B limited to small-lane-eligible specs, minimum 5 runs per arm, median ratio <= 0.7 with a seeded permutation test) to print `holds`, `does not hold` or `insufficient data`, deterministically as Markdown or JSON (`--rev` pins the git history read); conflicting counts and every exclusion are listed, never silently resolved.
+
+### Small-spec lane: one-page worker guide, condensed parent checklist, lane telemetry (SPEC-NS-KIT-108)
+
+Small-spec lane: `guides/worker-small.md` (a one-page worker path through LOOP Steps 4-5, 8, 9 and 12-14 for a pre-bootstrapped worktree, enrolled as managed payload and delivered) and a condensed parent checklist in `guides/kickoff.md` (eligibility: at most 4 ACs, one module; independent verification, scope, terminal integrity and the exact-candidate merge-gate stay mandatory); the kickoff brief (`run-2.md`), the run-7 evidence gate and LOOP Step 14 now name one report path (`reports/YYYY-MM-DD-nightshift-report-<SPEC-ID>.md`) and the worker CHANGELOG/follow-up write rule is explicit; every kickoff records its lane with `python3 .nightshift/loop_events.py lane ...` (event `lane_recorded`: lane tag, parent tool calls, worker and verifier wall time, verifier dispatches, re-dispatch reasons; unmeasured is `unavailable`, never 0), and the existing `verification_report.py throughput-report` prints the small-versus-full comparison per project, so installs report the effect without another release.
+
+### Project-configurable spec target version (SPEC-419)
+
+Project-configurable spec target version: an optional `version:` label (the intended product release, never `template_version`/`kit_version`) is governed by `spec_metadata.fields.version.{required,allowed_values}` in the project's own config.yaml, read and checked by one shared policy reader in `spec_frontmatter.py` (the same machinery SPEC-420's tags plug into); validators and `validate_specs.py --staged` report violations as WARNING on drafts, errors on planned/ready/in_progress and audit warnings on terminal specs, while promotion (`spec_promotion.py`, `board_ctl.py rules check`), `lifecycle.derive_admission`, `preflight.py` (the sequential run gate), `nightshift-dag.py admission`/`next`/`dispatch-spec`/`--explain-spec` and the parallel dispatcher refuse violating specs (an invalid policy block launches no worker); the board shows the label on cards and adds an exact-match VERSION filter (All/Unassigned/label) that combines with the existing filters and never touches dispatch, plus read-only `GET /api/spec-metadata`; `validate_specs.py --spec-metadata-audit` previews affected specs and `config_migrations.opt_in_spec_metadata_version` is the explicit opt-in, while the registered migrations never add or rewrite the policy or any spec.
+
+### Project-configurable spec tags (SPEC-420)
+
+Project-configurable spec tags: an optional `tags:` list (unique, nonblank, unpadded, case-sensitive strings; organizational labels, never `touches`, capabilities or NFR `scope_tags`) is governed by `spec_metadata.fields.tags.{required,allowed_values}` in the project's own config.yaml and checked by SPEC-419's shared policy reader in `spec_frontmatter.py` (a registered list rule; every allowlisted member is matched exactly and `[]` counts as untagged), so validators and `--staged`, promotion, `lifecycle.derive_admission`, `preflight.py`, `nightshift-dag.py admission`/`next`/`dispatch-spec` and the parallel dispatcher enforce it with the same severity convention and an invalid policy launches no worker; the board shows tag chips on cards and details and adds a TAGS filter (All, Untagged, several tags with ANY matching, configured plus observed legacy values) that intersects the status/version/type filters and never touches dispatch; `validate_specs.py --spec-metadata-audit --field tags` previews affected specs and `config_migrations.opt_in_spec_metadata_tags` is the explicit opt-in, while the registered migrations never add or rewrite the policy or any spec tags.
+
+### Pinned verifier blocks and four command bodies move to guides; SKILL.md reaches 60 KB (SPEC-NS-KIT-101)
+
+The verdict validator, brief check, scope gate, both verifier briefs and the verdict-JSON template move byte-for-byte from SKILL.md into `guides/pinned-briefs.md`, `guides/pinned-checks.md` and `guides/pinned-validator.md`; `verification_report.py` reads them through one guide loader (`load_guide`, resolved from the kit that holds SKILL.md, fail-closed, no SKILL.md fallback) and the trusted-kit snapshot carries those guides from main's object database, so a worker's edit to a moved block is detected as drift and never reaches the verifier. The `doctor`, `validate`, `knowledge` and `address-issues` bodies move to guides behind short stubs with registry `guide:` rows; SKILL.md is 48983 bytes. "SKILL.md Step N" citations for moved steps now name the guide that holds them.
+
+### Ordinary unblock attempts get a durable ledger and issuance (SPEC-NS-KIT-109)
+
+The ordinary `prepare`, `record_attempt` and `finalize` now use the administrative path's durable status-store mechanism, under the same controller lock: each packet is durably issued (the latest issuance supersedes older packets; `retry_override` counts only as issued), each outcome is recorded as write intent, atomic file and digest-bound ledger entry, and `finalize` accepts only a ledgered, digest-intact success bound to the packet. A deleted or corrupted attempt file now fails closed with its named `NS-UNBLOCK-ATTEMPT-EVIDENCE-*` reason instead of reopening the fingerprint, and a planted file is never an outcome (SPEC-421 F2, F3). Existing installs need no step: the first ordinary `prepare` of a spec (and its parent) automatically and idempotently adopts that spec's pre-ledger attempt files into the ledger (`unblock_spec.py adopt-legacy-attempts --spec <ID>` does the same by hand). Ordinary packets now carry `issuance_id`, and only `invalid_run_abandonment` routes a packet administratively. `GIT.md` documents the integrity wedge and its human exits (F6). Run logs gain `route` and `issuance_id` on the unblock events plus `unblock_legacy_attempts_adopted` and `unblock_ledger_integrity_failed`.
+
+### Ordinary unblock record refuses an administrative blocker and re-checks the repeat gate (BUG-NS-KIT-110)
+
+The ordinary `record_attempt` now refuses a non-administrative (e.g. stripped) packet on an administrative abandonment blocker before writing, as `finalize` already did, and re-evaluates the SPEC-351 repeated-failure gate at record time from the attempts on disk (a second packet or a `retry_override` packet can no longer record a third blind failure; `skipped` routing still records). Both refusals emit `unblock_decision_refused` (`reason`, and `repeated_ac_ids` for the gate); SPEC-421 findings F1 and F5, model and anchors updated.
+
+### Ordinary unblock finalizes its own success after a lost packet (BUG-NS-KIT-109)
+
+The ordinary `prepare` of the same run on the same fingerprint returns its packet stamped `finalize_only` when that run's own automatic `succeeded` attempt is on file (with or without `retry_override`), `finalize` is idempotent, and `unblock_ladder` finalizes such a packet without dispatching a worker; other runs stay refused. Run logs gain `unblock_prepare_finalize_only` and `unblock_decision_refused` (named reason constant); the rule text in `GIT.md` and the formal model follow.
+
+### Global skill delivery carries its guides (BUG-NS-KIT-102)
+
+The release coordinator delivers every manifest guide to `Skills/nightshift/guides/` beside the global `SKILL.md` (manifest-hash-checked, one exact-path commit, listed in the plan's `skill_delivery.allowlist`); canonical tests read an installed skill through `tests/skill_corpus.installed_skill_text`, which accepts pre-slim and slim layouts.
+
+### Kickoff binds the result receipt to the worker install and closes `superseded` (SPEC-NS-KIT-007)
+
+The kickoff admits the result receipt against the worker worktree's install and checks it there; a separate control-plane receipt (taken at launch against the parent install) gets exactly one fresh admission and one re-check on `NS-MPI-RELEASE-SUPERSEDED`. A superseded result receipt ends the run `superseded` (no merge, branch and worktree kept, spec back to `ready` via a status-store transition citing the attempt artifact, dependents not blocked); the old candidate is never accepted. `stored-result` deny is a deny, allow is logged with its `prior_attempts`. `run_validation.py` marks `integrity_outcome: superseded`. Documented in SKILL.md, `guides/kickoff.md`, `guides/run-7.md`, GIT/LOOP/ORCHESTRATOR.
+
+### Terminal integrity acceptance slot is allow-only (SPEC-NS-KIT-006)
+
+`verify_terminal_integrity` writes `acceptance/<invocation_id>.json` only for an `allow` (with `prior_attempts`, the sorted digests of earlier attempts); a deny, mismatch or the new `NS-MPI-RELEASE-SUPERSEDED` (a self-consistent sealed release landed after admission: re-admit and re-run, never accepted under a new receipt) is recorded once under `acceptance/attempts/<invocation_id>-<result_sha256>.json`. A stored allow with a matching receipt is read back (`receipt_check.check="stored-result"`), except a non-binding `run_id` reports the mismatch and any payload drift, also after a release, reports `NS-MPI-PAYLOAD-DRIFT`. Pre-fix burnt slots keep `NS-MPI-DUPLICATE-CONTRADICTION` and quarantine. Models: `formal/nightshift/ReceiptAcceptance.tla` (SPEC-NS-KIT-005).
+
+### Verifier brief carries the verdict input and the arm_isolation shape (BUG-NS-KIT-104)
+
+Both pinned verifier-brief blocks now embed the small `assemble-verdict` input as a JSON example (`acs`, `arm_isolation` with a required `runtime` per arm, `suites[].samples`, `premise_dispute`, `contamination`) plus how to obtain the runtime for a sequential or `devices` plan, so the parent-authored and `handoff` briefs carry identical contract text; `arm_isolation_missing` names the expected shape; the run-4 implicit-rule sentence lists every `_IMPLICIT_KIT_GLOBS` entry (adds `red-proofs/**`, `runs/**`, `knowledge/attempts/**`, `release-handoffs/**`, `reports/_wip/**`). No gate changed.
+
+### `/nightshift init` installs only the managed kit and ends admitted (BUG-NS-KIT-105)
+
+`python3 release.py install --canonical <canonical> --install <project>/.nightshift [--name N --language L] [--dry-run|--force]` bootstraps a fresh project: managed set via `apply_install`, scaffold directories and spec templates, a seeded `config.yaml`, `hooks/pre-commit` and `hooks/commit-msg` wired into the project's git hooks directory, then `validate_install.py --profile installed`, non-zero unless ALLOW. `/nightshift init` Step 3 uses it instead of copying the whole canonical tree.
+
+### In-progress lifecycle commit passes the commit-msg hook (BUG-NS-KIT-106)
+
+Hook accepts the run guide's `chore: mark <id> in_progress` marker (anchored; `done|blocked` keep the trailer gate), the form `record_metrics.find_in_progress_sha` reads; `GIT.md` now prints the same bare form and notes that this repository must wire `hooks/commit-msg` too.
+
+### Kickoff merge is bound to the verified candidate revision (BUG-NS-KIT-107)
+
+Kickoff Step 6 merges the verified candidate revision, not the branch name: `git merge --no-ff <candidate-sha>`, new evidence-gate check 7 (`verification_report.py merge-gate`: candidate digest, plan/verdict identity and branch tip must agree, else `MERGE-GATE: stale_head`), `worker_done_head` recorded at the TERMINAL wake, optional heartbeat `head: <sha>` with no commits after a terminal state, `Nightshift-Merged-Revision` trailer read by `record_metrics.py`, and `handoff`'s moved-head refusal is now reason `stale_head`.
+
+### Verifier spec projection is default-on in prepare-dispatch (SPEC-NS-KIT-008)
+
+prepare-dispatch projects the verifier spec by default whenever --spec-path is given (SPEC-NS-KIT-002-005 projection, now default-on); --no-project-spec restores the unprojected copy for SPEC-289 external evidence and the plan then carries spec_projection: declined; --project-spec stays an accepted no-op; handoff and guides/run-4.md stop passing the flag.
+
+### Docs/design specs skip code verification and type-check gates (SPEC-NS-KIT-004)
+
+Docs/design specs no longer run code gates: verification_report.py prepare-dispatch and handoff take --no-suite (no-test-suite brief, never commands.test); the pre-commit hook honours commands.code_paths (a commit staging no matching path skips type_check; lint, scanner and spec validation still run); guides/run.md Step 1 selects the bare-run spec from nightshift-dag.py admission's frontier, never layer/priority alone; validate_specs accepts a live-execution (evidence: path) naming a project file outside the kit directory (absolute and .. stay rejected).
+
+### Graph view hides dependency arrows implied by another path (SPEC-NS-KIT-003)
+
+New managed payload `dependency_graph_view.py` (installs to `.nightshift/dependency_graph_view.py`) holds the reference transitive reduction; `board.py`'s live and exported graph default to the reduced arrows (gate -> planning -> child no longer also draws gate -> child), with a keyboard-operable **Show all dependencies** switch, a hidden-arrow note and an inspector row naming each omitted arrow's alternate path. View-only: `after:` metadata, `/api/graph`, CLI, export data, validation and scheduling keep every declared edge. `guides/board-and-api.md` documents the semantics.
+
+### Validator checks the type registry and after: ids; promotion runs intrinsic readiness (BUG-NS-KIT-100)
+
+`validate_specs.py` reports an unregistered `type:` (error, any status; an `NFR-` id is exempt) and an `after:`/bare `requires_specs` id naming no spec in the specs directory (error on planned/ready/in_progress, WARNING on draft, audit WARNING on closed specs), in file, directory and staged modes. SPEC-GUIDE `## Spec Types` gains `docs` and `task`, `vocabulary-registry.yaml` carries the identical set (a test pins it) and `board_ctl.py rules check` shares the one registry loader. `spec_promotion.py` and `rules check lifecycle/promotion` now run `lifecycle.intrinsic_readiness`: `FAIL` is refused, `REVIEW` needs `--readiness-reviewed <rationale>`, recorded as a decision artifact.
+
+### Main-freeze probe is silent without a coordinator store and ships in the managed set (BUG-NS-KIT-103)
+
+`hooks/main-freeze.sh check` allows silently when the coordinator store file does not exist (`NIGHTSHIFT_MAIN_FREEZE_VERBOSE=1` prints one note; schema errors, locks and timeouts still warn, a live lease still refuses), and the hook is now a `CANONICAL_PROTOCOL_FILES` / manifest entry so narrowed installs and the release handoff carry it.
+
+### Active-spec lookup resolves a parent ID to its own spec, not its child's (BUG-NS-KIT-007)
+
+`scope_guard.find_spec_file` resolves an ID to the `<ID>.md` / `<ID>-*.md` file whose frontmatter `id` equals it (name rule only for files with no usable id) and fails closed (`AmbiguousSpecFile`, naming the candidates) on two same-id files. `protect-write-scope.sh`, `write-scope-hook.sh`, `scope_guard.py`, `analyze_metrics.py`, `model_selection.py`, `nightshift-dag.py`, `nightshift_coordinator.py` and `worktree_janitor.py` use it instead of prefix globs that sent `SPEC-005` to `SPEC-005-001-*.md` (and, in the last two, to `SPEC-0050-*`).
+
+### Dynamic admission resolves `type: main`/`nfr` parents instead of calling them missing (BUG-NS-KIT-005)
+
+`nightshift-dag.py admission` now passes the statuses of local excluded (`main`/`nfr`) specs as dependency statuses, so a child of such a parent waits (`dependencies_pending`), is blocked when the parent is blocked, and is admitted once it is done, agreeing with `lifecycle.derive_admission`; only unknown IDs stay `invalid_dependency`.
+
+### DAG reader keeps column-0 `after:` block lists (BUG-NS-KIT-004)
+
+`nightshift-dag.py` now reads the list fields (`after`, `nfrs`, `children`, `provides`, `requires`, `touches`, `implementation_order`) with `yaml.safe_load`, and its regex fallback accepts inline, indented and column-0 block lists. `spec_promotion.py` writes column-0 dashes, which the old regex dropped, so promoted specs silently lost their dependencies and `next`/`admission` treated gated specs as runnable.
+
+### Main freeze as an advisory coordinator lease the commit and merge paths enforce (SPEC-NS-KIT-001)
+
+New `hooks/main-freeze.sh` (synced with the hooks directory): a freeze is a local-coordinator path claim on `<git common dir>/.nightshift-main-freeze`; `hooks/pre-commit` runs one bounded read-only probe per commit on the main branch and refuses a non-holder with the holder, reason and expiry, and the coordinator's integration queue holds a merge on the same check (`main_freeze_gate`, injectable `main_freeze_probe`). Coordinator outage fails open with a warning; `--no-verify` bypasses. Documented in `SPEC-GUIDE.md` and `Skills/nightshift/SKILL.md`.
+
+### `board_ctl.py` read side: find, search and inspect specs without hand-built curl (SPEC-417-002)
+
+New managed payload `board_ctl.py` (installs to `.nightshift/board_ctl.py`; no FastAPI import): `health`, `list`, `show`, `search`, `history`, `deps`, `artifacts`, `next`, `who`, `brief`, `refresh`, `port` and `describe --json`, with `--json` on every command, exit codes 0/1/2/3 and `--project NAME` through `projects-registry.json`. `list`, `show`, `search` and `deps` fall back to the spec files plus a read-only status-store read when the board is down (`"source": "offline"`). `board.py` now imports its project-name and default-port formula from `board_ctl.py` (ports unchanged). `guides/board-and-api.md` gains a `board_ctl.py` section.
+
+### `board_ctl.py` management: lifecycle, board-doctor, gated transitions and validate (SPEC-417-003)
+
+`board_ctl.py` gains `start|stop|restart|status` (Nightshift Control when reachable and the project is registered, else `board.sh --no-open`; it never signals a process), the board-only `board-doctor`, `transition` (the lifecycle policy table, the board's `PUT` when it is up and the same gates plus `transition_commit_backed` when it is down, committing only the spec and its new artifacts with `git commit -- <paths>`) and `validate`. `board.sh` accepts `--no-open`. The write gates and the transfer-refusal helpers move out of `board.py` into the new FastAPI-free managed payload `status_transition.py`, which `board.py` calls with unchanged verdicts. `guides/board-and-api.md` gains the policy table and recipes.
+
+### `rules` guide and `board_ctl.py rules check` pre-flight (SPEC-417-004)
+
+New managed guide `guides/rules.md` (installs to `.nightshift/guides/rules.md`): one row per rule family with a digest, the authoritative file and anchor, and the checking tool. `board_ctl.py rules check <id> [--diff <rev-range>] [--main BRANCH] [--json]` runs `validate_specs.py` (findings routed per family), a `type:` registry lookup, `after:`/`requires_specs` resolution, `spec_frontmatter.promotion_transition_error` and, with `--diff`, `scope_guard.py`, printing `rule | pass/fail/skip | reason | source` and exiting 5 on any fail; it never writes the tree or the status store. SKILL.md gains a `/nightshift rules` heading and registry row (existing prose trimmed to stay within its size budget).
+
+### SKILL.md slimmed: `release`, `unblock`, `kickoff` and `run` bodies move into on-demand guides (SPEC-417-005)
+
+The bodies of `/nightshift release`, `unblock`, `kickoff` and `run` (Steps 1-7 and Kickoff Parent Context) moved verbatim into managed guides `guides/release.md`, `unblock.md`, `kickoff.md` and `run.md` + `run-2.md` .. `run-8.md` (each under the 24 KB guide cap; install to `.nightshift/guides/`); each heading keeps at most 15 lines (when to use, the hard safety rules, the guide pointer) and its registry row gains `guide:`. The executable blocks that `verification_report.py` reads from SKILL.md at run time (verdict validator, brief check, scope gate, both verifier briefs, the verdict-JSON template), the `verify_terminal_integrity` paragraph and the version line stay inline, in a new "Run and kickoff pinned blocks" section. SKILL.md goes from 263433 to 119041 bytes (the 60 KB goal is not reached because those blocks are pinned); the 417-001 budget constant is lowered to the new size. The run guide also documents the SPEC-391 `verifier_evidence_projection:` declaration where `prepare-dispatch` is described.
+
+### Verify report-only acceptance without exposing run reports (SPEC-391)
+
+A spec may declare `verifier_evidence_projection:` in its frontmatter (`- path:` of a withheld same-spec JSON artifact plus `fields:` selectors such as `rows[*].sha256`). `prepare-dispatch` then writes a sanitized document to `.nightshift-verifier-evidence/evidence-projection.json` in both arms (never the blobs), bound to candidate and baseline revision digests and the head/baseline blob SHA-256s, and the public plan gains `evidence_projection`. Selectors naming conclusions, logs or secrets, undeclared paths, non-JSON files, dict leaves, host paths, oversize values and arm-differing declarations are refused or marked unverifiable; `verification_report.py verify-evidence-projection --surface <arm> --candidate-revision-digest <digest>` judges the document. No declaration leaves dispatch byte-identical.
+
+### Write-scope guard allows a worker's merge commit from main (BUG-NS-KIT-002)
+
+While `MERGE_HEAD` exists (resolved via `git rev-parse --git-path`, so linked worktrees work), `protect-write-scope.sh` classifies only staged paths whose blob differs from every merge parent; paths taken unchanged from main are named on stderr as "taken from main" and allowed. Conflict resolutions outside `scope.write` and the universal rules are still refused; non-merge commits are unchanged.
+
+### Fleet-uniqueness check no longer flags a spec edited in a linked worktree (no-spec fix)
+
+SPEC-416's `spec_id_collision` treated the owning project's own spec, seen through the registry's main-checkout path while a worker committed from `.claude/worktrees/<name>/`, as a second owner, so every coded spec edited in a worker worktree was rejected. `_collision_findings` now skips a record that is the same repository-relative directory of the same git repository (shared `--git-common-dir`); collisions with other repositories are unchanged.
+
+SPEC-NS-KIT-002-006: `unblock_spec.py resume` adds an evidence-bound recovery record, a first-invalidated-stage eligibility check (identity, receipts, 24 h cap, ownership) and a verifier-direct fast path after verified recovery; scope, terminal-integrity, serial-integration and fresh-main gates are never skipped and the command never marks done.
+
+SPEC-NS-KIT-002-007: `verification_report.py` adds an advisory per-host heavy-suite lease (config `heavy_suite`, fails open on coordinator outage, gate wait recorded), separate worker/verifier/integration budgets derived from recorded history with `budget_expiry` records that keep partial samples and are never verdicts, a one-shot `handoff` command (head-moved refusal, terminal integrity, scope, report check, prepare-dispatch under its own derived timeout, brief, contamination check, checkpoints), private-file-first bounded diagnostics (`suite-sample --output-dir`), observation-only owned-helper cleanup and separate native/diagnostic/transport/cleanup outcomes.
+
+### Verifier sampling defaults to one sample per arm; launch failures get one bounded control probe (SPEC-NS-KIT-002-003)
+
+The canonical verdict example no longer carries `"flaky_suspected": true` (parents copied it, forcing 3 samples per arm); `verification_report.required_samples_per_arm` is now the one conditional rule (1 per arm, 3 only on a flaky ledger entry, an unexcused head failure, or arm/sample disagreement), `prepare-dispatch` emits it as `sampling` in the plan, and the verifier brief quotes it. A failure at app launch before any test step is recorded as `launch_infrastructure_suspected`, gets exactly one control probe, and is excluded from escalation only when the control supports it (`launch_infrastructure_supported`) with the original failure, probe and residual uncertainty retained. The verdict validator rule is unchanged.
+
+### Deterministic verdict assembly and arm isolation (SPEC-NS-KIT-002-004)
+
+`verification_report.py assemble-verdict` builds the verdict from the dispatch plan, a small verifier input and raw per-sample outputs (pytest -q or junit): it derives identity, rename-aware `scope`, the five classification lists and the arm footprint, then runs the embedded SKILL.md validator (with the trusted `scope_guard` pinned) and refuses to write with the validator's exact defect; the brief templates default to it and the hand-written verdict stays valid. `prepare-dispatch` records `arm_isolation` (sequential plus interpreter identity, or distinct `--arm-device`s; a shared device is refused as `arm_device_overlap`, a differing runtime as `surface_env_gap`) and `trusted_tooling`: prepare-dispatch and assemble-verdict re-run from main's copy of the kit when their own differs, `validate-verdict` runs a hand-written verdict through the same validator with the trusted `scope_guard` pinned, and `trusted-kit --materialize` provides main's copy for the scope gate and terminal-integrity check.
+
+### Pre-commit install-root resolution uses one batched git call per commit (SPEC-397-002)
+
+`hooks/pre-commit` resolved each staged path's owning install with up to three `git cat-file -e` spawns per candidate directory; it now asks git once (`git cat-file --batch-check`) about every candidate `config.yaml` in the index and HEAD and answers from that result. Resolved roots and allow/deny decisions are unchanged (the former algorithm is kept as a test reference); spawns no longer grow with the number of staged paths.
+
+### Mandatory project-prefixed spec IDs `{KIND}-{CODE}-{NNN}` with a shared parser, project codes and frozen legacy lists (SPEC-416)
+
+Spec IDs gain a mandatory project-prefixed grammar for NEW specs, {KIND}-{CODE}-{NNN}(-{NNN})*, parsed once in the managed spec_id.py: validate_specs.py errors on a grammar, code, kind/type or fleet-uniqueness break for any spec not on the project's frozen, generated legacy list (spec-id-legacy/<CODE>.json); check_followup_spec.py mints coded fleet-unique IDs; scope_guard, artifact_reachability, record_metrics, hooks/commit-msg, nightshift-dag, the board and Nightshift Control accept both forms; projects-registry.json gains a validated code field (existing IDs are never renamed).
+
+### On-demand guides: `guides/board-and-api.md`, SKILL.md `## Where to look` router and `/nightshift board` (SPEC-417-001)
+
+New managed payload `guides/<topic>.md` (installs to `.nightshift/guides/`) holds detail loaded only when needed; the first guide documents the board launch and port, the status authority model, every board route with `curl` recipes and the tool map. SKILL.md gains a router block, a `board` registry row with an optional `guide:` field and a `/nightshift board` section (+2 KB); `skill_tutorial.py <command>` prints the guide path. Release skill delivery is unchanged.
+
+### `validate_specs.py --staged` skips untouched specs the commit cannot affect (SPEC-397-001)
+
+`--staged` (the pre-commit hook path) no longer re-validates every unchanged spec: an untouched spec is skipped when the commit changes only spec files and report directories, no changed spec is NFR-family, and the untouched spec's text names none of the changed specs' ids, file stems or report directories. Findings are unchanged (the skipped specs could only have matched their baseline findings); any other kit change keeps the exhaustive pass. Full (non-staged) validation is untouched.
+
+### Board spec panel: no click stalls behind the poll, a visible loading state and no stale overwrite (BUG-NS-KIT-001)
+
+`board.py` no longer runs the fleet-wide dependency scan inside the spec-cache lock (a click's `/api/spec/{id}` used to wait behind every ~10 s poll for 1.5-4 s), shows a loading/stale banner from click until the clicked spec's content is on screen, and stops background refreshes from cancelling a newer click.
+
+### Verification instrumentation: per-dispatch timings, stage timings, suite samples, throughput report (SPEC-NS-KIT-002-001)
+
+Observation only; no gate changes. `record_metrics.py --record-timing dispatch|stage|sample` writes `metrics/<spec>.verification.json`, `--render-timing-trailers` prints the repeatable `Nightshift-Verifier-Dispatch`/`Nightshift-Stage-Timing`/`Nightshift-Verification-Duration-S` trailers, and `--mark-commit` plus the direct emitter fold both into an additive `verification` block and a `project` tag; `phases.completion_verification.duration_s` is now the summed dispatch time (still 0/unavailable with no data, never a guess). Re-dispatch reasons use the closed set `defect_fail|unauditable_verdict|contamination|surface_env_gap|stale_head|budget_expiry|other`; unmeasured values are `unavailable`, not 0. `verification_report.py suite-sample` wraps a suite command (samples, wall, executed/skipped counts, 1-minute load at start and end, optional iOS phases) and `verification_report.py throughput-report` prints per-project medians and distributions. Schema and SKILL.md wording updated. Agent-outcome rows gain an optional `project` tag (`terminal_outcomes.encode_agent_outcomes(..., project=)` or config `project`; never invented when unknown; field name remappable via `agent_fields`).
+
+### Main test-status ledger, targeted re-runs and identity-bound result reuse (SPEC-NS-KIT-002-002)
+
+Main test-status ledger: identity-bound, BUG-linked per-test status of main with targeted re-runs, read-only baseline projection into both verifier arms (`prepare-dispatch --ledger`), fresh-main dedup from the verifier head run, and reused-sample validator rules; anything unproven falls back to the real run.
+
+### Receipt-bound administrative abandonment of a rejected invalid installed run (SPEC-387-001)
+
+A parent-only seam rejects an installed run whose wrong-run-identity acceptance was followed by an
+immutable duplicate contradiction, without accepting, merging or cleaning its candidate.
+`managed_payload_provenance.verify_invalid_run_abandonment`/`record_invalid_run_abandonment` bind an
+externally retained `AbandonmentAnchor` (authority, independent verdict, receipt, frozen candidate,
+original release A or a proven sealed whole-kit successor B) and persist one write-once decision;
+`unblock_spec.abandon_invalid_run` (also `Coordinator.abandon_invalid_run` and
+`nightshift-instructions.py::abandon_instruction_run`) projects an administrative **blocked** state, and
+only the existing `prepare`/`record_attempt`/`finalize` with the same `abandonment_provider` reach ready.
+On that path the automatic-retry rule (`unblock_spec.automatic_attempt_decision`, text mirrored in GIT.md)
+reads only the durable status-store ledger of issued packets and recorded outcomes; a ledger entry whose
+attempt file is missing, unsafe, corrupted, digest-mismatched or orphaned fails closed with a named
+`NS-UNBLOCK-ATTEMPT-*` reason. `StatusStore.list_terminal_decisions` and an optional administrative guard
+in `transition_commit_backed` support it. The ordinary unblock controller and `unblock_ladder` are unchanged.
+
+### Installed board launchers probe the project-derived port (BUG-342)
+
+`board.sh` queries `board.py --print-port` before starting the board, forwarding all CLI arguments to the existing port derivation. Installed `.nightshift` launchers now probe the bound project port and retain their HTTP-ready PID record; explicit ports remain supported.
+
+### The reports/runs reachability sweep recognises project-prefixed spec and bug IDs (SPEC-418)
+
+`artifact_reachability._SPEC_TOKEN_RE` now also tokenises `SPEC-<P>-<N>` / `BUG-<P>-<N>` (one or more
+hyphen-separated uppercase prefix segments, optional `-<digits>` sub-IDs), so `reports/SPEC-NS-KIT-001`
+and `reports/BUG-NS-KIT-001` resolve to their specs. A prefixed token still counts only when it names an
+existing spec/bug ID; bare IDs, `SPEC-QUESTIONS-<N>`, sub-spec IDs, session reports and named docs are unchanged.
+
+### Board panel renders Markdown tables, h4-h6 and blockquotes at body-copy scale (SPEC-393)
+
+The spec panel's `## AC Amendments` / `## Scope Amendments` tables (and tables in the report viewer)
+had no styles in the shared `.panel-md` block, so they fell back to browser defaults: 16px bold,
+centred header cells that read as a second heading, and wide cells that clipped or scrolled the
+panel. `board.py` now styles `.panel-md` `table`/`th`/`td` at the 11px paragraph size (left-aligned,
+muted semibold header, themed cell borders, long cells wrap inside the panel), and brings `h4`-`h6`
+and `blockquote` to body scale; the existing h1-h3/p/code/pre/a/ul/ol/li values are unchanged.
+
+### A scope amendment approved on main mid-run no longer misfires check 6 or the verdict validator (SPEC-413)
+
+Check 6's `scope_self_edit` now compares the branch's `scope:` with the **baseline** copy
+(`git show {baseline}:{spec_relpath}`), not current main's, so a branch that never touched its
+scope is not flagged when main's scope moved (the SPEC-402 shape); a real branch-side scope edit
+is still flagged, and classification and amendment globs still read main. The embedded verdict
+validator takes optional `[main-root [main-branch]]` arguments and, when given, recomputes
+`scope.out_of_scope`/`.amended` and the `## Scope Amendments` globs from main's committed spec
+(`scope_from_main`) instead of argv[2]'s working copy; argv[2] still locates the kit and the AC
+list, and without the new arguments the prior behaviour is kept. SKILL.md usage text updated.
+
+### Preflight records the retained result's digest out of band and `prepare-dispatch` uses it automatically (SPEC-390-002-002)
+
+`preflight.py` now also writes `<metrics_dir>/_wip/preflight-digests/<SPEC-ID>.json`
+(`spec_id`, `repository_head`, `result_sha256` of the exact bytes written; untracked, overwritten per
+run, skipped when `repository_head` is null). With no `--preflight-proof-sha256`, `prepare-dispatch`
+reads that record for a spec that declares a `preflight-proof:`, uses the digest when its
+`repository_head` equals the resolved `--head`, and refuses (exit 2, `preflight_digest_head_mismatch`
+or `preflight_digest_record_invalid`) otherwise; an explicit flag still wins, an absent record keeps
+`no_reference_digest`, and the digest is never read from the spec, a report or any committed file.
+SKILL.md documents the automatic and manual paths. Plans without a declared proof are unchanged.
+
+### Sanitized verifier arms keep documentation links to withheld same-spec reports resolvable (SPEC-398)
+
+When a retained file in an arm links (relative path resolving to, or the exact repo path of) a
+withheld same-spec report that is tracked in that arm's own tree, `prepare-dispatch` now writes a
+content-free placeholder at that path in that arm (fixed `PLACEHOLDER_REPORT_BODY`, never derived
+from the report; the original blob stays out of the surface object database). Containment evidence
+(`CONTAINMENT_EVIDENCE_SCHEMA_VERSION` 1.7.0) lists each one in `placeholder_report_paths`
+(`arm`, `path`, `sha256`), and the dispatch gate accepts a withheld path being present only when it
+is listed, recomputes the expected set from the source, and its commit and checked-out bytes equal
+the constant; any other presence or a tampered placeholder fails closed. Withheld reports nothing
+links to, or absent from an arm's tree, are unchanged. SKILL.md's verifier briefs document the rule
+and route a configured command failing on placeholder content as `disputes_premise` with
+`spec_defect: false`; no configured command is skipped or rewritten.
+
+### The verifier checks a declared preflight proof with a trusted copy of the checker, not the candidate's (SPEC-390-002-001)
+
+The SKILL.md recipe ran `verification_report.py verify-preflight-proof` from the assigned arm,
+so a candidate that edited `verification_report.py` controlled the code judging its own proof.
+The recipe now runs the check from a trusted copy (the baseline arm's or the parent's installed
+`verification_report.py`) with `--surface` at the head arm, and the verifier states which copy it
+ran. The public dispatch plan's `preflight_proof` block gains `checker_provenance` (a closed
+value from `PREFLIGHT_CHECKER_PROVENANCE`: `baseline_arm` | `installed`) and
+`candidate_changed_checker` (`true` when `verification_report.py` differs between the baseline and
+head arms); a run from the head arm alone is rejected as evidence when it is `true`. A plan
+without a declared proof, the verdict schema and the proof projection are unchanged.
+
+### The feedback loop's remediation bound and `disputes_premise` routing now agree across SKILL.md, code and model (SPEC-411)
+
+The SPEC-405 TLA+ model found two places where `SKILL.md` Step 5c(e) and
+`verifier_feedback.py` disagreed. The owner decided each (2026-10-02, mixed).
+
+- **Remediation bound: the code was right.** `remediation_limit` stays 2 (SPEC-266): a fresh
+  valid failure whose failed ACs are a strict subset of the packet's earns a second packet and
+  remediation; any other fresh failure, or a failure after the second round, exhausts the
+  bounded path. `SKILL.md` Step 5c(e) said one remediation and "a fresh valid failure exhausts
+  the bounded path"; it now states the two-round, strict-subset rule.
+- **`disputes_premise`: the docs were right.** `reduce_feedback_event` turned a valid
+  `disputes_premise` verdict into a terminal `invalid_verdict` (or `fresh_verifier_failure`).
+  It now hands it to the parent decision path: terminal blocked with the new controlled reason
+  `premise_dispute` and next action `parent_decision` (no human action), no replacement verifier
+  or remediation spent, and `premise_dispute.spec_defect` carried on the `terminal_resolution`
+  effect so the parent applies the existing Step 5c(e) routing (`true`: independent AC review and
+  amendment; `false`: follow-up, then the ordinary evidence gate). A dispute without a claim,
+  evidence and boolean `spec_defect`, or bound to another head, is still an invalid verdict.
+
+The `VerifierFeedback.tla` model encodes both rules (`RemLimit` 2, the strict-subset
+distinction, the `premise_dispute` handoff), `formal/nightshift/FEEDBACK.md` and the feedback
+registry are updated, and the formal lane stays `feedback=pass`. `SKILL.md`'s `version:` follows
+`kit_version`. No project config migration is required.
+
+### Remediation admission checks the canonical two-arm verifier footprint (BUG-NS-KIT-003)
+
+`verifier_feedback.validate_verifier_verdict` read a flat `git_footprint` (`tree_before`/`tree_after`/`porcelain`), so a canonical two-arm (`baseline`/`head`) verdict passed without either arm being examined. It now requires both arms with string `tree_*`/`porcelain_*` fields and applies the shared `verification_report.verifier_footprint_errors_multi` rules; the legacy flat shape and a one-arm footprint are refused with distinct reasons (message prefix `verifier write footprint is not clean` unchanged). Producers that emit a flat `git_footprint` are now refused at remediation admission.
+
+### Spec bookkeeping normalisation and classified verifier contamination (SPEC-NS-KIT-002-005)
+
+`prepare-dispatch --spec-path <spec> --project-spec` gives each arm a contractual projection of the spec (frontmatter `id` and `scope:`, Requirements, Acceptance Criteria, Out of Scope; boxes unticked; no State rationale, `unblock_history`, scope amendments or history), proves Requirements/AC text unchanged apart from checkbox state or refuses, records original hashes and withheld earlier-attempt names (replaced by neutral placeholders in scope and Out of Scope) in containment evidence, and emits `scope_summary` in the plan. Verdict `contamination` is null or closed `{class, timing}` exposures (`spec_bookkeeping`, `author_artifact_name`, `required_deliverable`, `author_conclusion`; `before_derivation`/`after_derivation`), checked by assemble-verdict and the embedded validator. `verifier_feedback.py` admits an exposed FAIL to the bounded remediation packet only when the verifier's own samples reproduce a regression, carrying closed lead-only provenance; a PASS with before-derivation author exposure, and a fresh-verifier PASS on the remediated head with any before-derivation exposure, still need a fresh verifier.
+
+### Ordinary unblock controller refuses a second automatic attempt (SPEC-387-001-001)
+
+The ordinary `prepare`, `record_attempt` and `finalize` route through `automatic_attempt_decision` over their attempt files: no override after another run's success, no second automatic outcome from an already-prepared run, no same-run override after its own failure, one automatic `succeeded` per fingerprint; only `finalize` is permitted after a success. Human-authorized non-automatic outcomes are unaffected. Rule text updated in `GIT.md`.
+
+## 3.24.21 (2026-10-03)
+
+### The feedback reducer binds every verdict to the current candidate head (SPEC-410)
+
+In its initial phases (`awaiting_verdict`, `awaiting_replacement_verdict`)
+`verifier_feedback.reduce_feedback_event` validated a verdict's identity against
+`event.head or state.implementation_head_digest` and never compared `event.head` with the
+run's head, so a `pass` bound to a different head could reach `ready_for_integration` (found by
+the SPEC-405 TLA+ model; SKILL.md Step 5c(e) and SPEC-235 require the verdict identity to match
+the exact candidate). The reducer now validates in every phase against the state's current
+candidate digest (the remediated digest in `awaiting_fresh_verdict`), and an event whose `head`
+differs is routed to the invalid path: one replacement verifier, then a terminal
+`invalid_verdict` (fresh phase: `fresh_verifier_failure`). Verdicts for the correct head behave
+as before. The formal feedback registry was re-pinned and `formal/nightshift/FEEDBACK.md`
+records the fix. `SKILL.md`'s `version:` follows `kit_version`. No project config migration is
+required.
+
+## 3.24.20 (2026-10-02)
+
+### A scope-amendment row must be dated on or after the specific widening commit (SPEC-409)
+
+SPEC-302 R1 says a scope widening is honoured only by a `## Scope Amendments` row dated on or
+after **that widening's commit**. `scope_guard._reconcile_scope_widening` compared the row date
+with the date of the last-`ready` commit instead, so a row dated between the ready commit and a
+later widening also covered it (reproduced: a 2026-01-02 row honoured a 2026-01-05 widening).
+Owner decision (2026-10-02): keep R1 as written. Each widened item (a new `write`/`read` glob,
+a removed `deny` entry, or the collapse to the project-root/unrestricted default) is now judged
+against the date of the commit that introduced that item, found from main's history of the spec
+file (the newest commit that made it newly present, so an item dropped and re-added is dated by
+the re-add). An older approval can no longer cover a later widening. A widening whose
+introducing commit cannot be read is dated by the newest commit, never by the last-ready date.
+Rows dated on or after the widening, the transition-into-`ready` baseline (SPEC-302-001),
+narrowings and the SPEC-408 fallback are unchanged. Practical effect: record the
+`## Scope Amendments` row on or after the day the widening lands on main, not before. The SPEC-404
+TLA+ model (`formal/nightshift/ScopeReconciliation.tla`) now carries a grant day per item and its
+retained mutant is the old last-ready anchor. `SKILL.md`'s `version:` follows `kit_version`. No
+project config migration is required.
+
+## 3.24.19 (2026-10-02)
+
+### A rolled-back uncovered write swap no longer falls open to the project root (SPEC-408)
+
+`scope_guard._reconcile_scope_widening` rolls back an uncovered `write` widening to the scope in
+effect when the spec was last `ready`. When a commit replaced the whole `write` list with only
+uncovered globs (for example baseline `[a/**]` replaced by `[b/**]` with no covering
+`## Scope Amendments` row), the rollback dropped every grant and returned `write: []`, which
+means the project-root default, so a path outside both globs became writable. The enforced
+`write` is now the last-ready value in that case: never wider than the last-ready scope plus
+approved amendments (SPEC-302), and never the empty project-root default. Pure narrowings,
+covered widenings and the other `write`/`deny`/`read` reconciliation rules are unchanged.
+Found by the SPEC-404 TLA+ model; `formal/nightshift/SCOPE.md` records the fix and that the
+`scope-code-empty-write-root` config is now historical. `SKILL.md`'s `version:` follows
+`kit_version`. No project config migration is required.
+
+SPEC-397: `hooks/pre-commit` reads `commands.lint` and `commands.type_check` in one Python process instead of two (identical behaviour), and `tests/test_hooks_pre_commit.py` prepares its repository skeleton once per module; no config migration.
+
+## 3.24.18 (2026-10-02)
+
+### Retire board.py's private copies of the status-sync helpers (SPEC-402)
+
+`board.py` no longer carries `_should_reconcile_frontmatter_status`, `_checkpoint_epoch` or its
+`_FRONTMATTER_RECONCILE_STATUSES` constant. The board's effective-status reconcile path now calls
+`status_store.should_reconcile_frontmatter_status`, the same function `classify_status_sync` and
+the SPEC-399 formal anchors already use, so the rule that decides whether a newer frontmatter
+status may repair a durable row has one definition. No behaviour change: the reconcile rule,
+its terminal-row protection (BUG-313) and the `/api/status-sync` report are unchanged. The test
+that held the two copies equal is replaced by one that proves the board path drives the shared
+helper. `SKILL.md`'s `version:` follows `kit_version`. No project config migration is required.
+
+## 3.24.17 (2026-10-02)
+
+### Add a fast worker hand-back test tier (SPEC-396)
+
+`tests/conftest.py` registers two pytest markers, `slow` and `browser`, and applies them
+centrally from a documented table of measured per-module durations (modules costing at
+least 30 s in a full parallel run, plus the Chromium-driven board tests). The new optional
+`commands.test_fast` key runs the same suite and options as `commands.test` with
+`-m 'not slow and not browser'`; workers run it at the Step 9 hand-back check. Marking only
+changes tier selection: `commands.test` (verifier gate) and `release.CANONICAL_SUITE`
+(release preflight) still collect and run all 4586 tests, so the release gate's full-suite
+run remains the proof of record. LOOP.md Step 9 and the Nightshift skill state which
+command a worker runs. The nine version-pinned spec-229-006 live-evidence fixtures were
+regenerated through their supported record mode for this version. No project config
+migration is required; projects without `commands.test_fast` keep running `commands.test`.
+
+## 3.24.16 (2026-10-02)
+
+### Run the canonical suite in parallel through pytest-xdist (SPEC-395)
+
+`release.CANONICAL_SUITE` now declares `pytest-xdist` as a dependency, imports `xdist` in
+its capability probe, and runs `python -m pytest -q -n auto --maxprocesses 4 --dist
+loadgroup tests`; this repository's `commands.test` carries the same dependency and
+options. Distribution is per test, capped at 4 workers by default, and the environment
+variable `PYTEST_XDIST_AUTO_NUM_WORKERS=<n>` lowers the count for one run (it cannot
+raise it above the cap). The nine test files that assign the board module's
+process-global state (`_board.cache`, `_board.reports_dir`) carry
+`pytest.mark.xdist_group("board_server")`, so `--dist loadgroup` runs them on one
+worker and a live in-process test server never observes another test's state. The same
+complete set of tests runs; only order and process isolation change. The pinned
+exact-command assertions in `test_preflight.py`, `test_verifier_feedback.py`,
+`test_release_coordinator.py` and `test_verifier_gate.py` assert the new command in full.
+The nine version-pinned spec-229-006 live-evidence fixtures were regenerated through
+their supported record mode for this version. No project config migration is required.
+
+## 3.24.15 (2026-10-01)
+
+### Make canonical tests independently selectable and measured (SPEC-394)
+
+Every canonical test file now collects and runs on its own: a shared `tests/conftest.py`
+puts the kit directory on `sys.path` (38 of 188 files previously failed standalone
+collection because they relied on an earlier-collected file). `test_knowledge_writer.py`
+uses per-test temporary directories instead of one fixed shared `test_knowledge` path, so
+concurrent suite runs no longer race. A release-preflight canonical-suite run now also
+writes per-test durations as a JUnit XML artifact
+(`canonical-suite-test-durations-<stamp>Z.junit.xml`) beside the existing
+`canonical-suite-duration-*.json` record, by adding `--junitxml` to the suite child's
+`PYTEST_ADDOPTS`; the pinned `CANONICAL_SUITE.command` argv is unchanged and the duration
+record gains a `test_durations_artifact` name when the file exists. This repository's
+`commands.test_timeout_s` is raised from 2400 to 3400 against the 1987s healthy run
+measured by this spec (earlier runs peaked near 1780s), restoring the original ~68% margin. The nine version-pinned spec-229-006
+live-evidence fixtures were regenerated through their supported record mode for this
+version. No project config migration is required.
+
+## 3.24.14 (2026-10-01)
+
+### Audit unavailable first-scaffold baseline evidence (SPEC-392)
+
+The embedded independent-verdict validator can represent a first scaffold whose
+configured, tracked baseline guard exits78 before discovering tests. It binds the
+assigned revisions, safe relative scaffold paths, guard bytes and configured command,
+and independently repeats three bounded baseline probes. Head evidence still requires
+three executed, nonzero passing samples with explicit failure and skip counts.
+Unavailable comparison is reported separately from a passing baseline. Ordinary
+executable sampling, classifications, scope, containment and footprint checks remain.
+The nine version-pinned spec-229-006 live-evidence fixtures were regenerated through
+their supported record mode for this version. No project config migration is required.
+
+## 3.24.13 (2026-10-01)
+
+### A retained preflight result is inspectable to an independent verifier as a sanitized, candidate-bound projection (SPEC-390-002)
+
+SPEC-390 retained an ordinary passing preflight result in ignored storage and committed only a
+compact summary, so the standalone verifier could not establish its AC from that summary. A spec
+may now declare `preflight-proof:<project-relative-path>` in `context.required_inputs`
+(identical at both verifier arms). `prepare-dispatch --spec-path ... --preflight-proof-sha256 <digest>`
+projects a closed, allowlisted, parsed document into `.nightshift-verifier-proof/preflight-proof.json`
+in both arms: `ok`, installation admission, declared test exit, invocation identity, and a candidate
+digest. No raw output, command line, host path, or raw commit crosses, the three same-spec report
+withholding classes and their containment audit are unchanged, and the digest is the
+coordinator's, never the author's. `verification_report.py verify-preflight-proof` judges the
+projection; a missing, altered, uncontained, unbound, or different-head proof is reported
+`unverifiable` with a stable reason instead of failing the dispatch. `preflight.py` results now record
+`repository_head` (the commit the run executed against) and expose
+`sanitized_preflight_projection`. A spec without a declaration keeps byte-identical evidence and
+plan. No config, protocol, or metrics schema changes; results retained before this release are
+`unbound`.
+
 ## 3.24.12 (2026-09-30)
 
 ### Fleet specs-directory discovery now loads `doctor.py` and reports a failed load (BUG-341-001)
