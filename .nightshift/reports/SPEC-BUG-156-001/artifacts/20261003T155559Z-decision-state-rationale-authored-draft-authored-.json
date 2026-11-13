@@ -1,0 +1,30 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "type": "decision",
+  "created": "2026-10-03T15:55:59Z",
+  "actor": "coordinator",
+  "summary": "state rationale authored: draft -- Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose",
+  "decision": {
+    "trigger": "state_rationale_authoring",
+    "current_state": "draft",
+    "candidate_states": [
+      "draft"
+    ],
+    "ambiguity_reason": "Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose to delete the spike.",
+    "static_findings": [],
+    "resolution": "Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose to delete the spike.",
+    "rationale": "Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose to delete the spike.",
+    "decision_authority": "coordinator",
+    "reusable_rule_gap": false
+  },
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "draft",
+    "reason": "Authored 2026-10-03 after both Dependabot PRs for the spike failed dependency-review; the user chose to delete the spike.",
+    "reconsider_when": "The deletion PR merges and AC1-AC5 hold.",
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

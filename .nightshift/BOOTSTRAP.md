@@ -296,6 +296,22 @@ Ask:
 For each language in `project.language`, check if `<devkb.path>/<language>.md` exists.
 If it does, add it to `devkb.mappings.<language>`. For Swift projects, also check for `xcode.md` and `macos.md`.
 
+### B8b: Spec target version (Optional)
+
+Ask only if the user mentions releases or versions:
+
+> **Do you want specs labelled with the product release they belong to (e.g. v1, v2)?** Default: no. If yes: must every spec carry one (`required`), and which labels are allowed?
+
+Record the answer as `spec_metadata.fields.version` (`required`, `allowed_values`) in `config.yaml`; leave the block at its defaults otherwise. This is the product release, never `template_version` or `kit_version`. Never backfill versions onto existing specs. See SPEC-GUIDE.md "Target Version Metadata".
+
+### B8c: Spec tags (Optional)
+
+Ask only if the user wants to categorize specs (ux, backend, security, ...):
+
+> **Do you want specs tagged by concern?** Default: no. If yes: must every spec carry at least one tag (`required`), and which tags are allowed (the project vocabulary)?
+
+Record the answer as `spec_metadata.fields.tags` (`required`, `allowed_values`) in `config.yaml`; leave the block at its defaults otherwise. Tags are not `touches`, capabilities or NFR scope_tags. Never backfill tags onto existing specs. See SPEC-GUIDE.md "Spec Tags Metadata".
+
 ### B9: Watcher (Optional)
 
 Ask:
@@ -918,3 +934,19 @@ no manual fallback.
 > The loop is self-contained. Once bootstrap is done, an agent can run unattended overnight.
 >
 > Each loop iteration will produce metrics, reports, and commits. Review them in the morning.
+
+
+### Invalid old-run administrative recovery
+
+For the retained wrong-identity/duplicate-contradiction case, use GIT.md's
+SPEC-387-001 receipt-bound invalid-run abandonment contract. The parent alone
+injects `abandonment_provider` into `unblock_spec.abandon_invalid_run`,
+`Coordinator.abandon_invalid_run`, or the official instruction
+`abandon_instruction_run` API. It proves original A separately from exact sealed
+successor B and the original target-only supported rollout report. This records
+rejected-old-run and administrative blocked only. Existing prepare,
+record_attempt and finalize revalidate before every mutation/restart; verified
+controller recovery alone reaches ready. Preserve old evidence and candidate;
+never accept, merge, complete or clean the old run. A new run requires its own
+original admission. Ordinary installed, authoring, expiry and parallel callback
+gates remain strict.

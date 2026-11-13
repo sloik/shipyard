@@ -47,6 +47,12 @@ except Exception:  # pragma: no cover - deployed copies may not include SPEC-CTX
     record_failure_reflexion = None
 
 try:
+    from lifecycle import BLOCKER_CLASSES
+except Exception:  # pragma: no cover - deployed copies may omit lifecycle
+    BLOCKER_CLASSES = frozenset({"technical_infeasibility", "safety_constraint", "evidence_unavailable",
+                                 "critical_external_constraint", "unknown_critical_failure", "scope_violation"})
+
+try:
     from lifecycle import classify_ordinary_evidence_wait
 except Exception:  # pragma: no cover - deployed copies may omit SPEC-206
     def classify_ordinary_evidence_wait(error_type: str) -> dict[str, str] | None:
@@ -119,8 +125,12 @@ def _set_frontmatter_status(frontmatter: str, status: str) -> str:
     return "\n".join(lines)
 
 
-def _set_frontmatter_defaults(frontmatter: str, reason: str) -> str:
-    """Add auditable blocker fields without overwriting caller-supplied evidence."""
+def _set_frontmatter_defaults(frontmatter: str, reason: str, supplied: Dict[str, str] | None = None) -> str:
+    """Add auditable blocker fields without overwriting caller-supplied evidence.
+
+    ``supplied`` values (BUG-NS-KIT-142 R4) replace the ``unknown`` defaults but, like them,
+    never overwrite a key the frontmatter already has.
+    """
     existing = {line.split(":", 1)[0].strip() for line in frontmatter.splitlines() if ":" in line}
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     defaults = {
@@ -131,6 +141,7 @@ def _set_frontmatter_defaults(frontmatter: str, reason: str) -> str:
         "blocker_scope": "unknown",
         "blocker_evidence": "failure_persistence",
     }
+    defaults.update({key: value for key, value in (supplied or {}).items() if value})
     additions = [f"{key}: {value!r}" for key, value in defaults.items() if key not in existing]
     return frontmatter.rstrip() + ("\n" + "\n".join(additions) if additions else "")
 
@@ -187,7 +198,22 @@ def is_eval_fixture(frontmatter: Dict[str, Any] | None, spec_path: Path) -> bool
     )
 
 
-def mark_spec_blocked(spec_path: Path, reason: str) -> bool:
+def _write_default_blocker_evidence(spec_path: Path, spec_id: str, reason: str) -> str:
+    """BUG-NS-KIT-142 R5: a small real record the unblock controller can pin; returns its install-relative path."""
+    resolved = spec_path.resolve()
+    install = resolved.parent.parent
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    relative = f"reports/failures/{ts}-blocked-{resolved.stem}.json"
+    _atomic_write_json(install / relative, {
+        "timestamp": ts, "spec_id": spec_id or resolved.stem, "reason": reason.strip(),
+        "source": "failure_persistence.mark_spec_blocked",
+    })
+    return relative
+
+
+def mark_spec_blocked(spec_path: Path, reason: str, *, blocker_class: str | None = None,
+                      blocker_scope: str | None = None, blocker_evidence: str | None = None,
+                      unblock_condition: str | None = None) -> bool:
     """
     Mark a normal spec blocked and ensure ## Block Reason follows the title.
 
@@ -201,8 +227,15 @@ def mark_spec_blocked(spec_path: Path, reason: str) -> bool:
     they are left byte-identical and no state is recorded on them at all. The
     failure is still durably recorded in the ledger by :func:`persist_failure`.
 
+    ``blocker_class`` (must be in ``lifecycle.BLOCKER_CLASSES``), ``blocker_scope``,
+    ``blocker_evidence`` and ``unblock_condition`` are written when given and never overwrite
+    keys already present. With no ``blocker_evidence`` a real record is written to
+    ``<install>/reports/failures/<ts>-blocked-<stem>.json`` and referenced (BUG-NS-KIT-142).
+
     Returns True if spec was updated.
     """
+    if blocker_class is not None and blocker_class not in BLOCKER_CLASSES:
+        raise ValueError(f"blocker_class {blocker_class!r} is not in lifecycle.BLOCKER_CLASSES")
     if not spec_path.exists():
         return False
 
@@ -247,7 +280,12 @@ def mark_spec_blocked(spec_path: Path, reason: str) -> bool:
             if not has_status:
                 lines.append("status: blocked")
 
-            new_frontmatter = _set_frontmatter_defaults("\n".join(lines), reason)
+            joined = "\n".join(lines)
+            supplied = {"blocker_class": blocker_class, "blocker_scope": blocker_scope,
+                        "blocker_evidence": blocker_evidence, "unblock_condition": unblock_condition}
+            if not blocker_evidence and not re.search(r"(?m)^blocker_evidence\s*:", joined):
+                supplied["blocker_evidence"] = _write_default_blocker_evidence(spec_path, str(fm.get("id", "")), reason)
+            new_frontmatter = _set_frontmatter_defaults(joined, reason, supplied)
             body_stripped = body.lstrip()
             if "## Block Reason" not in body_stripped:
                 block_section = f"## Block Reason\n\n{reason}\n\n"
@@ -406,7 +444,9 @@ def persist_failure(
                     f"- Source: `{source_file}`\n"
                     f"- Description: {description}\n"
                 )
-                updated = mark_spec_blocked(spec_path, reason)
+                updated = mark_spec_blocked(
+                    spec_path, reason,
+                    blocker_evidence=report_path.relative_to(project_root).as_posix())
                 spec_update = "updated" if updated else "unchanged"
         else:
             spec_update = "not_found"

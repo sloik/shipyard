@@ -180,9 +180,12 @@ try:
         ):
             if not specs_dir.is_dir():
                 continue
-            matches = sorted(specs_dir.glob(f"{active_spec_id}-*.md")) + sorted(specs_dir.glob(f"{active_spec_id}.md"))
-            if matches:
-                spec_file = matches[0]
+            try:
+                spec_file = module.find_spec_file(specs_dir, active_spec_id)
+            except module.AmbiguousSpecFile as exc:
+                emit_deny(f"BLOCKED - {exc}")
+                raise SystemExit(0)
+            if spec_file is not None:
                 break
         if spec_file is not None:
             spec_relpath = str(spec_file.relative_to(project_root)).replace("\\", "/")
@@ -227,11 +230,36 @@ try:
             roots.append(tmpdir.replace("\\", "/").rstrip("/") + "/")
         return roots
 
+    def _inside_project(path_str: str) -> bool:
+        # True when the path, spelled lexically or resolved, lies under the
+        # project root. Ancestors are compared with samefile so `/tmp/x` and
+        # `/private/tmp/x` spellings match, and a symlink that leads out of the
+        # root is still "inside" (classify_write then reports outside_root).
+        root = project_root.resolve()
+        for cand in (os.path.abspath(path_str), os.path.realpath(path_str)):
+            current = cand
+            while True:
+                try:
+                    if os.path.exists(current) and os.path.samefile(current, root):
+                        return True
+                except OSError:
+                    pass
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
+        return False
+
     def _is_scratch_or_devnull(path_str: str) -> bool:
         normalized = path_str.replace("\\", "/")
         if normalized == "/dev/null" or normalized.startswith("/dev/"):
             return True
         if not normalized.startswith("/"):
+            return False
+        # BUG-NS-KIT-136: a checkout that itself lives under a scratch root
+        # (/private/tmp, /private/var/folders) is not scratch -- classify it.
+        # Only narrows the carve-out; symlink escapes stay outside_root.
+        if _inside_project(normalized):
             return False
         return any(normalized.startswith(root) for root in _scratch_roots())
 

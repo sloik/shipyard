@@ -304,6 +304,14 @@ PHONE_CONTEXT_PATTERN = re.compile(
 BARE_PHONE_PATTERN = re.compile(r"(?<![\d.])\+?1?\s?(\d{10})(?![\d.])")
 
 CANONICAL_RUN_ID_PATTERN = re.compile(r"\brun-\d{4}-\d{2}-\d{2}-\d{6}\b")
+# BUG-NS-KIT-130 R1: the free-text spec-ID grammar, copied from spec_id.TOKEN_PATTERN
+# (this module stays standard-library only; a test pins the copy to the original).
+SPEC_ID_TOKEN_PATTERN = (
+    r"(?:SPEC-QUESTIONS-\d+(?:-\d+)*"
+    r"|(?:SPEC|BUG|NFR|QUESTIONS)-(?:(?!(?:SPEC|BUG|NFR|QUESTIONS)-)[A-Z][A-Z0-9]*-)*\d+(?:-\d+)*)"
+)
+# A token starts at a word edge, so "XSPEC-1" is not an ID; the grammar itself is unchanged.
+SPEC_ID_TOKEN_RE = re.compile(rf"(?<![A-Za-z0-9]){SPEC_ID_TOKEN_PATTERN}")
 
 # SPEC-198: RFC 2606 §2 reserves these top-level domains and RFC 6761 restates them as
 # special-use names that resolvers must refuse to resolve. No mail exchanger for them can
@@ -976,6 +984,7 @@ def _scan_line(text: str, location: str) -> list[tuple[Finding, str]]:
         # would restart at the top of the line, and a memo carried over from the previous
         # entry would then be asked about a match behind its own scan position.
         url_path = _UrlPathContext(text)
+        spec_ids: list[tuple[int, int]] | None = None
         for match in pattern.finditer(text):
             value = match.group(0)
             if matched_class == "credit_card" and _canonical_run_id_context(text, match):
@@ -984,6 +993,14 @@ def _scan_line(text: str, location: str) -> list[tuple[Finding, str]]:
             # A 19-digit tweet id happened to pass Luhn and blocked a commit.
             if matched_class == "credit_card" and url_path.holds(match):
                 continue
+            if matched_class == "credit_card" and _valid_pii(matched_class, value):
+                # BUG-NS-KIT-130 R1: digits wholly inside a spec-ID token are an identifier.
+                # Looked up only for a Luhn-valid candidate, and the spans are read once per line.
+                if spec_ids is None:
+                    spec_ids = [m.span() for m in SPEC_ID_TOKEN_RE.finditer(text)]
+                end = match.start() + len(value.rstrip(" -"))
+                if any(lo <= match.start() and end <= hi for lo, hi in spec_ids):
+                    continue
             if _valid_pii(matched_class, value):
                 findings.append((Finding("pii", location, matched_class), value_digest(value)))
     # SPEC-183: undelimited 10-digit runs are only PII beside a phone-context keyword.

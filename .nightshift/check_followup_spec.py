@@ -15,10 +15,13 @@ calling agent can perform semantic judgment.
 
 ID generation priority:
   1. --parent-id SPEC-ID  →  SPEC-ID-NNN  (parent-scoped, collision-safe)
-  2. --domain DOMAIN       →  project prefix + NNN  (inferred from existing specs)
-  3. neither               →  project prefix + NNN  (inferred from existing specs)
+  2. a registered project code (SPEC-416)  →  {KIND}-{CODE}-NNN, --kind picks the
+     kind (SPEC default, BUG, NFR, QUESTIONS); --domain is ignored
+  3. --domain DOMAIN       →  legacy project prefix + NNN  (project has no code)
+  4. neither               →  legacy project prefix + NNN  (inferred from existing specs)
 
-The returned proposed_id is always verified unique against existing spec IDs.
+The returned proposed_id is always verified unique against existing spec IDs and,
+when the project is registered, against every ID in the registered fleet.
 """
 
 from __future__ import annotations
@@ -32,6 +35,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+import spec_id as spec_id_grammar
+from dependency_registry import DependencyRegistryResolver
 
 
 # ---------------------------------------------------------------------------
@@ -168,10 +174,19 @@ def _infer_project_prefix(specs: list[dict[str, Any]]) -> str:
     return "SPEC-"
 
 
+def is_spec_id(value: object) -> bool:
+    """SPEC-416 R7: True for any legacy or R1 spec ID (shared parser)."""
+    return spec_id_grammar.parse_id(value) is not None
+
+
 def _proposed_id(
     domain: str | None,
     specs: list[dict[str, Any]],
     parent_id: str | None = None,
+    *,
+    code: str | None = None,
+    kind: str = "SPEC",
+    fleet_ids: Any = (),
 ) -> str:
     """Generate a proposed spec ID that is guaranteed unique among existing IDs.
 
@@ -184,7 +199,11 @@ def _proposed_id(
     In all cases the returned ID is verified against the in-memory ID set; if
     the candidate already exists the counter is incremented until unique.
     """
-    existing_ids = {str(s.get("id", "")) for s in specs}
+    existing_ids = {str(s.get("id", "")) for s in specs} | {str(x) for x in fleet_ids}
+
+    if code and not parent_id:
+        # SPEC-416 R6: the registered project code replaces every legacy prefix.
+        return spec_id_grammar.mint_id(kind, code, existing_ids)
 
     if parent_id:
         # Parent-scoped: find existing PARENT-NNN children (exactly 3 digits)
@@ -260,8 +279,25 @@ def check(
     parent_id: str | None = None,
     suggestion_body: str | None = None,
     source_spec_id: str | None = None,
+    kind: str = "SPEC",
+    registry_path: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run all checks. Returns (exit_code, result_dict)."""
+    if kind not in spec_id_grammar.ID_KINDS:
+        return 2, {
+            "status": "error",
+            "detail": f"unknown id kind {kind!r}; expected one of {', '.join(spec_id_grammar.ID_KINDS)}",
+            "nfr_texts": [],
+            "notes": [],
+        }
+    for label, value in (("parent_id", parent_id), ("source_spec_id", source_spec_id)):
+        if value is not None and not is_spec_id(value):
+            return 2, {
+                "status": "error",
+                "detail": f"{label} {value!r} is not a spec ID ({spec_id_grammar.GRAMMAR} or a legacy form)",
+                "nfr_texts": [],
+                "notes": [],
+            }
     specs = _load_specs(specs_dir)
     known_ids = {str(spec.get("id", "")) for spec in specs}
     if source_spec_id is not None and source_spec_id not in known_ids:
@@ -365,7 +401,13 @@ def check(
             "notes": notes,
         }
 
-    proposed_id = _proposed_id(domain, specs, parent_id=parent_id)
+    resolver = DependencyRegistryResolver(Path(specs_dir), registry_path=registry_path, cache_seconds=0)
+    project = resolver.current_project()
+    project_code = project.code if project is not None else None
+    proposed_id = _proposed_id(
+        domain, specs, parent_id=parent_id, code=project_code, kind=kind,
+        fleet_ids=resolver.all_ids() if project_code or parent_id else (),
+    )
     return 0, {
         "status": "clean",
         "proposed_id": proposed_id,
@@ -475,6 +517,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--kind", default="SPEC", choices=spec_id_grammar.ID_KINDS,
+        help="ID kind for the proposed ID in a project with a registered code (default: SPEC)",
+    )
+    parser.add_argument(
         "--suggestion-body", default=None,
         help=(
             "Proposed requirement/AC prose for the follow-up (audit R6). When provided, "
@@ -522,6 +568,7 @@ def main() -> None:
         parent_id=args.parent_id,
         suggestion_body=args.suggestion_body,
         source_spec_id=args.source_spec,
+        kind=args.kind,
     )
     print(json.dumps(result, indent=2))
     sys.exit(exit_code)
