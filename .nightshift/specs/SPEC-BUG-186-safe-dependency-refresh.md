@@ -30,6 +30,16 @@ devkb_required:
 
 Protocol work will touch core runtime dependencies. Mixing unrelated updates obscures regressions; current safe candidates include coder/websocket, ncruces SQLite/WASM, and Playwright, while Wails is a separate major-risk migration.
 
+> Status note (2026-11-13): part of this refresh landed outside this spec. Renovate PRs #44
+> (playwright-core 1.65.0), #45 (actions/setup-node 7.1.0), #46 (golang.org/x/sys 0.50.0), #47
+> (honnef.co/go/tools 0.8.2), #48 (goreleaser-action 7.3.0), #49 (Node 26) and #50
+> (ncruces/go-sqlite3 0.37.0) were merged to `main` with CI green, and Wails moved to v3.1.0
+> through PR #42. None of them went through this spec's requirements: no dependency inventory,
+> no per-group live gateway smoke and no recorded rollback revisions exist, and the new build is
+> not yet deployed to the live gateway. This spec stays `draft`; whoever promotes it must rewrite
+> the candidate list against the then-current `go.mod` and `package.json`, and AC3 ("Wails
+> remains unchanged") no longer describes `main`.
+
 ## Requirements
 
 - [ ] Inventory outdated/vulnerable Go/Node modules and classify direct, transitive, safe, breaking and unused dependencies.
