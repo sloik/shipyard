@@ -8,8 +8,9 @@ credentials.json
 /shipyard
 /shipyard-mcp
 /shipyard-v2
-/bin/*
-!/bin/shipyard
+# Runtime binaries are built by `make deploy-runtime`; never tracked.
+/bin/
+/archive/
 /build/smoke/
 /build/coverage/
 *.exe

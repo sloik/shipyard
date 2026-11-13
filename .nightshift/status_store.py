@@ -10,20 +10,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 # SPEC-303: bound-parameter chunk for the batch status read; one connection
 # is reused across chunks.
 _BATCH_READ_CHUNK = 500
 
 
-_CURRENT_SCHEMA_VERSION = 5
+_CURRENT_SCHEMA_VERSION = 6
 _DEFAULT_DB_NAME = "nightshift-status.db"
 
 
@@ -109,6 +110,97 @@ def _json_loads(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _git_path(path: Path, *args: str) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _primary_worktree(path: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    return next((Path(line.removeprefix("worktree ")).resolve() for line in result.stdout.splitlines() if line.startswith("worktree ")), None)
+
+
+def _checkpoint_path_identity(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    source = Path(value).expanduser().resolve()
+    top, git_dir, common_dir = (_git_path(source.parent, flag) for flag in ("--show-toplevel", "--git-dir", "--git-common-dir"))
+    if top is None or git_dir is None or common_dir is None:
+        return None
+    try:
+        relative = source.relative_to(top).as_posix()
+    except ValueError:
+        return None
+    if git_dir == common_dir:
+        return {"spec_path": str(source), "project_relative_spec_path": relative}
+    primary = _primary_worktree(source.parent)
+    if primary is None:
+        return None
+    return {"spec_path": str((primary / relative).resolve()), "project_relative_spec_path": relative, "worktree_spec_path": str(source)}
+
+
+def _normalize_checkpoint_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    normalized = dict(payload)
+    identity = _checkpoint_path_identity(normalized.get("canonical_spec_path") or normalized.get("spec_path"))
+    if identity is None:
+        return normalized
+    normalized.update({"spec_path": identity["spec_path"], "canonical_spec_path": identity["spec_path"], "project_relative_spec_path": identity["project_relative_spec_path"]})
+    if "worktree_spec_path" in identity:
+        normalized["worktree_spec_path"] = identity["worktree_spec_path"]
+    return normalized
+
+
+def _legacy_worktree_path_matches(checkpoint_path: Any, spec_path: Path) -> bool:
+    if not isinstance(checkpoint_path, str) or not checkpoint_path or not Path(checkpoint_path).is_absolute():
+        return False
+    current = spec_path.resolve()
+    top = _git_path(current.parent, "--show-toplevel")
+    if top is None:
+        return False
+    try:
+        expected = current.relative_to(top).parts
+    except ValueError:
+        return False
+    parts = Path(checkpoint_path).expanduser().resolve().parts
+    for i, part in enumerate(parts):
+        if parts[i:i + 2] == (".claude", "worktrees") and len(parts) > i + 3:
+            if (Path(*parts[:i]) == top and parts[i + 2].startswith("agent-")
+                    and tuple(parts[i + 3:]) == expected):
+                return True
+        if part == "nightshift-worktrees" and len(parts) > i + 3:
+            temporary_root = parts[:3] == ("/", "var", "folders") or parts[:4] == ("/", "private", "var", "folders")
+            if temporary_root and tuple(parts[i + 3:]) == expected:
+                return True
+    return False
+
+
+def _checkpoint_path_matches(payload: dict[str, Any], spec_path: Path) -> bool:
+    checkpoint_path = payload.get("spec_path")
+    if not checkpoint_path or Path(str(checkpoint_path)).expanduser().resolve() == spec_path.resolve():
+        return True
+    # Relative metadata alone cannot authorize an unrelated absolute locator.
+    identity = _checkpoint_path_identity(str(spec_path))
+    if identity and Path(str(checkpoint_path)).expanduser().resolve() == Path(identity["spec_path"]):
+        return True
+    return _legacy_worktree_path_matches(checkpoint_path, spec_path)
 
 
 def is_canonical_repository_relative_path(
@@ -413,7 +505,7 @@ class StatusStore:
         )
         return _checkpoint_from_row(row).to_dict() if row else None
 
-    def get_states(self, spec_ids: Iterable[str]) -> dict[str, dict[str, Any] | None]:
+    def get_states(self, spec_ids: Iterable[str], *, include_terminal_projection: bool = False) -> dict[str, dict[str, Any] | None]:
         """Return the latest state for many specs over one connection (SPEC-303).
 
         Equivalent to calling ``get_state`` per id — same value, including
@@ -427,6 +519,8 @@ class StatusStore:
         if not states:
             return states
         unique = list(states)
+        projections = {}
+        activity_inputs = {identity: {"checkpoints": [], "events": []} for identity in unique}
         with closing(self._connect()) as conn:
             # Chunked to stay clear of SQLite's bound-parameter limit; the
             # connection is still opened exactly once.
@@ -446,7 +540,64 @@ class StatusStore:
                 ).fetchall()
                 for row in rows:
                     states[str(row["spec_id"])] = _checkpoint_from_row(row).to_dict()
-        return states
+                if include_terminal_projection:
+                    projections.update(_terminal_projection_diagnostics(conn, chunk))
+                    for point in conn.execute(f'SELECT id,spec_id,status,created_at,run_id FROM status_checkpoints WHERE spec_id IN ({placeholders}) ORDER BY id', tuple(chunk)):
+                        activity_inputs[point['spec_id']]['checkpoints'].append({
+                            'checkpoint_id': point['id'], 'spec_id': point['spec_id'], 'status': point['status'],
+                            'created_at': point['created_at'], 'run_id': point['run_id']})
+                    for event in conn.execute(f'SELECT spec_id,payload_json FROM activity_events WHERE spec_id IN ({placeholders}) ORDER BY id', tuple(chunk)):
+                        activity_inputs[event['spec_id']]['events'].append(json.loads(event['payload_json']))
+        return _BoardStateBatch(states, projections, activity_inputs) if include_terminal_projection else states
+
+    def record_activity_event(self, *, spec_id: str, run_id: str, event_id: str, episode_id: str,
+                              category: str, kind: str, at: str, actor: str, source: str,
+                              phase: str | None = None, required_action: str | None = None,
+                              next_action: str | None = None) -> dict[str, Any]:
+        """Append a closed metadata boundary; never change status or store discussion content."""
+        from loop_observability import ACTIVITY_CATEGORIES, _activity_epoch
+        data = dict(spec_id=spec_id, run_id=run_id, event_id=event_id, episode_id=episode_id,
+                    category=category, kind=kind, at=at, actor=actor, source=source)
+        for key, value in dict(phase=phase, required_action=required_action, next_action=next_action).items():
+            if value is not None:
+                data[key] = value
+        if any(not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', value)
+               for key, value in data.items() if key != 'at') or _activity_epoch(at) is None:
+            raise ValueError('activity requires bounded identity codes and an explicit timezone timestamp')
+        allowed = {'question', 'answer', 'takeover'} if category == 'discussion' else {'start', 'end'}
+        if category not in (*ACTIVITY_CATEGORIES, 'discussion') or kind not in allowed:
+            raise ValueError('unknown activity boundary')
+        if (category == 'waiting' and kind == 'start' or category == 'discussion' and kind == 'question') and not required_action:
+            raise ValueError('human action code required for explicit waiting')
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute('BEGIN IMMEDIATE')
+                rows = conn.execute('SELECT payload_json FROM activity_events WHERE spec_id=? AND run_id=? AND (event_id=? OR episode_id=?)',
+                                    (spec_id, run_id, event_id, episode_id)).fetchall()
+                for row in rows:
+                    previous = json.loads(row['payload_json'])
+                    if previous['event_id'] == event_id:
+                        if previous != data:
+                            raise ValueError('activity event identity conflict')
+                        return previous
+                    if {k: v for k, v in previous.items() if k != 'event_id'} == {k: v for k, v in data.items() if k != 'event_id'}:
+                        return previous
+                    if previous['category'] != category:
+                        raise ValueError('episode category identity conflict')
+                    if category != 'discussion' and previous['kind'] == kind:
+                        raise ValueError('episode boundary identity conflict')
+                conn.execute('INSERT INTO activity_events (spec_id,run_id,event_id,episode_id,created_at,payload_json) VALUES (?,?,?,?,?,?)',
+                             (spec_id, run_id, event_id, episode_id, at, json.dumps(data, sort_keys=True)))
+        return data
+
+    def get_activity_events(self, spec_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            return [json.loads(row['payload_json']) for row in conn.execute(
+                'SELECT payload_json FROM activity_events WHERE spec_id=? ORDER BY id', (spec_id,))]
+
+    def get_board_states(self, spec_ids: Iterable[str]) -> dict:
+        """Read status and projection diagnostics over the same bounded connection."""
+        return self.get_states(spec_ids, include_terminal_projection=True)
 
     def assert_durable_ready(self) -> None:
         """Fail unless the configured SQLite store is current and writable."""
@@ -528,6 +679,18 @@ class StatusStore:
                         f"recorded {existing.decision}, refused {decision}"
                     )
         return existing.to_dict()
+
+    def list_terminal_decisions(self, spec_id: str, *, source: str) -> list[dict[str, Any]]:
+        """Return every immutable terminal-decision row of one spec and source, oldest first."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM terminal_decisions
+                WHERE spec_id = ? AND source = ? ORDER BY id ASC
+                """,
+                (spec_id, source),
+            ).fetchall()
+        return [_terminal_decision_from_row(row).to_dict() for row in rows]
 
     def get_terminal_decision_history(
         self, spec_id: str, run_id: str,
@@ -657,6 +820,35 @@ class StatusStore:
             )
         ):
             raise ValueError("merge attempt evidence is incomplete or invalid")
+        proof = payload.get("selfspec_reconciliation")
+        if proof is not None:
+            fields = {"schema_version", "spec_id", "run_id", "base", "main_before", "candidate", "spec_path",
+                      "binding", "receipt_sha256", "contract_sha256", "held_event_id", "base_blob", "main_blob",
+                      "candidate_blob", "resolution_blob", "mode", "expected_tree", "conflict_files",
+                      "approval_sha256", "verification_sha256", "checked_items"}
+            def hex_value(value, length):
+                return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value)
+            if (not isinstance(proof, dict) or set(proof) != fields or type(proof.get("schema_version")) is not int or proof.get("schema_version") != 1
+                    or proof.get("spec_id") != spec_id or proof.get("run_id") != run_id
+                    or proof.get("main_before") != payload["main_before"]
+                    or proof.get("candidate") != payload["candidate_revision"] or payload["attempt_number"] != 2
+                    or proof.get("resolution_blob") != proof.get("candidate_blob")
+                    or proof.get("mode") not in {"100644", "100755"}
+                    or not is_canonical_repository_relative_path(proof.get("spec_path"))
+                    or proof.get("conflict_files") != [proof["spec_path"]]
+                    or type(proof.get("held_event_id")) is not int or proof["held_event_id"] < 1
+                    or any(not hex_value(proof.get(key), 40) for key in
+                           ("base", "main_before", "candidate", "base_blob", "main_blob", "candidate_blob", "resolution_blob", "expected_tree"))
+                    or any(not hex_value(proof.get(key), 64) for key in
+                           ("receipt_sha256", "contract_sha256", "approval_sha256", "verification_sha256"))
+                    or not isinstance(proof.get("binding"), dict) or set(proof["binding"]) !=
+                       {"git_common_dir_sha256", "worktree_sha256", "install_relative_sha256"}
+                    or any(not hex_value(value, 64) for value in proof["binding"].values())
+                    or not isinstance(proof.get("checked_items"), list) or not proof["checked_items"]
+                    or any(not isinstance(item, str) or not re.fullmatch(r"(?:R|AC)[1-9][0-9]*", item)
+                           for item in proof["checked_items"])
+                    or proof["checked_items"] != sorted(set(proof["checked_items"]))):
+                raise ValueError("self-spec reconciliation proof is malformed")
         created_at = _utc_now()
         with closing(self._connect()) as conn:
             with conn:
@@ -671,6 +863,14 @@ class StatusStore:
                     row for row in prior
                     if _json_loads(row["payload_json"]).get("outcome") == "started"
                 ]
+                if outcome == "started" and proof is not None:
+                    anchor = next((row for row in prior if int(row["id"]) == proof["held_event_id"]), None)
+                    anchor_payload = _json_loads(anchor["payload_json"]) if anchor is not None else {}
+                    if (anchor_payload.get("outcome") != "conflict" or anchor_payload.get("attempt_number") != 1
+                            or anchor_payload.get("main_before") != payload["main_before"]
+                            or anchor_payload.get("candidate_revision") != payload["candidate_revision"]
+                            or anchor_payload.get("conflict_files") != proof["conflict_files"]):
+                        raise ValueError("self-spec proof lacks its original held conflict")
                 if outcome == "started":
                     if payload["attempt_number"] != len(starts) + 1 or (
                         prior and _json_loads(prior[-1]["payload_json"]).get("outcome")
@@ -690,7 +890,7 @@ class StatusStore:
                     if correcting_false_success:
                         matching_fields = (
                             "main_before", "candidate_revision", "observed_files",
-                            "declared_surfaces", "attempt_number",
+                            "declared_surfaces", "attempt_number", "selfspec_reconciliation",
                         )
                         if any(
                             payload.get(field) != started_payload.get(field)
@@ -706,7 +906,7 @@ class StatusStore:
                             payload.get(field) != started_payload.get(field)
                             for field in (
                                 "main_before", "candidate_revision", "observed_files",
-                                "declared_surfaces", "attempt_number",
+                                "declared_surfaces", "attempt_number", "selfspec_reconciliation",
                             )
                         )
                     ):
@@ -917,6 +1117,23 @@ class StatusStore:
         )
         recomputed_before = hashlib.sha256(base_blob.stdout).hexdigest()
         recomputed_expected = hashlib.sha256(target_text.encode("utf-8")).hexdigest()
+        closure = None
+        if 'completion_inputs' in payload:
+            from spec_artifacts import derive_terminal_first_projection
+            closure, trailers = derive_terminal_first_projection(
+                repository, spec_id, run_id, decision, relative.as_posix(),
+                payload['base_head'], payload['completion_inputs'])
+            hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+            if payload.get('closure_sha256') != hashes:
+                raise ValueError('terminal first projection closure binding mismatch')
+            recomputed_expected = hashes[relative.as_posix()]
+            history = self.get_terminal_projection_history(spec_id, run_id)
+            original = next((event['payload'] for event in history
+                             if event['payload'].get('phase') == 'started'), None)
+            if original is not None and original != {**payload, 'phase': 'started'}:
+                raise ValueError('terminal first projection cannot replace a started receipt')
+            if payload['phase'] == 'completed' and original is None:
+                raise ValueError('terminal first projection completed receipt lacks started closure')
         if (
             payload["before_sha256"] != recomputed_before
             or payload["expected_sha256"] != recomputed_expected
@@ -933,6 +1150,33 @@ class StatusStore:
             raise ValueError("terminal projection completed receipt requires clean projected path")
         if payload["phase"] == "started" and head.stdout.strip() != payload["base_head"]:
             raise ValueError("terminal projection started receipt base is not current HEAD")
+        if closure is not None:
+            for name, data in closure.items():
+                target = repository / name
+                current_path = repository
+                for member in PurePosixPath(name).parts:
+                    current_path /= member
+                    if current_path.is_symlink():
+                        raise ValueError(f'terminal first projection symlinked closure path: {name}')
+                if target.is_file() and target.stat().st_nlink != 1:
+                    raise ValueError(f'terminal first projection hardlinked closure path: {name}')
+                dirty = subprocess.run(['git', 'status', '--porcelain', '--', name],
+                                       cwd=repository, capture_output=True, text=True, check=True).stdout
+                if target.is_symlink() or dirty.strip():
+                    raise ValueError(f'terminal first projection requires clean closure path: {name}')
+                if payload['phase'] == 'completed':
+                    observed = subprocess.run(['git', 'show', f'HEAD:{name}'], cwd=repository,
+                                              capture_output=True)
+                    if observed.returncode or observed.stdout != data or target.read_bytes() != data:
+                        raise ValueError(f'terminal first projection committed closure differs: {name}')
+            if payload['phase'] == 'completed':
+                changed = subprocess.run(['git', 'diff', '--name-only', 'HEAD^1', 'HEAD'],
+                                         cwd=repository, capture_output=True, text=True, check=True).stdout.splitlines()
+                message = subprocess.run(['git', 'log', '-1', '--pretty=%B'], cwd=repository,
+                                         capture_output=True, text=True, check=True).stdout.splitlines()
+                if set(changed) != set(closure) or message[:1] != [f'chore: mark {spec_id} done'] \
+                    or any(line not in message for line in trailers):
+                    raise ValueError('terminal first projection commit paths/subject/trailers differ')
         if payload["phase"] == "completed":
             parent = subprocess.run(
                 ["git", "rev-parse", "HEAD^1^{commit}"], cwd=repository,
@@ -952,6 +1196,16 @@ class StatusStore:
         created_at = _utc_now()
         with closing(self._connect()) as conn:
             with conn:
+                if closure is not None:
+                    rows = conn.execute('SELECT id, created_at, payload_json FROM terminal_projection_events '
+                                        'WHERE spec_id = ? AND run_id = ? ORDER BY id', (spec_id, run_id)).fetchall()
+                    for row in rows:
+                        previous = _json_loads(row['payload_json'])
+                        if previous.get('phase') == 'started' and previous != {**payload, 'phase': 'started'}:
+                            raise ValueError('terminal first projection cannot replace a started receipt')
+                        if previous == payload:
+                            return {'event_id': int(row['id']), 'spec_id': spec_id, 'run_id': run_id,
+                                    'created_at': row['created_at'], 'payload': payload}
                 cursor = conn.execute(
                     """
                     INSERT INTO terminal_projection_events
@@ -965,6 +1219,125 @@ class StatusStore:
             "event_id": event_id, "spec_id": spec_id, "run_id": run_id,
             "created_at": created_at, "payload": payload,
         }
+
+    def record_terminal_projection_failure(self, spec_id: str, run_id: str, *,
+                                           original_event_id: int | None = None, reason: str) -> dict[str, Any]:
+        """Retain actual projection failure separately from immutable done."""
+        original = next((event for event in self.get_terminal_projection_history(spec_id, run_id)
+                         if event['event_id'] == original_event_id), None)
+        decision = self.get_terminal_decision(spec_id, run_id)
+        state = self.get_state(spec_id)
+        if (decision is None or state is None or state.get('run_id') != run_id
+            or (state.get('payload') or {}).get('terminal_decision_id') != decision['decision_id']
+            or state.get('status') != decision['decision']
+            or (original_event_id is not None and
+                (original is None or original['payload'].get('phase') != 'started'))):
+            raise StatusStoreError('terminal projection failure lacks matching immutable decision/receipt')
+        payload = {'event': 'terminal_frontmatter_projection_failure', 'phase': 'pending',
+                   'original_event_id': original_event_id,
+                   'decision_id': decision['decision_id'],
+                   'reason': str(reason)[:16384],
+                   'recovery_action': 'queue.recover_terminal_projection(handle)'}
+        created_at = _utc_now()
+        with closing(self._connect()) as conn:
+            with conn:
+                cursor = conn.execute('INSERT INTO terminal_projection_events '
+                    '(spec_id, run_id, created_at, payload_json) VALUES (?, ?, ?, ?)',
+                    (spec_id, run_id, created_at, _json_dumps(payload)))
+        return {'event_id': int(cursor.lastrowid), 'spec_id': spec_id, 'run_id': run_id,
+                'created_at': created_at, 'payload': payload}
+
+    def terminal_projection_diagnostics(self, spec_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read projection progress separately from the accepted terminal decision."""
+        if not spec_ids:
+            return {}
+        with closing(self._connect()) as conn:
+            return _terminal_projection_diagnostics(conn, spec_ids)
+
+    def record_terminal_metadata_recovery_event(
+        self, spec_id: str, run_id: str, *, repo_root: Path,
+        request: dict[str, Any], phase: str,
+    ) -> dict[str, Any]:
+        """Append a canonical metadata link; never replace the original receipt."""
+        from spec_artifacts import derive_terminal_metadata_recovery
+
+        if phase not in {"metadata_started", "metadata_completed"}:
+            raise ValueError("metadata recovery phase invalid")
+        identity = self.require_repository(repo_root)
+        history = self.get_terminal_projection_history(spec_id, run_id)
+        originals = [item for item in history
+                     if item["event_id"] == request.get("original_event_id")]
+        if len(originals) != 1:
+            raise StatusStoreError("metadata recovery original receipt unavailable")
+        original = originals[0]
+        receipt = original["payload"]
+        decision = self.get_terminal_decision(spec_id, run_id)
+        state = self.get_state(spec_id)
+        completion = (decision or {}).get("payload", {}).get("completion_evidence", {})
+        if (decision is None or state is None or state.get("run_id") != run_id
+            or state.get("status") != "done"
+            or state.get("payload", {}).get("terminal_decision_id") != decision["decision_id"]
+            or completion.get("ok") is not True or completion.get("outcome") != "accepted"
+            or not {"report", "tests", "ac_checklist", "verifier"}.issubset(completion.get("artifacts", {}))
+            or any(receipt.get(key) != identity[key] for key in ("repo_common_dir", "checkout_root"))):
+            raise StatusStoreError("metadata recovery decision/repository binding invalid")
+        closure = derive_terminal_metadata_recovery(repo_root, spec_id, run_id,
+                                                   decision, original, request)
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in closure.items()}
+        recovery_base = request.get("recovery_base_head", receipt["base_head"])
+        payload = {"event": "terminal_frontmatter_metadata_recovery", "phase": phase,
+                   "original_event_id": original["event_id"], "request": request,
+                   "closure_sha256": hashes, "recovery_base_head": recovery_base}
+        links = [item for item in history if item["payload"].get("event") == payload["event"]]
+        if links and any(item["payload"].get("request") != request
+                         or item["payload"].get("closure_sha256") != hashes for item in links):
+            raise StatusStoreError("competing metadata recovery target refused")
+        root = Path(repo_root).resolve()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if phase == "metadata_started":
+            if links or head != recovery_base:
+                raise StatusStoreError("metadata recovery requires pending original base HEAD")
+            if hashlib.sha256((root / receipt["spec_path"]).read_bytes()).hexdigest() != receipt["expected_sha256"]:
+                raise StatusStoreError("metadata recovery requires exact parent-owned pending bytes")
+        else:
+            if not links or links[0]["payload"].get("phase") != "metadata_started":
+                raise StatusStoreError("metadata completion lacks started link")
+            parent = subprocess.run(["git", "rev-parse", "HEAD^1"], cwd=root,
+                                    capture_output=True, text=True, check=True).stdout.strip()
+            subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=root,
+                                     capture_output=True, text=True, check=True).stdout.strip()
+            changed = subprocess.run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+                                     cwd=root, capture_output=True, text=True, check=True).stdout.splitlines()
+            if parent != recovery_base or subject != f"chore: mark {spec_id} done" or set(changed) != set(closure):
+                raise StatusStoreError("metadata completion commit binding invalid")
+            for name, digest in hashes.items():
+                committed = subprocess.run(["git", "show", f"HEAD:{name}"], cwd=root, capture_output=True, check=True).stdout
+                dirty = subprocess.run(["git", "status", "--porcelain", "--", name], cwd=root,
+                                       capture_output=True, text=True, check=True).stdout
+                if hashlib.sha256(committed).hexdigest() != digest or dirty.strip():
+                    raise StatusStoreError("metadata completion closure differs from committed bytes")
+        created_at = _utc_now()
+        with closing(self._connect()) as conn:
+            with conn:
+                # Serialize the choice and detect a concurrent competing parent.
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute("SELECT id, payload_json FROM terminal_projection_events WHERE spec_id = ? AND run_id = ? ORDER BY id",
+                                    (spec_id, run_id)).fetchall()
+                existing = [_json_loads(row["payload_json"]) for row in rows
+                            if _json_loads(row["payload_json"]).get("event") == payload["event"]]
+                if any(item.get("request") != request or item.get("closure_sha256") != hashes for item in existing):
+                    raise StatusStoreError("competing metadata recovery target refused")
+                for row in rows:
+                    if _json_loads(row["payload_json"]) == payload:
+                        return {"event_id": int(row["id"]), "spec_id": spec_id,
+                                "run_id": run_id, "payload": payload}
+                if phase == "metadata_started" and existing:
+                    raise StatusStoreError("metadata recovery already chosen")
+                cursor = conn.execute("INSERT INTO terminal_projection_events (spec_id, run_id, created_at, payload_json) VALUES (?, ?, ?, ?)",
+                                      (spec_id, run_id, created_at, _json_dumps(payload)))
+        return {"event_id": int(cursor.lastrowid), "spec_id": spec_id, "run_id": run_id,
+                "created_at": created_at, "payload": payload}
 
     def get_terminal_projection_history(
         self, spec_id: str, run_id: str,
@@ -1003,6 +1376,7 @@ class StatusStore:
             raise ValueError("spec_id required")
         if not status:
             raise ValueError("status required")
+        payload = _normalize_checkpoint_payload(payload)
         timestamp = created_at or _utc_now()
         with closing(self._connect()) as conn:
             with conn:
@@ -1038,7 +1412,9 @@ class StatusStore:
                                 actor: str | None = None,
                                 reconsider_when: str | None = None,
                                 state_rationale_evidence: Any = (),
-                                provenance: str = "authored") -> dict[str, Any]:
+                                provenance: str = "authored",
+                                before_administrative_write: Callable[[], None] | None = None,
+                                extra_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Write the coordinator checkpoint before tracked frontmatter.
 
         This ordering prevents a store outage from producing a false terminal
@@ -1083,16 +1459,24 @@ class StatusStore:
             reason_text = f"mechanical transition to {status!r} via run {run_id}"
 
         try:
-            checkpoint = self.update_state(
-                spec_id, status, run_id=run_id, source=source, note=note or reason_text,
-                payload={"spec_path": str(path), "canonical_spec_path": str(path)},
-            )
+            if before_administrative_write is not None:
+                before_administrative_write()
+            checkpoint = self.get_state(spec_id) if before_administrative_write is not None else None
+            payload = _normalize_checkpoint_payload({"spec_path": str(path), "canonical_spec_path": str(path), **(extra_payload or {})})
+            if not (checkpoint and checkpoint.get("status") == status and checkpoint.get("run_id") == run_id
+                    and checkpoint.get("source") == source and checkpoint.get("note") == (note or reason_text)
+                    and checkpoint.get("payload") == payload):
+                checkpoint = self.update_state(
+                    spec_id, status, run_id=run_id, source=source, note=note or reason_text, payload=payload,
+                )
         except Exception as exc:
             raise LifecyclePersistenceError(
                 f"durable lifecycle checkpoint failed; frontmatter unchanged; "
                 f"recovery: rerun coordinator transition for {spec_id}"
             ) from exc
         try:
+            if before_administrative_write is not None:
+                before_administrative_write()
             spec_artifacts.write_status_transition_artifact(
                 spec_artifacts.reports_root_for_spec_path(path), spec_id,
                 from_status=current_status, to_status=status,
@@ -1110,6 +1494,8 @@ class StatusStore:
                 f"recovery: reconcile {path.name} artifacts and retry"
             ) from exc
         try:
+            if before_administrative_write is not None:
+                before_administrative_write()
             write_spec_frontmatter(path, lambda fm: {**fm, "status": status})
         except Exception as exc:
             raise LifecyclePersistenceError(
@@ -1183,6 +1569,8 @@ class StatusStore:
                 version = 4
             if version < 5:
                 _migrate_v4_to_v5(conn)
+            if version < 6:
+                _migrate_v5_to_v6(conn)
 
 
 def _schema_version(conn: sqlite3.Connection) -> int:
@@ -1318,6 +1706,21 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS activity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                spec_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                event_id TEXT NOT NULL, episode_id TEXT NOT NULL,
+                created_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+                UNIQUE(spec_id, run_id, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_events_spec_run ON activity_events(spec_id,run_id,id);
+        """)
+        conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version','6')")
+
+
 # ---------------------------------------------------------------------------
 # SPEC-332: the board/file status-sync rule, shared by board.py (live probe)
 # and validate_specs.py (offline --status-store check). Pure functions: no
@@ -1368,8 +1771,7 @@ def should_reconcile_frontmatter_status(
         return False
     payload = durable_state.get("payload")
     if spec_path is not None and isinstance(payload, dict):
-        checkpoint_path = payload.get("spec_path")
-        if checkpoint_path and Path(str(checkpoint_path)) != spec_path:
+        if not _checkpoint_path_matches(payload, spec_path):
             return False
     checkpoint_mtime = checkpoint_epoch(durable_state)
     if checkpoint_mtime is None:
@@ -1404,7 +1806,11 @@ def classify_status_sync(
         if durable_status in TERMINAL_DURABLE_STATUSES
         else SYNC_DURABLE_STALE_BEHIND
     )
-    return {"durable": durable_status, "effective": durable_status, "reason": reason}
+    result = {"durable": durable_status, "effective": durable_status, "reason": reason}
+    payload = durable_state.get("payload")
+    if reason == SYNC_DURABLE_STALE_BEHIND and spec_path is not None and isinstance(payload, dict) and _legacy_worktree_path_matches(payload.get("spec_path"), spec_path):
+        result["recovery_action"] = "recognized legacy linked-worktree checkpoint: make the primary spec newer than the checkpoint and refresh; the board will reconcile it automatically"
+    return result
 
 
 def effective_status_view(
@@ -1488,6 +1894,7 @@ _MIGRATION_SPEC_ID_TABLES = (
     "cleanup_events",
     "terminal_projection_events",
     "merge_attempt_events",
+    "activity_events",
 )
 
 
@@ -1726,3 +2133,61 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(main())
+
+
+def _terminal_projection_diagnostics(conn, spec_ids):
+    placeholders = ','.join('?' for _ in spec_ids)
+    decisions = conn.execute(
+            f'SELECT * FROM terminal_decisions WHERE id IN (SELECT MAX(id) FROM terminal_decisions '
+            f'WHERE spec_id IN ({placeholders}) GROUP BY spec_id) ORDER BY id',
+            spec_ids).fetchall()
+    events = conn.execute(
+            f'SELECT * FROM terminal_projection_events WHERE id IN (SELECT MAX(id) '
+            f'FROM terminal_projection_events WHERE spec_id IN ({placeholders}) GROUP BY spec_id, run_id)',
+            spec_ids).fetchall()
+    cleanup_rows = conn.execute(
+        f'SELECT * FROM cleanup_events WHERE id IN (SELECT MAX(id) FROM cleanup_events '
+        f'WHERE spec_id IN ({placeholders}) GROUP BY spec_id, run_id)',
+        spec_ids).fetchall()
+    cleanups = {(row['spec_id'], row['run_id']): _json_loads(row['payload_json'])
+                for row in cleanup_rows}
+    histories = {}
+    for row in events:
+        histories.setdefault((row['spec_id'], row['run_id']), []).append(_json_loads(row['payload_json']))
+    result = {}
+    for row in decisions:
+        history = histories.get((row['spec_id'], row['run_id']), [])
+        last = history[-1] if history else {}
+        completed = last.get('phase') in {'completed', 'metadata_completed'}
+        result[row['spec_id']] = {
+            'decision': row['decision'], 'run_id': row['run_id'],
+            'projection': 'completed' if completed else 'pending',
+            'cleanup_eligible': completed,
+            'cleanup': cleanups.get((row['spec_id'], row['run_id']), {}).get('phase', 'pending'),
+            'reason': None if completed else last.get('reason') or
+                ('sealed tracked closure awaits ordinary commit' if history else
+                 'accepted decision awaits bounded parent completion inputs and tracked closure'),
+            'findings': [] if completed else [last.get('reason')] if last.get('reason') else [],
+            'recovery_action': None if completed else 'queue.recover_terminal_projection(handle)',
+        }
+    return result
+
+
+
+def read_terminal_projection_diagnostics_readonly(db_path: Path, spec_ids: list[str]) -> dict:
+    """Offline diagnostics never initialize, migrate or write a status store."""
+    if not spec_ids or not Path(db_path).is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            return _terminal_projection_diagnostics(conn, spec_ids)
+    except (sqlite3.Error, OSError):
+        return {}
+
+
+class _BoardStateBatch(dict):
+    def __init__(self, states, projections, activity_inputs=None):
+        super().__init__(states)
+        self.terminal_projections = projections
+        self.activity_inputs = activity_inputs or {}

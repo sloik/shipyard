@@ -147,6 +147,7 @@ def render_command(entry: dict[str, Any], harness: str) -> str:
             f"Changes: {entry['side_effects']}",
             f"It will ask: {entry['asks']}",
             f"Worked example: {entry['example']}",
+            *([f"Guide: {entry['guide']}"] if entry.get("guide") else []),
             "",
         ]
     )

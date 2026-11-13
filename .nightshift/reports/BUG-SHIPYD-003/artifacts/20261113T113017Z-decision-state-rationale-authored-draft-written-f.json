@@ -1,0 +1,30 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-003",
+  "type": "decision",
+  "created": "2026-11-13T11:30:17Z",
+  "actor": "coordinator",
+  "summary": "state rationale authored: draft -- Written from the failing security step of run 43416709784 on 2026-11-13",
+  "decision": {
+    "trigger": "state_rationale_authoring",
+    "current_state": "draft",
+    "candidate_states": [
+      "draft"
+    ],
+    "ambiguity_reason": "Written from the failing security step of run 43416709784 on 2026-11-13",
+    "static_findings": [],
+    "resolution": "Written from the failing security step of run 43416709784 on 2026-11-13",
+    "rationale": "Written from the failing security step of run 43416709784 on 2026-11-13",
+    "decision_authority": "coordinator",
+    "reusable_rule_gap": false
+  },
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "draft",
+    "reason": "Written from the failing security step of run 43416709784 on 2026-11-13",
+    "reconsider_when": "Validation of this spec passes",
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

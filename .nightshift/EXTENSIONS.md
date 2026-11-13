@@ -141,4 +141,4 @@ subprocess's own environment) and the evidence gate remain the two working
 backstops for spec-scoped enforcement in this case — the same fallback
 Codex/Hermes rely on for everything. This is a known, accepted gap (no fix
 available at the harness-launch layer today), not a silent one; see
-`canonical/Skills/nightshift/SKILL.md` Step 5 for the full evidence trail.
+`canonical/guides/run-3.md` Step 5 for the full evidence trail.

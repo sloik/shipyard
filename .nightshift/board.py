@@ -22,8 +22,10 @@ except ImportError as e:
     sys.exit(1)
 
 import errno
+import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import resource
@@ -48,11 +50,15 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from dependency_registry import DependencyRegistryResolver, DependencyResolution
-from spec_frontmatter import promotion_transition_error
+from spec_frontmatter import promotion_transition_error, spec_metadata_policy_for_specs_dir
 import deployment_tiers
 import lifecycle
 import skill_tutorial
 import spec_artifacts
+import spec_id as spec_id_grammar
+import board_search
+import prompt_snippets
+import prompt_snippets_ui
 
 # SPEC-332: the status-sync rule is shared with validate_specs.py; the module
 # is stdlib-only managed payload, so it is always importable.
@@ -97,11 +103,6 @@ def _registry_field_help() -> dict[str, str]:
 # every path component, which is not free on a synced filesystem, and this was
 # being recomputed per corpus-signature call and per spec with a release handoff.
 _RELEASE_HANDOFFS_DIR = Path(__file__).resolve().parent / "release-handoffs"
-
-_FRONTMATTER_RECONCILE_STATUSES = frozenset({
-    "planned", "draft", "ready", "in_progress", "blocked",
-    "active", "done", "superseded", "retired",
-})
 
 
 class PerformanceRegistry:
@@ -152,15 +153,17 @@ class PerformanceRegistry:
         self, key: str, duration_s: float, *, error: bool = False, cancelled: bool = False
     ) -> None:
         # Callers select keys from the fixed allowlist below.
-        if key not in _PERFORMANCE_KEYS or duration_s < 0:
+        if (key not in _PERFORMANCE_KEYS or type(duration_s) not in (int, float)
+                or not math.isfinite(duration_s) or duration_s < 0):
             return
         if cancelled:
             self._cancelled[key] += 1
             self._updated_at = self._clock()
             return
-        self._samples[key].append(round(duration_s * 1000, 3))
         if error:
             self._errors[key] += 1
+        else:
+            self._samples[key].append(round(duration_s * 1000, 3))
         self._updated_at = self._clock()
 
     def summary(self) -> dict:
@@ -199,6 +202,8 @@ _PERFORMANCE_KEYS = frozenset({
     "route.spec.2xx", "route.allowed.error",
     "browser.initial_board_ready", "browser.poll_unchanged", "browser.poll_diff",
     "browser.poll_full", "browser.spec_panel_ready", "browser.graph_ready",
+    "browser.graph_fetch", "browser.graph_json_decode", "browser.graph_prepare",
+    "browser.graph_first_paint",
     "browser.panel_fetch", "browser.panel_json_decode", "browser.panel_markdown_parse",
     "browser.panel_dom_mutation", "browser.panel_title_controls_paint",
     "browser.panel_body_paint", "browser.panel_cancelled",
@@ -206,110 +211,15 @@ _PERFORMANCE_KEYS = frozenset({
 performance_registry = PerformanceRegistry()
 
 
-def _checkpoint_epoch(state: dict) -> float | None:
-    """Return checkpoint timestamp seconds, or None when unavailable."""
-    raw = state.get("created_at")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _should_reconcile_frontmatter_status(
-    frontmatter_status: str,
-    durable_state: dict,
-    file_mtime: float,
-    spec_path: Path | None = None,
-) -> bool:
-    """Whether a newer file status may repair a durable row.
-
-    A durable row already at a terminal status (`done`/`blocked`) is
-    authoritative and immutable via frontmatter — that is SPEC-296-008's
-    original protection, and BUG-313 R2 requires it survive intact: a
-    terminal durable row must never be silently overwritten by a later,
-    different frontmatter status.
-
-    A durable row that is still *non-terminal*, however, may be
-    forward-reconciled by a newer, terminal (`done`/`blocked`) frontmatter
-    status. Nightshift's documented interactive/manual coordinator workflow
-    (SKILL.md's finalization steps: edit frontmatter, `chore: mark <id>
-    done` commit) never itself calls `nightshift_coordinator.py`'s
-    automated terminal-decision projector — without this forward reconcile
-    the durable store would freeze at its last non-terminal value forever
-    (BUG-313). Once this repair fires it writes the terminal status back to
-    the durable store (see `_effective_status`), so the row itself becomes
-    terminal and the guard above then protects it from any further changes.
-    """
-    durable_status = str(durable_state.get("status", ""))
-    if durable_status == frontmatter_status:
-        return False
-    if durable_status in {"done", "blocked"}:
-        return False
-    if frontmatter_status not in _FRONTMATTER_RECONCILE_STATUSES:
-        return False
-    payload = durable_state.get("payload")
-    if spec_path is not None and isinstance(payload, dict):
-        checkpoint_path = payload.get("spec_path")
-        if checkpoint_path and Path(str(checkpoint_path)) != spec_path:
-            return False
-    checkpoint_mtime = _checkpoint_epoch(durable_state)
-    if checkpoint_mtime is None:
-        return True
-    return file_mtime >= checkpoint_mtime
-
-
-# SPEC-290: the frontmatter field that persists a status-transfer refusal so
-# it survives past the toast that first reported it, and is discoverable by
-# any tool reading the spec file directly (not only the board).
-TRANSFER_REFUSAL_FIELD = "transfer_refusal"
-_TRANSFER_REFUSAL_MAX_LEN = 300
-
-
-def _sanitize_transfer_refusal_text(text: str) -> str:
-    """Collapse to one line and cap length so the value is a safe YAML scalar.
-
-    A raw refusal detail can be multi-line or arbitrarily long; a folded YAML
-    scalar with text at line-start could otherwise corrupt a later regex-based
-    field rewrite (e.g. the status line).
-    """
-    collapsed = " ".join(str(text).split())
-    if len(collapsed) > _TRANSFER_REFUSAL_MAX_LEN:
-        collapsed = collapsed[: _TRANSFER_REFUSAL_MAX_LEN - 1].rstrip() + "…"
-    return collapsed
-
-
-def _render_scalar_field_line(key: str, value: str) -> str:
-    """Render ``key: value`` as one safely-quoted YAML mapping line."""
-    dumped = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True)
-    return dumped.rstrip("\n")
-
-
-def _upsert_or_remove_field_line(fm_block: str, key: str, rendered_line: str | None) -> str:
-    """Upsert or delete a single top-level ``key: ...`` line, else no-op.
-
-    Every other line — order, list style, date quoting — is preserved
-    byte-for-byte, matching ``_update_status_file``'s regex approach rather
-    than a full YAML re-serialization.
-    """
-    lines = fm_block.split("\n")
-    prefix = f"{key}:"
-    out: list[str] = []
-    found = False
-    for line in lines:
-        if line.startswith(prefix):
-            found = True
-            if rendered_line is not None:
-                out.append(rendered_line)
-            continue
-        out.append(line)
-    if not found and rendered_line is not None:
-        if out and out[-1] == "":
-            out.insert(len(out) - 1, rendered_line)
-        else:
-            out.append(rendered_line)
-    return "\n".join(out)
+# SPEC-290 / SPEC-417-003: the transfer-refusal helpers and the status-write gates live in the
+# FastAPI-free status_transition.py so `board_ctl.py transition` runs the identical code.
+import status_transition
+from status_transition import (
+    TRANSFER_REFUSAL_FIELD,
+    render_scalar_field_line as _render_scalar_field_line,
+    sanitize_transfer_refusal_text as _sanitize_transfer_refusal_text,
+    upsert_or_remove_field_line as _upsert_or_remove_field_line,
+)
 
 
 @dataclass
@@ -324,6 +234,12 @@ class CacheEntry:
     rationale: tuple = ("absent", None)
 
 
+@lru_cache(maxsize=32768)
+def _search_path(value: str) -> Path:
+    """Reuse immutable path values; file metadata and bodies stay live."""
+    return Path(value)
+
+
 class SpecCache:
     """mtime-keyed two-tier cache.
 
@@ -331,11 +247,18 @@ class SpecCache:
     Tier 2 — body markdown, lazy (loaded on first access per spec).
     """
 
-    def __init__(self, specs_dir: Path, status_store=None) -> None:
+    def __init__(self, specs_dir: Path, status_store=None, *, project_code=None, archive_observed_at=None) -> None:
         self._specs_dir = specs_dir
+        self._search_project_code = project_code
+        self._search_archive_observed_at = board_search.archive_observation(archive_observed_at)
         self._status_store = status_store
+        self._activity_inputs = {}
+        self._last_heartbeat_text = {}
         self._dir_mtime: float = 0.0
         self._entries: dict[str, CacheEntry] = {}  # keyed by spec id
+        # Generic Tier 1 identity lookup; aliases the same entries/bodies rather
+        # than building a separate search index or scanning all ids per path.
+        self._entries_by_path: dict[Path, CacheEntry] = {}
         self._dependency_resolver = DependencyRegistryResolver(specs_dir)
         self._dependency_resolution = DependencyResolution()
         # SPEC-303 R5: handlers run in Starlette's threadpool, so entry
@@ -357,6 +280,18 @@ class SpecCache:
         self._recompose: dict[str, tuple[dict, dict]] = {}
         self._pass_memo: tuple | None = None  # (signature, snapshot, parallel, qualified)
         self._rationale_memo: dict[str, tuple] = {}
+        # BUG-NS-KIT-001: the fleet-wide dependency scan (every registered project's specs, re-read
+        # when its 5 s cache expires) used to run inside `_lock`, so every ~10 s poll parked all
+        # single-spec reads behind it for 1.5-4 s. It now refreshes under this separate lock first.
+        self._dependency_refresh_lock = threading.Lock()
+
+    def _refresh_dependency_cache(self) -> None:
+        """Refresh the dependency resolver's structural cache without holding `_lock`.
+
+        `resolve()` inside the corpus pass then finds the cache fresh and does no filesystem work.
+        """
+        with self._dependency_refresh_lock:
+            self._dependency_resolver._refresh_if_stale()
 
     # ------------------------------------------------------------------
     # Public API
@@ -388,11 +323,20 @@ class SpecCache:
             if self._projection_signature is not None:
                 if self._corpus_signature() == self._projection_signature:
                     projected = self._projection.get(spec_id)
-                    return dict(projected) if projected is not None else None
-            for item in self.get_all_frontmatter():
-                if item.get("id") == spec_id:
-                    return dict(item)
-            return None
+                    return self._with_activity(dict(projected)) if projected is not None else None
+        # Signature changed (or never derived): do the slow fleet scan outside the lock, then the pass.
+        for item in self.get_all_frontmatter():
+            if item.get("id") == spec_id:
+                return dict(item)
+        return None
+
+    def _with_activity(self, item: dict) -> dict:
+        from loop_observability import project_activity
+        source = self._activity_inputs.get(str(item.get('id')), {})
+        result = dict(item)
+        result['activity'] = project_activity(str(item.get('id')), source.get('checkpoints', []),
+                                               source.get('events', []), now=datetime.now(timezone.utc))
+        return result
 
     def _invalidate_projection(self) -> None:
         self._projection = {}
@@ -422,6 +366,7 @@ class SpecCache:
         now = datetime.now(timezone.utc)
         try:
             evidence = spec_artifacts.read_heartbeat_evidence(kwargs["reports_root"], spec_id, now=now)
+            self._last_heartbeat_text[spec_id] = evidence["text"]
             return spec_artifacts.compose_run_state_explanation(
                 item, **{**kwargs, "now": now, "heartbeat_evidence": evidence})
         except Exception:
@@ -476,7 +421,13 @@ class SpecCache:
                     stamps.append((stat.st_mtime, stat.st_size))
                 except OSError:
                     stamps.append(None)
-        return (files, tuple(artifacts), tuple(stamps), self._explanation_stamp(parent))
+        # SPEC-419: the project's spec_metadata policy is an input of every readiness/admission result.
+        try:
+            config_stat = os.stat(parent / "config.yaml")
+            config_stamp = (config_stat.st_mtime_ns, config_stat.st_size)
+        except OSError:
+            config_stamp = None
+        return (files, tuple(artifacts), tuple(stamps), self._explanation_stamp(parent), config_stamp)
 
     def _explanation_stamp(self, project_root: Path) -> tuple:
         """SPEC-359 R6: stat-only stamps of every extra input an explanation reads.
@@ -510,6 +461,7 @@ class SpecCache:
 
     def get_all_frontmatter(self) -> list[dict]:
         """Return all frontmatter dicts, checking mtime for staleness."""
+        self._refresh_dependency_cache()
         with self._lock:
             return self._get_all_frontmatter_locked()
 
@@ -548,6 +500,7 @@ class SpecCache:
         states = self._durable_states(
             [str(e.frontmatter.get("id")) for e in self._entries.values() if e.frontmatter.get("id")]
         )
+        self._activity_inputs = getattr(states, "activity_inputs", {})
         public = performance_registry.measure(
             "cache.frontmatter_public_assembly",
             lambda: [
@@ -571,6 +524,8 @@ class SpecCache:
         )
         admission_specs = self._dependency_resolution.combined_specs(by_id)
         help_text = _registry_field_help()
+        metadata_policy = spec_metadata_policy_for_specs_dir(Path(self._specs_dir))
+        self._metadata_policy = metadata_policy
         try:
             from lifecycle import derive_admission
         except ImportError:
@@ -592,6 +547,7 @@ class SpecCache:
                         body,
                         admission_specs,
                         self._dependency_resolution.errors,
+                        spec_metadata_policy=metadata_policy,
                     )
                     hold_detail = None
                     item["readiness"] = admission.readiness.level.value
@@ -640,12 +596,16 @@ class SpecCache:
             performance_registry.measure("cache.admission_derivation", _derive_and_explain)
         # SPEC-303 R6: memoize the finished projection against the signature of
         # the inputs it came from, so a single-spec fetch can reuse it.
+        progress = getattr(states, 'terminal_projections', {})
+        for item in public:
+            if str(item.get('id')) in progress:
+                item['terminal_projection'] = progress[str(item['id'])]
         self._projection = {
             str(item.get("id")): item for item in public if item.get("id")
         }
         self._projection_signature = signature
         performance_registry.record("cache.frontmatter", time.monotonic() - start)
-        return [dict(item) for item in public]
+        return [self._with_activity(item) for item in public]
 
     @staticmethod
     def _admission_settings(specs_dir: Path) -> tuple[int, str]:
@@ -682,6 +642,7 @@ class SpecCache:
             parallel, qualified = parallel_admission_decisions(
                 {str(item["id"]): item for item in public if item.get("id")},
                 self._dependency_resolver, worker_limit=worker_limit, missing_touches_policy=policy,
+                spec_metadata_policy=getattr(self, "_metadata_policy", None),
             )
         except Exception:
             log.exception("parallel admission evidence unavailable; explanations omit it")
@@ -751,7 +712,7 @@ class SpecCache:
         """Batch-read durable status, or None when there is no store."""
         if self._status_store is None or not spec_ids:
             return None
-        batch = getattr(self._status_store, "get_states", None)
+        batch = getattr(self._status_store, "get_board_states", None) or getattr(self._status_store, "get_states", None)
         if batch is None:  # a store predating SPEC-303 still works, just slower
             return None
         return batch(spec_ids)
@@ -786,54 +747,64 @@ class SpecCache:
             return entry.path if entry else None
 
     def search(self, q: str) -> list[dict]:
-        """In-memory case-insensitive search over frontmatter fields + body."""
+        """Compatibility list response; omitted facets mean All."""
+        return self.search_metadata(q)["results"]
+
+    def search_metadata(self, q: str, filters=None, *, offset=0, limit=None) -> dict:
         with self._lock:
-            return self._search_locked(q)
+            return self._search_locked(q, filters, offset=offset, limit=limit)
 
-    def _search_locked(self, q: str) -> list[dict]:
-        self.get_all_frontmatter()  # ensure Tier 1 is fresh
-
-        # Warm all bodies for changed/new files
+    def _search_locked(self, q: str, filters=None, *, offset=0, limit=None) -> dict:
+        # Search needs fresh source fields and effective status, not the board's
+        # unrelated readiness/explanation projections. Keep that work out of
+        # every search while applying the same read-only status authority rule.
+        dir_m = os.stat(self._specs_dir).st_mtime
+        if dir_m != self._dir_mtime:
+            self._reconcile(dir_m)
         with os.scandir(self._specs_dir) as entries:
             for de in entries:
                 if not de.name.endswith(".md"):
                     continue
-                path = Path(de.path)
+                path = _search_path(de.path)
                 mtime = de.stat().st_mtime
                 entry = self._entry_by_path(path)
-                if entry is not None and entry.body_md is None:
+                if entry is None:
+                    self._load_entry(path, mtime, retain_body=True)
+                elif entry.mtime != mtime:
+                    self._reload_entry(entry, mtime, retain_body=True)
+                elif entry.body_md is None:
                     entry.body_md = self._read_body(path)
-                elif entry is not None and entry.mtime != mtime:
-                    self._reload_entry(entry, mtime)
-                    if entry.body_md is None:
-                        entry.body_md = self._read_body(path)
 
-        ql = q.lower()
-        results = []
+        db_path = getattr(self._status_store, "db_path", None)
+        states = (
+            status_store_module.read_durable_states_readonly(db_path, self._entries)
+            if db_path is not None else self._durable_states(list(self._entries))
+        ) or {}
+
+        project = self._search_project_code
+        if project is None:
+            project = _search_project_code(self._specs_dir)
+        now = self._search_archive_observed_at if self._search_archive_observed_at is not None else time.time()
+        effective_filters = {**(filters or {}), "project": project, "archive_observed_at": now}
+        records = []
         for entry in self._entries.values():
-            spec_id = entry.frontmatter.get("id", "")
-            title = entry.frontmatter.get("_title", "")
-            body = entry.body_md or ""
-            haystack = (spec_id + " " + title + " " + body).lower()
-            idx = haystack.find(ql)
-            if idx == -1:
-                continue
-            start = max(0, idx - 60)
-            end = min(len(haystack), idx + len(ql) + 60)
-            excerpt = "..." + haystack[start:end] + "..."
-            results.append({
-                "id": spec_id,
-                "title": title or spec_id,
-                "status": self._effective_status(entry.frontmatter),
-                "excerpt": excerpt,
-            })
-        return results
+            fm = entry.frontmatter
+            status = status_store_module.effective_status_view(
+                str(fm.get("status", "draft")), states.get(fm.get("id")),
+                entry.mtime, entry.path,
+            )["effective"]
+            records.append({"id": fm.get("id", ""), "title": fm.get("_title", ""),
+                            "body": entry.body_md or "", "status": status,
+                            "type": fm.get("type", "feature"), "tags": fm.get("tags") or [],
+                            "version": fm.get("version"),
+                            "archived": status == "done" and bool(entry.mtime) and now - entry.mtime > 14 * 86400})
+        return board_search.search_records(records, q, effective_filters, offset=offset, limit=limit)
 
     def update_status(
         self, spec_id: str, status: str, *, reason: str | None = None,
         reconsider_when: str | None = None,
         state_evidence: list[dict] | None = None,
-    ) -> None:
+    ) -> list[str]:
         """Write new status to spec frontmatter and the durable checkpoint store.
 
         SPEC-291 R3: this is a board-manual move, so a judgment transition
@@ -853,7 +824,7 @@ class SpecCache:
         endpoint to supply the field.
         """
         with self._lock:
-            self._update_status_locked(
+            return self._update_status_locked(
                 spec_id, status, reason=reason, reconsider_when=reconsider_when,
                 state_evidence=state_evidence,
             )
@@ -862,64 +833,17 @@ class SpecCache:
         self, spec_id: str, status: str, *, reason: str | None = None,
         reconsider_when: str | None = None,
         state_evidence: list[dict] | None = None,
-    ) -> None:
+    ) -> list[str]:
         entry = self._entries.get(spec_id)
         if entry is None:
             raise KeyError(f"spec not found: {spec_id}")
-        if status not in _VALID_SPEC_STATUSES:
-            raise ValueError(f"invalid status: {status}")
-        allowed_statuses = _allowed_statuses_for_spec(entry.frontmatter)
-        if status not in allowed_statuses:
-            refusal_msg = _status_error_for_spec(entry.frontmatter, status) or f"invalid status: {status}"
-            self._record_transfer_refusal(entry, refusal_msg)
-            raise ValueError(refusal_msg)
-        refusal = promotion_transition_error(entry.frontmatter, status, specs_dir=self._specs_dir)
-        if refusal:
-            self._record_transfer_refusal(entry, refusal)
-            raise ValueError(refusal)
-        if status == "done":
-            # BUG-337: release-manifest.json is canonical-only release
-            # bookkeeping (see release_handoff.py's comment on
-            # managed_paths) and is deliberately never distributed to
-            # fleet installs. `canonical` here always resolves to this
-            # running copy's own directory, which on a fleet install is
-            # that install's `.nightshift/`, not the true canonical kit
-            # repository. Mirror validate_specs.py's `manifest_path.is_file()`
-            # guard (validate_specs.py ~line 1377): an install with no
-            # manifest has nothing to validate a release-handoff
-            # declaration against, so the check is skipped -- not failed
-            # -- and the transition proceeds. This applies uniformly, even
-            # if the spec itself carries an explicit `release_handoff:`
-            # declaration, exactly as validate_specs.py already treats it:
-            # release-handoff declarations are only checked against an
-            # actual manifest. Where a manifest is present (the canonical
-            # repository itself), this branch is unchanged and still hard
-            # gates release-impact specs per SPEC-189 AC2.
-            import release_handoff
-            canonical = Path(__file__).resolve().parent
-            manifest_path = canonical / "release-manifest.json"
-            if manifest_path.is_file():
-                try:
-                    manifest = json.loads(manifest_path.read_text())
-                except (OSError, json.JSONDecodeError) as exc:
-                    self._record_transfer_refusal(entry, str(exc))
-                    raise ValueError(f"release handoff validation unavailable: {exc}") from exc
-                errors = release_handoff.validate_spec_handoff(entry.frontmatter, canonical, manifest)
-                if errors:
-                    joined = "; ".join(errors)
-                    self._record_transfer_refusal(entry, joined)
-                    raise ValueError(joined)
-
         current_status = str(entry.frontmatter.get("status") or "")
-        reason_text = reason.strip() if isinstance(reason, str) else ""
-        if lifecycle.is_judgment_transition(current_status, status) and not reason_text:
-            refusal_msg = (
-                f"status transition {current_status} -> {status} requires a non-empty reason"
-            )
-            self._record_transfer_refusal(entry, refusal_msg)
-            raise ValueError(refusal_msg)
-        if not reason_text:
-            reason_text = f"mechanical board transition to {status}"
+        warnings: list[str] = []
+        reason_text = status_transition.gate_status_write(
+            entry.frontmatter, status, reason=reason, specs_dir=self._specs_dir,
+            canonical_dir=Path(__file__).resolve().parent, warnings=warnings,
+            record_refusal=lambda message: self._record_transfer_refusal(entry, message),
+        )
 
         if self._status_store is not None:
             self._status_store.transition_commit_backed(
@@ -931,7 +855,7 @@ class SpecCache:
             entry.mtime = os.stat(entry.path).st_mtime
             entry.frontmatter["status"] = status
             self._clear_transfer_refusal(entry)
-            return
+            return warnings
 
         spec_artifacts.write_status_transition_artifact(
             spec_artifacts.reports_root_for_spec_path(entry.path), spec_id,
@@ -943,6 +867,7 @@ class SpecCache:
         )
         self._update_status_file(entry, status)
         self._clear_transfer_refusal(entry)
+        return warnings
 
     def get_artifacts(self, spec_id: str) -> list[dict]:
         """Return the SPEC-291 artifact index entries for one spec (R5)."""
@@ -1101,6 +1026,7 @@ class SpecCache:
         """Wipe cache and re-warm all frontmatter from disk."""
         with self._lock:
             self._entries.clear()
+            self._entries_by_path.clear()
             self._dir_mtime = 0.0
             self._invalidate_projection()
             self._dependency_resolver.invalidate()
@@ -1122,31 +1048,33 @@ class SpecCache:
         # Remove entries whose files were deleted
         to_remove = [sid for sid, e in self._entries.items() if e.path not in on_disk]
         for sid in to_remove:
+            self._entries_by_path.pop(self._entries[sid].path, None)
             del self._entries[sid]
 
         # New files will be picked up by the scandir loop in get_all_frontmatter
 
     def _entry_by_path(self, path: Path) -> Optional[CacheEntry]:
-        for e in self._entries.values():
-            if e.path == path:
-                return e
-        return None
+        return self._entries_by_path.get(path)
 
-    def _load_entry(self, path: Path, mtime: float) -> None:
+    def _load_entry(self, path: Path, mtime: float, *, retain_body: bool = False) -> None:
         """Parse a spec file and store it in cache."""
         fm, body = _parse_spec_file(path)
         spec_id = fm.get("id")
         if not spec_id:
             return  # Skip files without an id field
         entry = CacheEntry(
-            path=path, mtime=mtime, frontmatter=fm, body_md=None,
+            path=path, mtime=mtime, frontmatter=fm, body_md=body if retain_body else None,
             rationale=spec_artifacts.parse_rationale_section(body),
         )
-        # We don't store body in Tier 1 — only load it on demand
+        # Search can reuse the body it just parsed; ordinary Tier 1 warm stays lazy.
+        previous = self._entries.get(spec_id)
+        if previous is not None:
+            self._entries_by_path.pop(previous.path, None)
         self._entries[spec_id] = entry
+        self._entries_by_path[path] = entry
         self._invalidate_projection()
 
-    def _reload_entry(self, entry: CacheEntry, mtime: float) -> None:
+    def _reload_entry(self, entry: CacheEntry, mtime: float, *, retain_body: bool = False) -> None:
         """Re-parse a changed file in-place."""
         fm, body = _parse_spec_file(entry.path)
         new_id = fm.get("id")
@@ -1154,13 +1082,16 @@ class SpecCache:
         entry.mtime = mtime
         entry.frontmatter = fm
         entry.rationale = spec_artifacts.parse_rationale_section(body)
-        entry.body_md = None  # Invalidate Tier 2 on file change
+        entry.body_md = body if retain_body else None
         self._invalidate_projection()
         if new_id and new_id != old_id:
             # ID changed — re-key
             if old_id in self._entries:
                 del self._entries[old_id]
             if new_id:
+                previous = self._entries.get(new_id)
+                if previous is not None and previous is not entry:
+                    self._entries_by_path.pop(previous.path, None)
                 self._entries[new_id] = entry
 
     def _read_body(self, path: Path) -> str:
@@ -1198,6 +1129,7 @@ class SpecCache:
         states = self._durable_states(
             [str(e.frontmatter.get("id")) for e in entries if e.frontmatter.get("id")]
         )
+        projections = getattr(states, 'terminal_projections', {})
         mismatches = []
         for entry in entries:
             spec_id = entry.frontmatter.get("id")
@@ -1216,9 +1148,11 @@ class SpecCache:
                     "durable": (found or {}).get("durable", (state or {}).get("status")),
                     "effective": effective,
                     "reason": (found or {}).get("reason", status_store_module.SYNC_DURABLE_STALE_BEHIND),
+                    **({"recovery_action": found["recovery_action"]} if (found or {}).get("recovery_action") else {}),
                     "spec_path": str(entry.path),
                 })
-        return {"checked": len(entries), "mismatches": mismatches}
+        return {"checked": len(entries), "mismatches": mismatches,
+                **({'terminal_projections': projections} if projections else {})}
 
     def _effective_status(
         self, fm: dict, file_mtime: float = 0.0, *, states: Optional[dict] = None
@@ -1233,13 +1167,22 @@ class SpecCache:
                 else self._status_store.get_state(spec_id)
             )
             if state and state.get("status"):
-                if _should_reconcile_frontmatter_status(file_status, state, file_mtime, self._entries[spec_id].path):
+                if status_store_module.should_reconcile_frontmatter_status(file_status, state, file_mtime, self._entries[spec_id].path):
                     self._status_store.update_state(
                         spec_id,
                         file_status,
                         source="frontmatter-reconcile",
                         note="newer frontmatter status repaired stale durable status",
-                        payload={"file_mtime": file_mtime},
+                        payload={
+                            **(state.get("payload") or {}),
+                            "file_mtime": file_mtime,
+                            "spec_path": str(self._entries[spec_id].path.resolve()),
+                            "canonical_spec_path": str(self._entries[spec_id].path.resolve()),
+                            **({"previous_spec_path": state["payload"]["spec_path"]}
+                               if (state.get("payload") or {}).get("spec_path")
+                               and state["payload"]["spec_path"] != str(self._entries[spec_id].path.resolve())
+                               else {}),
+                        },
                     )
                     return file_status
                 return str(state["status"])
@@ -1551,8 +1494,9 @@ class BoardBranchError(RuntimeError):
 
 
 def _project_root_for_specs_dir(specs_dir: Path) -> Path:
-    """Return the project root for a Nightshift specs directory."""
-    return specs_dir.parent.parent if specs_dir.name == "specs" else specs_dir.parent
+    """Return the project root for a Nightshift specs directory (SPEC-417-002: one shared formula)."""
+    from board_ctl import project_root_for_specs_dir
+    return project_root_for_specs_dir(specs_dir)
 
 
 def _read_config_documents(config_path: Path) -> list[dict]:
@@ -1864,111 +1808,78 @@ def _snippet_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _prompt_library() -> prompt_snippets.PromptLibrary:
+    return prompt_snippets.PromptLibrary(
+        _current_project_snippet_paths(), board_url=_board_url(),
+        known_actions=_known_nightshift_actions(),
+    )
+
+
+def _library_response(operation, *, created=False):
+    try:
+        result = operation()
+        return JSONResponse(status_code=201 if created else 200, content=result)
+    except prompt_snippets.LibraryError as exc:
+        content = {"error": exc.code, **exc.details}
+        if exc.code in {"conflict", "precondition_required", "store_unavailable", "write_failed", "malformed_store"}:
+            content["message"] = exc.message
+        return JSONResponse(status_code=exc.status, content=content)
+
+
 @app.get("/api/prompts")
 def list_prompts() -> JSONResponse:
-    """R1/R8: merged snippet list across all three scopes for the current
-    project. Repo scope is simply omitted (no error) when unresolvable."""
-    paths = _current_project_snippet_paths()
-    merged: list[dict] = []
-    for scope in SNIPPET_SCOPES:
-        merged.extend(load_snippets(scope, paths[scope]))
-    return JSONResponse(merged)
+    # Retain the legacy list response shape; all transports share one authority.
+    return _library_response(lambda: _prompt_library().snapshot()["items"])
 
 
 @app.get("/api/prompts/{scope}/{id}")
 def get_prompt(scope: str, id: str) -> JSONResponse:
-    """R2: single snippet lookup, or 404/400 per the spec's flat error shape."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    paths = _current_project_snippet_paths()
-    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-    return JSONResponse(snippet)
+    return _library_response(lambda: _prompt_library()._find(scope, id))
 
 
 @app.post("/api/prompts/{scope}")
-def create_prompt(scope: str, payload: dict) -> JSONResponse:
-    """R3/R4/R8: create a repo/project snippet; prebuilt is never writable,
-    and a fresh id may not collide with the *other two* scopes."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-
-    title = payload.get("title", "")
-    new_id = payload.get("id") or _slugify_prompt_title(title)
-
-    for other in SNIPPET_SCOPES:
-        if other == scope:
-            continue
-        if find_snippet(new_id, load_snippets(other, paths[other])) is not None:
-            return _prompt_error(409, error="id_collision", existing_scope=other)
-
-    now = _snippet_utc_now()
-    entry = {
-        "id": new_id,
-        "title": title,
-        "scope": scope,
-        "body": payload.get("body", ""),
-        "tags": payload.get("tags", []),
-        "variables": payload.get("variables", []),
-        "harness_overrides": payload.get("harness_overrides", {}),
-        "created_at": now,
-        "updated_at": now,
-    }
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    snippets.append(entry)
-    save_snippets(target_path, snippets)
-    return JSONResponse(status_code=201, content=entry)
+def create_prompt(scope: str, payload: dict, request: Request) -> JSONResponse:
+    return _library_response(lambda: _prompt_library().mutate(
+        scope, "create", payload, request.headers.get("if-match") or payload.get("revision")
+    )["item"], created=True)
 
 
 @app.put("/api/prompts/{scope}/{id}")
-def update_prompt(scope: str, id: str, payload: dict) -> JSONResponse:
-    """R5: update title/body/tags/variables/harness_overrides; id/scope are
-    immutable; bumps updated_at. prebuilt/missing behave like R3/R2."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    snippet = find_snippet(id, snippets)
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-    for field in ("title", "body", "tags", "variables", "harness_overrides"):
-        if field in payload:
-            snippet[field] = payload[field]
-    snippet["updated_at"] = _snippet_utc_now()
-    save_snippets(target_path, snippets)
-    return JSONResponse(snippet)
+def update_prompt(scope: str, id: str, payload: dict, request: Request) -> JSONResponse:
+    return _library_response(lambda: _prompt_library().mutate(
+        scope, "update", {**payload, "id": id}, request.headers.get("if-match") or payload.get("revision")
+    )["item"])
 
 
 @app.delete("/api/prompts/{scope}/{id}")
-def delete_prompt(scope: str, id: str) -> JSONResponse:
-    """R6: delete a repo/project snippet; last-snippet delete leaves an empty
-    JSON list on disk (via save_snippets), not a deleted file."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    if scope == "prebuilt":
-        return _prompt_error(403, error="prebuilt_read_only")
-    paths = _current_project_snippet_paths()
-    if scope == "repo" and paths["repo"] is None:
-        return _prompt_error(400, error="no_repo_root")
-    target_path = paths[scope]
-    snippets = load_snippets(scope, target_path)
-    if find_snippet(id, snippets) is None:
-        return _prompt_error(404, error="not_found")
-    remaining = [s for s in snippets if s.get("id") != id]
-    save_snippets(target_path, remaining)
-    return JSONResponse({"ok": True})
+def delete_prompt(scope: str, id: str, request: Request) -> JSONResponse:
+    def remove():
+        _prompt_library().mutate(scope, "delete", {"id": id}, request.headers.get("if-match"))
+        return {"ok": True}
+    return _library_response(remove)
+
+
+@app.middleware("http")
+async def _guard_prompt_library(request: Request, call_next):
+    if request.url.path.startswith(("/api/prompt-library", "/api/prompts")):
+        host = request.url.hostname
+        try:
+            local_host = host == "localhost" or ipaddress.ip_address(host or "").is_loopback
+        except ValueError:
+            local_host = host == "testserver"
+        peer = request.client.host if request.client else ""
+        try:
+            local_peer = ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            local_peer = peer == "testclient"
+        origin = request.headers.get("origin")
+        same_origin = not origin or origin.rstrip("/") == str(request.base_url).rstrip("/")
+        if not local_host or not local_peer or not same_origin or request.headers.get("sec-fetch-site") == "cross-site":
+            return _prompt_error(403, error="local_api_only")
+    return await call_next(request)
+
+
+prompt_snippets.register_library_routes(app, lambda request: _prompt_library())
 
 
 # --- SPEC-371-003: prompt snippet render endpoint -----------------------------
@@ -2025,51 +1936,19 @@ def _stale_command_warnings(text: str, known_actions: set) -> list:
 
 @app.post("/api/prompts/{scope}/{id}/render")
 def render_prompt(scope: str, id: str, payload: "dict | None" = None) -> JSONResponse:
-    """R1-R6: render a stored snippet into copy-ready text.
-
-    Lookup mirrors get_prompt's (SPEC-371-002) exact pattern, including its
-    404/400 error shapes (R6)."""
-    if scope not in SNIPPET_SCOPES:
-        return _prompt_error(400, error="invalid_scope")
-    paths = _current_project_snippet_paths()
-    snippet = find_snippet(id, load_snippets(scope, paths[scope]))
-    if snippet is None:
-        return _prompt_error(404, error="not_found")
-
-    body = payload or {}
-    harness = body.get("harness") or "other"
-    variables = dict(body.get("variables") or {})
-    variables["board_url"] = _board_url()  # R4: never client-overridable
-
-    overrides = snippet.get("harness_overrides") or {}
-    text = overrides.get(harness)  # R2: harness_overrides[harness] ?? body
-    if text is None:
-        text = snippet.get("body", "")
-
-    warnings: list = []
-
-    def _substitute(match: "re.Match") -> str:
-        name = match.group(1)
-        if name in variables:
-            return str(variables[name])
-        if name not in warnings_seen:
-            warnings_seen.add(name)
-            warnings.append(f"missing_variable:{name}")
-        return match.group(0)
-
-    warnings_seen: set = set()
-    text = _PROMPT_VARIABLE_RE.sub(_substitute, text)
-
-    warnings.extend(_stale_command_warnings(text, _known_nightshift_actions()))
-    return JSONResponse({"text": text, "warnings": warnings})
+    """Explicit legacy rendering keeps overrides, variables and warning shape."""
+    return _library_response(lambda: _prompt_library().render(scope, id, payload))
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = HTML_TEMPLATE
+    html = html.replace("\"__SPEC_ID_STRICT_RE__\"", json.dumps(spec_id_grammar.STRICT_ID_JS_PATTERN))
     html = html.replace("__PROJECT__", project_name)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project_name)
+    html = html.replace('"__ARCHIVE_OBSERVED_AT_JSON__"', json.dumps(getattr(cache, '_search_archive_observed_at', None)))
+    html = html.replace("</body>", prompt_snippets_ui.html() + "<script>" + prompt_snippets_ui.javascript() + "</script></body>")
     return HTMLResponse(html)
 
 
@@ -2187,6 +2066,7 @@ def get_performance() -> dict:
 _CLIENT_PERFORMANCE_OPERATIONS = frozenset({
     "initial_board_ready", "poll_unchanged", "poll_diff", "poll_full",
     "spec_panel_ready", "graph_ready", "panel_fetch", "panel_json_decode",
+    "graph_fetch", "graph_json_decode", "graph_prepare", "graph_first_paint",
     "panel_markdown_parse", "panel_dom_mutation", "panel_title_controls_paint",
     "panel_body_paint", "panel_cancelled",
 })
@@ -2198,24 +2078,54 @@ def record_client_performance(payload: dict) -> dict:
     operation = payload.get("operation")
     duration_ms = payload.get("duration_ms")
     failed = payload.get("failed", False)
+    cancelled = payload.get("cancelled", False)
     if (
-        operation not in _CLIENT_PERFORMANCE_OPERATIONS
-        or not isinstance(duration_ms, (int, float))
+        not isinstance(operation, str) or operation not in _CLIENT_PERFORMANCE_OPERATIONS
+        or set(payload) - {"operation", "duration_ms", "failed", "cancelled"}
+        or type(duration_ms) not in (int, float)
+        or not math.isfinite(duration_ms) or duration_ms < 0
         or not isinstance(failed, bool)
+        or not isinstance(cancelled, bool) or (failed and cancelled)
     ):
         raise HTTPException(status_code=400, detail="invalid performance sample")
     performance_registry.record(
         f"browser.{operation}",
         float(duration_ms) / 1000,
         error=failed,
-        cancelled=operation == "panel_cancelled",
+        cancelled=cancelled or operation == "panel_cancelled",
     )
     return {"ok": True}
 
 
 @app.get("/api/specs")
 def get_specs() -> list[dict]:
-    return cache.get_all_frontmatter()
+    items = cache.get_all_frontmatter()
+    for item in items:
+        if item.get('status') == 'in_progress' and item.get('activity', {}).get('status_history_available'):
+            try:
+                reports = spec_artifacts.reports_root_for_spec_path(Path(cache._specs_dir) / 'placeholder.md')
+                item['activity']['last_heartbeat'] = spec_artifacts.read_heartbeat_evidence(reports, str(item['id']))['text']
+            except Exception:
+                pass  # Unknown heartbeat stays unknown; timing never establishes liveness.
+    return items
+
+
+def _spec_metadata_payload(specs_path: Path) -> dict:
+    """One live/export representation of the project's read-only facet policy."""
+    policy = spec_metadata_policy_for_specs_dir(specs_path)
+    return {
+        "fields": {
+            name: {"required": item.required,
+                   "allowed_values": list(item.allowed_values) if item.allowed_values is not None else None}
+            for name, item in policy.fields.items()
+        },
+        "errors": list(policy.errors),
+    }
+
+@app.get("/api/spec-metadata")
+def get_spec_metadata_policy() -> dict:
+    """SPEC-419: the project's spec_metadata policy (read-only; the board filter's choices and diagnostics)."""
+    return _spec_metadata_payload(Path(cache._specs_dir))
 
 
 @app.get("/api/statuses")
@@ -2290,6 +2200,8 @@ def get_spec(spec_id: str) -> JSONResponse:
         # (list responses carry only its bounded `run_state_summary`).
         "run_state_explanation": cache.get_explanation(spec_id),
     }
+    if 'activity' in fm:
+        fm['activity']['last_heartbeat'] = getattr(cache, '_last_heartbeat_text', {}).get(spec_id, 'unknown')
     return performance_registry.measure(
         "server.selected_response_serialization", lambda: JSONResponse(jsonable_encoder(payload))
     )
@@ -2329,17 +2241,19 @@ def update_status(spec_id: str, payload: dict) -> dict:
     reconsider_when = payload.get("reconsider_when")
     state_evidence = payload.get("state_evidence")
     try:
-        cache.update_status(
+        warnings = cache.update_status(
             spec_id, status, reason=reason, reconsider_when=reconsider_when,
             state_evidence=state_evidence,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"spec not found: {spec_id}")
+    except status_transition.CompletionValidationError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e), "errors": e.errors, "warnings": e.warnings})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True}
+    return {"ok": True, "warnings": warnings} if warnings else {"ok": True}
 
 
 @app.post("/api/spec/{spec_id}/transfer-refusal")
@@ -2415,11 +2329,34 @@ def get_status_history(spec_id: str) -> dict:
     return {"spec_id": spec_id, "history": store.get_state_history(spec_id)}
 
 
+def _search_project_code(specs_path: Path) -> str:
+    """Use the selected registered root/code; never infer ownership from matches."""
+    from board_ctl import Ctx, project_name_for_root, project_root_for_specs_dir
+    import argparse
+    ctx = Ctx(argparse.Namespace(project=None, specs_dir=str(specs_path)))
+    entry = ctx._own_registry_entry()
+    if entry and spec_id_grammar.code_status(entry.get("code")) == "ok":
+        return str(entry["code"])
+    root = project_root_for_specs_dir(specs_path)
+    name = "NIGHTSHIFT-CANONICAL" if specs_path.parent.name == "canonical" else project_name_for_root(root)
+    return spec_id_grammar.PROJECT_CODES.get(name, "")
+
+
 @app.get("/api/search")
-def search(q: str = "") -> list[dict]:
-    if not q:
-        return []
-    return cache.search(q)
+def search(q: str = "", filters: str = "", metadata: bool = False,
+           offset: int = 0, limit: Optional[int] = None):
+    if not q.strip() and not metadata:
+        return []  # Preserve the existing empty-query compatibility path.
+    try:
+        facets = json.loads(filters) if filters else {}
+        if not isinstance(facets, dict):
+            raise ValueError("filters must be an object")
+        if 'archive_observed_at' in facets:
+            raise ValueError('archive observation is fixture-owned, not a live query override')
+        result = cache.search_metadata(q, facets, offset=offset, limit=limit)
+        return result if metadata else result["results"]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/graph")
@@ -3415,6 +3352,28 @@ body {
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
 }
 #col-vis-dropdown.open { display: block; }
+#version-filter-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+#version-filter-wrap label { color: var(--text-muted); }
+#version-filter { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 3px; font: inherit; padding: 3px 4px; }
+#version-filter.active { border-color: var(--c-theme); }
+#tag-filter-wrap { position: relative; }
+#tag-filter-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 0;
+  z-index: 500;
+  min-width: 150px;
+  max-height: 60vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#tag-filter-dropdown.open { display: block; }
+.tag-badge { border-style: dashed; }
 #type-filter-wrap { position: relative; }
 #type-filter-dropdown {
   display: none;
@@ -3502,7 +3461,25 @@ body {
   line-height: 1.4;
   margin-bottom: 4px;
   word-break: break-word;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
+
+.card-activity {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.card-activity-duration, .card-activity-flags { flex-shrink: 0; }
+.card-activity-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .card-meta {
   display: flex;
@@ -3741,6 +3718,24 @@ body {
   overflow-y: auto;
   padding: 16px;
 }
+
+/* BUG-NS-KIT-001 R5: while the clicked spec's content is not yet on screen the panel says so and the
+   content still shown (another spec's, or a pre-refresh copy) is dimmed and inert. */
+.panel-loading {
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: rgba(255, 193, 7, 0.18);
+  border-bottom: 1px solid rgba(255, 193, 7, 0.5);
+}
+.panel-loading[hidden] { display: none; }
+#panel[data-loading] #panel-body { opacity: 0.4; pointer-events: none; }
+/* A selection made while the panel is closed slides it in right away (without the `open` class, which
+   still means "a spec's content is shown") so the loading banner is visible. */
+#panel[data-loading] { right: 0; }
+#panel.side-left[data-loading] { left: 0; right: auto; }
+#panel.side-bottom[data-loading] { bottom: var(--recent-bar-h, 0px); }
 
 #panel-title {
   font-size: 15px;
@@ -4162,6 +4157,48 @@ button.artifact-row:focus-visible,
   margin-bottom: 8px;
 }
 .panel-md li { margin-bottom: 3px; }
+/* SPEC-393: blocks `.panel-md` used to leave unstyled fell back to browser
+   defaults (th 16px bold centred, h4 14px, blockquote 16px), so Markdown
+   tables such as `## AC Amendments` read louder than the h2 above them.
+   Bring them to body-copy scale; the h1-h3/p/code/pre/a/ul/ol/li rules above
+   are untouched. */
+.panel-md h4, .panel-md h5, .panel-md h6 {
+  color: var(--text);
+  margin: 12px 0 6px;
+  font-size: 11px;
+}
+.panel-md blockquote {
+  font-size: 11px;
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+.panel-md table {
+  width: 100%;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.panel-md th, .panel-md td {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--border);
+  /* `anywhere` lets a 600-char unbroken token wrap inside its cell; the
+     10ch floor keeps short cells (an ISO date) from being squeezed to one
+     character per line by that same rule. */
+  overflow-wrap: anywhere;
+  min-width: 10ch;
+}
+.panel-md th {
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-hi);
+}
 
 /* ── Reports panel ── */
 .panel-header-left {
@@ -4463,6 +4500,8 @@ button.artifact-row:focus-visible,
 }
 #graph-view.active { display: flex; flex-direction: column; }
 
+#graph-timing { margin: 48px 220px 0 12px; font-size: 12px; flex-shrink: 0; }
+
 #graph-container {
   flex: 1;
   background: var(--bg);
@@ -4684,6 +4723,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <button class="btn" id="btn-deps" onclick="toggleDeps()">⌥ DEPS</button>
     <button class="btn" id="btn-graph" onclick="showGraph()">▣ GRAPH</button>
     <button class="btn" id="btn-all-reports" onclick="openReportsViewFromHeader()" title="Browse all human-review reports across the project">📋 REPORTS</button>
+    <button class="btn" id="btn-prompt-library" onclick="window.PromptLibraryUI.open({endpoint:'/api/prompt-library',contextKey:location.origin,contextName:document.title})" title="Shared prompt library">PROMPT LIBRARY</button>
     <button class="btn" id="btn-snippets" onclick="openSnippetsViewFromHeader()" title="Browse prompt snippets (prebuilt, repo, project scopes)">⧉ SNIPPETS</button>
     <button class="btn" id="btn-archived" onclick="toggleArchived()">🗄 ARCHIVED</button>
     <button class="btn" id="btn-fit-cols" onclick="fitColumns()" title="Distribute visible expanded columns to fill board width — resets manual resize gaps">⇔ FIT</button>
@@ -4695,6 +4735,16 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <div id="type-filter-wrap">
       <button class="btn" id="btn-type-filter" onclick="toggleTypeFilterDropdown()" title="Filter board and graph by spec type">⊟ TYPE</button>
       <div id="type-filter-dropdown"></div>
+    </div>
+    <div id="tag-filter-wrap">
+      <button class="btn" id="btn-tag-filter" aria-haspopup="true" aria-expanded="false" aria-controls="tag-filter-dropdown" onclick="toggleTagFilterDropdown()" title="Filter board and graph by spec tags (view only; never changes dispatch)">⊟ TAGS</button>
+      <div id="tag-filter-dropdown" role="group" aria-label="Filter board and graph by tags"></div>
+    </div>
+    <div id="version-filter-wrap">
+      <label for="version-filter">VERSION</label>
+      <select id="version-filter" aria-label="Filter board and graph by target version" title="Filter board and graph by target version (view only; never changes dispatch)" onchange="onVersionFilterChange(this.value)">
+        <option value="all">All</option>
+      </select>
     </div>
     <button class="btn" id="btn-theme-mode" onclick="toggleDarkMode()">☀</button>
     <button class="btn" id="btn-theme-color" onclick="cycleThemeColor()" title="Theme color">◉</button>
@@ -4717,6 +4767,9 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
       <button class="btn" id="btn-graph-topo" onclick="applyDepsOrderLayout()" title="Arrange left→right by dependency depth: sources (no prereqs) on left, most-blocked on right. Clusters stacked vertically.">↦ TOPO</button>
       <button class="btn" id="btn-graph-auto" onclick="autoArrangeGraph()" title="Toggle force-directed auto-arrange; click again or drag a node to stop">⚙ AUTO</button>
       <button class="btn" id="btn-graph-snap" onclick="toggleGraphSnap()" title="Snap dragged nodes to a grid">⚏ SNAP</button>
+    </div>
+    <div id="graph-timing"><span id="graph-load-status" role="status">Graph timing unavailable</span>
+      <details id="graph-diagnostics" ontoggle="if(this.open) refreshGraphDiagnostics()"><summary>Load diagnostics</summary><pre id="graph-diagnostics-content" style="white-space:pre-wrap;max-height:200px;overflow:auto"></pre></details>
     </div>
     <div id="graph-container"></div>
     <div id="graph-info"></div>
@@ -4745,6 +4798,7 @@ div.vis-button.vis-zoomExtends::before { content: "⊡"; font-size: 16px; }
     <button id="panel-side-toggle" onclick="togglePanelSide()" title="Dock panel to the other side">⇄</button>
     <button id="panel-close" onclick="clearSelection()">✕</button>
   </div>
+  <div id="panel-loading" class="panel-loading" role="status" aria-live="polite" hidden></div>
   <div id="panel-body">
     <!-- View: spec detail -->
     <div id="panel-view-spec">
@@ -4880,6 +4934,9 @@ let searchTimer = null;
 let graphEdgesDataset = null;
 let graphNodesDataset = null;
 let openPanelId = null;       // spec id currently shown in detail panel
+let panelLoadingId = null;     // BUG-NS-KIT-001: the spec a user selection is still loading, else null
+let panelLoadingVersion = 0;
+let panelShownId = null;       // the spec whose content (header + body) is currently on screen
 let panelRequestVersion = 0;  // monotonically rejects a late prior selection
 let openPanelMtime = null;    // _mtime snapshot of spec currently shown in panel
 let openPanelBlockerClass = ''; // blocker_class of spec currently shown in panel (SPEC-268)
@@ -4907,11 +4964,17 @@ const GRAPH_SNAP_PX = 35;      // grid size in graph-coordinate space
 let graphHiddenStatuses = new Set(); // statuses hidden in graph view ONLY (independent of board's hiddenColumns)
 let showGroupingEdges = true;        // dashed parent (grouping-membership) edges in graph view; toggle to de-clutter high-fan-out parents
 let showArchived = false;            // when false, done specs older than ARCHIVED_AGE_DAYS are hidden from board + graph
+let showAllDependencies = false;     // SPEC-NS-KIT-003: false = graph hides edges implied by another displayed path (session-only, never persisted)
+let graphOmittedEdges = [];          // last reduced projection: [{edge, via:[ids]}] — read-only diagnostics for the inspector
 let activeTypeFilters = new Set();   // empty = show all types; non-empty = show only listed types (board + graph)
+let versionFilter = 'all';           // SPEC-419: 'all' | 'unassigned' | 'v:<label>' exact match (board + graph); session-only, a reload returns to All
+let tagFilter = new Set();           // SPEC-420: empty = All; tokens 'untagged' and 't:<tag>' match ANY (board + graph); session-only, a reload returns to All
+let specMetadataPolicy = {fields: {}, errors: []};  // SPEC-419: GET /api/spec-metadata (read-only)
 let isDragging = false;             // true while a SortableJS drag is in progress
 let renderBoardQueued = false;      // renderBoard() was called during a drag — flush on onCardDrop
 const ARCHIVED_AGE_DAYS = 14;
 const ARCHIVED_AGE_SECONDS = ARCHIVED_AGE_DAYS * 24 * 60 * 60;
+const ARCHIVE_OBSERVED_AT = "__ARCHIVE_OBSERVED_AT_JSON__";
 
 // A spec is "archived" when it's effectively `done` AND its file mtime is
 // older than ARCHIVED_AGE_DAYS. Pure display behavior — not a real status.
@@ -4920,7 +4983,9 @@ function isArchived(spec) {
   if (effectiveStatus(spec) !== 'done') return false;
   const m = spec._mtime;
   if (!m) return false;
-  return (Date.now() / 1000) - m > ARCHIVED_AGE_SECONDS;
+  const archiveNow = window.__STATIC__ && window.STATIC ? window.STATIC.searchObservedAt :
+    typeof ARCHIVE_OBSERVED_AT === 'number' ? ARCHIVE_OBSERVED_AT : Date.now() / 1000;
+  return archiveNow - m > ARCHIVED_AGE_SECONDS;
 }
 
 // Reports panel state
@@ -5368,11 +5433,19 @@ async function loadProjectsRegistry() {
   } catch {}
 }
 
-// Longest-prefix-match across all OTHER projects in the registry. Returns the
-// matching project entry (with port + name + path), or null when the spec
-// belongs to this project (or no match).
+const SPEC_ID_STRICT_RE = new RegExp("__SPEC_ID_STRICT_RE__");  // SPEC-416 R1 grammar, from spec_id.py
+
+// SPEC-416: an R1 ID ({KIND}-{CODE}-{NNN}) names its owner by project code.
+// Longest-prefix-match across all OTHER projects in the registry is the legacy
+// fallback. Returns the matching project entry (with port + name + path), or
+// null when the spec belongs to this project (or no match).
 function resolveExternalProject(specId) {
   if (!projectsRegistry || !Array.isArray(projectsRegistry.projects)) return null;
+  const coded = SPEC_ID_STRICT_RE.exec(specId);
+  if (coded) {
+    const owner = projectsRegistry.projects.find(p => p.code === coded[2]);
+    if (owner) return owner.name === CURRENT_PROJECT ? null : owner;
+  }
   let best = null, bestLen = 0;
   for (const p of projectsRegistry.projects) {
     if (p.name === CURRENT_PROJECT) continue;
@@ -5538,6 +5611,31 @@ function runStateSummaryHtml(summary) {
   return `<div class="tt-current"><span class="tt-label">This spec now</span>${rows.join('')}</div>`;
 }
 
+function cardActivitySummaryHtml(t) {
+  if (!t) return '';
+  const flags = [t.waiting ? 'Needs action' : '', t.history_incomplete ? 'Incomplete' : ''].filter(Boolean);
+  const phase = String(t.current_phase || 'unrecorded').replaceAll('_', ' ');
+  return '<div class="card-activity">'
+    + `<span class="card-activity-duration" title="Known in-progress duration">${_escHtml(t.in_progress_label || 'unknown')} ·</span>`
+    + (flags.length ? `<span class="card-activity-flags">${flags.join(' · ')} ·</span>` : '')
+    + `<span class="card-activity-copy">${_escHtml(phase)}</span></div>`;
+}
+
+function activitySummaryHtml(t) {
+  if (!t) return '';
+  const phase = String(t.current_phase || 'unrecorded').replaceAll('_', ' ');
+  const categories = Object.entries(t.category_labels || {}).map(([k,v]) =>
+    `${k === 'human_work' && t.human_work_is_estimate ? 'human involvement estimate' : k.replaceAll('_',' ')} ${v}`).join(' · ');
+  const action = t.waiting ? `Human action: ${t.required_action || 'unknown'}` : '';
+  return `<div class="activity-summary"><b>Known in-progress subtotal: ${_escHtml(t.in_progress_label)}</b>`
+    + `${t.history_incomplete ? ' · incomplete history' : ''}<br>`
+    + `Recorded phase: ${_escHtml(phase)} · actor: ${_escHtml(t.actor || 'unknown')} ${_escHtml(action)}<br>`
+    + `Next: ${_escHtml(t.next_action || 'unrecorded')} · Last heartbeat: ${_escHtml(t.last_heartbeat || 'unknown')}<br>`
+    + `Recorded: ${_escHtml(categories)}<br>Unclassified: ${_escHtml(t.unclassified_label)} · overlap: ${_escHtml(t.overlap_label)}`
+    + `${t.incomplete_activity ? ' · incomplete activity records' : ''}`
+    + `${t.human_work_note ? '<br>' + _escHtml(t.human_work_note) : ''}<br>${_escHtml(t.history_coverage || '')}</div>`;
+}
+
 function runStateSummaryText(summary) {
   if (!summary) return '';
   const state = summary.run_state ? String(summary.run_state).replaceAll('_', ' ') : 'not applicable';
@@ -5653,6 +5751,8 @@ async function loadSpecs() {
   const data = await r.json();
   if (!Array.isArray(data)) throw new Error('/api/specs: unexpected response type');
   specs = data;
+  refreshVersionFilterOptions();
+  loadSpecMetadataPolicy();
   renderPendingWork();
   // Fetch worktree state in parallel; missing or empty result is fine
   fetch('/api/worktree-status').then(r => r.ok ? r.json() : {}).then(ws => {
@@ -5682,30 +5782,33 @@ let performanceClock = () => performance.now();
 // guard can reject a sample whose whole measurement WINDOW overlapped a hidden
 // period, not merely one reported while hidden.
 let documentHiddenSince = (typeof document !== 'undefined' && document.hidden)
-  ? performanceClock() : null;
+  ? graphClock() : null;
 let documentLastHiddenEnd = null;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
-    documentHiddenSince = performanceClock();
+    documentHiddenSince = graphClock();
   } else {
-    documentLastHiddenEnd = performanceClock();
+    documentLastHiddenEnd = graphClock();
     documentHiddenSince = null;
   }
 });
 
-function reportPerformance(operation, start, { failed = false } = {}) {
+function reportPerformance(operation, start, { failed = false, cancelled = false, duration_ms: measuredDuration, windowStart = start } = {}) {
   // Diagnostic-only: capability absence or a rejected post never affects UI.
-  if (!window.performance || typeof start !== 'number') return;
+  if (window.__STATIC__ || !window.performance || !Number.isFinite(start)) return;
   // Discard rather than distort: a duration that spans a hidden period is not a
   // measurement of this operation, and one bad sample poisons min/mean/max for
   // the whole bounded window.
   if (document.visibilityState === 'hidden' || documentHiddenSince !== null) return;
-  if (documentLastHiddenEnd !== null && documentLastHiddenEnd >= start) return;
-  const duration_ms = performanceClock() - start;
-  fetch('/api/performance/client', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ operation, duration_ms, failed }),
-  }).catch(() => {});
+  if (documentLastHiddenEnd !== null && documentLastHiddenEnd >= windowStart) return;
+  const duration_ms = measuredDuration ?? (graphClock() - start);
+  if (!Number.isFinite(duration_ms) || duration_ms < 0) return;
+  try {
+    return fetch('/api/performance/client', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operation, duration_ms, failed, cancelled }),
+    }).catch(() => {});
+  } catch { return; }
 }
 
 function renderPendingWork() {
@@ -5759,6 +5862,8 @@ async function loadLoopObservability() {
 }
 
 function renderBoard() {
+  const queryControl=document.getElementById('search');
+  if(queryControl && queryControl.value.trim() && JSON.stringify(currentSearchFilters())!==searchScopeSignature) scheduleSearch();
   if (!Array.isArray(specs)) return;
   // Block re-renders mid-drag: renderBoard() clears boardView.innerHTML, which
   // removes the dragged element. When SortableJS then drops it, the element is
@@ -5766,6 +5871,7 @@ function renderBoard() {
   // for the same spec — producing a visual duplicate. Queue instead and flush in onCardDrop.
   if (isDragging) { renderBoardQueued = true; return; }
   renderBoardQueued = false;
+  refreshVersionFilterOptions();
   const boardView = document.getElementById('board-view');
   const blocksMap = buildBlocksMap();
 
@@ -5780,6 +5886,8 @@ function renderBoard() {
       if (!showArchived && isArchived(s)) return false;
       // Type filter: when active, only show specs whose type is selected
       if (activeTypeFilters.size > 0 && !activeTypeFilters.has(s.type || 'feature')) return false;
+      if (!specMatchesVersionFilter(s)) return false;
+      if (!specMatchesTagFilter(s)) return false;
       return true;
     });
 
@@ -5880,16 +5988,19 @@ function renderCard(spec, blocksMap) {
   card.dataset.status = status;
 
   const title = spec._title || spec.title || spec.id || '';
-  const displayTitle = title.length > 40 ? title.substring(0, 40) + '…' : title;
 
   const priority = parseInt(spec.priority) || 0;
   const dots = '●'.repeat(Math.min(priority, 3));
 
-  const typeBadge = spec.type ? `<span class="badge">${spec.type}</span>` : '';
+  const typeBadge = spec.type ? `<span class="badge">${_escHtml(spec.type)}</span>` : '';
+  const versionBadge = (spec.version !== undefined && spec.version !== null)
+    ? `<span class="badge version-badge" title="Target product version (not template_version or kit_version)">${_escHtml(String(spec.version))}</span>` : '';
+  const tagBadges = specTagLabels(spec).map(t =>
+    `<span class="badge tag-badge" title="Spec tag (organizational label; not touches or NFR scope_tags)">${_escHtml(t)}</span>`).join('');
   const layerBadge = spec.layer !== undefined && spec.layer !== null
-    ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'layer'))}">L${spec.layer}</span>` : '';
+    ? `<span class="badge" title="${_escHtml(registryHelp(spec, 'layer'))}">L${_escHtml(spec.layer)}</span>` : '';
   const readinessBadge = spec.readiness
-    ? `<span class="badge readiness-${spec.readiness.toLowerCase()}" title="${_escHtml(registryHelp(spec, 'readiness'))}">${_escHtml(spec.readiness)}</span>`
+    ? `<span class="badge readiness-${_escHtml(spec.readiness.toLowerCase())}" title="${_escHtml(registryHelp(spec, 'readiness'))}">${_escHtml(spec.readiness)}</span>`
     : '';
   const runStateTip = registryHelp(spec, 'run_state')
     + (spec.run_state_summary ? ' | This spec: ' + runStateSummaryText(spec.run_state_summary) : '');
@@ -5916,17 +6027,18 @@ function renderCard(spec, blocksMap) {
     const _slashIdx = _b.lastIndexOf('/');
     const branchShort = (_slashIdx >= 0 ? _b.slice(_slashIdx + 1) : _b).slice(0, 28);
     const more = wt.length > 1 ? ` +${wt.length - 1}` : '';
-    wtHtml = `<div class="wt-badge" title="Worktree branch '${first.branch}' has status: ${first.status}">🔧 ${(first.status || '').toUpperCase()} · ${branchShort}${more}</div>`;
+    wtHtml = `<div class="wt-badge" title="Worktree branch '${_escHtml(first.branch)}' has status: ${_escHtml(first.status)}">🔧 ${_escHtml((first.status || '').toUpperCase())} · ${_escHtml(branchShort)}${more}</div>`;
   }
 
   card.innerHTML = `
     <div class="card-header">
-      <span class="card-id">${spec.id || ''}</span>
+      <span class="card-id">${_escHtml(spec.id || '')}</span>
       <span class="card-dots">${dots}</span>
     </div>
-    <div class="card-title">${displayTitle}</div>
-    <div class="card-meta">${typeBadge}${layerBadge}${readinessBadge}${runStateBadge}${depHtml}</div>
+    <div class="card-title">${_escHtml(title)}</div>
+    <div class="card-meta">${typeBadge}${versionBadge}${tagBadges}${layerBadge}${readinessBadge}${runStateBadge}${depHtml}</div>
     ${wtHtml}
+    ${cardActivitySummaryHtml(spec.activity)}
   `;
 
   card.addEventListener('click', (e) => {
@@ -5977,6 +6089,11 @@ async function statusWriteErrorDetail(r) {
     // Not JSON or no body — fall through to null.
   }
   return null;
+}
+
+function showStatusWriteWarnings(result) {
+  const warnings = (result.warnings || []).join('; ');
+  if (warnings) showToast(`⚠ ${warnings}`);
 }
 
 function statusWriteFailureToastText(specId, detail) {
@@ -6118,6 +6235,7 @@ function onCardDrop(evt) {
       showToast(statusWriteFailureToastText(specId, detail));
       return;
     }
+    showStatusWriteWarnings(await r.json());
     // SPEC-348 R4: the write committed — clear in-flight tracking for every
     // transition, not just the 'done' bump handled below.
     delete pendingMoves[specId];
@@ -6158,6 +6276,8 @@ function updateColumnCounts() {
     const count = specs.filter(s => {
       if (effectiveStatus(s) !== col.id) return false;
       if (!showArchived && isArchived(s)) return false;
+      if (!specMatchesVersionFilter(s)) return false;
+      if (!specMatchesTagFilter(s)) return false;
       return true;
     }).length;
     const el = document.getElementById(`count-${col.id}`);
@@ -6286,6 +6406,8 @@ function renderPanelMeta(specId, fm) {
     ['created', fm.created],
   ];
   if (fm.stack) fields.push(['stack', fm.stack]);
+  const panelTags = specTagLabels(fm);
+  if (panelTags.length) fields.push(['tags', panelTags.join(', ')]);
   // SPEC-360 R6: a declared scope is a read-only collapsible row.
   if (fm.scope && typeof fm.scope === 'object' && !Array.isArray(fm.scope)) {
     const scopeText = Object.entries(fm.scope)
@@ -6295,6 +6417,9 @@ function renderPanelMeta(specId, fm) {
 
   const metaEl = document.getElementById('panel-meta');
   const statusRow = `<tr><td ${helpTargetAttrs(fm, 'status', 'status')}>status</td><td><select id="panel-status-select" data-status="${currentStatus}" onchange="changeSpecStatus('${specId}', this.value)">${statusOptions}</select></td></tr>`;
+  const projection = fm.terminal_projection;
+  const projectionRow = projection && projection.projection === 'pending'
+    ? `<tr><td>tracked projection</td><td>pending · ${_escHtml(projection.reason || '')}<br>${_escHtml(projection.recovery_action || '')}</td></tr>` : '';
   // SPEC-360 R1/R6: the run-state control stays above the fold and moves focus to "Why this state?".
   const runStateText = fm.run_state ? String(fm.run_state).replaceAll('_', ' ') : 'not applicable';
   const runStateValueHelp = fm.run_state_summary ? runStateSummaryText(fm.run_state_summary) : '';
@@ -6338,7 +6463,7 @@ function renderPanelMeta(specId, fm) {
   const hiddenCount = collapsibleFields.length;
   const toggleLabel = metaCollapsed ? `▸ details (${hiddenCount})` : `▾ details`;
   const toggleRow = `<tr><td colspan="2"><button type="button" id="panel-meta-toggle" class="meta-toggle-btn" aria-expanded="${!metaCollapsed}" onclick="toggleMetaCollapsed()">${_escHtml(toggleLabel)}</button></td></tr>`;
-  metaEl.innerHTML = statusRow + modelRows + runStateRow + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
+  metaEl.innerHTML = statusRow + projectionRow + modelRows + runStateRow + `<tr><td>activity</td><td>${activitySummaryHtml(fm.activity)}</td></tr>` + alwaysRows + toggleRow + (metaCollapsed ? '' : collapsibleRows);
 
   // SPEC-294-001: render (or hide) the deployment-authorization approve/
   // reject control in the same panel the run_state row already renders.
@@ -6821,9 +6946,41 @@ document.getElementById('panel-body').addEventListener('click', function(e) {
   if (open) openArtifact(open.dataset.artifactSpec || openPanelId, open.dataset.artifactPath);
 });
 
+// BUG-NS-KIT-001 R5: visible loading/stale state from the moment a spec is selected until its
+// content is on screen. `data-loading` also dims the content still shown (see CSS).
+function beginPanelLoading(specId, version) {
+  const panel = document.getElementById('panel');
+  const banner = document.getElementById('panel-loading');
+  panelLoadingId = specId;
+  panelLoadingVersion = version;
+  panel.dataset.loading = specId;
+  panel.setAttribute('aria-busy', 'true');
+  banner.textContent = panelShownId && panelShownId !== specId
+    ? `Loading ${specId}… (still showing ${panelShownId})`
+    : (panelShownId === specId ? `Refreshing ${specId}…` : `Loading ${specId}…`);
+  banner.hidden = false;
+}
+
+function endPanelLoading(version) {
+  if (version !== panelLoadingVersion) return;  // a newer selection owns the indicator
+  const panel = document.getElementById('panel');
+  panelLoadingId = null;
+  delete panel.dataset.loading;
+  panel.removeAttribute('aria-busy');
+  document.getElementById('panel-loading').hidden = true;
+}
+
 async function openPanel(specId, { keepNavStack = false } = {}) {
-  const performanceStart = performanceClock();
+  // BUG-NS-KIT-001 R3: a refresh of the spec already on screen (poll, status action: keepNavStack
+  // on the shown spec) must never cancel a selection the user made after it was scheduled; before
+  // this guard a poll reloading spec A won the request-version race against a click on B and the
+  // panel ended on A.
+  if (keepNavStack && specId === panelShownId && panelLoadingId && panelLoadingId !== specId) return false;
   const requestVersion = ++panelRequestVersion;
+  beginPanelLoading(specId, requestVersion);
+  let loaded = false;
+  try {
+  const performanceStart = performanceClock();
   if (!keepNavStack) specNavStack = [];
   const fetchStart = performanceClock();
   let r;
@@ -6893,6 +7050,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     }
     chipsHtml += '</div>';
   }
+  chipsHtml += omittedEdgesPanelHtml(specId);
   document.getElementById('panel-chips').innerHTML = chipsHtml;
   attachSpecRefPreview(document.getElementById('panel-chips'));
 
@@ -6924,6 +7082,7 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
   openPanelBlockerClass = fm.blocker_class || fm.block_reason || '';
 
   openPanelId = specId;
+  panelShownId = specId;
   openPanelMtime = fm._mtime || null;
   applyActiveCard(specId);
   document.getElementById('panel').classList.add('open');
@@ -6960,7 +7119,12 @@ async function openPanel(specId, { keepNavStack = false } = {}) {
     reportPerformance('panel_body_paint', performanceStart);
     reportPerformance('spec_panel_ready', performanceStart);
   });
+  loaded = true;
   return true;
+  } finally {
+    if (!loaded && requestVersion === panelLoadingVersion && !panelShownId) closePanel();
+    endPanelLoading(requestVersion);
+  }
 }
 
 function applyActiveCard(specId) {
@@ -6976,6 +7140,7 @@ function closePanel() {
 
 function clearSelection() {
   openPanelId = null;
+  panelShownId = null;
   openPanelMtime = null;
   panelView = 'spec';
   cancelArtifactFetch();
@@ -7034,6 +7199,7 @@ async function changeSpecStatus(specId, newStatus) {
     expandColumnForStatus(newStatus);
     if (openPanelId === specId) await openPanel(specId, { keepNavStack: true });
     showToast(`✓ ${specId} → ${newStatus}`);
+    showStatusWriteWarnings(await r.json());
   } catch {
     // Network error / thrown before a response existed — no body to read, so
     // fall back to the generic message (R2), and still persist a refusal
@@ -7066,8 +7232,244 @@ function toggleDeps() {
   renderBoard();
 }
 
-async function showGraph(selectId) {
-  const performanceStart = performanceClock();
+// SPEC-NS-KIT-003: reduced dependency view. Mirrors canonical/dependency_graph_view.py
+// (reduce_dependency_edges); tests/test_dependency_graph_view.py runs both on the same fixtures.
+// Hides an edge only when another directed path between its endpoints remains among the
+// DISPLAYED dependency edges. Self-loops, unknown endpoints and anything touching a cycle stay.
+// External nodes are keyed project::id. Pure projection: never mutates edges or metadata.
+function reduceDependencyEdges(edges, nodes) {
+  const keys = nodes ? new Map() : null;
+  if (nodes) for (const n of nodes) {
+    const id = String(n.id);
+    if (keys.has(id) && n.external) continue;
+    keys.set(id, (n.external && n.project) ? `${n.project}::${id}` : id);
+  }
+  const endpoint = (e, side) => {
+    const project = e[side + '_project'];
+    const raw = String(e[side]);
+    if (project) return `${project}::${raw}`;
+    if (!keys) return raw;
+    return keys.has(raw) ? keys.get(raw) : null;
+  };
+  const resolved = edges.map(e => [e, endpoint(e, 'from'), endpoint(e, 'to')]);
+  const adj = new Map();
+  for (const [, f, t] of resolved) {
+    if (f !== null && t !== null && f !== t) {
+      if (!adj.has(f)) adj.set(f, new Set());
+      adj.get(f).add(t);
+    }
+  }
+  const reach = (start) => {
+    const seen = new Set();
+    const stack = [...(adj.get(start) || [])];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const nx of (adj.get(cur) || [])) stack.push(nx);
+    }
+    return seen;
+  };
+  const cyclic = new Set();
+  for (const n of adj.keys()) if (reach(n).has(n)) cyclic.add(n);
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const dag = new Map();
+  for (const [n, targets] of adj) {
+    if (!cyclic.has(n)) dag.set(n, [...targets].filter(t => !cyclic.has(t)).sort(cmp));
+  }
+  const alternatePath = (u, v) => {
+    const parent = new Map();
+    const queue = [];
+    for (const w of (dag.get(u) || [])) {
+      if (w !== v && !parent.has(w)) { parent.set(w, u); queue.push(w); }
+    }
+    for (let qi = 0; qi < queue.length; qi++) {
+      const cur = queue[qi];
+      for (const nx of (dag.get(cur) || [])) {
+        if (nx === v) {
+          const path = [v, cur];
+          while (path[path.length - 1] !== u) path.push(parent.get(path[path.length - 1]));
+          return path.reverse();
+        }
+        if (!parent.has(nx) && nx !== u) { parent.set(nx, cur); queue.push(nx); }
+      }
+    }
+    return null;
+  };
+  const verdicts = new Map();
+  const kept = [], omitted = [];
+  for (const [edge, f, t] of resolved) {
+    let via = null;
+    if (f !== null && t !== null && f !== t && !cyclic.has(f) && !cyclic.has(t)) {
+      const k = JSON.stringify([f, t]);
+      if (!verdicts.has(k)) verdicts.set(k, alternatePath(f, t));
+      via = verdicts.get(k);
+    }
+    if (via === null) kept.push(edge); else omitted.push({ edge, via });
+  }
+  const ek = (e) => [String(e.from), String(e.to)];
+  const order = (a, b) => cmp(ek(a)[0], ek(b)[0]) || cmp(ek(a)[1], ek(b)[1]);
+  kept.sort(order);
+  omitted.sort((a, b) => order(a.edge, b.edge));
+  return { kept, omitted };
+}
+
+// Note under the legend + spec-inspector rows that explain which declared arrows are not drawn.
+function omittedEdgeText(o) {
+  const via = (o.via || []).map(id => String(id).replace(/^.*::/, ''));
+  return `${o.edge.from} → ${o.edge.to} is implied by ${via.join(' → ')}`;
+}
+async function toggleShowAllDependencies() {
+  // The legend is rebuilt on every render; keep keyboard focus on the switch so it can be pressed again.
+  const hadFocus = !!document.activeElement && document.activeElement.id === 'graph-show-all-deps';
+  showAllDependencies = !showAllDependencies;
+  renderGraphLegend();
+  await showGraph(openPanelId || undefined, { refresh: false });
+  if (openPanelId) refreshPanelDependencies();
+  if (hadFocus) { const sw = document.getElementById('graph-show-all-deps'); if (sw) sw.focus(); }
+}
+function renderGraphDependencyNote() {
+  const el = document.getElementById('graph-dep-note');
+  if (!el) return;
+  if (showAllDependencies || !graphOmittedEdges.length) {
+    el.textContent = showAllDependencies ? 'All declared dependency arrows shown.' : 'No implied arrows to hide.';
+    el.title = '';
+    return;
+  }
+  el.textContent = `${graphOmittedEdges.length} implied arrow${graphOmittedEdges.length === 1 ? '' : 's'} hidden — select a spec for details`;
+  el.title = graphOmittedEdges.map(omittedEdgeText).join('\\n');
+}
+// HTML for the inspector: omitted arrows ending at (or starting from) specId. Empty unless the reduced graph is active.
+function omittedEdgesPanelHtml(specId) {
+  if (activeTab !== 'graph' || showAllDependencies) return '';
+  const rows = graphOmittedEdges.filter(o => o.edge.to === specId || o.edge.from === specId);
+  if (!rows.length) return '';
+  const li = rows.map(o => `<li>${_escHtml(omittedEdgeText(o))}</li>`).join('');
+  return `<div class="omitted-deps" id="omitted-deps" role="note" style="margin:6px 0;font-size:11px"><div><b>Not drawn in the reduced graph</b> (declared in metadata):</div><ul style="margin:2px 0;padding-left:16px">${li}</ul><div style="opacity:.7;font-size:10px">Each arrow is implied by another dependency path. <button class="btn" id="omitted-deps-show-all" onclick="toggleShowAllDependencies()">Show all dependencies</button></div></div>`;
+}
+
+// SPEC-NS-KIT-200: one attempt spans invocation through first draw + next frame.
+const GRAPH_DIAGNOSTIC_BUDGET_MS = 2000;
+let graphLoadSequence = 0;
+let graphLoadAttempt = null;
+let graphLatestLoad = null;
+let graphAggregateMetrics = null;
+let graphTelemetrySettled = Promise.resolve();
+
+function graphClock() {
+  try {
+    const now = performanceClock();
+    return Number.isFinite(now) ? now : null;
+  } catch { return null; }
+}
+function graphWindowVisible(start) {
+  return Number.isFinite(start) && document.visibilityState !== 'hidden'
+    && documentHiddenSince === null
+    && (documentLastHiddenEnd === null || documentLastHiddenEnd < start);
+}
+function graphDuration(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 10) / 10} ms` : 'unavailable';
+}
+function renderGraphLoadStatus() {
+  const el = document.getElementById('graph-load-status');
+  if (!el) return;
+  const value = graphLatestLoad;
+  if (!value) { el.textContent = 'Graph timing unavailable'; return; }
+  el.textContent = value.state === 'loading' ? 'Graph loading…'
+    : `Graph ${value.state} · ${graphDuration(value.total_ms)}`
+      + (value.qualified ? '' : ' (timing unavailable: hidden window or clock)')
+      + (value.slow ? ` · Slow load: ${graphDuration(value.total_ms)} exceeds ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms diagnostic budget` : '');
+  el.dataset.state = value.state;
+  renderGraphDiagnostics();
+}
+function renderGraphDiagnostics() {
+  const el = document.getElementById('graph-diagnostics-content');
+  if (!el) return;
+  const value = graphLatestLoad;
+  const lines = [`Diagnostic budget: ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms (not an optimization target).`];
+  if (value) {
+    lines.push(`Latest: ${value.state}; total ${graphDuration(value.total_ms)}.`);
+    for (const phase of ['fetch', 'json_decode', 'prepare', 'first_paint']) {
+      const timing = value.phases[phase];
+      lines.push(`${phase}: ${timing === null && !value.requested && ['fetch', 'json_decode'].includes(phase) ? 'not applicable (no request)' : graphDuration(timing)}`);
+    }
+    if (value.nodes !== undefined) lines.push(`Visible nodes ${value.nodes}; edges ${value.edges}; corpus nodes ${value.corpus_nodes}.`);
+  }
+  if (window.__STATIC__) {
+    lines.push('Static export: server/process aggregates unavailable. Local latest-load timing only.');
+  } else {
+    lines.push('Process-local aggregates reset on board process restart; latest 128 successful samples. Error/cancellation counts are process-local totals.');
+    if (!graphAggregateMetrics) lines.push('Aggregates unavailable; open diagnostics to request current values.');
+    else for (const key of ['browser.graph_ready', 'browser.graph_fetch', 'browser.graph_json_decode', 'browser.graph_prepare', 'browser.graph_first_paint', 'route.graph.2xx']) {
+      const metric = graphAggregateMetrics[key] || { state: 'unavailable', count: 0, error_count: 0, cancelled_count: 0 };
+      lines.push(`${key === 'route.graph.2xx' ? 'server route (separate from browser total)' : key}: ${metric.state}; count ${metric.count}; p50 ${graphDuration(metric.p50_ms)}; p95 ${graphDuration(metric.p95_ms)}; max ${graphDuration(metric.max_ms)}; errors ${metric.error_count}; cancelled ${metric.cancelled_count}`);
+      if (key === 'browser.graph_ready' && metric.count >= 5 && metric.p95_ms > GRAPH_DIAGNOSTIC_BUDGET_MS) {
+        lines.push(`Slow aggregate: successful end-to-end p95 ${graphDuration(metric.p95_ms)} exceeds ${GRAPH_DIAGNOSTIC_BUDGET_MS} ms diagnostic budget.`);
+      }
+    }
+  }
+  el.textContent = lines.join('\\n');
+}
+async function refreshGraphDiagnostics() {
+  renderGraphDiagnostics();
+  if (window.__STATIC__) return;
+  try {
+    const response = await fetch('/api/performance');
+    if (!response.ok) throw new Error('unavailable');
+    const data = await response.json();
+    graphAggregateMetrics = data.metrics || null;
+  } catch { graphAggregateMetrics = null; }
+  renderGraphDiagnostics();
+}
+function beginGraphLoad(requested) {
+  if (graphLoadAttempt && !graphLoadAttempt.done) finishGraphLoad(graphLoadAttempt, 'cancelled');
+  const start = graphClock();
+  const attempt = { id: ++graphLoadSequence, start, requested, done: false,
+    phase: requested ? null : 'prepare', phaseStart: start,
+    phases: { fetch: null, json_decode: null, prepare: null, first_paint: null } };
+  graphLoadAttempt = attempt;
+  graphLatestLoad = { state: 'loading', total_ms: null, requested, phases: { ...attempt.phases } };
+  renderGraphLoadStatus();
+  return attempt;
+}
+function graphPhase(attempt, phase, now = graphClock()) {
+  if (attempt.done) return;
+  if (attempt.phase && Number.isFinite(now) && Number.isFinite(attempt.phaseStart) && now >= attempt.phaseStart) {
+    attempt.phases[attempt.phase] = now - attempt.phaseStart;
+  }
+  attempt.phase = phase;
+  attempt.phaseStart = now;
+}
+function finishGraphLoad(attempt, state) {
+  if (attempt.done) return;
+  const now = graphClock();
+  graphPhase(attempt, null, now);
+  attempt.done = true;
+  const qualified = graphWindowVisible(attempt.start) && Number.isFinite(now) && now >= attempt.start;
+  const total = qualified ? now - attempt.start : null;
+  const phases = Object.fromEntries(Object.entries(attempt.phases).map(([key, value]) => [key, qualified ? value : null]));
+  if (attempt === graphLoadAttempt) {
+    graphLatestLoad = { state, total_ms: total, phases, requested: attempt.requested, qualified,
+      slow: state === 'success' && qualified && total > GRAPH_DIAGNOSTIC_BUDGET_MS,
+      nodes: attempt.nodes, edges: attempt.edges, corpus_nodes: attempt.corpus_nodes };
+    renderGraphLoadStatus();
+  }
+  if (qualified) {
+    const options = { failed: state === 'error', cancelled: state === 'cancelled', windowStart: attempt.start };
+    const samples = Object.entries(phases).filter(([, value]) => Number.isFinite(value))
+      .map(([key, duration_ms]) => reportPerformance('graph_' + key, attempt.start, { ...options, duration_ms }));
+    samples.push(reportPerformance('graph_ready', attempt.start, { ...options, duration_ms: total }));
+    graphTelemetrySettled = Promise.all(samples).then(() => {
+      if (document.getElementById('graph-diagnostics')?.open) refreshGraphDiagnostics();
+    }).catch(() => {});
+  }
+}
+
+async function showGraph(selectId, { refresh = true } = {}) {
+  const needsData = refresh || !graphData;
+  const requested = needsData && !window.__STATIC__;
+  const loadAttempt = beginGraphLoad(requested);
+  try {
   activeTab = 'graph';
   document.getElementById('board-view').style.display = 'none';
   document.getElementById('search-results').classList.remove('visible');
@@ -7080,13 +7482,24 @@ async function showGraph(selectId) {
   // SPEC-063: fetch /api/specs in parallel with /api/graph so node status
   // promotion (line ~2917 below) uses fresh data on tab-activate, not the
   // possibly-stale cached specs[] from the last poll.
-  const [graphResp, specsResp] = await Promise.all([
-    fetch('/api/graph'),
-    fetch('/api/specs').catch(() => null),
-  ]);
-  graphData = await graphResp.json();
-  if (specsResp && specsResp.ok) {
-    try { specs = await specsResp.json(); } catch {}
+  if (needsData) {
+    if (requested) graphPhase(loadAttempt, 'fetch');
+    const [graphResp, specsResp] = await Promise.all([
+      fetch('/api/graph'),
+      fetch('/api/specs').catch(() => null),
+    ]);
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
+    if (!graphResp.ok) throw new Error('graph unavailable');
+    if (requested) graphPhase(loadAttempt, 'json_decode');
+    const freshGraph = await graphResp.json();
+    let freshSpecs = specs;
+    if (specsResp && specsResp.ok) {
+      try { freshSpecs = await specsResp.json(); } catch {}
+    }
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
+    graphData = freshGraph;
+    specs = freshSpecs;
+    graphPhase(loadAttempt, 'prepare');
   }
 
   const container = document.getElementById('graph-container');
@@ -7121,6 +7534,8 @@ async function showGraph(selectId) {
     const liveSpec = specs.find(s => s.id === n.id);
     if (!showArchived && liveSpec && isArchived(liveSpec)) return false;
     if (activeTypeFilters.size > 0 && liveSpec && !activeTypeFilters.has(liveSpec.type || 'feature')) return false;
+    if (liveSpec && !specMatchesVersionFilter(liveSpec)) return false;
+    if (liveSpec && !specMatchesTagFilter(liveSpec)) return false;
     return true;
   });
   const visibleIds = new Set(visibleNodes.map(n => n.id));
@@ -7173,8 +7588,16 @@ async function showGraph(selectId) {
     };
   });
 
-  const edgesArr = graphData.edges
-    .filter(e => visibleIds.has(e.from) && visibleIds.has(e.to))
+  // SPEC-NS-KIT-003: reduce over the DISPLAYED dependency edges only (filters recompute it; parent
+  // lines are never dependency edges), unless the user asked for every declared arrow.
+  const displayedDeps = graphData.edges.filter(e => visibleIds.has(e.from) && visibleIds.has(e.to));
+  const reduction = showAllDependencies
+    ? { kept: displayedDeps, omitted: [] }
+    : reduceDependencyEdges(displayedDeps, visibleNodes);
+  graphOmittedEdges = reduction.omitted;
+  window.graphOmittedEdges = graphOmittedEdges;
+  renderGraphDependencyNote();
+  const edgesArr = reduction.kept
     .map((e, i) => ({
       id: i,
       from: e.from,
@@ -7206,6 +7629,11 @@ async function showGraph(selectId) {
   // Keep globals visible for diagnostics/tests and backwards compatibility.
   window.graphNodesDataset = graphNodesDataset;
   window.graphEdgesDataset = graphEdgesDataset;
+
+  loadAttempt.nodes = nodesArr.length;
+  loadAttempt.edges = edgesArr.length + parentEdgesArr.length;
+  loadAttempt.corpus_nodes = graphData.nodes.length;
+  graphPhase(loadAttempt, 'first_paint');
 
   const options = {
     layout: { improvedLayout: false },
@@ -7241,15 +7669,19 @@ async function showGraph(selectId) {
 
   // Physics is disabled, so stabilizationIterationsDone may not fire — use afterDrawing
   // (fires once per frame; .once() ensures it only runs on the first paint).
+  const loadNetwork = network;
   network.once('afterDrawing', () => {
+    if (loadAttempt !== graphLoadAttempt || loadAttempt.done || activeTab !== 'graph') return;
     if (selectId || pendingSelectId) {
       const sid = selectId || pendingSelectId;
       pendingSelectId = null;
       highlightNode(sid);
     } else {
-      network.fit();
+      loadNetwork.fit();
     }
-    requestAnimationFrame(() => reportPerformance('graph_ready', performanceStart));
+    requestAnimationFrame(() => {
+      if (loadAttempt === graphLoadAttempt && activeTab === 'graph') finishGraphLoad(loadAttempt, 'success');
+    });
   });
 
   // vis.js fires `click` even after a drag finishes. Track whether a node-drag
@@ -7266,8 +7698,8 @@ async function showGraph(selectId) {
     }
     if (params.nodes.length > 0) {
       const nodeId = params.nodes[0];
-      highlightNode(nodeId);
       const graphNode = (graphData.nodes || []).find(node => node.id === nodeId);
+      highlightNode(nodeId, { panelOpening: !(graphNode && graphNode.external) });
       if (graphNode && graphNode.external && graphNode.port) {
         window.open(`http://127.0.0.1:${graphNode.port}/?spec=${encodeURIComponent(nodeId)}`, '_blank');
       } else {
@@ -7341,9 +7773,76 @@ async function showGraph(selectId) {
   network.on('doubleClick', function() {
     network.fit();
   });
+  } catch { finishGraphLoad(loadAttempt, 'error'); }
 }
 
-function highlightNode(nodeId) {
+// SPEC-NS-KIT-134: the details panel overlays the graph, so a selected node is placed in the part of the
+// canvas the panel does not cover. Geometry comes from the panel's size and dock side (its target position),
+// never from its mid-transition rect, so the first selection that opens the panel and later switches agree.
+const GRAPH_FOCUS_SCALE = 1.2;       // today's focus zoom; applied only when the view is zoomed out further
+const GRAPH_MIN_VISIBLE_PX = 240;    // narrower/shorter visible areas use the edge fallback
+const GRAPH_EDGE_INSET_PX = 120;     // fallback: node sits this far inside the edge nearest the panel
+const GRAPH_VISIBLE_MARGIN_PX = 48;  // node already this far inside the visible area: camera stays put
+
+function graphVisibleArea(panelOpening) {
+  const panel = document.getElementById('panel');
+  const cont = document.getElementById('graph-container');
+  if (!panel || !cont) return null;
+  const present = panel.classList.contains('open') || panel.dataset.loading || panelOpening;
+  const cr = cont.getBoundingClientRect();
+  const area = { left: 0, top: 0, right: cr.width, bottom: cr.height, side: null };
+  if (!present || cr.width <= 0 || cr.height <= 0) return area;
+  const pr = panel.getBoundingClientRect();  // size only: the position may still be sliding in
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  if (panel.classList.contains('side-bottom')) {
+    const barH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--recent-bar-h')) || 0;
+    area.bottom = Math.max(0, Math.min(area.bottom, vh - barH - pr.height - cr.top));
+    area.side = 'bottom';
+  } else if (panel.classList.contains('side-left')) {
+    area.left = Math.min(area.right, Math.max(0, pr.width - cr.left));
+    area.side = 'left';
+  } else {
+    area.right = Math.max(0, Math.min(area.right, vw - pr.width - cr.left));
+    area.side = 'right';
+  }
+  return area;
+}
+
+// Selects the camera placement for nodeId; with no panel it is the unchanged full-canvas focus.
+function graphFocusNode(nodeId, panelOpening) {
+  const area = graphVisibleArea(panelOpening);
+  if (!area || !area.side) {
+    network.focus(nodeId, { scale: GRAPH_FOCUS_SCALE, animation: true });
+    return;
+  }
+  const pos = network.getPositions([nodeId])[nodeId];
+  if (!pos) return;
+  const bb = network.getBoundingBox(nodeId);
+  const tl = network.canvasToDOM({ x: bb.left, y: bb.top });
+  const br = network.canvasToDOM({ x: bb.right, y: bb.bottom });
+  const m = GRAPH_VISIBLE_MARGIN_PX;
+  if (tl.x >= area.left + m && br.x <= area.right - m && tl.y >= area.top + m && br.y <= area.bottom - m) return;
+  const mid = (lo, hi) => (lo + hi) / 2;
+  let tx = mid(area.left, area.right);
+  let ty = mid(area.top, area.bottom);
+  if (area.side === 'right' && area.right - area.left < GRAPH_MIN_VISIBLE_PX) {
+    tx = Math.max(area.right - GRAPH_EDGE_INSET_PX, area.left);
+  } else if (area.side === 'left' && area.right - area.left < GRAPH_MIN_VISIBLE_PX) {
+    tx = Math.min(area.left + GRAPH_EDGE_INSET_PX, area.right);
+  } else if (area.side === 'bottom' && area.bottom - area.top < GRAPH_MIN_VISIBLE_PX) {
+    ty = Math.max(area.bottom - GRAPH_EDGE_INSET_PX, area.top);
+  }
+  const cont = document.getElementById('graph-container');
+  network.moveTo({
+    position: pos,
+    scale: Math.max(network.getScale(), GRAPH_FOCUS_SCALE),
+    offset: { x: tx - cont.clientWidth / 2, y: ty - cont.clientHeight / 2 },
+    animation: true,
+  });
+}
+
+function highlightNode(nodeId, { panelOpening = false } = {}) {
   const allEdges = graphEdgesDataset.get();
 
   // Build per-node adjacency from live edge set
@@ -7388,7 +7887,7 @@ function highlightNode(nodeId) {
   graphEdgesDataset.update(edgeUpdates);
 
   // Focus and select the node
-  network.focus(nodeId, { scale: 1.2, animation: true });
+  graphFocusNode(nodeId, panelOpening);
   network.selectNodes([nodeId]);
 
   // Update info bar
@@ -7702,7 +8201,7 @@ function renderGraphLegend() {
       else graphHiddenStatuses.add(status);
       saveSettings();
       renderGraphLegend();
-      showGraph();  // re-render with new filter
+      showGraph(undefined, { refresh: false });  // re-render with new filter
     });
     el.appendChild(item);
   }
@@ -7715,12 +8214,33 @@ function renderGraphLegend() {
     showGroupingEdges = !showGroupingEdges;
     saveSettings();
     renderGraphLegend();
-    showGraph();  // re-render with/without grouping edges
+    showGraph(undefined, { refresh: false });  // re-render with/without grouping edges
   });
   el.appendChild(ge);
+  // SPEC-NS-KIT-003: reduced/full dependency arrows. Keyboard-operable switch; view-only, writes nothing.
+  const sd = document.createElement('div');
+  sd.id = 'graph-show-all-deps';
+  sd.className = 'legend-item' + (showAllDependencies ? '' : ' legend-hidden');
+  sd.setAttribute('role', 'switch');
+  sd.setAttribute('tabindex', '0');
+  sd.setAttribute('aria-checked', showAllDependencies ? 'true' : 'false');
+  sd.innerHTML = `<span class="legend-dot" style="background:transparent;border-top:2px solid var(--text-muted);border-radius:0"></span>Show all dependencies`;
+  sd.title = showAllDependencies ? 'Hide arrows implied by another dependency path' : 'Reduced view hides arrows implied by another path; click to draw every declared dependency';
+  sd.addEventListener('click', toggleShowAllDependencies);
+  sd.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleShowAllDependencies(); }
+  });
+  el.appendChild(sd);
+  const note = document.createElement('div');
+  note.id = 'graph-dep-note';
+  note.setAttribute('aria-live', 'polite');
+  note.style.cssText = 'font-size:10px;opacity:.75;max-width:230px;white-space:normal';
+  el.appendChild(note);
+  renderGraphDependencyNote();
 }
 
 async function showBoard() {
+  if (graphLoadAttempt && !graphLoadAttempt.done) finishGraphLoad(graphLoadAttempt, 'cancelled');
   activeTab = 'board';
   document.getElementById('board-view').style.display = 'flex';
   document.getElementById('graph-view').classList.remove('active');
@@ -7743,66 +8263,80 @@ async function showBoard() {
   }
 }
 
-// Search
+// Search: generation binds query, facets and paging, including clear/error paths.
 const searchInput = document.getElementById('search');
-searchInput.addEventListener('input', (e) => {
+let searchGeneration = 0;
+let searchAbort = null;
+let searchScopeSignature = '';
+function currentSearchFilters() {
+  return {types: activeTypeFilters.size ? [...activeTypeFilters] : 'all',
+    tags: tagFilter.size ? [...tagFilter] : 'all', version: versionFilter,
+    include_archived: showArchived, statuses: COLUMNS.filter(c => !hiddenColumns.has(c.id)).map(c => c.id)};
+}
+function scheduleSearch(offset=0) {
+  const generation = ++searchGeneration;
   clearTimeout(searchTimer);
-  const q = e.target.value.trim();
-  const clearBtn = document.getElementById('btn-clear-search');
-  clearBtn.classList.toggle('visible', q.length > 0);
+  if (searchAbort) searchAbort.abort();
+  const q = searchInput.value.trim(), filters = currentSearchFilters();
+  searchScopeSignature = JSON.stringify(filters);
+  document.getElementById('btn-clear-search').classList.toggle('visible', !!q);
   if (!q) {
     document.getElementById('search-results').classList.remove('visible');
     if (activeTab === 'board') document.getElementById('board-view').style.display = 'flex';
     return;
   }
-  searchTimer = setTimeout(() => doSearch(q), 250);
-});
-
-function clearSearch() {
-  searchInput.value = '';
-  document.getElementById('btn-clear-search').classList.remove('visible');
-  document.getElementById('search-results').classList.remove('visible');
-  if (activeTab === 'board') document.getElementById('board-view').style.display = 'flex';
-  // Panel intentionally left open
+  searchTimer = setTimeout(() => doSearch(q, filters, generation, offset), 250);
 }
-
-async function doSearch(q) {
-  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-  const results = await r.json();
-
-  const el = document.getElementById('search-results');
-  document.getElementById('board-view').style.display = 'none';
-
-  if (!results.length) {
-    el.innerHTML = '<div class="search-empty">no results</div>';
-    el.classList.add('visible');
-    return;
+searchInput.addEventListener('input', () => scheduleSearch());
+function clearSearch() { searchInput.value = ''; scheduleSearch(); }
+function clearSearchFilters() {
+  hiddenColumns.clear(); activeTypeFilters.clear(); tagFilter.clear(); versionFilter='all'; showArchived=true;
+  document.getElementById('btn-type-filter').classList.remove('active');
+  saveSettings(); applyArchivedBtnState(); buildTypeFilterDropdown(); buildColVisDropdown(); syncTagFilterControls(); renderBoard();
+  scheduleSearch();
+}
+async function doSearch(q, filters=currentSearchFilters(), generation=++searchGeneration, offset=0) {
+  const abort = new AbortController(); searchAbort=abort;
+  const params = new URLSearchParams({q, metadata:'true', filters:JSON.stringify(filters), offset:String(offset), limit:'50'});
+  try {
+    const r = await fetch('/api/search?' + params, {signal:abort.signal});
+    if (!r.ok) throw new Error('Search request failed ('+r.status+')');
+    const data = await r.json();
+    if (!data || !Array.isArray(data.results) || !Number.isInteger(data.total)) throw new Error('Invalid search response');
+    if (generation!==searchGeneration || searchInput.value.trim()!==q || JSON.stringify(currentSearchFilters())!==JSON.stringify(filters)) return;
+    const el=document.getElementById('search-results');
+    el.replaceChildren(); document.getElementById('board-view').style.display='none';
+    const info=document.createElement('div'); info.className='search-scope';
+    info.textContent=data.total+' results · project '+(data.scope.project||'unregistered (legacy IDs only)')+' · archive observation (UTC epoch seconds) '+data.scope.archive_observed_at+' · filters '+JSON.stringify(filters);
+    el.appendChild(info);
+    const clear=document.createElement('button'); clear.className='btn'; clear.textContent='Clear filters'; clear.onclick=clearSearchFilters; el.appendChild(clear);
+    if (!data.results.length) {
+      const empty=document.createElement('div'); empty.className='search-empty';
+      empty.textContent=data.excluded_by_filters ? data.excluded_by_filters+' matching specs excluded by active filters' : 'No identity or text matches in this project';
+      el.appendChild(empty);
+    }
+    const list=document.createElement('div'); list.className='search-list';
+    for(const res of data.results){
+      const card=document.createElement('div'); card.className='card'; card.dataset.id=res.id; card.dataset.status=res.status;
+      const header=document.createElement('div'); header.className='card-header';
+      const id=document.createElement('span'); id.className='card-id'; id.textContent=res.id; header.appendChild(id); card.appendChild(header);
+      const title=document.createElement('div'); title.className='card-title'; title.textContent=res.title||res.id; card.appendChild(title);
+      const excerpt=document.createElement('div'); excerpt.textContent=res.excerpt||''; card.appendChild(excerpt);
+      card.onclick=()=>openPanel(res.id); card.tabIndex=0; card.onkeydown=e=>{if(e.key==='Enter')openPanel(res.id);}; list.appendChild(card);
+    }
+    el.appendChild(list);
+    for(const [label,next] of [['Previous',offset-50],['Next',offset+50]]){
+      if((label==='Previous'&&offset===0)||(label==='Next'&&!data.has_more))continue;
+      const button=document.createElement('button'); button.className='btn'; button.textContent=label; button.onclick=()=>scheduleSearch(Math.max(0,next)); el.appendChild(button);
+    }
+    el.classList.add('visible'); el.dataset.query=q; el.dataset.generation=String(generation);
+    el.dispatchEvent(new CustomEvent('nightshift:search-published',{detail:{generation,query:q,total:data.total}}));
+  } catch(error) {
+    if(generation!==searchGeneration || error.name==='AbortError')return;
+    const el=document.getElementById('search-results'); el.replaceChildren();
+    const message=document.createElement('div'); message.className='search-error'; message.setAttribute('role','alert'); message.textContent='Search error: '+error.message;
+    el.appendChild(message); el.classList.add('visible'); document.getElementById('board-view').style.display='none';
   }
-
-  const listEl = document.createElement('div');
-  listEl.className = 'search-list';
-
-  for (const res of results) {
-    const spec = specs.find(s => s.id === res.id) || { status: res.status };
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.dataset.id = res.id;
-    const status = effectiveStatus(spec);
-    card.dataset.status = status;
-    card.innerHTML = `
-      <div class="card-header">
-        <span class="card-id">${res.id}</span>
-      </div>
-      <div class="card-title">${res.title || res.id}</div>
-      <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">${res.excerpt || ''}</div>
-    `;
-    card.addEventListener('click', () => openPanel(res.id));
-    listEl.appendChild(card);
-  }
-
-  el.innerHTML = '';
-  el.appendChild(listEl);
-  el.classList.add('visible');
 }
 
 // True when the currently focused element is a text-entry control (input or
@@ -7881,6 +8415,11 @@ document.addEventListener('click', (e) => {
   const dd = document.getElementById('col-vis-dropdown');
   if (dd.classList.contains('open') && !e.target.closest('#col-vis-wrap')) {
     dd.classList.remove('open');
+  }
+  const tgd = document.getElementById('tag-filter-dropdown');
+  if (tgd.classList.contains('open') && !e.target.closest('#tag-filter-wrap')) {
+    tgd.classList.remove('open');
+    document.getElementById('btn-tag-filter').setAttribute('aria-expanded', 'false');
   }
   // Close type-filter dropdown when clicking outside it
   const tdd = document.getElementById('type-filter-dropdown');
@@ -8000,6 +8539,135 @@ function toggleColVis(colId, visible) {
   else hiddenColumns.add(colId);
   renderBoard();
   saveSettings();
+}
+
+// SPEC-419: the target version of a spec, or null when unassigned. Labels are opaque,
+// case-sensitive strings; a non-string value is invalid metadata and matches no exact choice.
+function specVersionLabel(spec) {
+  return typeof spec.version === 'string' && spec.version !== '' ? spec.version : null;
+}
+
+function specMatchesVersionFilter(spec) {
+  if (versionFilter === 'all') return true;
+  const label = (spec.version === undefined || spec.version === null) ? null : spec.version;
+  if (versionFilter === 'unassigned') return label === null;
+  return label === versionFilter.slice(2);
+}
+
+function refreshVersionFilterOptions() {
+  const select = document.getElementById('version-filter');
+  if (!select) return;
+  const configured = ((specMetadataPolicy.fields || {}).version || {}).allowed_values || [];
+  const seen = new Set(configured);
+  const observed = [...new Set(specs.map(specVersionLabel).filter(v => v !== null && !seen.has(v)))].sort();
+  const labels = [...configured, ...observed];
+  const options = [['all', 'All'], ['unassigned', 'Unassigned'], ...labels.map(v => ['v:' + v, v])];
+  if (versionFilter.startsWith('v:') && !options.some(o => o[0] === versionFilter)) {
+    options.push([versionFilter, versionFilter.slice(2)]);   // keep the active choice visible after a refresh
+  }
+  const signature = JSON.stringify(options);
+  if (select.dataset.signature !== signature) {
+    select.innerHTML = '';
+    for (const [value, text] of options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      select.appendChild(option);
+    }
+    select.dataset.signature = signature;
+  }
+  select.value = versionFilter;
+  select.classList.toggle('active', versionFilter !== 'all');
+}
+
+function onVersionFilterChange(value) {
+  versionFilter = value || 'all';
+  refreshVersionFilterOptions();
+  renderBoard();
+  if (activeTab === 'graph') showGraph();
+}
+
+function clearVersionFilter() {
+  onVersionFilterChange('all');
+}
+
+async function loadSpecMetadataPolicy() {
+  try {
+    const r = await fetch('/api/spec-metadata');
+    if (r.ok) specMetadataPolicy = await r.json();
+  } catch { /* policy only enriches filter choices; the filter still works from observed versions */ }
+  refreshVersionFilterOptions();
+}
+
+// SPEC-420: the tag labels of a spec (board view only). A list contributes its nonblank string
+// members; a legacy scalar string counts as one observed value so an invalid value stays inspectable.
+function specTagLabels(spec) {
+  const raw = spec.tags;
+  if (Array.isArray(raw)) return [...new Set(raw.filter(t => typeof t === 'string' && t.trim() !== ''))];
+  if (typeof raw === 'string' && raw.trim() !== '') return [raw];
+  return [];
+}
+
+function specMatchesTagFilter(spec) {
+  if (tagFilter.size === 0) return true;
+  const labels = specTagLabels(spec);
+  if (labels.length === 0) return tagFilter.has('untagged');
+  return labels.some(t => tagFilter.has('t:' + t));
+}
+
+function tagFilterChoices() {
+  const configured = ((specMetadataPolicy.fields || {}).tags || {}).allowed_values || [];
+  const seen = new Set(configured);
+  const observed = [...new Set(specs.flatMap(specTagLabels).filter(t => !seen.has(t)))].sort();
+  return [...configured, ...observed];
+}
+
+function buildTagFilterDropdown() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  dd.innerHTML = '';
+  const entries = [['all', 'All'], ['untagged', 'Untagged'], ...tagFilterChoices().map(t => ['t:' + t, t])];
+  for (const [token, text] of entries) {
+    const item = document.createElement('label');
+    item.className = 'type-filter-item';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.dataset.token = token;
+    box.addEventListener('change', () => onTagFilterChange(token, box.checked));
+    item.appendChild(box);
+    item.appendChild(document.createTextNode(' ' + text));
+    dd.appendChild(item);
+  }
+  syncTagFilterControls();
+}
+
+function syncTagFilterControls() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  if (!dd) return;
+  for (const box of dd.querySelectorAll('input[type=checkbox]')) {
+    box.checked = box.dataset.token === 'all' ? tagFilter.size === 0 : tagFilter.has(box.dataset.token);
+  }
+  const btn = document.getElementById('btn-tag-filter');
+  if (btn) btn.classList.toggle('active', tagFilter.size > 0);
+}
+
+function toggleTagFilterDropdown() {
+  const dd = document.getElementById('tag-filter-dropdown');
+  buildTagFilterDropdown();
+  dd.classList.toggle('open');
+  document.getElementById('btn-tag-filter').setAttribute('aria-expanded', String(dd.classList.contains('open')));
+}
+
+function onTagFilterChange(token, checked) {
+  if (token === 'all') tagFilter.clear();            // All is the default and clears every selection
+  else if (checked) tagFilter.add(token);
+  else tagFilter.delete(token);
+  syncTagFilterControls();
+  renderBoard();
+  if (activeTab === 'graph') showGraph();
+}
+
+function clearTagFilter() {
+  onTagFilterChange('all', true);
 }
 
 function buildTypeFilterDropdown() {
@@ -8633,7 +9301,7 @@ function openEditPromptEditor(scope, id) {
   if (!snippet) return;
   expandedSnippetId = null;
   snippetEditor = {
-    anchor: id, mode: 'edit', scope, id,
+    anchor: id, mode: 'edit', scope, id, revision: snippet.revision,
     title: snippet.title || '', body: snippet.body || '',
     tagsText: (snippet.tags || []).join(', '), error: null,
   };
@@ -8648,7 +9316,7 @@ function openDuplicatePromptEditor(scope, id) {
   if (!snippet) return;
   expandedSnippetId = null;
   snippetEditor = {
-    anchor: id, mode: 'duplicate', scope: 'project', id: null,
+    anchor: id, mode: 'duplicate', scope: 'project', id: null, variables: snippet.variables, harness_overrides: snippet.harness_overrides, kind: snippet.kind,
     title: (snippet.title || '') + ' (copy)', body: snippet.body || '',
     tagsText: (snippet.tags || []).join(', '), error: null,
   };
@@ -8683,7 +9351,21 @@ async function submitSnippetEditor() {
   snippetEditor.error = null;
   const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
   const payload = { title, body, tags };
+  if (snippetEditor.mode === 'duplicate') {
+    payload.variables = snippetEditor.variables || [];
+    payload.harness_overrides = snippetEditor.harness_overrides || {};
+    payload.kind = snippetEditor.kind || 'plain';
+  }
+  const original = promptsCache.find(s => s.scope === scope && s.id === snippetEditor.id);
+  payload.revision = snippetEditor.revision || (original && original.revision);
+
   try {
+    if (!payload.revision) {
+      const snapshotResponse = await fetch('/api/prompt-library');
+      if (!snapshotResponse.ok) throw new Error('library unavailable');
+      const snapshot = await snapshotResponse.json();
+      payload.revision = snapshot.stores[scope] && snapshot.stores[scope].revision;
+    }
     let r;
     if (snippetEditor.mode === 'edit') {
       r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(snippetEditor.id)}`, {
@@ -8700,7 +9382,7 @@ async function submitSnippetEditor() {
     }
     if (r.status === 409) {
       const err = await r.json().catch(() => ({}));
-      snippetEditor.error = `id already exists in ${err.existing_scope || 'another'} scope — rename and resubmit`;
+      snippetEditor.error = err.error === 'conflict' ? 'Conflict: store changed. Keep this input and reopen/reapply in Prompt library.' : `id already exists in ${err.existing_scope || 'another'} scope — rename and resubmit`;
       renderSnippetsList();
       return;
     }
@@ -8730,7 +9412,7 @@ async function submitSnippetEditor() {
 async function deleteSnippetById(scope, id) {
   if (!confirm('Delete this prompt snippet? This cannot be undone.')) return;
   try {
-    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const r = await fetch(`/api/prompts/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`, { method: 'DELETE', headers: {'If-Match': (promptsCache.find(s => s.scope === scope && s.id === id) || {}).revision || ''} });
     if (!r.ok) {
       showToast('⚠ delete failed');
       return;
@@ -9021,10 +9703,12 @@ async function copyQuestionsPrompt() {
     '| reports/2026-01-01-nightshift-report-SPEC-000.md | No | none_found |',
     '',
     'Consolidate all questions into a new QUESTIONS spec file at',
-    '.nightshift/specs/{PROJECT}-QUESTIONS-NNN.md using this exact format:',
+    '.nightshift/specs/QUESTIONS-{CODE}-NNN.md using this exact format',
+    '({CODE} is the registered spec-ID code of this project; a project with no registered',
+    'code keeps the legacy {PROJECT}-QUESTIONS-NNN name):',
     '',
     '---',
-    'id: {PROJECT}-QUESTIONS-NNN',
+    'id: QUESTIONS-{CODE}-NNN',
     'type: questions',
     'status: draft',
     `created: ${today}`,
@@ -9114,15 +9798,17 @@ function updateReportsBtnLabel() {
 function classifySpecsChange(prev, fresh, prevWtStatus, freshWtStatus) {
   const prevById = new Map(prev.map(s => [s.id, s]));
   const freshById = new Map(fresh.map(s => [s.id, s]));
-  const added = [], removed = [], statusChanged = [], onlyMtimeChanged = [];
+  const added = [], removed = [], statusChanged = [], onlyMtimeChanged = [], afterChanged = [];
   for (const [id, f] of freshById) {
     const p = prevById.get(id);
     if (!p) { added.push(id); continue; }
+    // SPEC-NS-KIT-003 R4: a changed prerequisite list changes the graph's edges (and so its reduction).
+    if (JSON.stringify(p.after || []) !== JSON.stringify(f.after || [])) afterChanged.push(id);
     if (effectiveStatusFor(p, prevWtStatus) !== effectiveStatusFor(f, freshWtStatus)) statusChanged.push(id);
     else if (p._mtime !== f._mtime) onlyMtimeChanged.push(id);
   }
   for (const id of prevById.keys()) if (!freshById.has(id)) removed.push(id);
-  return { added, removed, statusChanged, onlyMtimeChanged };
+  return { added, removed, statusChanged, onlyMtimeChanged, afterChanged };
 }
 
 function hasSpecsChange(change) {
@@ -9160,7 +9846,7 @@ function mergeFreshSpecs(prevSpecs, freshSpecs, pendingMoves) {
 }
 
 function graphNeedsFullRebuild(change) {
-  return !!(change.added.length || change.removed.length || change.statusChanged.length);
+  return !!(change.added.length || change.removed.length || change.statusChanged.length || (change.afterChanged || []).length);
 }
 
 // Board diff render. Single-card swap when only mtime changed; falls back to
@@ -9246,6 +9932,7 @@ function refreshPanelDependencies() {
     for (const dep of blocks) chipsHtml += renderSpecChip(dep);
     chipsHtml += '</div>';
   }
+  chipsHtml += omittedEdgesPanelHtml(openPanelId);
   const el = document.getElementById('panel-chips');
   if (el) {
     el.innerHTML = chipsHtml;
@@ -9510,6 +10197,7 @@ def export_board_html(
     lib_fetcher=None,
     reports_dir: Optional[Path] = None,
     worktree_status: Optional[dict] = None,
+    archive_observed_at: Optional[float] = None,
 ) -> str:
     """Build and return a self-contained static HTML snapshot of the board.
 
@@ -9560,7 +10248,7 @@ def export_board_html(
     fetcher = lib_fetcher or _default_lib_fetcher
 
     # ── 1. Gather spec data ─────────────────────────────────────────────
-    _cache = SpecCache(specs_dir)
+    _cache = SpecCache(specs_dir, archive_observed_at=archive_observed_at)
     _cache.warm()
     all_fm = _cache.get_all_frontmatter()
 
@@ -9693,8 +10381,16 @@ def export_board_html(
         vocabulary_blob = {"registry_version": 0, "concepts": []}
 
     # ── 5. Build STATIC blob ────────────────────────────────────────────
+    search_observed_at = board_search.archive_observation(archive_observed_at)
+    if search_observed_at is None:
+        search_observed_at = time.time()
+    search_project = _cache._search_project_code if _cache._search_project_code is not None else _search_project_code(specs_dir)
+    search_metadata_policy = _spec_metadata_payload(specs_dir)
     static_blob = {
         "specs": all_fm,
+        "searchProject": search_project,
+        "searchObservedAt": search_observed_at,
+        "specMetadata": search_metadata_policy,
         "bodies": bodies,
         "artifacts": artifacts_meta,
         "explanations": explanations,
@@ -9734,6 +10430,9 @@ def export_board_html(
     _struct_json = json.dumps(
         {
             "specs": all_fm,
+            "searchProject": search_project,
+            "searchObservedAt": search_observed_at,
+            "specMetadata": search_metadata_policy,
             "artifacts": artifacts_meta,
             "explanations": explanations,
             "graph": graph_data,
@@ -9757,9 +10456,11 @@ def export_board_html(
 
     # ── 7. Patch HTML_TEMPLATE ──────────────────────────────────────────
     html = HTML_TEMPLATE
+    html = html.replace("\"__SPEC_ID_STRICT_RE__\"", json.dumps(spec_id_grammar.STRICT_ID_JS_PATTERN))
     html = html.replace("__PROJECT__", project)
     html = html.replace("__STATUS_COLUMNS_JSON__", status_columns_json)
     html = html.replace("__PROJECT_KEY__", project)
+    html = html.replace('"__ARCHIVE_OBSERVED_AT_JSON__"', json.dumps(search_observed_at))
 
     # Remove Google Fonts link (AC6 — no external resources)
     html = html.replace(_REMOVE_GOOGLE_FONTS, "")
@@ -9817,12 +10518,16 @@ def _build_static_shim(static_json: str, marked_js: str, vis_js: str) -> str:
 {marked_js}
 </script>
 <script>
+{board_search.javascript()}
+</script>
+<script>
 /* ── vis-network ── */
 {vis_js}
 </script>
 <style>
 /* ── SPEC-083: hide static-irrelevant live-only UI ── */
 html.static-export #btn-refresh {{ display: none !important; }}
+html.static-export #btn-prompt-library {{ display: none !important; }}
 html.static-export .wt-badge {{ display: none !important; }}
 html.static-export .chip[data-external="1"] {{ display: none !important; }}
 </style>
@@ -9915,17 +10620,18 @@ window.Sortable.prototype = {{ destroy: function() {{}} }};
       return _json({{ filename: fname, content: content }});
     }}
 
-    /* /api/search?q=... — client-side substring filter */
-    var searchMatch = u.match(/^\\/api\\/search\\?q=(.*)$/);
-    if (searchMatch) {{
-      var q = decodeURIComponent(searchMatch[1]).toLowerCase();
-      if (!q) return _json([]);
-      var results = (S.specs || []).filter(function(s) {{
-        return (s.id + ' ' + (s._title || '') + ' ' + (s.status || '')).toLowerCase().includes(q);
-      }}).slice(0, 20).map(function(s) {{
-        return {{ id: s.id, title: s._title || s.id, status: s.status || 'draft', excerpt: '' }};
-      }});
-      return _json(results);
+    if (u === '/api/spec-metadata') return _json(S.specMetadata);
+
+    /* BUG225 same declared search contract, complete snapshot bodies, explicit facets. */
+    if (u.startsWith('/api/search?')) {{
+      const params=new URLSearchParams(u.slice(u.indexOf('?')+1));
+      try {{
+        const filters=JSON.parse(params.get('filters')||'{{}}'); filters.project=S.searchProject||''; filters.archive_observed_at=S.searchObservedAt;
+        const records=(S.specs||[]).map(s=>({{id:s.id,title:s._title||s.id,body:(S.bodies||{{}})[s.id]||'',status:s.status||'draft',type:s.type||'feature',tags:s.tags||[],version:s.version,
+          archived:(s.status==='done'&&!!s._mtime&&(S.searchObservedAt-s._mtime)>14*86400)}}));
+        const result=window.NightshiftSearch.search(records,params.get('q')||'',filters,Number(params.get('offset')||0),params.has('limit')?Number(params.get('limit')):null);
+        return _json(params.get('metadata')==='true'?result:result.results);
+      }} catch(error) {{ return Promise.resolve({{ok:false,status:400,json:()=>Promise.resolve({{detail:String(error)}})}}); }}
     }}
 
     /* /api/external-spec/<port>/<id> — always unreachable in static mode */
@@ -9950,6 +10656,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Nightshift Board — local Kanban for specs")
     parser.add_argument("--port", type=int, default=None,
                         help="Port (default: hash-based per project, range 7800-7999)")
+    parser.add_argument("--print-port", action="store_true",
+                        help="Print the resolved port and exit without starting the board")
     parser.add_argument("--open", action="store_true", dest="open_browser",
                         help="Auto-open browser after startup")
     parser.add_argument("--specs", type=str, default=None,
@@ -9967,14 +10675,22 @@ if __name__ == "__main__":
 
     # When deployed as .nightshift/specs, go up two levels to reach project root
     project_root = _project_root_for_specs_dir(specs_dir)
+    # SPEC-417-002: the name and port formulas live in board_ctl.py (FastAPI-free) so the
+    # read-side client and this launcher can never disagree.
+    from board_ctl import default_port_for_name, project_name_for_root
+    project_name = project_name_for_root(project_root)
+
+    # One derivation serves both startup and the launcher's readiness probe.
+    port = args.port if args.port is not None else default_port_for_name(project_name)
+    if args.print_port:
+        print(port)
+        sys.exit(0)
+
     try:
         board_branch = _validate_board_branch(project_root, specs_dir.parent / "config.yaml")
     except BoardBranchError as exc:
         print(f"✗ Board branch validation failed: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    _name_src = project_root
-    project_name = _name_src.name.lstrip('.').upper() or "PROJECT"
 
     if args.export:
         # Static export mode — write HTML and exit, no server started.
@@ -9991,8 +10707,6 @@ if __name__ == "__main__":
         print(f"✓ Exported {out_path} ({out_path.stat().st_size // 1024} KB)")
         sys.exit(0)
 
-    # Hash-based port: deterministic per project, range 7800-7999
-    port = args.port if args.port is not None else (7800 + sum(ord(c) for c in project_name) % 200)
     board_port = port  # SPEC-371-003 R4: module global for board_url auto-fill
 
     _bootstrap_start = time.monotonic()

@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "type": "status-transition",
+  "created": "2026-10-03T15:55:59Z",
+  "actor": "coordinator",
+  "summary": "draft -> ready: User chose deletion on 2026-10-03; fully specified, mechanical removal.",
+  "from": "draft",
+  "to": "ready",
+  "reason": "User chose deletion on 2026-10-03; fully specified, mechanical removal.",
+  "evidence": [],
+  "run_id": "coord-20261003-bug156-001",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "ready",
+    "reason": "User chose deletion on 2026-10-03; fully specified, mechanical removal.",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

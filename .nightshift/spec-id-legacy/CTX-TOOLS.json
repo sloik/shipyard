@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "project_code": "CTX-TOOLS",
+  "ids": [
+    "SPEC-CTX-TOOLS-018",
+    "SPEC-CTX-TOOLS-019",
+    "SPEC-CTX-TOOLS-020",
+    "SPEC-CTX-TOOLS-047",
+    "SPEC-CTX-TOOLS-048",
+    "SPEC-CTX-TOOLS-053",
+    "SPEC-CTX-TOOLS-053-001",
+    "SPEC-CTX-TOOLS-053-002",
+    "SPEC-CTX-TOOLS-053-005-001",
+    "SPEC-CTX-TOOLS-054",
+    "SPEC-CTX-TOOLS-055",
+    "SPEC-CTX-TOOLS-056",
+    "SPEC-CTX-TOOLS-QUESTIONS-001",
+    "SPEC-NS8"
+  ]
+}

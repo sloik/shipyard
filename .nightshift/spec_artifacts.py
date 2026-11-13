@@ -15,6 +15,8 @@ frontmatter.
 """
 from __future__ import annotations
 
+import dependency_registry
+
 import argparse
 import base64
 import errno
@@ -654,6 +656,93 @@ def record_authoring_decision(
         status=status, reason=reason, reconsider_when=reconsider_when,
         evidence=evidence, provenance=provenance,
     )
+
+
+def _git_index_paths(root: Path, relatives: list[str]) -> set[str] | None:
+    """Repo-relative paths (of ``relatives``) present in HEAD or the index; None if git is unusable."""
+    import subprocess
+    if not relatives:
+        return set()
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--cached", "-z", "--", *relatives],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return {item for item in done.stdout.decode("utf-8", "replace").split("\0") if item}
+
+
+def untracked_references(spec_path: Path) -> dict[str, list[str]]:
+    """BUG-NS-KIT-127 R1: referenced files that are neither tracked in HEAD nor staged.
+
+    References: checked LE evidence, ``proof/evidence.json`` ``sources`` (repo-root
+    relative), ``artifacts/index.json`` entries, and the release handoff when
+    ``release_handoff.impact`` is ``required``. Only existing files count. Returns
+    ``stage_with_done`` (the spec file and anything under ``reports/<ID>/``) and
+    ``outside`` (repo-root-relative paths); both empty when git is unavailable.
+    """
+    from spec_frontmatter import parse_spec_file
+
+    spec_path = Path(spec_path).resolve()
+    empty: dict[str, list[str]] = {"stage_with_done": [], "outside": []}
+    parsed = parse_spec_file(spec_path)
+    spec_id = str(parsed.frontmatter.get("id") or "")
+    root = _find_git_root(spec_path.parent)
+    if not spec_id or root is None:
+        return empty
+    root = root.resolve()
+    kit_dir = spec_path.parent.parent
+    report_dir = (reports_root_for_spec_path(spec_path) / spec_id).resolve()
+    candidates: list[Path] = [spec_path]
+
+    import validate_specs
+    _checked, _unchecked, refs = validate_specs._live_execution_items(parsed.body.splitlines())
+    for reference in refs.values():
+        if reference and validate_specs._evidence_reference_exists(reference, spec_path):
+            for base in (spec_path.parent, kit_dir, kit_dir.parent):
+                if (base / reference).is_file():
+                    candidates.append(base / reference)
+                    break
+
+    def load(path: Path) -> Any:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    proof = load(report_dir / "artifacts" / "proof" / "evidence.json")
+    if isinstance(proof, dict) and isinstance(proof.get("sources"), dict):
+        candidates += [root / str(name) for name in proof["sources"]]
+    index = load(report_dir / "artifacts" / INDEX_FILENAME)
+    if isinstance(index, dict) and isinstance(index.get("entries"), list):
+        for entry in index["entries"]:
+            name = str(entry.get("path", "")) if isinstance(entry, dict) else ""
+            if name and not name.startswith("/") and ".." not in Path(name).parts:
+                candidates.append(report_dir / name)
+    declaration = parsed.frontmatter.get("release_handoff")
+    if isinstance(declaration, dict) and declaration.get("impact") == "required":
+        candidates.append(kit_dir / "release-handoffs" / f"{spec_id}.json")
+
+    relatives: dict[str, Path] = {}
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            relative = resolved.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file():
+            relatives[relative] = resolved
+    known = _git_index_paths(root, sorted(relatives))
+    if known is None:
+        return empty
+    result: dict[str, list[str]] = {"stage_with_done": [], "outside": []}
+    for relative in sorted(set(relatives) - known):
+        inside = relatives[relative] == spec_path or relatives[relative].is_relative_to(report_dir)
+        result["stage_with_done" if inside else "outside"].append(relative)
+    return result
 
 
 def validate_artifact_index(
@@ -1299,8 +1388,8 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
     ``expected_duration_min`` and an age computed from its declared timestamp to the existing
     ``liveness_classifier.classify_heartbeat``. File mtime, commits and branch movement are never
     inputs. Returns ``{"result", "text", "diagnostic"}``; ``text`` is built only from the
-    classifier result, the declared state (a closed set) and the age, so free text (phase, blockers,
-    evidence) can never reach an explanation or a static export. Anything unusable is ``unknown``
+    classifier result, the declared state (a closed set) and the age, with narrowly bounded
+    approval-wait command text. Other free text (phase, blockers, evidence) never reaches an export. Anything unusable is ``unknown``
     with a typed diagnostic.
     """
     spec_id = str(spec_id)
@@ -1333,7 +1422,7 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
             raise _HeartbeatProblem("heartbeat_unparsable")
     except _HeartbeatProblem as problem:
         return _heartbeat_unknown(spec_id, problem.code)
-    import liveness_classifier  # the existing heartbeat-only classifier, reused unchanged (SPEC-225)
+    import liveness_classifier  # shared heartbeat-only classifier (SPEC-225 / SPEC-231)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -1347,7 +1436,16 @@ def read_heartbeat_evidence(reports_root: Path, spec_id: str, *, now: datetime |
             entry["expected_duration_min"] = expected
     except (KeyError, ValueError):
         pass
+    if fields.get("waiting_on") == "owner_approval":
+        entry["waiting_on"] = "owner_approval"
     result = str(liveness_classifier.classify_heartbeat(entry))
+    if result == "waiting_on_approval":
+        command = liveness_classifier.sanitize_waiting_command(fields.get("waiting_command"))
+        wait_age = liveness_classifier.waiting_age_min(fields.get("waiting_since"), now=current)
+        duration = "wait age unknown" if wait_age is None else f"waiting {int(wait_age)} min"
+        return {"result": result, "diagnostic": None, "waiting_on": "owner_approval",
+                "waiting_command": command, "waiting_age_min": wait_age,
+                "text": f"{result} ({state}, {duration}; command: {command or 'not declared'})"}
     return {"result": result, "diagnostic": None,
             "text": f"{result} ({state}, {int(age)} min since its declared timestamp)"}
 
@@ -1433,6 +1531,145 @@ def compose_run_state_explanation(
     return explanation
 
 
+def _ac_evidence_items(text: str) -> dict[str, str]:
+    block = re.search(r'^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)', text, re.M)
+    if block is None:
+        raise ArtifactError('acceptance criteria missing')
+    items = re.findall(r'^- \[[ x]\]\s*(AC\d+\b[^\n]*)', block.group(1), re.M)
+    result = {}
+    for item in items:
+        identity = re.match(r'AC\d+', item).group(0)
+        if identity in result:
+            raise ArtifactError('ambiguous acceptance criterion identity')
+        result[identity] = item
+    return result
+
+
+def amend_ac_evidence(spec_path: Path, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Record one explicitly approved locator-only amendment through existing indexed artifacts."""
+    import hashlib
+    import subprocess
+    import yaml
+    from datetime import date
+    import validate_specs
+    from spec_frontmatter import parse_spec_file
+
+    spec_path = Path(spec_path).resolve()
+    if not isinstance(request, Mapping):
+        raise ArtifactError('amendment request must be a mapping')
+    approval = request.get('approval')
+    if (not isinstance(approval, Mapping) or approval.get('kind') != 'explicit-user'
+            or not re.fullmatch(r'human:\s*\S[^\n|]*', str(approval.get('actor', '')))
+            or not all(isinstance(approval.get(key), str) and approval[key].strip()
+                       and not any(c in approval[key] for c in '\n\r|') for key in ('reason', 'evidence'))):
+        raise ArtifactError('genuine explicit user approval, actor, reason and provenance required')
+    try:
+        stamp = approval['date']
+        if not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', stamp):
+            raise ValueError()
+        date.fromisoformat(stamp)
+        baseline = validate_specs.ready_ac_baseline(spec_path)
+    except (KeyError, ValueError, OSError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+        raise ArtifactError('actual ready baseline and approval date required') from exc
+    if (request.get('ready_revision') != baseline['revision']
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', baseline['revision'])):
+        raise ArtifactError('pinned ready baseline does not match actual ready object')
+    parsed = parse_spec_file(spec_path)
+    spec_id = parsed.frontmatter.get('id')
+    baseline_fm = yaml.safe_load(re.match(r'\A---\r?\n(.*?)\r?\n---', baseline['text'], re.S).group(1))
+    if not isinstance(spec_id, str) or not spec_id or request.get('spec_id') != spec_id or baseline_fm.get('id') != spec_id:
+        raise ArtifactError('spec/ready baseline identity mismatch')
+    current = spec_path.read_bytes()
+    digest = hashlib.sha256(json.dumps(dict(request), sort_keys=True).encode()).hexdigest()
+    reports = reports_root_for_spec_path(spec_path)
+    state, entries, detail = _read_index_strict(reports, spec_id)
+    if state not in ('ok', 'absent'):
+        raise ArtifactError(detail)
+    if _symlinked_index_component(reports, spec_id):
+        raise ArtifactError('artifact index path is unsafe')
+    for entry in entries:
+        if entry.get('type') != 'decision':
+            continue
+        try:
+            artifact = json.loads(read_indexed_artifact(reports, spec_id, entry['path'])['content'])
+        except (ValueError, ArtifactReadError) as exc:
+            raise ArtifactError('indexed authoring history unavailable') from exc
+        amendment = artifact.get('amendment', {})
+        if isinstance(amendment, dict) and amendment.get('request_sha256') == digest:
+            if amendment.get('request') != dict(request) or amendment.get('ready_revision') != baseline['revision']:
+                raise ArtifactError('applied amendment provenance mismatch')
+            if hashlib.sha256(current).hexdigest() != amendment.get('source_after_sha256'):
+                raise ArtifactError('source drift after applied amendment')
+            return {'entry': entry, 'replayed': True, 'request_sha256': digest}
+    if hashlib.sha256(current).hexdigest() != request.get('source_sha256'):
+        raise ArtifactError('source drift before amendment')
+    ac_id = request.get('ac_id')
+    old, new = request.get('old_text'), request.get('new_text')
+    before = _ac_evidence_items(current.decode())
+    ready = _ac_evidence_items(baseline['text'])
+    if (ac_id not in ready or before.get(ac_id) != old or not isinstance(new, str)
+            or not re.match(r'^' + re.escape(str(ac_id)) + r'\b', new)
+            or any(c in str(old) + new + ready[ac_id] for c in '\n\r|')):
+        raise ArtifactError('AC identity or exact old/new wording mismatch')
+    offset = request.get('annotation_offset')
+    prior, annotation = request.get('old_annotation'), request.get('new_annotation')
+    pattern = r' ?\(evidence: ([^()\n\r]+)\)'
+    if (type(offset) is not int or not 0 <= offset <= len(old) or not isinstance(prior, str)
+            or (prior and not re.fullmatch(pattern, prior)) or not isinstance(annotation, str)
+            or not re.fullmatch(pattern, annotation) or old[offset:offset + len(prior)] != prior
+            or new != old[:offset] + annotation + old[offset + len(prior):] or new == old):
+        raise ArtifactError('not locator-only; substantive changes require existing independent AC-review authority')
+    locator = re.fullmatch(pattern, annotation).group(1)
+    relative = Path(locator)
+    project = spec_path.parent.parent if spec_path.parent.name == 'specs' else spec_path.parent
+    target = project / relative
+    if (relative.is_absolute() or '..' in relative.parts or not target.is_file()
+            or any(parent.is_symlink() for parent in (target, *target.parents))):
+        raise ArtifactError('exact evidence locator must name an existing safe project-relative file')
+    if ready[ac_id] != old and validate_specs.validate_ac_amendments(current.decode(), spec_path):
+        raise ArtifactError('prior substantive amendment must satisfy the existing approval contract first')
+    updated = re.sub(r'(?m)^(- \[[ x]\]\s*)' + re.escape(old) + r'$', lambda match: match.group(1) + new,
+                     current.decode(), count=1)
+    row = (f"| {stamp} | {ac_id} | {ready[ac_id]} → {new} | runtime-captured | {approval['reason']} | "
+           f"{approval['actor']} (explicit user approval: {approval['evidence']}) |\n")
+    table = re.search(r'^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)', updated, re.M)
+    if table:
+        insertion = table.end()
+        while insertion > table.start() and updated[insertion - 1] in '\r\n':
+            insertion -= 1
+        updated = updated[:insertion] + '\n' + row + updated[insertion:]
+    else:
+        updated += ('\n## AC Amendments\n\n| Date | AC | Change (old → new) | Kind | Justification | Reviewer |\n'
+                    '| --- | --- | --- | --- | --- | --- |\n' + row)
+    if validate_specs.validate_ac_amendments(updated, spec_path) or validate_specs.validate_ac_amendment_unapplied(updated):
+        raise ArtifactError('result rejected by existing amendment rules')
+    index = index_path(reports, spec_id)
+    index_before = index.read_bytes() if index.exists() else None
+    # All refusal checks precede artifact/spec writes; recheck the immutable baseline and current bytes.
+    if (validate_specs.ready_ac_baseline(spec_path) != baseline or spec_path.read_bytes() != current
+            or (index.read_bytes() if index.exists() else None) != index_before):
+        raise ArtifactError('concurrent baseline/source/index drift')
+    decision = lifecycle.decision_record(trigger='ac_evidence_amendment', current_state=parsed.frontmatter.get('status'),
+        candidates=[parsed.frontmatter.get('status')], reason=approval['reason'], findings=[],
+        resolution='runtime-captured', rationale='Only exact approved evidence annotation bytes change.', authority=approval['actor'])
+    entry = write_artifact(reports, spec_id, type='decision', actor=approval['actor'],
+        summary=f'{ac_id} exact evidence locator amendment', content={'decision': decision, 'amendment': {
+            'request_sha256': digest, 'request': dict(request), 'ready_revision': baseline['revision'],
+            'ready_text': ready[ac_id], 'old_text': old, 'new_text': new,
+            'source_before_sha256': hashlib.sha256(current).hexdigest(),
+            'source_after_sha256': hashlib.sha256(updated.encode()).hexdigest()}})
+    if spec_path.read_bytes() != current:
+        # Preserve the concurrent source edit and roll back only this newly created artifact/index append.
+        (reports / spec_id / entry['path']).unlink()
+        if index_before is None:
+            index.unlink()
+        else:
+            index.write_bytes(index_before)
+        raise ArtifactError('concurrent source drift; amendment artifact rolled back')
+    spec_path.write_text(updated)
+    return {'entry': entry, 'replayed': False, 'request_sha256': digest}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1481,6 +1718,14 @@ def build_parser() -> argparse.ArgumentParser:
     author.add_argument("--state-evidence", action="append", default=[], dest="state_evidence")
     author.add_argument("--provenance", default="authored", choices=("authored", "reconstructed"))
     author.add_argument("--finding", action="append", default=[])
+    untracked = sub.add_parser(
+        "untracked-refs",
+        help="BUG-NS-KIT-127 R3: list referenced files not tracked or staged; exit 1 when any is outside the done commit.",
+    )
+    untracked.add_argument("spec_file", type=Path)
+    amendment = sub.add_parser('amend-ac-evidence', help='Record an exact explicitly approved AC locator amendment')
+    amendment.add_argument('spec_file', type=Path)
+    amendment.add_argument('--request', type=Path, required=True)
     return parser
 
 
@@ -1502,6 +1747,20 @@ def main(argv: list[str] | None = None) -> int:
 
     from spec_frontmatter import parse_spec_file
 
+    if ns.command == 'amend-ac-evidence':
+        try:
+            result = amend_ac_evidence(ns.spec_file, json.loads(ns.request.read_text()))
+        except (ArtifactError, ValueError, OSError) as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}))
+            return 1
+        print(json.dumps({'ok': True, **result}, indent=2))
+        return 0
+
+    if ns.command == "untracked-refs":
+        found = untracked_references(ns.spec_file)
+        print(json.dumps(found, indent=2))
+        return 1 if found["outside"] else 0
+
     if ns.command == "author-decision":
         spec_path = Path(ns.spec_file).resolve()
         try:
@@ -1521,7 +1780,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     spec_path = Path(ns.spec_file).resolve()
-    spec_id = str(parse_spec_file(spec_path).frontmatter.get("id") or "")
+    frontmatter = parse_spec_file(spec_path).frontmatter
+    if ns.from_status == "ready" and ns.to_status == "in_progress":
+        gate = dependency_registry.start_gate(spec_path.parent, frontmatter)
+        if not gate["ok"]:
+            print(json.dumps({"ok": False, "error": "The frontmatter flip must be reverted. " + "; ".join(r["message"] for r in gate["reasons"]), "reasons": gate["reasons"]}))
+            return 1
+    spec_id = str(frontmatter.get("id") or "")
     if not spec_id:
         print(json.dumps({"ok": False, "error": f"spec id missing from {spec_path.name}"}))
         return 1
@@ -1573,3 +1838,371 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def derive_terminal_first_projection(
+    repo_root: Path, spec_id: str, run_id: str, decision: Mapping[str, Any],
+    relative: str, base_head: str, inputs: Mapping[str, Any],
+) -> tuple[dict[str, bytes], list[str]]:
+    """Seal complete first-projection metadata from explicit parent inputs.
+
+    The immutable accepted decision supplies evidence classifications. Git blobs
+    supply the contract and proof, and official rationale capture supplies the
+    artifact/index closure. Neither caller replacement bytes nor worker claims
+    can nominate a target.
+    """
+    import hashlib
+    import subprocess
+    import tempfile
+    import yaml
+    from record_metrics import render_terminal_trailers, verdict_evidence
+    from spec_frontmatter import _split_frontmatter, parse_spec_file
+    from validate_specs import _live_execution_items, validate_file
+
+    root = Path(repo_root).resolve()
+    # Durable receipts sort nested JSON keys. Derive the same official bytes
+    # before recording and after restart, independent of caller insertion order.
+    encoded_inputs = json.dumps(inputs, sort_keys=True)
+    if len(encoded_inputs.encode()) > 1024 * 1024:
+        raise ArtifactError('first projection parent envelope exceeds 1 MiB')
+    inputs = json.loads(encoded_inputs)
+    keys = {'schema_version', 'spec_id', 'run_id', 'decision_id', 'repo_common_dir',
+            'checkout_root', 'base_head', 'candidate_revision', 'reason', 'created',
+            'le_evidence', 'evidence_values', 'verifier', 'parent_tool_calls'}
+    completion = (decision.get('payload') or {}).get('completion_evidence')
+    fresh_main = (decision.get('payload') or {}).get('fresh_main')
+    if (not isinstance(inputs, Mapping) or set(inputs) != keys
+        or inputs.get('schema_version') != 1 or inputs.get('spec_id') != spec_id
+        or inputs.get('run_id') != run_id or inputs.get('decision_id') != decision.get('decision_id')
+        or decision.get('decision') != 'done' or inputs.get('base_head') != base_head
+        or not isinstance(completion, dict) or completion.get('ok') is not True
+        or completion.get('outcome') != 'accepted'):
+        raise ArtifactError('first projection completion input/decision identity mismatch')
+    if (not isinstance(fresh_main, dict) or fresh_main.get('ok') is not True
+        or fresh_main.get('revision') != base_head or not isinstance(fresh_main.get('output'), str)):
+        raise ArtifactError('first projection base does not match accepted fresh-main evidence')
+    common = subprocess.run(['git', 'rev-parse', '--git-common-dir'], cwd=root,
+                            capture_output=True, text=True, check=True).stdout.strip()
+    common = str((root / common).resolve())
+    candidate = completion.get('candidate_revision')
+    if (inputs['repo_common_dir'] != common or inputs['checkout_root'] != str(root)
+        or not isinstance(candidate, str) or not re.fullmatch(r'[0-9a-f]{40}', candidate)
+        or inputs['candidate_revision'] != candidate
+        or subprocess.run(['git', 'merge-base', '--is-ancestor', candidate, base_head],
+                          cwd=root, capture_output=True).returncode):
+        raise ArtifactError('first projection repository/candidate binding mismatch')
+    values = inputs['evidence_values']
+    if (not isinstance(values, dict) or set(values) != {'report', 'tests', 'code'}
+        or values != completion.get('evidence_values')
+        or any(value not in {'pass', 'fail', 'unknown', 'absent'} for value in values.values())
+        or inputs['verifier'] != completion.get('verifier')):
+        raise ArtifactError('first projection cannot rewrite accepted evidence or verdict')
+    verdict = inputs['verifier']
+    if not isinstance(verdict, dict) or set(verdict) != {'verdict', 'acs', 'sha256'}:
+        raise ArtifactError('first projection requires hash-bound accepted verifier classifications')
+    if not re.fullmatch(r'[0-9a-f]{64}', str(verdict['sha256'])):
+        raise ArtifactError('first projection verifier hash is invalid')
+    verifier, acs = verdict_evidence(verdict)
+    if verifier not in {'pass', 'disputes_premise'} or acs != 'pass':
+        raise ArtifactError('first projection verifier is not an accepted terminal verdict')
+    premise = completion.get('premise_acceptance')
+    if verifier == 'disputes_premise' and (
+        not isinstance(premise, dict) or set(premise) != {'path', 'sha256'}
+        or not lifecycle.is_safe_relative_posix_path(premise.get('path'))
+        or not re.fullmatch(r'[0-9a-f]{64}', str(premise.get('sha256')))
+    ):
+        raise ArtifactError('first projection dispute lacks retained parent acceptance')
+    tally = inputs['parent_tool_calls']
+    if tally != 'unavailable' and (type(tally) is not int or tally < 0):
+        raise ArtifactError('first projection requires measured or unavailable parent tally')
+    reason, created = inputs['reason'], inputs['created']
+    if (not isinstance(reason, str) or not reason.strip() or reason != reason.strip()
+        or len(reason) > 4096 or not isinstance(created, str)
+        or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', created)):
+        raise ArtifactError('first projection requires bounded rationale and explicit UTC timestamp')
+    datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ')
+
+    def blob(name):
+        if not lifecycle.is_safe_relative_posix_path(name):
+            raise ArtifactError(f'first projection unsafe repository evidence path: {name!r}')
+        mode = subprocess.run(['git', 'ls-tree', base_head, '--', name], cwd=root,
+                              capture_output=True, text=True, check=True).stdout
+        if not mode.startswith(('100644 ', '100755 ')):
+            raise ArtifactError(f'first projection missing regular base blob: {name}')
+        result = subprocess.run(['git', 'show', f'{base_head}:{name}'], cwd=root,
+                                capture_output=True, check=True).stdout
+        return result
+
+    base = blob(relative)
+    fm_text, body, end_nl = _split_frontmatter(base.decode('utf-8'))
+    fm = yaml.safe_load(fm_text)
+    if not isinstance(fm, dict) or fm.get('id') != spec_id:
+        raise ArtifactError('first projection base spec identity mismatch')
+    ac_ids = set(re.findall(r'(?m)^\s*- \[[xX ]\]\s*(?:\*\*)?(AC[1-9][0-9]*)\b', body))
+    accepted_acs = verdict['acs']
+    if (not isinstance(accepted_acs, list) or not accepted_acs
+        or any(not isinstance(item, dict) for item in accepted_acs)
+        or len(accepted_acs) != len(ac_ids)
+        or {item.get('id') for item in accepted_acs} != ac_ids):
+        raise ArtifactError('first projection accepted verifier AC coverage differs from contract')
+    evidence = inputs['le_evidence']
+    checked, _, refs = _live_execution_items(body.splitlines())
+    if not isinstance(evidence, dict) or set(evidence) != checked or len(evidence) > 256:
+        raise ArtifactError('first projection must bind every checked LE item exactly once')
+    evidence_bytes = {}
+    kit = Path(relative).parent.parent
+    for item, proof in evidence.items():
+        if not isinstance(proof, dict) or set(proof) != {'path', 'sha256'}:
+            raise ArtifactError(f'first projection malformed evidence binding: {item}')
+        name = proof['path']
+        data = blob(name)
+        if len(data) > 8 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != proof['sha256']:
+            raise ArtifactError(f'first projection evidence hash disagrees with base blob: {name}')
+        if refs.get(item):
+            candidates = [str(prefix / refs[item]) for prefix in (Path(relative).parent, kit, kit.parent)]
+            if name not in candidates:
+                raise ArtifactError(f'first projection cannot replace existing LE reference: {item}')
+        evidence_bytes[name] = data
+    if sum(map(len, evidence_bytes.values())) > 8 * 1024 * 1024:
+        raise ArtifactError('first projection evidence closure exceeds 8 MiB')
+    lines = body.splitlines(keepends=True)
+    in_live = False
+    for i, line in enumerate(lines):
+        if line.startswith('## '):
+            in_live = line.strip() == '## Live Execution Checklist'
+        match = re.match(r'^\s*- \[[xX]\]\s+\*\*(LE[1-9][0-9]*):\*\*', line)
+        if in_live and match and match[1] in evidence and not refs.get(match[1]):
+            ending = '\n' if line.endswith('\n') else ''
+            lines[i] = line.removesuffix('\n') + f" (evidence: {evidence[match[1]]['path']})" + ending
+    target_fm, replaced = re.subn(r'(?m)^status:.*$', 'status: done', fm_text)
+    if replaced != 1:
+        raise ArtifactError('first projection requires one explicit status field')
+    pending = ('---\n' + target_fm + '\n---' + ('\n' if end_nl else '') + ''.join(lines)).encode()
+    reports = str(kit / 'reports')
+    prefix = f'{reports}/{spec_id}/artifacts/'
+    old_names = subprocess.run(['git', 'ls-tree', '-r', '--name-only', base_head, '--', prefix],
+                               cwd=root, capture_output=True, text=True, check=True).stdout.splitlines()
+    old_files = {name: blob(name) for name in old_names}
+    config_relative = str(kit / 'config.yaml')
+    with tempfile.TemporaryDirectory(prefix='nightshift-first-projection-') as scratch:
+        sandbox = Path(scratch)
+        for name, data in {**old_files, **evidence_bytes, relative: pending,
+                           config_relative: blob(config_relative)}.items():
+            target = sandbox / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        target_spec = sandbox / relative
+        binding = {key: inputs[key] for key in ('spec_id', 'run_id', 'decision_id',
+                   'candidate_revision', 'evidence_values', 'verifier', 'parent_tool_calls', 'le_evidence')}
+        binding['repository_sha256'] = hashlib.sha256((common + '\0' + str(root)).encode()).hexdigest()
+        if premise is not None:
+            binding['premise_acceptance'] = premise
+        capture_state_rationale(sandbox / reports, spec_id, target_spec,
+            artifact_type='status-transition', actor='coordinator',
+            summary=f"{fm.get('status')} -> done: {reason[:120]}",
+            artifact_content={'from': fm.get('status'), 'to': 'done', 'reason': reason,
+                              'run_id': run_id, 'evidence': sorted(evidence_bytes),
+                              'completion_binding': binding},
+            status='done', reason=reason, created=created, expected_status='done')
+        # Preserve every original frontmatter byte except its status field.
+        _, captured_body, _ = _split_frontmatter(target_spec.read_text())
+        target_spec.write_text('---\n' + target_fm + '\n---' + ('\n' if end_nl else '') + captured_body)
+        corpus = []
+        names = subprocess.run(['git', 'ls-tree', '-r', '--name-only', base_head, '--', str(kit / 'specs')],
+                               cwd=root, capture_output=True, text=True, check=True).stdout.splitlines()
+        for name in names:
+            if name.endswith('.md') and not Path(name).name.startswith('_'):
+                corpus.append(yaml.safe_load(_split_frontmatter(blob(name).decode())[0]) or {})
+        findings = validate_file(target_spec, config_path=sandbox / config_relative,
+                                 all_specs=corpus, check_adoption=False)
+        errors = [finding for finding in findings if not finding.startswith('WARNING:')]
+        if errors:
+            raise ArtifactError('first projection target validation failed: ' + '; '.join(errors))
+        closure = {relative: target_spec.read_bytes()}
+        for target in (sandbox / prefix).glob('*.json'):
+            name = target.relative_to(sandbox).as_posix()
+            if old_files.get(name) != target.read_bytes():
+                closure[name] = target.read_bytes()
+    trailers = render_terminal_trailers(**values, verifier=verifier, acs=acs,
+        parent_tool_calls=tally, resolution_kind='verifier-dispatched', model='coordinator')
+    return closure, trailers
+
+
+def derive_terminal_metadata_recovery(
+    repo_root: Path, spec_id: str, run_id: str, decision: Mapping[str, Any],
+    original: Mapping[str, Any], request: Mapping[str, Any],
+) -> dict[str, bytes]:
+    """Derive a bounded completion closure without writing the integration tree.
+
+    Caller bytes/hashes never nominate a replacement spec. Only official rationale
+    capture and evidence annotations on already checked LE items may change it.
+    The original status-only receipt is independently recomputed from Git.
+    """
+    import hashlib
+    import subprocess
+    import tempfile
+    import yaml
+    from spec_frontmatter import _split_frontmatter, _serialise_frontmatter, parse_spec_file
+    from validate_specs import _live_execution_items, validate_file
+
+    root = Path(repo_root).resolve()
+    receipt = original['payload']
+    identity_keys = ('event', 'phase', 'decision_id', 'terminal', 'spec_path',
+                     'repo_common_dir', 'checkout_root', 'base_head',
+                     'before_sha256', 'expected_sha256')
+    if 'terminal_trailers' in receipt:
+        identity_keys += ('terminal_trailers',)
+    allowed = set(identity_keys) | {'original_event_id', 'spec_id', 'run_id',
+                                   'reason', 'created', 'le_evidence'}
+    if (not isinstance(request, Mapping) or set(request) - {'recovery_base_head'} != allowed
+        or any(request[key] != receipt.get(key) for key in identity_keys)
+        or request['original_event_id'] != original['event_id']
+        or request['spec_id'] != spec_id or request['run_id'] != run_id
+        or decision.get('decision_id') != receipt['decision_id']
+        or decision.get('decision') != 'done' or receipt['terminal'] != 'done'
+        or receipt['phase'] != 'started'):
+        raise ArtifactError('metadata recovery original receipt identity mismatch')
+    reason, created = request['reason'], request['created']
+    if (not isinstance(reason, str) or not reason.strip()
+        or reason != reason.strip() or not isinstance(created, str)
+        or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', created)):
+        raise ArtifactError('metadata recovery requires explicit reason and UTC timestamp')
+    datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ')
+
+    def safe_path(relative: str) -> Path:
+        from pathlib import PurePosixPath
+        if (not isinstance(relative, str) or not relative or '\\' in relative
+            or ':' in relative or relative.startswith('~')):
+            raise ArtifactError('metadata recovery path is unsafe')
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or '..' in pure.parts or pure.as_posix() != relative:
+            raise ArtifactError('metadata recovery path is unsafe')
+        current = root
+        for member in pure.parts:
+            current = current / member
+            if current.is_symlink():
+                raise ArtifactError('metadata recovery symlink path is unsafe')
+        if current.exists() and (not current.is_file() or current.stat().st_nlink != 1):
+            raise ArtifactError('metadata recovery requires safe regular local files')
+        return current
+
+    def blob(relative: str, *, optional: bool = False) -> bytes | None:
+        safe_path(relative)
+        result = subprocess.run(['git', 'show', f"{receipt['base_head']}:{relative}"],
+                                cwd=root, capture_output=True)
+        if result.returncode:
+            if optional:
+                return None
+            raise ArtifactError('metadata recovery base blob unavailable')
+        mode = subprocess.run(['git', 'ls-tree', receipt['base_head'], '--', relative],
+                              cwd=root, capture_output=True, text=True, check=True).stdout
+        if not mode.startswith(('100644 ', '100755 ')):
+            raise ArtifactError('metadata recovery base blob is not regular')
+        return result.stdout
+
+    relative = receipt['spec_path']
+    base = blob(relative)
+    fm_text, body, end_nl = _split_frontmatter(base.decode('utf-8'))
+    fm = yaml.safe_load(fm_text)
+    if not isinstance(fm, dict) or fm.get('id') != spec_id:
+        raise ArtifactError('metadata recovery spec identity mismatch')
+    target_fm = _serialise_frontmatter({**fm, 'status': 'done'})
+    old_target = (f'---\n{target_fm}---' + ('\n' if end_nl else '') + body).encode()
+    if (hashlib.sha256(base).hexdigest() != receipt['before_sha256']
+        or hashlib.sha256(old_target).hexdigest() != receipt['expected_sha256']):
+        raise ArtifactError('metadata recovery original hashes conflict with canonical base')
+    recovery_base = request.get('recovery_base_head', receipt['base_head'])
+    if not isinstance(recovery_base, str) or not re.fullmatch(r'[0-9a-f]{40}', recovery_base):
+        raise ArtifactError('metadata recovery base must be an exact commit revision')
+    revision = subprocess.run(['git', 'rev-parse', '--verify', f'{recovery_base}^{{commit}}'],
+                              cwd=root, capture_output=True, text=True)
+    ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', receipt['base_head'], recovery_base],
+                              cwd=root, capture_output=True)
+    recovery_spec = subprocess.run(['git', 'show', f'{recovery_base}:{relative}'],
+                                  cwd=root, capture_output=True)
+    recovery_mode = subprocess.run(['git', 'ls-tree', recovery_base, '--', relative],
+                                   cwd=root, capture_output=True, text=True)
+    if (revision.returncode or revision.stdout.strip() != recovery_base or ancestry.returncode
+        or recovery_spec.returncode or recovery_spec.stdout != base
+        or recovery_mode.returncode or not recovery_mode.stdout.startswith(('100644 ', '100755 '))):
+        raise ArtifactError('metadata recovery base is not a descendant with unchanged original spec')
+    if not lifecycle.requires_state_rationale(fm):
+        raise ArtifactError('metadata recovery requires a rationale-bearing spec')
+    evidence = request['le_evidence']
+    checked, _, old_refs = _live_execution_items(body.splitlines())
+    if not isinstance(evidence, dict) or not evidence or not set(evidence) <= checked:
+        raise ArtifactError('metadata recovery evidence may annotate only checked LE items')
+    evidence_bytes = {}
+    for item, proof in evidence.items():
+        if not isinstance(proof, dict) or set(proof) != {'path', 'sha256'}:
+            raise ArtifactError('metadata recovery evidence binding is malformed')
+        path = safe_path(proof['path'])
+        if not path.is_file():
+            raise ArtifactError('metadata recovery evidence is missing')
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != proof['sha256']:
+            raise ArtifactError('metadata recovery evidence hash changed')
+        if old_refs.get(item):
+            raise ArtifactError('metadata recovery cannot replace existing LE evidence')
+        evidence_bytes[proof['path']] = data
+    lines = body.splitlines(keepends=True)
+    in_live = False
+    for i, line in enumerate(lines):
+        if line.startswith('## '):
+            in_live = line.strip() == '## Live Execution Checklist'
+        match = re.match(r'^\s*- \[[xX]\]\s+\*\*(LE[1-9][0-9]*):\*\*', line)
+        if in_live and match and match[1] in evidence:
+            ending = '\n' if line.endswith('\n') else ''
+            lines[i] = line.removesuffix('\n') + f" (evidence: {evidence[match[1]]['path']})" + ending
+    pending = (f'---\n{target_fm}---' + ('\n' if end_nl else '') + ''.join(lines)).encode()
+    spec_path = safe_path(relative)
+    reports = reports_root_for_spec_path(spec_path).relative_to(root).as_posix()
+    prefix = f'{reports}/{spec_id}/artifacts/'
+    tree = subprocess.run(['git', 'ls-tree', '-r', '--name-only', recovery_base, '--', prefix],
+                          cwd=root, capture_output=True, text=True, check=True)
+    # The artifact history belongs to the separately pinned recovery snapshot;
+    # the original spec/status-only hashes still come only from its old receipt.
+    old_files = {}
+    for name in tree.stdout.splitlines():
+        safe_path(name)
+        mode = subprocess.run(['git', 'ls-tree', recovery_base, '--', name],
+                              cwd=root, capture_output=True, text=True, check=True).stdout
+        if not mode.startswith(('100644 ', '100755 ')):
+            raise ArtifactError('metadata recovery artifact base blob is not regular')
+        old_files[name] = subprocess.run(['git', 'show', f'{recovery_base}:{name}'],
+                                        cwd=root, capture_output=True, check=True).stdout
+    for name, data in old_files.items():
+        if not name.endswith('/index.json') and safe_path(name).read_bytes() != data:
+            raise ArtifactError('metadata recovery existing artifact changed')
+    with tempfile.TemporaryDirectory(prefix='nightshift-metadata-') as scratch:
+        sandbox = Path(scratch)
+        for name, data in {**old_files, **evidence_bytes, relative: pending}.items():
+            target = sandbox / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        target_spec = sandbox / relative
+        write_status_transition_artifact(
+            sandbox / reports, spec_id, from_status=str(fm['status']), to_status='done',
+            actor='coordinator', reason=reason, evidence=sorted(evidence_bytes),
+            run_id=run_id, created=created, spec_path=target_spec,
+            expected_status='done', state_rationale_evidence=[
+                {'kind': 'file', 'path': Path(name).relative_to(Path(relative).parent.parent).as_posix()}
+                for name in sorted(evidence_bytes)
+                if Path(name).is_relative_to(Path(relative).parent.parent)],
+        )
+        # Run the ordinary validator against the derived complete metadata snapshot.
+        corpus = [parse_spec_file(path).frontmatter for path in spec_path.parent.glob('*.md')]
+        findings = validate_file(target_spec, config_path=spec_path.parent.parent / 'config.yaml',
+                                 all_specs=corpus, check_adoption=False)
+        errors = [finding for finding in findings if not finding.startswith('WARNING:')]
+        if errors:
+            raise ArtifactError('metadata recovery target validation failed: ' + '; '.join(errors))
+        result = {relative: target_spec.read_bytes()}
+        for target in (sandbox / prefix).glob('*.json'):
+            name = target.relative_to(sandbox).as_posix()
+            data = target.read_bytes()
+            if old_files.get(name) != data:
+                result[name] = data
+        for name in result:
+            safe_path(name)
+        return result
