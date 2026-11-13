@@ -455,6 +455,30 @@ The macOS app package is produced by `wails3 task darwin:package`. Signing uses
 `wails3 sign GOOS=darwin`, which runs `darwin:sign`. Notarization is explicit
 through `wails3 task darwin:sign:notarize`.
 
+### Capture retention
+
+Captured traffic does not grow without bound. The defaults below apply when the `capture` block is absent from the config file:
+
+| Setting (`capture` block) | Default | Meaning |
+|---|---|---|
+| `retention_days` | `60` | `traffic` rows older than this are deleted. Rows linked to a recorded session (`session_id IS NOT NULL`) are never pruned by age; `sessions`, `schema_snapshots` and `schema_changes` are never pruned. 60 days covers the dashboard's longest range (`30d`) plus its previous-period comparison. |
+| `prune_interval_hours` | `6` | Prune runs at startup and then every N hours. |
+| `jsonl_max_bytes` | `104857600` (100 MiB) | `shipyard.jsonl` is rotated when the next write would exceed this size. |
+| `jsonl_keep` | `3` | Rotated files kept (`shipyard.jsonl.1` ... `.3`), so the backup is capped at about 400 MB. |
+
+```json
+{
+  "servers": { },
+  "capture": { "retention_days": 60, "prune_interval_hours": 6, "jsonl_max_bytes": 104857600, "jsonl_keep": 3 }
+}
+```
+
+`0` or a negative value disables that limit: `retention_days <= 0` never prunes by age; `prune_interval_hours <= 0` prunes only at startup; `jsonl_max_bytes <= 0` never rotates; `jsonl_keep <= 0` keeps no rotated files (the file is discarded when it reaches the cap). Only the `--config` mode reads the `capture` block; `wrap` and the no-server mode use the defaults.
+
+Space is returned to the OS: the database uses `auto_vacuum=INCREMENTAL`, and each prune runs `PRAGMA incremental_vacuum` and `wal_checkpoint(TRUNCATE)`. An existing database is converted once at startup with a `VACUUM` (expired rows are pruned first so the rewrite is smaller). The conversion checks free disk space first, logs its start, end and duration, and is skipped with a warning (retried on the next start) when space is short; it never blocks startup.
+
+An existing `shipyard.jsonl` larger than `jsonl_max_bytes` is trimmed on first start to its last `jsonl_max_bytes` bytes (from a line boundary) so the space is actually freed. `/api/performance/runtime` reports `jsonl_total_bytes`, `last_prune_at` and `last_prune_rows_deleted` in its `store` section.
+
 ### UI
 
 The web dashboard is a single HTML file with vanilla JS, embedded into the binary at compile time via `go:embed`. To edit the UI:
@@ -468,7 +492,7 @@ The web dashboard is a single HTML file with vanilla JS, embedded into the binar
 Shipyard is built with Go stdlib-first principles:
 
 - **Proxy** -- stdio pipe relay using goroutines, one per server
-- **Capture** -- SQLite (`internal/capture/store.go`) with JSONL append-only backup
+- **Capture** -- SQLite (`internal/capture/store.go`) with a size-capped, rotating JSONL backup (see [Capture retention](#capture-retention))
 - **Web** -- `net/http` server with `go:embed` for static assets
 - **Dashboard** -- vanilla JS, WebSocket for live updates, no framework dependencies
 - **Schema watcher** -- periodic `tools/list` polling with diff detection

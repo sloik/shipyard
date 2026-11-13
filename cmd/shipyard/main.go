@@ -63,7 +63,14 @@ var parseServerOrder = func(raw json.RawMessage, appendName func(string), consum
 	return nil
 }
 
-var captureNewStore = capture.NewStore
+// captureConfig holds the retention/rotation limits applied to the capture
+// store. runMultiServer overrides it from the "capture" block of the config
+// file; other modes use the defaults.
+var captureConfig = capture.DefaultConfig()
+
+var captureNewStore = func(dbPath, jsonlPath string) (*capture.Store, error) {
+	return capture.NewStoreWithConfig(dbPath, jsonlPath, captureConfig)
+}
 var webNewHub = web.NewHub
 var proxyNewManager = proxy.NewManager
 var exitFn = os.Exit
@@ -143,6 +150,7 @@ type Config struct {
 	Web         WebConfig               `json:"web"`
 	Auth        AuthConfig              `json:"auth"`
 	Secrets     SecretsConfig           `json:"secrets"`
+	Capture     CaptureConfig           `json:"capture"`
 	ConfigPath  string                  `json:"-"`
 }
 
@@ -168,6 +176,34 @@ type ServerConfig struct {
 	Env     map[string]string     `json:"env"`
 	Cwd     string                `json:"cwd"`
 	Tools   map[string]ToolConfig `json:"tools"`
+}
+
+// CaptureConfig is the optional "capture" block of servers.json. Every field is
+// optional; an absent field keeps the default (60 days, 6 hours, 100 MiB, 3).
+// For each limit, 0 or a negative value disables it.
+type CaptureConfig struct {
+	RetentionDays      *int   `json:"retention_days"`       // traffic rows older than this are pruned
+	PruneIntervalHours *int   `json:"prune_interval_hours"` // periodic prune interval
+	JSONLMaxBytes      *int64 `json:"jsonl_max_bytes"`      // rotate shipyard.jsonl at this size
+	JSONLKeep          *int   `json:"jsonl_keep"`           // rotated JSONL files to keep
+}
+
+// resolve overlays the configured values on the capture defaults.
+func (c CaptureConfig) resolve() capture.Config {
+	out := capture.DefaultConfig()
+	if c.RetentionDays != nil {
+		out.RetentionDays = *c.RetentionDays
+	}
+	if c.PruneIntervalHours != nil {
+		out.PruneInterval = time.Duration(*c.PruneIntervalHours) * time.Hour
+	}
+	if c.JSONLMaxBytes != nil {
+		out.JSONLMaxBytes = *c.JSONLMaxBytes
+	}
+	if c.JSONLKeep != nil {
+		out.JSONLKeep = *c.JSONLKeep
+	}
+	return out
 }
 
 type WebConfig struct {
@@ -245,6 +281,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		Web     WebConfig       `json:"web"`
 		Auth    AuthConfig      `json:"auth"`
 		Secrets SecretsConfig   `json:"secrets"`
+		Capture CaptureConfig   `json:"capture"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -252,6 +289,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 
 	c.Web = raw.Web
 	c.Secrets = raw.Secrets
+	c.Capture = raw.Capture
 	// Expand env vars in auth fields
 	c.Auth = raw.Auth
 	c.Auth.BootstrapToken = expandEnvVars(raw.Auth.BootstrapToken)
@@ -525,6 +563,7 @@ func runMultiServer(cfg *Config, port int, schemaPoll time.Duration, headless bo
 
 	// Initialize capture store
 	dir := dataDirFn()
+	captureConfig = cfg.Capture.resolve()
 	store, err := captureNewStore(filepath.Join(dir, "shipyard.db"), filepath.Join(dir, "shipyard.jsonl"))
 	if err != nil {
 		slog.Error("failed to initialize capture store", "error", err)
