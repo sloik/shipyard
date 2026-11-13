@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 2
 type: bugfix
-status: ready
+status: in_progress
 after:
 - SPEC-SHIPYD-001
 violates:
@@ -105,10 +105,10 @@ the first GNU environment to execute them.
 
 ```yaml
 schema_version: 1
-status: ready
-reason: Root cause confirmed from CI log and source; fix is a two-file POSIX change; owner asked for it on 2026-11-13
+status: in_progress
+reason: mechanical transition to 'in_progress' via run run-20261113-shipyd002
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261113T112116Z-status-transition-draft-ready-root-cause-confirmed-from-ci.json
+record: artifacts/20261113T174737Z-status-transition-ready-in-progress-mechanical-transition-.json
 ```
