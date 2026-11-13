@@ -1,0 +1,49 @@
+#!/bin/sh
+# Test for scripts/rotate-launchd-logs.sh (AC5). Run: sh scripts/rotate-launchd-logs.test
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/rotate-launchd-logs.sh"
+root=$(mktemp -d "${TMPDIR:-/tmp}/shipyard-rotate-test.XXXXXX")
+trap 'rm -rf "$root"' EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+size() { stat -f %z "$1"; }
+inode() { stat -f %i "$1"; }
+
+# Missing dir is created; nothing to do exits 0.
+d="$root/missing/logs"
+sh "$script" "$d" || fail "exit nonzero on empty/missing dir"
+[ -d "$d" ] || fail "missing dir not created"
+
+# 11 MB file rotates in place.
+out="$d/shipyard-launchd.out.log"
+small="$d/shipyard-launchd.err.log"
+dd if=/dev/zero of="$out" bs=1048576 count=11 2>/dev/null
+echo hello >"$small"
+ino=$(inode "$out")
+sh "$script" "$d"
+[ "$(size "$out")" -eq 0 ] || fail "live file not truncated"
+[ "$(inode "$out")" = "$ino" ] || fail "inode changed"
+[ "$(size "$out.1")" -eq 11534336 ] || fail "rotated copy .1 wrong size"
+[ ! -e "$small.1" ] || fail "small file rotated"
+[ "$(size "$small")" -eq 6 ] || fail "small file modified"
+
+# Repeated rotations never keep more than 3 copies; ordering preserved.
+for n in 2 3 4 5 6; do
+  printf 'gen%s' "$n" >"$out"
+  dd if=/dev/zero bs=1048576 count=11 2>/dev/null >>"$out"
+  sh "$script" "$d"
+done
+count=0
+for c in "$out".*; do [ -e "$c" ] && count=$((count + 1)); done
+[ "$count" -eq 3 ] || fail "expected 3 rotated copies, got $count"
+[ ! -e "$out.4" ] || fail ".4 exists"
+[ "$(inode "$out")" = "$ino" ] || fail "inode changed after repeats"
+head -c 4 "$out.1" | grep -q gen6 || fail ".1 is not newest"
+head -c 4 "$out.3" | grep -q gen4 || fail ".3 is not oldest kept"
+
+# Threshold is configurable.
+printf 'x%.0s' 1 2 3 4 5 >"$small"
+SHIPYARD_LOG_MAX_BYTES=3 sh "$script" "$d"
+[ "$(size "$small")" -eq 0 ] || fail "custom threshold ignored"
+
+echo "PASS: rotate-launchd-logs"

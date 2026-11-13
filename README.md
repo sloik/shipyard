@@ -434,6 +434,31 @@ archiving former binaries under `archive/runtime/`. On failure it restores the
 prior canonical runtime and service (or the legacy service during a failed
 first install) and retains the prior binaries.
 
+#### launchd log rotation
+
+launchd appends the gateway's stdout/stderr to
+`~/Library/Logs/Shipyard/shipyard-launchd.{out,err}.log`. The repo-owned
+`scripts/rotate-launchd-logs.sh` rotates each `*.log` larger than 10 MB with
+copy-truncate (the live file is truncated in place, so the fd launchd holds
+stays valid) and keeps 3 rotated copies (`.1` to `.3`). It creates the log
+directory if missing. Knobs: `SHIPYARD_LOG_DIR`, `SHIPYARD_LOG_MAX_BYTES`
+(0 or negative disables rotation), `SHIPYARD_LOG_KEEP` (0 = truncate only).
+
+Install the daily `com.argo.shipyard.logcap` LaunchAgent (replaces any older
+agent with the same label) from the checkout that should own the script:
+
+```bash
+scripts/launchd/install-logcap.sh install     # renders the plist template, bootstraps, runs once
+scripts/launchd/install-logcap.sh render      # print the rendered plist only
+scripts/launchd/install-logcap.sh uninstall   # boot out and remove the plist
+launchctl list | grep logcap                  # last exit status should be 0
+```
+
+The template is `scripts/launchd/com.argo.shipyard.logcap.plist`;
+`__SCRIPT_PATH__` and `__LOG_DIR__` are substituted at install time. Re-run
+`install` if the checkout moves. Test: `sh scripts/rotate-launchd-logs.test`
+(also part of `make script-check`).
+
 Shipyard uses Wails v3 packaging tasks for the desktop `.app` and GoReleaser for
 the cross-platform headless CLI binaries.
 
