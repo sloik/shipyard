@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-002",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-11-13T11:20:56Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+      "path": "artifacts/20261113T112056Z-decision-state-rationale-authored-draft-written-f.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T11:21:16Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: Root cause confirmed from CI log and source; fix is a two-file POSIX change; owner asked for it on 2026-11-13",
+      "path": "artifacts/20261113T112116Z-status-transition-draft-ready-root-cause-confirmed-from-ci.json"
+    },
+    {
+      "type": "validation-evidence",
+      "created": "2026-11-13T11:21:16Z",
+      "actor": "coordinator",
+      "summary": "validation performed for promotion to ready",
+      "path": "artifacts/20261113T112116Z-validation-evidence-validation-performed-for-promotion-to-re.json"
+    }
+  ]
+}

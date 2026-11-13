@@ -207,6 +207,178 @@ def emit_resilience_rung(
              rung=rung, outcome=outcome, evidence_refs=refs)
 
 
+# SPEC-NS-KIT-108: which lane a run used (`small` = worker-small.md plus the condensed
+# parent checklist, `full` = the whole loop) and the lane-relevant counters.  One bounded
+# event per run, written to the same run stream the other emitters use; the existing
+# `verification_report.py throughput-report` reads it back.  An unmeasured counter is the
+# string `unavailable`, never 0 (the SPEC-NS-KIT-002-001 convention).
+LANES = frozenset({"small", "full"})
+LANE_UNAVAILABLE = "unavailable"
+LANE_COUNTER_FIELDS = ("parent_tool_calls", "worker_wall_s", "verifier_wall_s", "verifier_dispatches")
+
+
+def _lane_counter(name: str, value, *, integer: bool):
+    if value == LANE_UNAVAILABLE:
+        return value
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    if ok and integer and int(value) != value:
+        ok = False
+    if not ok:
+        raise ValueError(f"{name} must be a non-negative {'integer' if integer else 'number'} or 'unavailable'")
+    return int(value) if integer else round(float(value), 3)
+
+
+def normalize_delivery_observation(row):
+    """Project optional observations to bounded public fields; never authorize work."""
+    import math
+    import re
+    from datetime import datetime
+    if not isinstance(row, dict):
+        return None
+    def identifier(value):
+        return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', value) else None
+    keys = ('repository_id', 'project_id', 'spec_id', 'run_id', 'observation_id')
+    clean = {key: identifier(row.get(key)) for key in keys}
+    if not all(clean.values()):
+        return None
+    clean['observation_origin'] = 'receipt' if row.get('observation_origin') == 'receipt' else 'emitted'
+    for key in ('attempt_id', 'action_id'):
+        if row.get(key) is not None and identifier(row.get(key)) is None:
+            return None
+    clean.update(event='delivery_observed', schema_version='1.0.0',
+                 attempt_id=identifier(row.get('attempt_id')), action_id=identifier(row.get('action_id')))
+    for key in ('source_receipt_digest', 'demand_receipt_digest', 'kit_fingerprint'):
+        value = row.get(key)
+        clean[key] = value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value) else None
+    version = row.get('kit_version')
+    clean['kit_version'] = version if isinstance(version, str) and re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', version) else None
+    clean['stage'] = row.get('stage') if isinstance(row.get('stage'), str) and row.get('stage') in {
+        'ready_restored', 'candidate_accepted', 'integrated', 'projection_complete', 'released'} else None
+    clean['disposition'] = row.get('disposition') if isinstance(row.get('disposition'), str) and row.get('disposition') in {
+        'consumed', 'native_fallback', 'not_offered', 'abandoned', 'refused', 'offered'} else None
+    clean['eligibility'] = row.get('eligibility') if isinstance(row.get('eligibility'), bool) else None
+    reasons = {'missing_transport', 'identity_match', 'identity_mismatch', 'ledger_disabled',
+               'head_proof_untrusted', 'ledger_error', 'ledger_module_unavailable',
+               'no_supported_proof', 'contract_binding_missing_or_changed', 'recovery_boundary_mismatch',
+               'not_offered', 'abandoned', 'native_failed', 'native_passed', 'input_policy_unresolved',
+               'untrusted_receipt', 'identity_changed', 'partial_coverage', 'stale_receipt'}
+    clean['reason_code'] = row.get('reason_code') if isinstance(row.get('reason_code'), str) and row.get('reason_code') in reasons else None
+    for key in ('product_outcome', 'diagnostic_outcome', 'admissibility_outcome', 'settlement_outcome'):
+        clean[key] = row.get(key) if isinstance(row.get(key), str) and row.get(key) in {'passed', 'failed', 'accepted', 'refused', 'unknown'} else None
+    def number(value):
+        try:
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
+        except (OverflowError, ValueError):
+            return None
+    measurements = row.get('measurements') if isinstance(row.get('measurements'), dict) else {}
+    clean['measurements'] = {key: number(measurements.get(key)) for key in
+        ('native_seconds', 'parent_tool_calls', 'worker_wall_s', 'verifier_wall_s', 'spend')}
+    clean['native_age_s'] = number(row.get('native_age_s'))
+    clean['source_native_seconds'] = number(row.get('source_native_seconds'))
+    for key in ('native_created_at', 'started_at', 'ended_at'):
+        value = row.get(key)
+        clean[key] = None
+        if isinstance(value, str) and len(value) <= 40:
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if parsed.tzinfo is not None:
+                    clean[key] = value
+            except ValueError:
+                pass
+    return clean
+
+
+def delivery_observation_context(root):
+    """Opaque association from the caller's explicit install and existing Git identity."""
+    import hashlib
+    import subprocess
+    from pathlib import Path
+    try:
+        root = Path(root).resolve()
+        git = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute',
+            '--git-common-dir', '--show-toplevel'], capture_output=True, text=True, check=True, timeout=2)
+        common, checkout = git.stdout.splitlines()
+        common, checkout = Path(common).resolve(), Path(checkout).resolve()
+        component = root.parent if root.name == '.nightshift' else root
+        relative = component.relative_to(checkout).as_posix()
+        repository = hashlib.sha256(str(common).encode()).hexdigest()
+        context = {'repository_id': repository,
+                   'project_id': hashlib.sha256((repository + ':' + relative).encode()).hexdigest()}
+    except Exception:
+        return {}
+    try:
+        import yaml
+        config = root / 'config.yaml'
+        if config.is_file() and not config.is_symlink() and config.stat().st_size <= 65536:
+            for doc in yaml.safe_load_all(config.read_text(encoding='utf-8')):
+                if isinstance(doc, dict) and 'kit_version' in doc:
+                    context['kit_version'] = doc['kit_version']
+        manifest = root / 'release-manifest.json'
+        if manifest.is_file() and not manifest.is_symlink() and manifest.stat().st_size <= 2 * 1024 * 1024:
+            context['kit_fingerprint'] = json.loads(manifest.read_text(encoding='utf-8')).get('fingerprint')
+    except Exception:
+        pass
+    return context
+
+
+def observe_delivery_boundary(root, spec_id, *, run_id, action_id, **fields):
+    """Observe a completed parent boundary, never change its authority or return value."""
+    import hashlib
+    try:
+        data = {**delivery_observation_context(root), **fields, 'spec_id': spec_id,
+                'run_id': run_id, 'action_id': action_id}
+        if data.get('observation_id') is None:
+            normalized = normalize_delivery_observation({**data, 'observation_id': 'pending'})
+            if normalized is None:
+                return False
+            identity = {key: normalized[key] for key in ('repository_id', 'project_id', 'spec_id',
+                'run_id', 'attempt_id', 'action_id', 'stage', 'disposition', 'source_receipt_digest',
+                'demand_receipt_digest', 'product_outcome', 'diagnostic_outcome', 'admissibility_outcome', 'settlement_outcome')}
+            data['observation_id'] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        return emit_delivery_observation(open_run_log(root, run_id), spec_id, **{key: value for key, value in data.items()
+            if key not in {'spec_id', 'run_id'}})
+    except Exception:
+        return False
+
+
+def emit_delivery_observation(log, spec_id, **fields):
+    """Advisory only: malformed data and optional sink failures cannot affect callers."""
+    try:
+        row = normalize_delivery_observation({**fields, 'spec_id': spec_id, 'run_id': log.run_id})
+        if row is None:
+            return False
+        log.emit('delivery_observed', spec_id, **{key: value for key, value in row.items()
+            if key not in {'event', 'spec_id', 'run_id'}})
+        return True
+    except Exception:
+        return False
+
+
+def emit_lane_event(
+    log: "RunEventLog", spec_id: str, *, lane: str, parent_tool_calls, worker_wall_s,
+    verifier_wall_s, verifier_dispatches, redispatch_reasons=(),
+) -> dict:
+    """Append one `lane_recorded` event: the lane tag plus every lane counter (all required)."""
+    from record_metrics import REDISPATCH_REASON_ENUM
+
+    if lane not in LANES:
+        raise ValueError(f"lane must be one of {sorted(LANES)}")
+    counters = {
+        "parent_tool_calls": _lane_counter("parent_tool_calls", parent_tool_calls, integer=True),
+        "worker_wall_s": _lane_counter("worker_wall_s", worker_wall_s, integer=False),
+        "verifier_wall_s": _lane_counter("verifier_wall_s", verifier_wall_s, integer=False),
+        "verifier_dispatches": _lane_counter("verifier_dispatches", verifier_dispatches, integer=True),
+    }
+    reasons = list(redispatch_reasons)
+    if any(item not in REDISPATCH_REASON_ENUM for item in reasons):
+        raise ValueError(f"redispatch reasons must be within {sorted(REDISPATCH_REASON_ENUM)}")
+    dispatches = counters["verifier_dispatches"]
+    if isinstance(dispatches, int) and len(reasons) > max(dispatches - 1, 0):
+        raise ValueError("more redispatch reasons than redispatches")
+    log.emit("lane_recorded", spec_id=spec_id, lane=lane, redispatch_reasons=reasons, **counters)
+    return {"lane": lane, "redispatch_reasons": reasons, **counters}
+
+
 def record_official_followup_decisions(
     log: "RunEventLog", *, source_spec_id: str, terminal_resolution: str,
     discovery_phase: str, evidence_ref: str, outcomes: list[str], recorded_at: str,
@@ -441,3 +613,41 @@ class RunEventLog:
 
 def open_run_log(nightshift_dir: Path, run_id: Optional[str] = None) -> RunEventLog:
     return RunEventLog(nightshift_dir=nightshift_dir, run_id=run_id or generate_run_id())
+
+
+def _count_arg(raw: str):
+    return raw if raw == LANE_UNAVAILABLE else float(raw)
+
+
+def main(argv=None) -> int:
+    """`loop_events.py lane ...`: the parent's one-line emitter for the lane tag and counters."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Emit a loop event (SPEC-NS-KIT-108).")
+    sub = parser.add_subparsers(dest="command", required=True)
+    lane = sub.add_parser("lane", help="record the lane tag and lane counters for one run")
+    lane.add_argument("--nightshift-dir", default=".nightshift")
+    lane.add_argument("--run-id", required=True)
+    lane.add_argument("--spec-id", required=True)
+    lane.add_argument("--lane", required=True)
+    for field in LANE_COUNTER_FIELDS:
+        lane.add_argument("--" + field.replace("_", "-"), required=True, type=_count_arg,
+                          help="a non-negative number or 'unavailable'")
+    lane.add_argument("--redispatch-reason", action="append", default=[])
+    args = parser.parse_args(argv)
+    try:
+        event = emit_lane_event(
+            open_run_log(Path(args.nightshift_dir), args.run_id), args.spec_id, lane=args.lane,
+            parent_tool_calls=args.parent_tool_calls, worker_wall_s=args.worker_wall_s,
+            verifier_wall_s=args.verifier_wall_s, verifier_dispatches=args.verifier_dispatches,
+            redispatch_reasons=args.redispatch_reason,
+        )
+    except ValueError as exc:
+        print(f"Error: cannot record lane event: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(event, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,8 +7,9 @@ This generated entry point is checked by `vocabulary.py audit`; consumer-specifi
 | Key | Label | Short help | Allowed values |
 |---|---|---|---|
 | `id` | Spec ID | Stable identifier for a spec. | — |
+| `id_kind` | ID kind | The leading word of a spec ID; not the frontmatter type. | SPEC, BUG, NFR, QUESTIONS |
 | `title` | Title | Human-readable spec name. | — |
-| `type` | Type | The kind of work a spec describes. | feature, bugfix, refactor, main, nfr, research, analysis, task |
+| `type` | Type | The kind of work a spec describes. | feature, bugfix, refactor, eval, nfr, main, docs, research, distillation, fact-check, review, analysis, reconciliation, valuation, scoring, report, questions, task |
 | `status` | Status | Stored lifecycle maturity and scheduling intent; not a derived gate. | draft, planned, ready, in_progress, blocked, done, superseded, active, retired |
 | `priority` | Priority | Lower number means higher within-layer priority. | — |
 | `layer` | Layer | Dependency ordering tier: 0 foundation through 3 polish. | 0, 1, 2, 3 |
@@ -43,7 +44,11 @@ This generated entry point is checked by `vocabulary.py audit`; consumer-specifi
 
 ### Spec ID
 
-A unique durable identifier used by dependencies and reports.
+A unique durable identifier used by dependencies and reports. New IDs are {KIND}-{CODE}-{NNN}(-{NNN})* where CODE is the registered project code; existing IDs are never renamed.
+
+### ID kind
+
+Closed vocabulary for the first segment of a new spec ID. BUG pairs with type bugfix, NFR with type nfr, QUESTIONS with type questions, and SPEC with every other type. It is distinct from type.
 
 ### Title
 

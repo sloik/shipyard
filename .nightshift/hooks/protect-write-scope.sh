@@ -168,6 +168,54 @@ try:
     if not unique_paths:
         raise SystemExit(0)
 
+    # BUG-NS-KIT-002: while a merge is in progress, a path whose staged blob
+    # (or absence) equals the same path in a MERGE_HEAD parent was taken from
+    # main, not written by the worker — report it and classify only the rest
+    # (the worker's own resolution edits). One `git cat-file --batch-check`
+    # spawn answers every path. MERGE_HEAD is resolved with --git-path so a
+    # linked worktree's per-worktree file is found.
+    taken_from_main: list[str] = []
+    mh_proc = subprocess.run(
+        ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
+        cwd=project_root, capture_output=True, text=True,
+    )
+    mh_path = Path(mh_proc.stdout.strip()) if mh_proc.returncode == 0 and mh_proc.stdout.strip() else None
+    if mh_path is not None and not mh_path.is_absolute():
+        mh_path = project_root / mh_path
+    if mh_path is not None and mh_path.is_file():
+        parents = [ln.strip() for ln in mh_path.read_text().splitlines() if ln.strip()]
+        probe = [p for p in unique_paths if "\n" not in p]
+        if parents and probe:
+            queries = []
+            for p in probe:
+                queries.append(f":{p}")
+                queries.extend(f"{sha}:{p}" for sha in parents)
+            cat_proc = subprocess.run(
+                ["git", "cat-file", "--batch-check"],
+                cwd=project_root, capture_output=True,
+                input="\n".join(queries).encode("utf-8", errors="surrogateescape") + b"\n",
+            )
+            lines = cat_proc.stdout.decode("utf-8", errors="surrogateescape").splitlines()
+            if cat_proc.returncode == 0 and len(lines) == len(queries):
+                width = 1 + len(parents)
+                for idx, p in enumerate(probe):
+                    row = lines[idx * width:(idx + 1) * width]
+                    keys = [None if ln.endswith(" missing") or " blob " not in ln else ln.split(" ", 1)[0] for ln in row]
+                    # Unmerged (conflicted) index entries read as missing at
+                    # stage 0; never treat those as taken from main.
+                    if row[0].endswith(" missing") and any(k is not None for k in keys[1:]):
+                        continue
+                    if any(k == keys[0] for k in keys[1:]):
+                        taken_from_main.append(p)
+            else:
+                warn("merge parent probe failed; classifying every staged path")
+        if taken_from_main:
+            taken = set(taken_from_main)
+            unique_paths = [p for p in unique_paths if p not in taken]
+            warn("merge in progress; paths taken from main (not classified): " + ", ".join(taken_from_main))
+        if not unique_paths:
+            raise SystemExit(0)
+
     spec_file = None
     if spec_id:
         specs_dirs = (
@@ -178,9 +226,12 @@ try:
         for specs_dir in specs_dirs:
             if not specs_dir.is_dir():
                 continue
-            matches = sorted(specs_dir.glob(f"{spec_id}-*.md")) + sorted(specs_dir.glob(f"{spec_id}.md"))
-            if matches:
-                spec_file = matches[0]
+            try:
+                spec_file = module.find_spec_file(specs_dir, spec_id)
+            except module.AmbiguousSpecFile as exc:
+                warn(f"BLOCKED — {exc}")
+                raise SystemExit(block_code)
+            if spec_file is not None:
                 break
 
     if spec_file is not None:

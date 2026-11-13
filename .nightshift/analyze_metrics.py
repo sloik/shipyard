@@ -43,11 +43,10 @@ def enrich_rows_for_token_report(metrics: List[Dict[str, Any]], specs_dir: Optio
             else:
                 try:
                     from spec_frontmatter import parse_spec_file
-                    candidates = list(Path(specs_dir).glob(f"{spec_id}-*.md")) + list(
-                        Path(specs_dir).glob(f"{spec_id}.md")
-                    )
-                    if candidates:
-                        parsed = parse_spec_file(candidates[0])
+                    from scope_guard import find_spec_file
+                    spec_path = find_spec_file(Path(specs_dir), spec_id)
+                    if spec_path is not None:
+                        parsed = parse_spec_file(spec_path)
                         fm = parsed.frontmatter or {}
                         spec_type = str(fm.get("type") or "unknown")
                         layer = fm.get("layer")

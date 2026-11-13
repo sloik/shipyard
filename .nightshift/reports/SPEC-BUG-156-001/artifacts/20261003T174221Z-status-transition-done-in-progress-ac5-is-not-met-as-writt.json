@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "type": "status-transition",
+  "created": "2026-10-03T17:42:21Z",
+  "actor": "coordinator",
+  "summary": "done -> in_progress: AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owne",
+  "from": "done",
+  "to": "in_progress",
+  "reason": "AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owner's AC-amendment decision.",
+  "evidence": [],
+  "run_id": "coord-20261003-bug156-001",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "in_progress",
+    "reason": "AC5 is not met as written (#40 was merged by the owner, not closed) and PR #41 has not merged; reopened pending the owner's AC-amendment decision.",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}
