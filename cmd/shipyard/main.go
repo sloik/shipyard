@@ -114,6 +114,11 @@ func acquireDesktopInstanceLock(dir string) (func(), error) {
 // data directory. Falls back to cwd if home directory is unavailable.
 var dataDirFn = dataDir
 
+// dataDirGuard is called with the resolved data directory before it is created
+// or used. It is a no-op in production; tests install a guard that fails when
+// the directory is the developer's real Shipyard install.
+var dataDirGuard = func(dir string) {}
+
 func dataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -132,6 +137,7 @@ func dataDir() string {
 	default:
 		dir = filepath.Join(home, ".shipyard")
 	}
+	dataDirGuard(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		slog.Warn("failed to create data directory, using cwd", "dir", dir, "error", err)
 		return "."
