@@ -1,0 +1,30 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-005",
+  "type": "decision",
+  "created": "2026-11-13T12:18:14Z",
+  "actor": "coordinator",
+  "summary": "state rationale authored: draft -- Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an in",
+  "decision": {
+    "trigger": "state_rationale_authoring",
+    "current_state": "draft",
+    "candidate_states": [
+      "draft"
+    ],
+    "ambiguity_reason": "Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an inline fix",
+    "static_findings": [],
+    "resolution": "Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an inline fix",
+    "rationale": "Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an inline fix",
+    "decision_authority": "coordinator",
+    "reusable_rule_gap": false
+  },
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "draft",
+    "reason": "Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an inline fix",
+    "reconsider_when": "The owner schedules the next Shipyard run or the next gateway deploy",
+    "evidence": [],
+    "provenance": "authored"
+  }
+}
