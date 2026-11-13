@@ -15,6 +15,16 @@ var realHome string
 // holds a live capture database.
 func TestMain(m *testing.M) {
 	realHome, _ = os.UserHomeDir()
+	if os.Getenv("SHIPYARD_TEST_REAL_HOME") == "" {
+		os.Setenv("SHIPYARD_TEST_REAL_HOME", realHome) // inherited by helper subprocesses
+	} else {
+		realHome = os.Getenv("SHIPYARD_TEST_REAL_HOME")
+	}
+	dataDirGuard = func(dir string) {
+		if realHome != "" && (dir == realHome || strings.HasPrefix(dir, realHome+string(os.PathSeparator))) {
+			panic("test resolved the data dir under the real home (live install): " + dir)
+		}
+	}
 	home, err := os.MkdirTemp("", "shipyard-test-home-")
 	if err != nil {
 		panic(err)
