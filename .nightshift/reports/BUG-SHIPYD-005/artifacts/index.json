@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-005",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-11-13T12:18:14Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Observed on the live gateway on 2026-11-13; needs a Nightshift run and a gateway redeploy, not an in",
+      "path": "artifacts/20261113T121814Z-decision-state-rationale-authored-draft-observed-.json"
+    }
+  ]
+}
