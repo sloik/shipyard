@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-156-001",
+  "type": "status-transition",
+  "created": "2026-10-03T16:07:44Z",
+  "actor": "coordinator",
+  "summary": "in_progress -> done: mechanical transition to 'done' via run coord-20261003-bug156-001",
+  "from": "in_progress",
+  "to": "done",
+  "reason": "mechanical transition to 'done' via run coord-20261003-bug156-001",
+  "evidence": [],
+  "run_id": "coord-20261003-bug156-001",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "done",
+    "reason": "mechanical transition to 'done' via run coord-20261003-bug156-001",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}
