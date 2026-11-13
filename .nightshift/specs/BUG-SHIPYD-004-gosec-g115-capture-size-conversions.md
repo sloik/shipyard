@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after:
 - SPEC-SHIPYD-001
 - SPEC-BUG-159
@@ -66,27 +66,27 @@ Unchecked `uint64(...)` conversions of signed values: the SQLite page arithmetic
 
 ## Requirements
 
-- [ ] R1: The live database size used by the `auto_vacuum` migration is computed by a function that
+- [x] R1: The live database size used by the `auto_vacuum` migration is computed by a function that
       returns 0 when any input is negative or when the page count is not above the freelist count,
       and never wraps.
-- [ ] R2: Free disk bytes are computed by a function that returns 0 for a negative block size or
+- [x] R2: Free disk bytes are computed by a function that returns 0 for a negative block size or
       block count and never converts a negative value to `uint64`.
-- [ ] R3: Behaviour for valid inputs is unchanged.
-- [ ] R4: No gosec suppression (`#nosec`, exclusion, severity change) is added.
+- [x] R3: Behaviour for valid inputs is unchanged.
+- [x] R4: No gosec suppression (`#nosec`, exclusion, severity change) is added.
 
 ## Acceptance Criteria
 
-- [ ] AC1 (R1): A unit test covers live-size computation for: normal values, zero values,
+- [x] AC1 (R1): A unit test covers live-size computation for: normal values, zero values,
       freelist above page count, negative page count, negative page size. The non-normal cases
       return 0. The test fails against the pre-fix arithmetic.
-- [ ] AC2 (R2): A unit test covers the free-bytes computation for normal values, a negative block
+- [x] AC2 (R2): A unit test covers the free-bytes computation for normal values, a negative block
       size and a negative block count; the negative cases return 0.
-- [ ] AC3 (R3): Existing `internal/capture` tests pass unchanged; `go test -race -count=1 ./...`
+- [x] AC3 (R3): Existing `internal/capture` tests pass unchanged; `go test -race -count=1 ./...`
       passes.
-- [ ] AC4 (R4): `GOTOOLCHAIN=go1.26.11 make security-gosec` and the same with `GOOS=linux` both
+- [x] AC4 (R4): `GOTOOLCHAIN=go1.26.11 make security-gosec` and the same with `GOOS=linux` both
       report `Issues : 0`, and `git grep -n nosec -- '*.go'` finds nothing new.
-- [ ] AC5: The CI job `test` passes in full on the PR, so the SPEC-BUG-159 gate passes again.
-- [ ] AC6: `make lint`, `make type-check` and `make coverage-check` pass.
+- [x] AC5: The CI job `test` passes in full on the PR, so the SPEC-BUG-159 gate passes again.
+- [x] AC6: `make lint`, `make type-check` and `make coverage-check` pass.
 
 ## Scope Amendments
 
@@ -117,10 +117,10 @@ Unchecked `uint64(...)` conversions of signed values: the SQLite page arithmetic
 
 ```yaml
 schema_version: 1
-status: in_progress
-reason: mechanical transition to 'in_progress' via run run-20261113-shipyd004
+status: done
+reason: mechanical transition to 'done' via run run-20261113-shipyd004
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261113T174753Z-status-transition-ready-in-progress-mechanical-transition-.json
+record: artifacts/20261113T180143Z-status-transition-in-progress-done-mechanical-transition-t.json
 ```

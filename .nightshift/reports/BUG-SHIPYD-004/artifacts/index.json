@@ -29,6 +29,13 @@
       "actor": "coordinator",
       "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run run-20261113-shipyd004",
       "path": "artifacts/20261113T174753Z-status-transition-ready-in-progress-mechanical-transition-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T18:01:43Z",
+      "actor": "coordinator",
+      "summary": "in_progress -> done: mechanical transition to 'done' via run run-20261113-shipyd004",
+      "path": "artifacts/20261113T180143Z-status-transition-in-progress-done-mechanical-transition-t.json"
     }
   ]
 }

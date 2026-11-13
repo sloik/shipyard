@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-004",
+  "type": "status-transition",
+  "created": "2026-11-13T18:01:43Z",
+  "actor": "coordinator",
+  "summary": "in_progress -> done: mechanical transition to 'done' via run run-20261113-shipyd004",
+  "from": "in_progress",
+  "to": "done",
+  "reason": "mechanical transition to 'done' via run run-20261113-shipyd004",
+  "evidence": [],
+  "run_id": "run-20261113-shipyd004",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "done",
+    "reason": "mechanical transition to 'done' via run run-20261113-shipyd004",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}
