@@ -82,9 +82,15 @@ PR that the `dependency-review` gate correctly rejects.
 - [x] AC3: `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`
   pass, and `renovate.json` is valid JSON.
 - [x] AC4: The PR's `dependency-review` check passes.
-- [ ] AC5 (R4): #39 and #40 are closed with a comment that links the deletion PR.
-  (Not met as written: #39 closed linking #41; #40 was merged by the repo owner before it
-  could be closed. Pending the owner's decision on an AC amendment.)
+- [x] AC5 (R4): Neither #39 nor #40 is open, and the deletion PR is linked from each: #39 was
+  closed with a comment that links #41; #40 was merged by the repo owner on 2026-10-03 before it
+  could be closed, which this PR makes moot by deleting the module it bumped. (Amended 2026-11-13)
+
+## AC Amendments
+
+| Date | AC | Kind | Old → New | Justification | Approval |
+|---|---|---|---|---|---|
+| 2026-11-13 | AC5 | runtime-captured | "#39 and #40 are closed with a comment that links the deletion PR." → "Neither #39 nor #40 is open, and the deletion PR is linked from each: #39 was closed with a comment that links #41; #40 was merged by the repo owner on 2026-10-03 before it could be closed, which this PR makes moot by deleting the module it bumped." | #40 can no longer be closed: the owner merged it on 2026-10-03T15:42Z. The intent of R4 (no open Dependabot PR left against the spike) holds either way. | Explicit user approval: repo owner, 2026-11-13, in session 01HynYeQbdpdBces7bGT6gyj (asked to decide the PR #41 merge and the AC5 amendment; approved both) |
 
 ## Context
 
