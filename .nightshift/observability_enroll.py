@@ -20,10 +20,11 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from observability_store import ObservabilityStoreError, StoreContext, enroll
+from observability_store import ObservabilityStoreError, StoreContext, enroll, load_observability_sink, PRIVATE_DROPBOX
 
 MANAGED_PUBLIC_PREFIXES = (
     ".nightshift/hooks/", ".nightshift/prompts/", ".nightshift/scenarios/",
+    ".nightshift/spec-id-legacy/",  # SPEC-416: frozen per-project legacy-ID lists
 )
 # Kept in sync with CANONICAL_PROTOCOL_FILES in nightshift-sync.py (SPEC-191
 # follow-up): that list is the single source of truth for what ships as
@@ -34,9 +35,11 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/config.yaml", ".nightshift/STOP",
     ".nightshift/.gitignore", ".nightshift/BOOTSTRAP.md", ".nightshift/CHANGELOG.md",
     ".nightshift/README.md",
+    ".nightshift/board_performance_snapshot.py", ".nightshift/run_tooling.py",
     ".nightshift/EXTENSIONS.md", ".nightshift/GIT.md", ".nightshift/HUMAN-REVIEW.md",
     ".nightshift/LOOP-DOMAIN-MAP.md", ".nightshift/LOOP.md", ".nightshift/ORCHESTRATOR.md",
     ".nightshift/REVIEW.md", ".nightshift/SPEC-GUIDE.md", ".nightshift/Skills/nightshift/SKILL.md",
+    ".nightshift/Skills/nightshift/prompts/prebuilt.json",
     ".nightshift/VOCABULARY.md", ".nightshift/WATCHER.md", ".nightshift/ac_review.py",
     ".nightshift/analyze_metrics.py", ".nightshift/argo_home.py", ".nightshift/audit_nfr.py",
     ".nightshift/board.py", ".nightshift/board.sh", ".nightshift/check_followup_spec.py",
@@ -47,7 +50,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/extension_registry.py", ".nightshift/extension_runtime.py", ".nightshift/extension_sandbox.py",
     ".nightshift/failure_persistence.py", ".nightshift/fleet_metrics.py", ".nightshift/followup_decisions.py",
     ".nightshift/followup_metrics.py", ".nightshift/followup_processor.py", ".nightshift/goal_gate.py",
-    ".nightshift/handler_registry.py", ".nightshift/hooks/commit-msg", ".nightshift/hooks/pre-commit",
+    ".nightshift/handler_registry.py", ".nightshift/hooks/commit-msg", ".nightshift/hooks/main-freeze.sh", ".nightshift/hooks/pre-commit",
     ".nightshift/integration_broker.py", ".nightshift/kickoff_reconciliation.py", ".nightshift/lifecycle.py",
     ".nightshift/loop_events.py", ".nightshift/loop_observability.py", ".nightshift/managed_payload_provenance.py",
     ".nightshift/metric-ranges.yaml", ".nightshift/metrics-schema.md", ".nightshift/metrics/_SCHEMA.md",
@@ -64,6 +67,7 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/synthesis_gate.py", ".nightshift/terminal_outcomes.py", ".nightshift/trace_export.py",
     ".nightshift/unblock_ladder.py", ".nightshift/unblock_spec.py", ".nightshift/validate_install.py",
     ".nightshift/validate_metrics.py", ".nightshift/validate_specs.py", ".nightshift/verification_report.py",
+    ".nightshift/verification_economics.py",
     ".nightshift/verifier_feedback.py", ".nightshift/vocabulary-registry.yaml", ".nightshift/vocabulary.py",
     ".nightshift/watchdog_cleanup.py", ".nightshift/worktree_janitor.py", ".nightshift/worktree_paths.py",
     ".nightshift/release-marker.json",
@@ -72,7 +76,53 @@ MANAGED_PUBLIC_FILES = {
     ".nightshift/deployment_tiers.py", ".nightshift/liveness_classifier.py",
     ".nightshift/resilience_ladder.py", ".nightshift/scope_guard.py",
     ".nightshift/spec_artifacts.py", ".nightshift/spec_promotion.py",
+    ".nightshift/spec_replacement.py",
     ".nightshift/token_usage.py",
+    # SPEC-417-001: on-demand guides.
+    ".nightshift/guides/board-and-api.md",
+    ".nightshift/guides/board-prompt-library.md",
+    ".nightshift/guides/pinned-baselines.md",
+    ".nightshift/guides/worker-local-config.md",
+    ".nightshift/guides/board-performance-comparisons.md",
+    # SPEC-417-004: the rules guide.
+    ".nightshift/guides/rules.md",
+    # SPEC-417-005: command bodies moved out of SKILL.md.
+    ".nightshift/guides/release.md",
+    ".nightshift/guides/unblock.md",
+    ".nightshift/guides/kickoff.md",
+    ".nightshift/guides/run.md",
+    ".nightshift/guides/run-2.md",
+    ".nightshift/guides/run-3.md",
+    ".nightshift/guides/run-4.md",
+    ".nightshift/guides/external-evidence.md",
+    ".nightshift/guides/run-5.md",
+    ".nightshift/guides/run-6.md",
+    ".nightshift/guides/run-7.md",
+    ".nightshift/guides/run-8.md",
+    # SPEC-NS-KIT-101: pinned verifier blocks and four more command bodies.
+    ".nightshift/guides/pinned-briefs.md",
+    ".nightshift/guides/pinned-checks.md",
+    ".nightshift/guides/pinned-validator.md",
+    ".nightshift/guides/doctor.md",
+    ".nightshift/guides/validate.md",
+    ".nightshift/guides/knowledge.md",
+    ".nightshift/guides/address-issues.md",
+    # SPEC-NS-KIT-108: small-spec lane worker guide.
+    ".nightshift/guides/worker-small.md",
+    # SPEC-417-002: read-only board client.
+    ".nightshift/board_ctl.py",
+    # BUG-NS-KIT-225: managed search runtime and benchmark guide.
+    ".nightshift/board_search.py",
+    ".nightshift/prompt_snippets.py",
+    ".nightshift/prompt_snippets_ui.py",
+    ".nightshift/worktree_local_config.py",
+    ".nightshift/guides/board-search-benchmarks.md",
+    # SPEC-417-003: the status-write gate shared by board.py and board_ctl.py.
+    ".nightshift/status_transition.py",
+    # SPEC-NS-KIT-003: the reduced-dependency-graph helper.
+    ".nightshift/dependency_graph_view.py",
+    # SPEC-416: the shared spec-ID grammar module.
+    ".nightshift/spec_id.py",
 }
 PRIVATE_PREFIXES = (
     ".nightshift/reports/", ".nightshift/metrics/", ".nightshift/knowledge/",
@@ -274,7 +324,7 @@ def history_remediation(repo: Path, *, apply: bool = False, operator_authority: 
 def release_disposition(install: Path) -> dict[str, str] | None:
     """Return a safe release skip for enrolled projects with unresolved artifacts."""
     config = Path(install) / "config.yaml"
-    if not config.is_file() or "sink: private-dropbox" not in config.read_text(errors="replace"):
+    if not config.is_file() or load_observability_sink(config) != PRIVATE_DROPBOX:
         return None
     audit = audit_project(Path(install))
     if audit["audit_clean"]:

@@ -13,6 +13,7 @@ from typing import Any, Iterable
 import yaml
 
 from parallel_executor import WorktreeHandle, cleanup_worktrees
+from scope_guard import AmbiguousSpecFile, find_spec_file  # BUG-NS-KIT-007
 
 try:
     from status_store import StatusStore
@@ -325,8 +326,10 @@ def _spec_id_from_branch(branch_name: str) -> str | None:
 
 
 def _find_spec_file(specs_dir: Path, spec_id: str) -> Path | None:
-    matches = sorted(specs_dir.glob(f"{spec_id}*.md"))
-    return matches[0] if matches else None
+    try:
+        return find_spec_file(specs_dir, spec_id)
+    except AmbiguousSpecFile:
+        return None  # fail closed: callers treat "no spec" as skip/keep
 
 
 def _resolve_spec_status(spec_id: str, spec_path: Path, status_store: Any | None) -> str | None:

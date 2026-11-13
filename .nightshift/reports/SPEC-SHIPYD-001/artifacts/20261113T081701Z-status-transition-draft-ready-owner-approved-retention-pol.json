@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-SHIPYD-001",
+  "type": "status-transition",
+  "created": "2026-11-13T08:17:01Z",
+  "actor": "argo",
+  "summary": "draft -> ready: Owner approved retention policy 2026-11-13",
+  "from": "draft",
+  "to": "ready",
+  "reason": "Owner approved retention policy 2026-11-13",
+  "evidence": [],
+  "run_id": "argo-20261113T091700",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "ready",
+    "reason": "Owner approved retention policy 2026-11-13",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

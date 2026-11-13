@@ -124,6 +124,7 @@ script-check: tools
 	node scripts/check-js-syntax.mjs internal/web/ui/ds.js internal/web/ui/index.html
 	zsh -n scripts/*.sh
 	zsh scripts/deploy-canonical-runtime.test
+	sh scripts/rotate-launchd-logs.test
 
 # Static workflow policy is local and deterministic; scans remain a separate
 # explicit target because their vulnerability databases are intentionally fresh.
@@ -152,7 +153,7 @@ security-govulncheck-offline-fixture:
 # fail the gate even with zero findings. They are not part of the shipped
 # module (`go list ./...` excludes them), and the fixture has its own offline
 # govulncheck target above.
-GOSEC_EXCLUDE_DIRS := -exclude-dir=spike/wails-websocket -exclude-dir=test/security-fixtures/govulncheck-offline
+GOSEC_EXCLUDE_DIRS := -exclude-dir=test/security-fixtures/govulncheck-offline
 
 security-gosec:
 	"$(GOSEC)" -exclude-generated -severity high $(GOSEC_EXCLUDE_DIRS) ./...

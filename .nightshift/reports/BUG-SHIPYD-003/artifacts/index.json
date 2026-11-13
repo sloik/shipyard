@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-003",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-11-13T11:30:17Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Written from the failing security step of run 43416709784 on 2026-11-13",
+      "path": "artifacts/20261113T113017Z-decision-state-rationale-authored-draft-written-f.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T11:30:30Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: Root cause confirmed: runner cache holds Go 1.26.10, go.dev lists 1.26.11 with the fix; owner asked for green CI on 2026",
+      "path": "artifacts/20261113T113030Z-status-transition-draft-ready-root-cause-confirmed-runner-.json"
+    },
+    {
+      "type": "validation-evidence",
+      "created": "2026-11-13T11:30:30Z",
+      "actor": "coordinator",
+      "summary": "validation performed for promotion to ready",
+      "path": "artifacts/20261113T113030Z-validation-evidence-validation-performed-for-promotion-to-re.json"
+    }
+  ]
+}

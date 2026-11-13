@@ -5,6 +5,69 @@
 > For the full per-spec metrics YAML schema, see `canonical/metrics/_SCHEMA.md`.
 > SPEC-028 adds an optional `phases.synthesis_gate` block when Step 9.7 fires.
 
+## Delivery evidence joins (SPEC-NS-KIT-209)
+
+The existing `verification_report.py throughput-report` adds
+`delivery_observations.schema_version: "1.0.0"`. Legacy project/lane distributions
+remain separate. Declare optional local inputs with `--delivery-sources` pointing
+to a JSON list of objects containing `kind`, `path`, and explicit opaque
+`repository_id`/`project_id`. Relative paths resolve against that descriptor.
+Inputs are read only, bounded to64 sources,2MiB per JSON/JSONL file and10,000 rows per source; existing SQLite stores use bounded read-only queries for at most256 explicit spec IDs.
+The report never creates, binds or migrates a status store. `terminal_store` uses
+the existing read-only projection accessor and explicit bounded `spec_ids`.
+
+Supported kinds are `events`, `economics`, `fresh_main`, `dispatch`, `terminal`,
+`terminal_store`, `native`, `activity`, and `release`. Native inputs retain the
+suite-sample `kind: native`, `invocation_identity`, `native_exit_code`, `wall_s`
+and original creation fields. No import launches a native command. Receipt-based
+observations carry `observation_origin: receipt`; they cannot inflate emission
+coverage or become additional independent samples. A completed release requires
+existing positive-delivery validation against the declared `manifest_path` and,
+when needed, `canonical_root`; a pending or opaque legacy release token proves
+no released stage. Input locators never enter the public join output.
+
+`records` are keyed by explicit repository/project, spec, run and optional attempt.
+Stable observation IDs or receipt-content digests deduplicate identical repeats;
+conflicting identities are quarantined in `unjoinable`. Only recorded economics
+`lineage` creates `lineage_links`; spec-name similarity, filenames, mtimes and Git
+dates do not create joins. Stages `ready_restored`, `candidate_accepted`,
+`integrated`, `projection_complete` and `released` are independent nullable facts.
+Ready restoration and an accepted decision awaiting projection do not imply
+integration or release. Product, diagnostic, admissibility and settlement outcomes
+remain separate; omitted measurements and original native age stay unknown.
+Original interval endpoints survive; overlapping intervals are not summed into an
+invented wall-clock duration. Avoided runtime is explicitly `estimated`, never
+measured savings, execution or an additional sample.
+
+Coverage counts independently retained supported demand receipts, then emitted
+observations matching those demands. Mark a declared finite population complete
+only when its full retained inventory was enumerated: `population_complete: true`.
+Economics imports use recorded proposal action IDs, eligibility, dispositions and
+validated record digests; fresh-main imports check advisory metadata against the
+unchanged core decision digest. Dispatch matches are offers, not consumption.
+Eligible replacement/amendment dispositions and abandoned demands remain in the denominator. Missing inventory,
+unsupported populations, malformed receipts and incomplete legacy identity produce
+unknown eligible/observed totals, never100percent inferred from emitted rows.
+An empty, genuinely complete inventory is distinct from an unavailable population.
+
+`delivery_observed` emissions use existing run logs. Their bounded public fields
+are IDs, reason codes, digests, versions, enums, timestamps and numeric/unknown
+measurements. Opaque repository/component IDs are recorded at the parent boundary
+from its explicit Git/install context; readers never recover private paths.
+Raw prompts, commands, environment/configuration values and private paths are not
+projected. Optional normalization, context or sink failures cannot alter native
+returns, reuse/recovery eligibility, required safety receipts, lifecycle, merge or
+cleanup. Economics observations follow required receipt persistence and never
+change its decision digest or owner disposition. Fresh-main consumption follows
+the existing owner decision; the independent head and original native proof remain
+required. Recovery observation is emitted after the existing Ready transition.
+
+A separately commissioned future adoption study may stop at20 eligible deliveries
+or14 days. Coverage90percent and a20percent candidate-to-integration median reduction
+are hypotheses, not implementation acceptance criteria. Preregister scope, producer
+identity and compatible comparisons separately; insufficient evidence is inconclusive.
+No extra native runs or new completion/live gate are introduced to collect samples.
+
 ## Emission path (SPEC-067)
 
 Per-spec metrics are emitted by **`canonical/record_metrics.py`**, not hand-authored

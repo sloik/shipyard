@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "project_code": "XLSXTK",
+  "ids": [
+    "FART-INFRA-001",
+    "FART-TEST-001",
+    "FART-TEST-002",
+    "SPEC-003",
+    "SPEC-004",
+    "SPEC-005",
+    "SPEC-006",
+    "SPEC-007",
+    "SPEC-008",
+    "SPEC-009",
+    "SPEC-010",
+    "SPEC-011"
+  ]
+}

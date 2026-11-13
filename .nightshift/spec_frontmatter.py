@@ -46,7 +46,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import yaml
 
@@ -354,6 +354,282 @@ def check_column_override(override: object) -> list:
             )
 
     return problems
+
+
+# ---------------------------------------------------------------------------
+# SPEC-419 / SPEC-420: project-configurable spec metadata policy
+# ---------------------------------------------------------------------------
+#
+# One shared policy reader and checker for ``spec_metadata.fields.<name>``.
+# ``version`` (SPEC-419) is the first enforced field; ``tags`` (SPEC-420) shares
+# the reader/validator shape and registers its list value rule in
+# ``_FIELD_VALUE_RULES``. Every consumer (validators, promotion gate, admission routes, board) calls
+# these functions; none re-implements a rule.
+
+SPEC_METADATA_FIELD_NAMES: Tuple[str, ...] = ("version", "tags")
+_SPEC_METADATA_FIELD_KEYS = frozenset({"required", "allowed_values"})
+# Statuses whose violations are errors (promotion/dispatch); a draft only warns and a
+# terminal/other status is audited without rewriting history.
+SPEC_METADATA_ENFORCED_STATUSES = frozenset({"planned", "ready", "in_progress"})
+
+
+@dataclass(frozen=True)
+class FieldPolicy:
+    """One field's project policy: whether it is required and its optional exact-match allowlist."""
+
+    name: str
+    required: bool = False
+    allowed_values: Optional[Tuple[str, ...]] = None
+
+
+@dataclass(frozen=True)
+class SpecMetadataPolicy:
+    """The parsed ``spec_metadata`` policy of one project; ``errors`` are deterministic config diagnostics."""
+
+    fields: Mapping[str, FieldPolicy]
+    errors: Tuple[str, ...] = ()
+
+    def field(self, name: str) -> FieldPolicy:
+        return self.fields.get(name) or FieldPolicy(name)
+
+    @property
+    def customised(self) -> bool:
+        return bool(self.errors) or any(
+            item.required or item.allowed_values is not None for item in self.fields.values()
+        )
+
+
+DEFAULT_SPEC_METADATA_POLICY = SpecMetadataPolicy({})
+
+
+def parse_spec_metadata_policy(config: Any) -> SpecMetadataPolicy:
+    """Read ``spec_metadata.fields.<name>.{required,allowed_values}`` from a parsed project config.
+
+    Missing configuration means every field is optional and unrestricted; nothing is inferred
+    from a project or release. Malformed configuration yields deterministic ``errors`` (and
+    the offending field falls back to its default so one bad field never masks another).
+    """
+    block = config.get("spec_metadata") if isinstance(config, Mapping) else None
+    if block is None:
+        return DEFAULT_SPEC_METADATA_POLICY
+    errors: List[str] = []
+    fields: Dict[str, FieldPolicy] = {}
+    if not isinstance(block, Mapping):
+        return SpecMetadataPolicy({}, ("spec_metadata must be a mapping",))
+    for key in block:
+        if key != "fields":
+            errors.append(f"spec_metadata has unknown key {key!r} (expected: fields)")
+    raw_fields = block.get("fields")
+    if raw_fields is None:
+        return SpecMetadataPolicy({}, tuple(errors))
+    if not isinstance(raw_fields, Mapping):
+        return SpecMetadataPolicy({}, tuple(errors) + ("spec_metadata.fields must be a mapping",))
+    for name, raw in raw_fields.items():
+        where = f"spec_metadata.fields.{name}"
+        if name not in SPEC_METADATA_FIELD_NAMES:
+            errors.append(f"{where}: unknown field (supported: {', '.join(SPEC_METADATA_FIELD_NAMES)})")
+            continue
+        if raw is None:
+            fields[name] = FieldPolicy(name)
+            continue
+        if not isinstance(raw, Mapping):
+            errors.append(f"{where} must be a mapping")
+            continue
+        for key in raw:
+            if key not in _SPEC_METADATA_FIELD_KEYS:
+                errors.append(f"{where} has unknown key {key!r} (expected: required, allowed_values)")
+        required = raw.get("required", False)
+        if required is None:
+            required = False
+        if not isinstance(required, bool):
+            errors.append(f"{where}.required must be a boolean, got {type(required).__name__}")
+            required = False
+        allowed = raw.get("allowed_values")
+        allowed_tuple: Optional[Tuple[str, ...]] = None
+        if allowed is not None:
+            problems = _allowlist_problems(allowed)
+            if problems:
+                errors.extend(f"{where}.allowed_values {problem}" for problem in problems)
+            else:
+                allowed_tuple = tuple(allowed)
+        fields[name] = FieldPolicy(name, required, allowed_tuple)
+    return SpecMetadataPolicy(fields, tuple(errors))
+
+
+def _allowlist_problems(allowed: Any) -> List[str]:
+    if not isinstance(allowed, list):
+        return [f"must be null or a list of strings, got {type(allowed).__name__}"]
+    if not allowed:
+        return ["must not be empty (use null for unrestricted values)"]
+    problems: List[str] = []
+    for index, item in enumerate(allowed):
+        if not isinstance(item, str):
+            problems.append(f"[{index}] must be a string, got {type(item).__name__}")
+        elif not item.strip():
+            problems.append(f"[{index}] must not be blank")
+        elif item != item.strip():
+            problems.append(f"[{index}] {item!r} must not have leading or trailing whitespace")
+    if not problems:
+        duplicates = sorted({item for item in allowed if allowed.count(item) > 1})
+        if duplicates:
+            problems.append("has duplicate entries: " + ", ".join(repr(item) for item in duplicates))
+    return problems
+
+
+def load_spec_metadata_policy(config_path: Path | None) -> SpecMetadataPolicy:
+    """Load the policy from one project's own ``config.yaml`` (no config -> defaults).
+
+    ``config.yaml`` is a multi-document stream; top-level mappings are merged. A file that is
+    not valid YAML yields defaults unless it visibly declares ``spec_metadata:``, in which case
+    the policy is a configuration error (it must not silently turn enforcement off).
+    """
+    if config_path is None:
+        return DEFAULT_SPEC_METADATA_POLICY
+    # One parse per (file, mtime, size): a directory or staged validation reads the policy once, not per spec.
+    try:
+        stat = Path(config_path).stat()
+        key = (str(config_path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return DEFAULT_SPEC_METADATA_POLICY
+    cached = _POLICY_CACHE.get(key)
+    if cached is None:
+        cached = _load_spec_metadata_policy_uncached(Path(config_path))
+        if len(_POLICY_CACHE) > 64:
+            _POLICY_CACHE.clear()
+        _POLICY_CACHE[key] = cached
+    return cached
+
+
+_POLICY_CACHE: Dict[Tuple[str, int, int], SpecMetadataPolicy] = {}
+
+
+def _load_spec_metadata_policy_uncached(config_path: Path) -> SpecMetadataPolicy:
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return DEFAULT_SPEC_METADATA_POLICY
+    merged: Dict[str, Any] = {}
+    try:
+        for document in yaml.safe_load_all(text):
+            if isinstance(document, dict):
+                merged.update(document)
+    except yaml.YAMLError as exc:
+        if any(line.startswith("spec_metadata:") for line in text.splitlines()):
+            return SpecMetadataPolicy({}, (f"config.yaml is not valid YAML, so spec_metadata cannot be read: {type(exc).__name__}",))
+        return DEFAULT_SPEC_METADATA_POLICY
+    return parse_spec_metadata_policy(merged)
+
+
+def project_config_path_for_specs_dir(specs_dir: Path) -> Path:
+    """The project's ``config.yaml`` beside its specs directory (same rule as ``spec_artifacts.project_config_path``)."""
+    specs_dir = Path(specs_dir)
+    return (specs_dir.parent if specs_dir.name == "specs" else specs_dir) / "config.yaml"
+
+
+def spec_metadata_policy_for_specs_dir(specs_dir: Path) -> SpecMetadataPolicy:
+    return load_spec_metadata_policy(project_config_path_for_specs_dir(specs_dir))
+
+
+def _scalar_label_problem(name: str, value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return f"{name} must be a string label, got {type(value).__name__}: {value!r}"
+    if not value.strip():
+        return f"{name} must not be blank"
+    if value != value.strip():
+        return f"{name} {value!r} must not have leading or trailing whitespace"
+    return None
+
+
+def _tag_list_problem(name: str, value: Any) -> Optional[str]:
+    """SPEC-420: ``tags`` is a list of unique, nonblank, unpadded, case-sensitive strings (no splitting or folding)."""
+    if not isinstance(value, list):
+        return f"{name} must be a list of strings, got {type(value).__name__}: {value!r}"
+    for index, item in enumerate(value):
+        problem = _scalar_label_problem(f"{name}[{index}]", item)
+        if problem:
+            return problem
+    duplicates = sorted({item for item in value if value.count(item) > 1})
+    if duplicates:
+        return f"{name} has duplicate entries: " + ", ".join(repr(item) for item in duplicates)
+    return None
+
+
+# field name -> value rule returning a problem string or None for one present, non-null value.
+_FIELD_VALUE_RULES: Dict[str, Callable[[str, Any], Optional[str]]] = {
+    "version": _scalar_label_problem,
+    "tags": _tag_list_problem,
+}
+# Multi-valued fields: every member is checked against the allowlist, and an empty list means unassigned.
+_LIST_FIELDS = frozenset({"tags"})
+
+
+def spec_metadata_problems(
+    frontmatter: Mapping[str, Any], policy: SpecMetadataPolicy | None = None,
+) -> List[str]:
+    """Severity-free policy violations of ``frontmatter`` (config errors first), in stable order.
+
+    A missing or YAML-null value is *unassigned*: fine unless the field is required. A present
+    value must satisfy the field's value rule and, when an allowlist is set, match it exactly
+    (labels are opaque and case-sensitive; no ordering or SemVer is applied).
+    """
+    policy = policy or DEFAULT_SPEC_METADATA_POLICY
+    problems = [f"spec_metadata policy: {error}" for error in policy.errors]
+    for name, rule in _FIELD_VALUE_RULES.items():
+        field_policy = policy.field(name)
+        value = frontmatter.get(name)
+        if value is None or (name in _LIST_FIELDS and value == []):
+            if field_policy.required:
+                problems.append(
+                    f"spec metadata: {name} is required by project policy "
+                    f"(spec_metadata.fields.{name}.required: true)"
+                )
+            continue
+        problem = rule(name, value)
+        if problem:
+            problems.append(f"spec metadata: {problem}")
+        elif field_policy.allowed_values is not None:
+            for member in (value if name in _LIST_FIELDS else [value]):
+                if member not in field_policy.allowed_values:
+                    problems.append(
+                        f"spec metadata: {name} {member!r} is not allowed by project policy "
+                        f"(allowed: {', '.join(field_policy.allowed_values)})"
+                    )
+    return problems
+
+
+def spec_metadata_findings(
+    frontmatter: Mapping[str, Any], policy: SpecMetadataPolicy | None = None,
+) -> List[str]:
+    """``spec_metadata_problems`` with the validator's severity convention.
+
+    planned/ready/in_progress -> error; draft -> ``WARNING:``; any other (terminal or held)
+    status -> ``WARNING: audit:`` so history stays readable and is never rewritten.
+    """
+    status = frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None
+    findings = []
+    for message in spec_metadata_problems(frontmatter, policy):
+        if status in SPEC_METADATA_ENFORCED_STATUSES:
+            findings.append(message)
+        elif status == "draft":
+            findings.append("WARNING: " + message)
+        else:
+            findings.append(f"WARNING: audit: {message} (status {status}; history is not rewritten)")
+    return findings
+
+
+def spec_metadata_audit(
+    specs: Iterable[Mapping[str, Any]], policy: SpecMetadataPolicy | None = None,
+) -> List[Dict[str, Any]]:
+    """Specs that violate ``policy`` today, for listing before enforcement is opted into (read-only)."""
+    rows = []
+    for fm in sorted(specs, key=lambda item: str(item.get("id", ""))):
+        problems = spec_metadata_problems(fm, policy)
+        if problems:
+            status = str(fm.get("status", ""))
+            severity = "error" if status in SPEC_METADATA_ENFORCED_STATUSES else (
+                "warning" if status == "draft" else "audit")
+            rows.append({"id": str(fm.get("id", "")), "status": status, "severity": severity, "problems": problems})
+    return rows
 
 
 class FrontmatterError(ValueError):
