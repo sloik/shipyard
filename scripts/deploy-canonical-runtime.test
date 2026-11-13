@@ -24,15 +24,25 @@ label="com.argo.shipyard.app.canonical"
 print -- "$*" >> "$log"
 case "$1" in
   print)
+    # bootout is asynchronous: the job stays visible for a few polls.
+    if [[ "$(<"$state")" == unloading ]]; then
+      n=$(( $(<"${state}.unload") - 1 ))
+      print $n > "${state}.unload"
+      (( n > 0 )) || print unloaded > "$state"
+      exit 0
+    fi
     [[ "$(<"$state")" == loaded ]] || exit 1
     print "program = $SHIPYARD_TEST_CANONICAL_BIN"
     print "pid = $(<"${state}.pid")"
     ;;
   bootout)
-    print unloaded > "$state"
+    if [[ "$(<"$state")" == loaded ]]; then
+      print unloading > "$state"
+      print 2 > "${state}.unload"
+    fi
     ;;
   bootstrap)
-    [[ "$(<"$state")" != loaded ]] || { print -u2 "Bootstrap failed: 5: Input/output error"; exit 5; }
+    [[ "$(<"$state")" == unloaded ]] || { print -u2 "Bootstrap failed: 5: Input/output error"; exit 5; }
     print loaded > "$state"
     ;;
   kickstart)

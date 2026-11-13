@@ -16,6 +16,7 @@ go_cmd="${SHIPYARD_GO:-go}"
 curl_cmd="${SHIPYARD_CURL:-curl}"
 sleep_cmd="${SHIPYARD_SLEEP:-sleep}"
 health_attempts="${SHIPYARD_HEALTH_ATTEMPTS:-15}"
+unload_attempts="${SHIPYARD_UNLOAD_ATTEMPTS:-120}"
 legacy_plist="$home_root/Library/LaunchAgents/com.argo.shipyard.app.plist"
 legacy_label="com.argo.shipyard.app"
 legacy_service="gui/$launchd_uid/$legacy_label"
@@ -36,8 +37,24 @@ prior_pid=""
 cleanup() { rm -f "$candidate" "$prior_runtime" "$prior_plist" "$live_payload" "$prior_service_state"; }
 trap cleanup EXIT
 
+# `launchctl bootout` returns before the job has exited; a bootstrap issued
+# while it is still shutting down fails with error 5. Wait until launchd no
+# longer knows the service (the gateway can take a while to checkpoint a large
+# capture DB on shutdown).
+bootout_and_wait() {
+  local svc="$1"
+  "$launchctl_cmd" bootout "$svc" 2>/dev/null || true
+  local i
+  for i in {1..$unload_attempts}; do
+    "$launchctl_cmd" print "$svc" >/dev/null 2>&1 || return 0
+    "$sleep_cmd" 1
+  done
+  print -u2 "warning: $svc still loaded after ${unload_attempts}s"
+  return 0
+}
+
 restore_legacy() {
-  "$launchctl_cmd" bootout "$service" 2>/dev/null || true
+  bootout_and_wait "$service"
   "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$legacy_plist" 2>/dev/null || true
   "$launchctl_cmd" kickstart -k "$legacy_service" 2>/dev/null || true
 }
@@ -46,7 +63,7 @@ restore_prior_runtime() {
   if [[ "$had_prior_runtime" == true ]]; then
     mv "$prior_runtime" "$canonical_bin"
   fi
-  "$launchctl_cmd" bootout "$service" 2>/dev/null || true
+  bootout_and_wait "$service"
   if [[ "$had_prior_service" == true ]]; then
     [[ -s "$prior_plist" ]] && cp -p "$prior_plist" "$plist"
     "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$plist" 2>/dev/null || true
@@ -101,10 +118,10 @@ chmod 755 "$canonical_bin"
 
 "$plist_buddy_cmd" -c "Set :ProgramArguments:0 $canonical_bin" "$plist"
 "$plutil_cmd" -lint "$plist"
-"$launchctl_cmd" bootout "$legacy_service" 2>/dev/null || true
+bootout_and_wait "$legacy_service"
 # bootstrap fails with error 5 for an already-loaded label. Unload the canonical
 # service first so both initial installation and replacement use one path.
-"$launchctl_cmd" bootout "$service" 2>/dev/null || true
+bootout_and_wait "$service"
 if ! "$launchctl_cmd" bootstrap "gui/$launchd_uid" "$plist"; then
   fail_and_restore "canonical launchd bootstrap failed; restored the prior runtime and service"
 fi
