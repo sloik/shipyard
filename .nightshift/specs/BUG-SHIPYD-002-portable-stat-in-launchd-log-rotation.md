@@ -82,6 +82,12 @@ the first GNU environment to execute them.
       the test only replaces the two helpers and adds the shim.
 - [ ] AC5: `make script-check` passes locally. SPEC-SHIPYD-001 AC5 holds again in CI.
 
+## Scope Amendments
+
+| Date | Path or glob | Change (old → new) | Reason | Approved by |
+| --- | --- | --- | --- | --- |
+| 2026-11-13 | .nightshift/specs/BUG-SHIPYD-002-portable-stat-in-launchd-log-rotation.md | not in scope → this spec's own file may be created by the delivering commit | The spec file was first committed together with the fix (PR #53), not on `main` beforehand, so the scope gate reads the new file as a `scope_self_edit`. The declared `scope.write` list itself was never widened. | human |
+
 ## Context
 
 - Violated spec: `.nightshift/specs/SPEC-SHIPYD-001-capture-and-log-retention.md`

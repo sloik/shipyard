@@ -88,6 +88,12 @@ Unchecked `uint64(...)` conversions of signed values: the SQLite page arithmetic
 - [ ] AC5: The CI job `test` passes in full on the PR, so the SPEC-BUG-159 gate passes again.
 - [ ] AC6: `make lint`, `make type-check` and `make coverage-check` pass.
 
+## Scope Amendments
+
+| Date | Path or glob | Change (old → new) | Reason | Approved by |
+| --- | --- | --- | --- | --- |
+| 2026-11-13 | .nightshift/specs/BUG-SHIPYD-004-gosec-g115-capture-size-conversions.md | not in scope → this spec's own file may be created by the delivering commit | The spec file was first committed together with the fix (PR #53), not on `main` beforehand, so the scope gate reads the new file as a `scope_self_edit`. The declared `scope.write` list itself was never widened. | human |
+
 ## Context
 
 - Violated specs: `.nightshift/specs/SPEC-BUG-159-vulnerability-supply-chain-gates.md`,

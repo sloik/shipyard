@@ -80,6 +80,12 @@ and only downloads when nothing cached satisfies it. Without `check-latest: true
 - [ ] AC4: `go-version` values and action SHAs in the diff are unchanged. The SPEC-BUG-159
       reachable-vulnerability gate passes again on `main` after merge.
 
+## Scope Amendments
+
+| Date | Path or glob | Change (old → new) | Reason | Approved by |
+| --- | --- | --- | --- | --- |
+| 2026-11-13 | .nightshift/specs/BUG-SHIPYD-003-ci-go-patch-release-for-govulncheck.md | not in scope → this spec's own file may be created by the delivering commit | The spec file was first committed together with the fix (PR #53), not on `main` beforehand, so the scope gate reads the new file as a `scope_self_edit`. The declared `scope.write` list itself was never widened. | human |
+
 ## Context
 
 - Violated spec: `.nightshift/specs/SPEC-BUG-159-vulnerability-supply-chain-gates.md`
