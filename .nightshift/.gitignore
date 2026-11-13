@@ -21,6 +21,9 @@ timings.json
 board.restart.log
 board.pid
 
+# Generated machine-local discovery state written by `nightshift-sync.py registry`; never tracked.
+projects-registry.json
+
 # Temporary work files (if agent creates any)
 *.tmp
 .DS_Store

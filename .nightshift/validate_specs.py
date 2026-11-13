@@ -13,22 +13,33 @@ Usage:
   python3 validate_specs.py <file_or_directory> [--format json|text]
 """
 
+import argparse
+import functools
+import hashlib
 import json
+import math
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 if __name__ == "__main__":
     sys.dont_write_bytecode = True
 
 from dependency_registry import DependencyRegistryResolver
+import spec_id as spec_id_grammar
 from deployment_tiers import deployment_block_findings, resolve_deployment_policy
 from lifecycle import migrate_legacy_planning, validate_blocked
 import lifecycle
 import spec_artifacts
+import spec_frontmatter
 
 try:
     import yaml
@@ -276,24 +287,46 @@ def validate_scope_amendments(content: str) -> list[str]:
     return errors
 
 
+def ready_ac_baseline(spec_file: Path) -> dict[str, str]:
+    """Resolve the actual ready object, including a transition which removed ready."""
+    root = Path(subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=spec_file.parent.parent,
+                               text=True, capture_output=True, check=True).stdout.strip())
+    relative = spec_file.resolve().relative_to(root).as_posix()
+    rows = subprocess.run(['git', 'log', '--max-count=1', '--full-history', '-m', '-G', r'^status: ready$', '--format=%H %P', '--', relative],
+                          cwd=root, text=True, capture_output=True, check=True).stdout.splitlines()
+    if not rows:
+        raise ValueError('ready baseline missing')
+    identities = rows[0].split()
+    def read(revision):
+        result = subprocess.run(['git', 'show', f'{revision}:{relative}'], cwd=root, text=True, capture_output=True)
+        if result.returncode:
+            return None
+        block = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', result.stdout, re.S)
+        if block is None:
+            return None
+        parsed = yaml.safe_load(block.group(1))
+        return result.stdout if isinstance(parsed, dict) and parsed.get('status') == 'ready' else None
+    current = read(identities[0])
+    if current is not None:
+        return {'revision': identities[0], 'text': current}
+    parents = [(revision, read(revision)) for revision in identities[1:]]
+    ready = [(revision, text) for revision, text in parents if text is not None]
+    if len(ready) != 1:
+        raise ValueError('ready baseline missing or ambiguous')
+    return {'revision': ready[0][0], 'text': ready[0][1]}
+
+
 def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
-    """Detect changed AC text against the last ready revision, when available."""
+    """Detect changed AC text against the actual last ready object, when available."""
     try:
-        root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=spec_file.parent.parent, text=True, capture_output=True, check=True).stdout.strip())
-        relative = spec_file.resolve().relative_to(root)
-        prior = subprocess.run(["git", "log", "-G", r"^status: ready$", "--format=%H", "--", str(relative)], cwd=root, text=True, capture_output=True, check=True).stdout.splitlines()
-        if not prior:
-            return []
-        old = subprocess.run(["git", "show", f"{prior[0]}:{relative}"], cwd=root, text=True, capture_output=True)
-        if old.returncode:
-            return []
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return []
+        baseline = ready_ac_baseline(spec_file)
+    except (OSError, subprocess.SubprocessError, ValueError, yaml.YAMLError):
+        return []  # Existing validator's history-unavailable policy remains unchanged.
     def acs(text: str) -> dict[str, str]:
         block = re.search(r"^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)", text, re.MULTILINE)
         items = re.findall(r"^- \[[ x]\]\s*(AC\d+[^\n]*)", block.group(1), re.MULTILINE) if block else []
         return {re.match(r"AC\d+", item).group(0): item for item in items}
-    current, previous = acs(content), acs(old.stdout)
+    current, previous = acs(content), acs(baseline["text"])
     deleted = sorted(set(previous) - set(current))
     changed = [key for key in sorted(set(previous) & set(current)) if previous[key] != current[key]]
     amendment = re.search(r"^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
@@ -304,6 +337,51 @@ def validate_ac_amendments(content: str, spec_file: Path) -> list[str]:
         if old_text not in table or new_text not in table:
             findings.append(f"ac_amendment_undocumented: {new_text}")
     return findings
+
+
+# BUG-NS-KIT-140 R3/D2(i): only rows dated on or after this day are checked (warning only).
+AC_AMENDMENT_UNAPPLIED_SINCE = "2026-10-09"
+
+
+def validate_ac_amendment_unapplied(content: str) -> list[str]:
+    """Warn when an AC Amendments row's new wording never reached its AC line.
+
+    The latest eligible row per AC id is checked: its Change cell's new side (after the
+    first ``->`` or arrow character) must appear, whitespace-normalised, in the AC item.
+    Rows whose AC cell is not a single ``AC<n>`` id, rows with no arrow or an empty new
+    side, and rows dated before the cutoff are skipped.
+    """
+    def squash(text: str) -> str:
+        return " ".join(text.split())
+
+    block = re.search(r"^## Acceptance Criteria\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
+    table = re.search(r"^## AC Amendments\s*$([\s\S]*?)(?=^## |\Z)", content, re.MULTILINE)
+    if not block or not table:
+        return []
+    lines: dict[str, str] = {}
+    for item in re.split(r"(?m)^(?=- \[[ xX]\])", block.group(1)):
+        found = re.match(r"- \[[ xX]\]\s*(AC\d+)\b", item)
+        if found:
+            lines[found.group(1)] = squash(item)
+    latest: dict[str, tuple[str, str]] = {}
+    for row in table.group(1).splitlines():
+        row = row.strip()
+        if not row.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if len(cells) < 3 or not re.fullmatch(r"AC\d+", cells[1]):
+            continue
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cells[0]) or cells[0] < AC_AMENDMENT_UNAPPLIED_SINCE:
+            continue
+        parts = re.split(r"\s*(?:->|\u2192)\s*", cells[2], maxsplit=1)
+        new_side = squash(parts[1]) if len(parts) == 2 else ""
+        if new_side:
+            latest[cells[1]] = (new_side, cells[0])
+    return [
+        f"WARNING: ac_amendment_unapplied: {ac} row dated {date} names new wording that its AC line does not carry"
+        for ac, (new_side, date) in sorted(latest.items())
+        if ac in lines and new_side not in lines[ac]
+    ]
 
 
 def _historical_checkbox_disposition(
@@ -734,6 +812,10 @@ _NAMED_FINDING_FAMILIES: tuple[str, ...] = (
 # one conceptual finding into many singleton "families". Ordered; first match
 # wins, evaluated only after the named constants above.
 _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("unregistered-type", "unregistered type:"),
+    ("unknown-dependency", "unknown dependency:"),
+    ("spec-metadata-policy", "spec metadata:"),
+    ("spec-metadata-config", "spec_metadata policy:"),
     ("done-spec-unchecked-checkbox", "but has an unchecked checkbox in"),
     ("missing-required-field-id", "missing required field: id"),
     ("missing-required-field-status", "missing required field: status"),
@@ -768,12 +850,42 @@ _AD_HOC_FINDING_FAMILIES: tuple[tuple[str, str], ...] = (
     ("block-reason-as-title", "first body H1 is 'Block Reason'"),
     ("missing-frontmatter-open-delimiter", "missing opening frontmatter delimiter"),
     ("missing-frontmatter-close-delimiter", "missing closing frontmatter delimiter"),
+    ("release-plan-required", "release-impact spec requires a valid release_plan before Ready"),
+    ("release-plan-invalid", "release_plan "),
     ("release-handoff-artifact-required", "release-impact spec requires a release handoff artifact"),
     ("release-handoff-awaiting-repin", "release handoff awaits coordinator re-pin"),
     # SPEC-332: delivered-but-not-closed and board/file status divergence.
     ("release-handoff-completed-spec-not-done", "release handoff completed"),
     ("status-sync-mismatch", "status-sync mismatch"),
     ("ac-amendment-undocumented", "ac_amendment_undocumented:"),
+    # BUG-NS-KIT-119: families that predate the table but were landing in
+    # ``unclassified-finding``. Owner = the spec that introduced the emitter.
+    ("resolved-blocker-field-residual", "resolved blocker field(s) still present"),  # SPEC-355
+    ("real-use-evidence-live-execution-incomplete", "requires completed live execution"),  # real-use experiments (6c17db23)
+    ("live-item-evidence-reference-missing", "is missing a valid evidence reference"),  # real_use_evidence LE evidence rule
+    ("artifact-orphan-unindexed", "orphan artifact file not listed in index.json"),  # SPEC-291
+    ("artifact-index-missing", "exists with no index.json"),  # SPEC-291
+    ("ac-amendment-deleted", "ac_amendment_deleted:"),  # SPEC-260
+    ("ac-amendment-unapplied", "ac_amendment_unapplied:"),  # BUG-NS-KIT-140
+    ("blocker-evidence-unresolved", "blocker_evidence_unresolved:"),  # BUG-NS-KIT-142
+    ("spec-id-not-fleet-unique", "not fleet-unique"),  # fleet ID uniqueness (warning only)
+    ("untracked-report-artifact", "untracked report artifact:"),  # artifact_reachability.py
+    ("untracked-run", "untracked run:"),  # artifact_reachability.py
+    ("artifact-index-untracked-file", "references an untracked artifact file"),  # SPEC-291 spec_artifacts.py
+    # SPEC-416 spec-ID grammar family (spec_id.py emits spec_id_kind_type).
+    ("spec-id-grammar", "spec_id_grammar:"),
+    ("spec-id-code-mismatch", "spec_id_code_mismatch:"),
+    ("spec-id-kind-type", "spec_id_kind_type:"),
+    ("spec-id-collision", "spec_id_collision:"),
+    ("spec-id-enforcement-inactive", "spec_id_enforcement_inactive:"),
+    ("spec-id-legacy-list-invalid", "spec_id_legacy_list_invalid:"),
+    ("registry-code-invalid", "registry code:"),
+    ("staged-configuration-invalid", "staged_configuration_invalid:"),  # SPEC-397-001
+    ("deploy-environment", "deploy_environment:"),
+    ("board-column-defaults", "board_column_defaults"),  # SPEC-080
+    # Catch-all for the remaining real_use_evidence sub-findings; deliberately last so every
+    # more specific real-use marker above keeps its own family.
+    ("real-use-evidence", "real_use_evidence:"),
 )
 
 # A finding matching neither table above still needs a stable, machine-
@@ -785,6 +897,82 @@ _UNCLASSIFIED_FINDING_FAMILY = "unclassified-finding"
 # finished or retired spec's historical claim does not keep future findings
 # owned once the spec itself is closed.
 _TERMINAL_SPEC_STATUSES = frozenset({"done", "superseded", "retired"})
+
+
+def load_spec_type_registry(guide_path: Path | None = None) -> set[str] | None:
+    """The ``type:`` values in SPEC-GUIDE.md ``## Spec Types`` (BUG-NS-KIT-100 R1); ``None`` when no guide is installed.
+
+    The one registry reader: ``board_ctl.py rules check`` calls it too, so the validator
+    and the rules pre-flight cannot disagree about which types exist.
+    """
+    path = guide_path or Path(__file__).resolve().parent / "SPEC-GUIDE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    start = text.find("\n## Spec Types")
+    if start < 0:
+        return None
+    end = text.find("\n### Rules", start)
+    section = text[start:end if end > 0 else len(text)]
+    return set(re.findall(r"^\|\s*`([a-z][a-z-]*)`\s*\|", section, re.MULTILINE))
+
+
+# BUG-NS-KIT-118: an unregistered type is an audit WARNING only for these finished statuses.
+UNREGISTERED_TYPE_AUDIT_STATUSES = frozenset({"done", "superseded", "retired", "blocked"})
+
+
+def spec_type_registry_finding(fm: dict, registry: set[str] | None) -> str | None:
+    """An unregistered-type message for ``fm``, or ``None`` (NFR- ids may use any registered type's slot).
+
+    An error for draft/planned/ready/in_progress; an audit WARNING for done/superseded/retired/blocked.
+    """
+    if registry is None or "type" not in fm:
+        return None
+    spec_type = fm.get("type")
+    if isinstance(spec_type, str) and spec_type in registry:
+        return None
+    if str(fm.get("id", "")).startswith("NFR-"):
+        return None  # SPEC-GUIDE "Spec Types / Rules": an NFR- id is NFR-family whatever dated-run type it uses
+    message = (f"unregistered type: {spec_type!r} is not in the SPEC-GUIDE.md Spec Types registry: "
+               + ", ".join(sorted(registry)))
+    status = fm.get("status")
+    if isinstance(status, str) and status in UNREGISTERED_TYPE_AUDIT_STATUSES:
+        # BUG-NS-KIT-118: finished specs are history nobody edits; same audit wording as the dangling-`after:` case.
+        return f"WARNING: audit: {message} (status {status}; history is not rewritten)"
+    return message
+
+
+_OPEN_DEPENDENCY_STATUSES = frozenset({"planned", "ready", "in_progress"})
+
+
+def dependency_existence_findings(fm: dict, corpus: list[dict]) -> list[str]:
+    """``after:`` and bare-id ``requires_specs`` entries naming no spec in the same directory (BUG-NS-KIT-100 R2).
+
+    Error for planned/ready/in_progress; WARNING for draft; terminal and other statuses get an
+    audit WARNING so history is not rewritten. Qualified ``{project, spec}`` entries are not
+    resolved here (cross-project resolution stays with the dependency registry).
+    """
+    known = {str(item.get("id")) for item in corpus if isinstance(item, dict)}
+    after = fm.get("after")
+    requires = fm.get("requires_specs")
+    candidates = [("after", str(dep)) for dep in after] if isinstance(after, list) else []
+    if isinstance(requires, list):
+        candidates += [("requires_specs", entry) for entry in requires if isinstance(entry, str)]
+    status = fm.get("status") if isinstance(fm.get("status"), str) else None
+    spec_id = fm.get("id", "?")
+    findings = []
+    for field, dep in candidates:
+        if dep in known:
+            continue
+        message = f"unknown dependency: {spec_id} {field} names {dep!r}, which is not a spec in this specs directory"
+        if status in _OPEN_DEPENDENCY_STATUSES:
+            findings.append(message)
+        elif status == "draft":
+            findings.append("WARNING: " + message)
+        else:
+            findings.append(f"WARNING: audit: {message} (status {status}; history is not rewritten)")
+    return findings
 
 
 def classify_finding_family(message: str) -> str:
@@ -844,6 +1032,12 @@ def finding_family_summary(results: dict, frontmatters: list[dict]) -> dict:
     counts: dict[str, int] = {}
     for errors in results.values():
         for msg in errors:
+            # Status and commit gates deliberately expose advisory diagnostics.
+            # They cannot participate in the failure floor: otherwise a valid
+            # pending handoff that the status gate accepts as Done becomes an
+            # unowned fatal finding at commit time.
+            if _is_warning(msg):
+                continue
             key = classify_finding_family(msg)
             counts[key] = counts.get(key, 0) + 1
 
@@ -1071,11 +1265,20 @@ def _live_execution_items(body_lines: list[str]) -> tuple[set[str], set[str], di
 
 
 def _evidence_reference_exists(reference: str, spec_file: Path) -> bool:
-    """Resolve an evidence reference relative to the spec file or kit dir."""
-    if not reference or reference.startswith(("/", "~")) or ".." in Path(reference).parts or "://" in reference:
+    """Resolve an evidence reference relative to the spec file, kit dir or project root."""
+    if not lifecycle.is_safe_relative_posix_path(reference):
         return False
-    roots = [spec_file.parent, spec_file.parent.parent]
-    return any((root / reference).is_file() for root in roots)
+    # SPEC-NS-KIT-004 R4: a committed project file outside the kit directory
+    # (the kit dir's parent is the project root); symlinks may not escape it.
+    project_root = spec_file.parent.parent.parent
+    for root in (spec_file.parent, spec_file.parent.parent, project_root):
+        candidate = root / reference
+        try:
+            if candidate.is_file() and candidate.resolve().is_relative_to(project_root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def validate_real_use_evidence(
@@ -1145,6 +1348,42 @@ def validate_real_use_evidence(
                         f"evidence reference (expected inline `(evidence: <path>)` pointing "
                         f"to an existing file); found: {reference!r}"
                     )
+            try:
+                section = lifecycle.parse_state_rationale('\n'.join(body_lines))
+            except lifecycle.StateRationaleError:
+                # The ordinary rationale validator reports malformed sections;
+                # proof binding must not abort whole-corpus validation.
+                section = None
+            record = section.get('record') if isinstance(section, dict) else None
+            if isinstance(record, str) and lifecycle.is_safe_relative_posix_path(record):
+                artifact = spec_file.parent.parent / 'reports' / str(fm.get('id')) / record
+                try:
+                    content = json.loads(artifact.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    content = {}
+                binding = content.get('completion_binding') if isinstance(content, dict) else None
+                if binding is not None:
+                    proofs = binding.get('le_evidence') if isinstance(binding, dict) else None
+                    root = spec_file.parent.parent.parent.resolve()
+                    if not isinstance(proofs, dict) or set(proofs) != checked:
+                        errors.append('real_use_evidence: completion binding must cover every checked LE item')
+                    else:
+                        import hashlib
+                        for le_id, proof in proofs.items():
+                            name = proof.get('path') if isinstance(proof, dict) else None
+                            reference = evidence_refs.get(le_id)
+                            valid = isinstance(name, str) and lifecycle.is_safe_relative_posix_path(name)
+                            target = (root / name).resolve() if valid else None
+                            candidates = [(prefix / reference).resolve() for prefix in
+                                          (spec_file.parent, spec_file.parent.parent, root)] if reference else []
+                            try:
+                                valid = (valid and target.is_relative_to(root) and target in candidates
+                                         and target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest()
+                                         == proof.get('sha256'))
+                            except OSError:
+                                valid = False
+                            if not valid:
+                                errors.append(f'real_use_evidence: checked {le_id} hash-bound evidence disagrees with captured proof: {name!r}')
         return errors
     if not isinstance(deferred, list) or not deferred:
         return errors + ["delegated_experiment requires a non-empty deferred list"]
@@ -1281,6 +1520,222 @@ def fleet_uniqueness_findings(specs_dir: Path, spec_files: list[Path]) -> dict[s
                     f"WARNING: spec id {spec_id} also exists in {record.spec_path} — not fleet-unique"
                 )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# SPEC-416: mandatory project-prefixed IDs for NEW specs (R4), R5 legacy lists
+# ---------------------------------------------------------------------------
+
+# The frozen legacy-ID lists ship beside this module (the kit's
+# ``spec-id-legacy/`` in canonical, ``.nightshift/spec-id-legacy/`` installed).
+LEGACY_ID_DIR = Path(__file__).resolve().parent / "spec-id-legacy"
+
+
+def load_legacy_ids(code: str, legacy_dir: Path | None = None) -> set[str] | None:
+    """The frozen legacy-ID set for a project code; ``None`` when no list exists."""
+    path = (legacy_dir or LEGACY_ID_DIR) / f"{code}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ids = payload["ids"]
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("ids must be a list of strings")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"legacy ID list {path.name} is unreadable: {exc}") from exc
+    return set(ids)
+
+
+def _grammar_finding(spec_id: str, code: str) -> str | None:
+    if spec_id_grammar.parse_id(spec_id, strict=True) is not None:
+        return None
+    return (
+        f"spec_id_grammar: new spec id {spec_id} does not match the required grammar "
+        f"{spec_id_grammar.GRAMMAR} (kind one of {', '.join(spec_id_grammar.ID_KINDS)}; "
+        f"this project's code is {code}, e.g. SPEC-{code}-001)"
+    )
+
+
+def _code_finding(spec_id: str, code: str) -> str | None:
+    parsed = spec_id_grammar.parse_id(spec_id, strict=True)
+    if parsed is None or parsed.code == code:
+        return None
+    return (
+        f"spec_id_code_mismatch: spec id {spec_id} carries code {parsed.code} but this "
+        f"project's registered code is {code}"
+    )
+
+
+def _pairing_finding(spec_id: str, spec_type: object) -> str | None:
+    return spec_id_grammar.kind_type_mismatch(spec_id, spec_type)
+
+
+@functools.lru_cache(maxsize=64)
+def _checkout_identity(directory: Path) -> tuple[str, str] | None:
+    """(git common dir, repo-relative prefix) for ``directory``; ``None`` outside git."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute",
+             "--git-common-dir", "--show-prefix"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.splitlines()
+    if proc.returncode != 0 or len(lines) < 2:
+        return None
+    return str(Path(lines[0]).resolve()), lines[1]
+
+
+def _same_checkout_family(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` are the same directory of one repository in two of its worktrees."""
+    if not (a.is_dir() and b.is_dir()):
+        return False
+    ida, idb = _checkout_identity(a.resolve()), _checkout_identity(b.resolve())
+    return ida is not None and ida == idb
+
+
+def _collision_findings(
+    spec_id: str,
+    spec_path: Path,
+    content: bytes,
+    records: tuple,
+    owner_specs_dir: Path,
+) -> list[str]:
+    findings = []
+    for record in records:
+        if record.spec_path == spec_path or record.spec_path.parent == owner_specs_dir:
+            continue
+        if _same_checkout_family(record.spec_path.parent, owner_specs_dir):
+            continue  # the owning project seen from a linked worktree, not a second owner
+        try:
+            if record.spec_path.read_bytes() == content:
+                continue  # an identical copy is a mirror, not a second owner
+        except OSError:
+            continue
+        findings.append(
+            f"spec_id_collision: spec id {spec_id} in {spec_path} is already used in "
+            f"{record.spec_path} (project {record.project.name}); new spec IDs must be fleet-unique"
+        )
+    return findings
+
+
+def _read_spec_identity(spec_file: Path) -> tuple[Path, str, object, bytes] | None:
+    try:
+        content = spec_file.read_bytes()
+        fm = yaml.safe_load(content.decode("utf-8").split("\n---", 1)[0][3:]) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if isinstance(fm, dict) and fm.get("id"):
+        return spec_file.resolve(), str(fm["id"]), fm.get("type"), content
+    return None
+
+
+def _id_problems(spec_id, spec_type, code, path, content, records, owner_dir) -> list[str]:
+    problems = [
+        _grammar_finding(spec_id, code),
+        _code_finding(spec_id, code),
+        _pairing_finding(spec_id, spec_type),
+        *_collision_findings(spec_id, path, content, records, owner_dir),
+    ]
+    return [problem for problem in problems if problem]
+
+
+def new_id_findings(
+    specs_dir: Path,
+    spec_files: list[Path],
+    *,
+    registry_path: Path | None = None,
+    legacy_dir: Path | None = None,
+    owner_specs_dir: Path | None = None,
+) -> dict[str, list[str]]:
+    """R4: ERROR findings for NEW spec IDs (not on the project's frozen legacy list).
+
+    Enforcement needs the owning project's registered ``code`` and its legacy
+    list.  When either is unavailable the check is inactive and one WARNING is
+    reported under the registry name instead of silently passing.
+    """
+    owner_dir = Path(owner_specs_dir if owner_specs_dir is not None else specs_dir).resolve()
+    findings: dict[str, list[str]] = {path.name: [] for path in spec_files}
+    resolver = DependencyRegistryResolver(owner_dir, registry_path=registry_path, cache_seconds=0)
+    registry_name = resolver.registry_path.name
+    owner = resolver.current_project()
+    if owner is None or not owner.code:
+        _, registry_error = resolver.records_for(())
+        # An unreadable registry is already reported (SPEC-218); stay quiet about it here.
+        if resolver.registry_path.is_file() and registry_error is None:
+            findings[registry_name] = [
+                "WARNING: spec_id_enforcement_inactive: this project has no registered code in "
+                f"{registry_name}; regenerate the registry (nightshift-sync) to enforce "
+                f"{spec_id_grammar.GRAMMAR} on new specs"
+            ]
+        return findings
+    try:
+        legacy = load_legacy_ids(owner.code, legacy_dir)
+    except ValueError as exc:
+        findings[registry_name] = [f"spec_id_legacy_list_invalid: {exc}"]
+        return findings
+    if legacy is None:
+        findings[registry_name] = [
+            f"WARNING: spec_id_enforcement_inactive: no legacy ID list for code {owner.code}; "
+            "generate it with validate_specs.py --generate-legacy-ids"
+        ]
+        return findings
+
+    identities = [item for item in map(_read_spec_identity, spec_files) if item is not None]
+    candidates = [item for item in identities if item[1] not in legacy]
+    if not candidates:
+        return findings
+    records_by_id, _ = resolver.records_for(item[1] for item in candidates)
+    name_of = {path.resolve(): path.name for path in spec_files}
+    for path, spec_id, spec_type, content in candidates:
+        findings[name_of[path]].extend(
+            _id_problems(spec_id, spec_type, owner.code, path, content, records_by_id.get(spec_id, ()), owner_dir)
+        )
+    return findings
+
+
+def generate_legacy_ids(
+    registry_path: Path,
+    legacy_dir: Path,
+    *,
+    codes: list[str] | None = None,
+) -> dict[str, int]:
+    """R5: freeze each registered project's legacy-ID list from its CURRENT specs.
+
+    An ID is legacy when the new-ID rules (grammar, own code, kind/type pairing,
+    fleet uniqueness) would reject it today, so every existing spec validates
+    clean afterwards.  Reads each registered project's specs; writes only
+    ``<legacy_dir>/<CODE>.json``.
+    """
+    from dependency_registry import _expand_path, specs_dir_for_project
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    rows = [row for row in registry.get("projects", []) if isinstance(row, dict)]
+    problems = spec_id_grammar.validate_project_codes(rows)
+    if problems:
+        raise ValueError("registry codes invalid: " + "; ".join(problems))
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    for row in rows:
+        code = row["code"]
+        if codes is not None and code not in codes:
+            continue
+        project_specs = specs_dir_for_project(_expand_path(row["path"]))
+        rejected: list[str] = []
+        if project_specs is not None:
+            resolver = DependencyRegistryResolver(project_specs, registry_path=registry_path, cache_seconds=0)
+            files = [p for p in sorted(project_specs.glob("*.md")) if not p.name.startswith("_")]
+            identities = [item for item in map(_read_spec_identity, files) if item is not None]
+            records_by_id, _ = resolver.records_for(item[1] for item in identities)
+            for path, spec_id, spec_type, content in identities:
+                if _id_problems(spec_id, spec_type, code, path, content,
+                                records_by_id.get(spec_id, ()), project_specs.resolve()):
+                    rejected.append(spec_id)
+        payload = {"schema_version": 1, "project_code": code, "ids": sorted(set(rejected))}
+        (legacy_dir / f"{code}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        counts[code] = len(payload["ids"])
+    return counts
 
 
 def parse_frontmatter_and_body(content: str) -> tuple[dict | None, str | None, list[str], int | None]:
@@ -1817,6 +2272,19 @@ def state_rationale_adoption_findings(
     return findings
 
 
+def _blocker_evidence_warnings(fm: dict, spec_file: Path) -> list[str]:
+    """BUG-NS-KIT-142 R7: warn (never fail) when a blocked spec's evidence is not a retained file."""
+    raw = fm.get("blocker_evidence")
+    if not isinstance(raw, str) or not raw.strip():
+        return []  # validate_blocked already reports a missing field
+    ref = Path(raw.strip())
+    if not ref.is_absolute() and ".." not in ref.parts:
+        if (Path(spec_file).resolve().parent.parent / ref).is_file():
+            return []
+    return [f"WARNING: blocker_evidence_unresolved: blocker_evidence {raw.strip()!r} is not an existing "
+            "install-relative file; unblock_spec prepare will refuse it"]
+
+
 def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: list[dict] | None = None, *, check_adoption: bool = True, base_revision: str = "HEAD", git_root: Path | None = None) -> list:
     """Return a list of error/warning strings for spec_file, or [] if valid.
 
@@ -1867,9 +2335,21 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
     errors.extend(validate_report_action_log(body))
     errors.extend(validate_reuse_gate(body))
     errors.extend(validate_ac_amendments(content, spec_file))
+    errors.extend(validate_ac_amendment_unapplied(content))
+    from verification_report import required_external_input_findings
+    errors.extend(required_external_input_findings(fm))
     errors.extend(validate_scope(fm))
     errors.extend(validate_scope_amendments(body))
     errors.extend(validate_resolved_blocker_fields(fm))
+    # BUG-NS-KIT-100 R1/R2: the type registry and dependency existence, in file and directory mode.
+    type_finding = spec_type_registry_finding(fm, load_spec_type_registry())
+    if type_finding:
+        errors.append(type_finding)
+    errors.extend(dependency_existence_findings(
+        fm, all_specs if all_specs is not None else _load_directory_frontmatters(spec_file.parent)))
+    # SPEC-419: the project's spec_metadata policy (version first; tags share it), same severity convention.
+    errors.extend(spec_frontmatter.spec_metadata_findings(
+        fm, spec_frontmatter.load_spec_metadata_policy(config_path)))
     # R8: a ready code spec with neither scope: nor touches: silently gets
     # the project-root default — surface that as a warning, never an error,
     # so historical specs are not retroactively required to declare either.
@@ -1907,6 +2387,8 @@ def validate_file(spec_file: Path, config_path: Path | None = None, all_specs: l
                         "legacy status 'planning' requires REVIEW: " + "; ".join(result.findings)
                     )
             errors.extend(validate_blocked(fm))
+            if status == "blocked":
+                errors.extend(_blocker_evidence_warnings(fm, spec_file))
 
     canonical = Path(__file__).resolve().parent
     manifest_path = canonical / "release-manifest.json"
@@ -2236,6 +2718,14 @@ def validate_registry_file(registry_path: Path) -> list:
                 f"non-portable absolute path {path!r} — regenerate the registry "
                 "(nightshift-sync) to emit an {{ARGO_HOME}}-relative token"
             )
+    # SPEC-416 R3: a registry that carries project codes must carry valid, unique ones
+    # (an absent code is the pre-adoption state and is reported by the enforcement warning).
+    errors.extend(
+        f"registry code: {problem}"
+        for problem in spec_id_grammar.validate_project_codes(
+            [proj for proj in projects if isinstance(proj, dict) and "code" in proj]
+        )
+    )
     return errors
 
 
@@ -2271,6 +2761,12 @@ def validate_config_file(config_path: Path) -> list:
     # preference, so unlike board_column_defaults its findings are errors
     # (no WARNING: prefix) -- they must not be silently non-fatal.
     findings.extend(deployment_block_findings(cfg))
+
+    # SPEC-419: an invalid spec_metadata policy refuses promotion/dispatch, so it is an error here too.
+    findings.extend(
+        f"spec_metadata policy: {error}"
+        for error in spec_frontmatter.parse_spec_metadata_policy(cfg).errors
+    )
 
     return findings
 
@@ -2368,6 +2864,14 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None, *
     for name, warnings in fleet_findings.items():
         results.setdefault(name, []).extend(warnings)
 
+    # SPEC-416 R4: errors for new IDs outside the grammar / own code / fleet.
+    for name, new_findings in new_id_findings(
+        specs_dir,
+        [path for path in sorted(specs_dir.glob("*.md")) if not path.name.startswith("_")],
+    ).items():
+        if new_findings:
+            results.setdefault(name, []).extend(new_findings)
+
     # SPEC-252: the per-spec pass above can only reach an artifact a spec
     # declares.  Sweep the sibling handoff directory from the artifact side so
     # an orphaned or untracked artifact is reported against its own path
@@ -2464,6 +2968,12 @@ def validate_directory(specs_dir: Path, status_store_path: Path | None = None, *
     return results
 
 
+def split_findings(findings: list[str]) -> tuple[list[str], list[str]]:
+    """Separate blocking errors and advisory warnings without changing diagnostics."""
+    return ([f for f in findings if not _is_warning(f)],
+            [f for f in findings if _is_warning(f)])
+
+
 def _is_warning(msg: str) -> bool:
     return msg.startswith("WARNING: ")
 
@@ -2550,6 +3060,107 @@ def _collect_frontmatters_for_paths(positional: list[str]) -> list[dict]:
 
 class StagedValidationError(RuntimeError):
     """SPEC-358 R3: the staged-index snapshot cannot be validated as-is."""
+
+
+class ValidationProgress:
+    """Advisory invocation evidence; never a validation or lifecycle authority.
+
+    A missing terminal event means unknown. In particular SIGKILL, power loss,
+    or losing the command session cannot be converted into a passed result.
+    """
+
+    def __init__(self, repo_root: Path, *, events_out: Path | None = None,
+                 interval: float = 5.0):
+        self.run_id = uuid.uuid4().hex
+        self.started = time.monotonic()
+        self.interval = interval
+        self.phase = "startup"
+        self.completed = 0
+        self.total = None
+        self.sequence = 0
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.events_path = events_out
+        self.events_ref = None
+        self.sink_status = "available"
+        self.thread = None
+        self.finished = False
+        if self.events_path is None:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode or not result.stdout.strip():
+                    raise OSError("Git common directory unavailable")
+                common = Path(result.stdout.strip())
+                if not common.is_absolute():
+                    common = repo_root / common
+                self.events_ref = f"nightshift/validation/{self.run_id}.jsonl"
+                self.events_path = common / self.events_ref
+            except (OSError, subprocess.SubprocessError):
+                self.sink_status = "unavailable"
+
+    def emit(self, event: str, **fields) -> None:
+        with self.lock:
+            self.sequence += 1
+            record = {
+                "schema_version": 1, "event": event, "run_id": self.run_id,
+                "sequence": self.sequence,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "elapsed_seconds": round(time.monotonic() - self.started, 3),
+                "phase": self.phase, "completed": self.completed,
+                "total": self.total, "events_ref": self.events_ref,
+                "sink_status": self.sink_status, **fields,
+            }
+            if self.events_path is not None and self.sink_status == "available":
+                try:
+                    self.events_path.parent.mkdir(parents=True, exist_ok=True)
+                    with self.events_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, sort_keys=True) + "\n")
+                        handle.flush()
+                except (OSError, ValueError):
+                    self.sink_status = "unavailable"
+                    record["sink_status"] = "unavailable"
+            try:
+                print(json.dumps(record, sort_keys=True), file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass  # A broken telemetry consumer must not alter gate results.
+
+    def start(self) -> None:
+        self.emit("validation_started")
+        self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self.thread.start()
+
+    def _heartbeat(self) -> None:
+        while not self.stop.wait(self.interval):
+            with self.lock:
+                if self.finished:
+                    return
+                self.emit("validation_progress", heartbeat=True)
+
+    def update(self, phase: str, completed: int = 0, total: int | None = None) -> None:
+        with self.lock:
+            changed = phase != self.phase
+            completed_phase = total is not None and completed == total and completed != self.completed
+            self.phase, self.completed, self.total = phase, completed, total
+            if changed or completed_phase:
+                self.emit("validation_progress", heartbeat=False)
+
+    def finish(self, outcome: str, exit_code: int, *, report: dict | None = None) -> None:
+        self.stop.set()
+        with self.lock:
+            if self.finished:
+                return
+            self.finished = True
+            fields = {}
+            if report is not None:
+                encoded = json.dumps(report, sort_keys=True, ensure_ascii=True).encode()
+                fields["report_sha256"] = hashlib.sha256(encoded).hexdigest()
+                fields["finding_count"] = sum(len(rows) for rows in report["results"].values())
+            self.emit("validation_finished", outcome=outcome, exit_code=exit_code, **fields)
+        if self.thread is not None:
+            self.thread.join(timeout=1)
 
 
 def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
@@ -2693,7 +3304,7 @@ def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[
     """
     links = []
     for path, entry in entries.items():
-        if not path.startswith(kit + "/") or not lifecycle.is_safe_relative_posix_path(path):
+        if not lifecycle.is_safe_relative_posix_path(path):
             continue
         target = snapshot / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2703,11 +3314,119 @@ def _materialize_kit_snapshot(snapshot: Path, kit: str, entries: dict[str, dict[
             target.write_bytes(blobs[entry["sha"]])
     for target, destination in links:
         resolved = (target.parent / destination).resolve()
-        if not Path(destination).is_absolute() and resolved.is_relative_to(snapshot / kit):
+        permitted_root = snapshot / kit if target.is_relative_to(snapshot / kit) else snapshot
+        if not Path(destination).is_absolute() and resolved.is_relative_to(permitted_root):
             target.symlink_to(destination)
 
 
-def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs") -> dict:
+def _untouched_spec_skip_tokens(
+    repo_root: Path, kit: str, entries: dict, baseline_revision: str | None,
+) -> list[str] | None:
+    """SPEC-397-001 R1: tokens that decide which untouched specs a commit can affect.
+
+    Returns ``None`` when the exhaustive per-spec pass must run (a baseline is
+    missing, or the commit changes anything whose effect on other specs cannot be
+    bounded by name). Otherwise returns the ids/file stems/report-directory names
+    of every changed spec: an untouched spec whose own text names none of them
+    cannot see a different corpus, so its findings equal its baseline findings
+    and the SPEC-382 differential would stay silent for it anyway.
+    """
+    if baseline_revision is None:
+        return None
+    base_entries = _git_tree_entries(repo_root, baseline_revision, ".")
+    changed = [path for path in set(entries) | set(base_entries)
+               if entries.get(path) != base_entries.get(path)]
+    spec_prefix = kit + "/specs/"
+    reports_prefix = kit + "/reports/"
+    tokens: set[str] = set()
+    base_spec_paths: dict[str, dict[str, str]] = {}
+    for path in changed:
+        name = path.rsplit("/", 1)[-1]
+        if not path.startswith(kit + "/"):
+            tokens.add(path)
+        elif path.startswith(spec_prefix) and path.endswith(".md") and "/" not in path[len(spec_prefix):] \
+                and not name.startswith("_"):
+            tokens.add(name[:-3])
+            if path in base_entries:
+                base_spec_paths[path] = base_entries[path]
+        elif path.startswith(reports_prefix) and path.count("/") > reports_prefix.count("/"):
+            tokens.add(path[len(reports_prefix):].split("/", 1)[0])
+        else:
+            return None
+    staged_specs = {p: entries[p] for p in changed if p in entries and p.startswith(spec_prefix) and p.endswith(".md")}
+    staged_blobs = _snapshot_blobs(repo_root, staged_specs) if staged_specs else {}
+    base_blobs = _snapshot_blobs(repo_root, base_spec_paths) if base_spec_paths else {}
+    sides = [(entry, staged_blobs) for entry in staged_specs.values()]
+    sides += [(entry, base_blobs) for entry in base_spec_paths.values()]
+    for entry, blob_map in sides:
+        if entry is None or entry["mode"] not in {"100644", "100755"}:
+            continue
+        try:
+            parsed = yaml.safe_load(blob_map[entry["sha"]].decode("utf-8").split("\n---", 1)[0][3:]) or {}
+        except (UnicodeDecodeError, yaml.YAMLError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        if is_nfr_family(parsed):
+            return None  # an NFR change can alter findings on any spec
+        if parsed.get("id"):
+            tokens.add(str(parsed["id"]))
+    tokens.discard("")
+    return sorted(tokens)
+
+
+def _referenced_index_closure(repo_root: Path, entries: dict, blobs: dict, kit: str,
+                              specs_relative_dir: str) -> dict:
+    """Select only captured tracked blobs cited by checked LE items.
+
+    No working-tree path is consulted. Symlink targets are included only after
+    normalization within the repository, with a bounded chain and byte budget.
+    """
+    import posixpath
+
+    selected = {path: entry for path, entry in entries.items() if path.startswith(kit + "/")}
+    references = set()
+    for path, entry in selected.items():
+        if not path.startswith(specs_relative_dir + "/") or not path.endswith(".md"):
+            continue
+        if entry["mode"] not in {"100644", "100755"}:
+            continue
+        text = blobs[entry["sha"]].decode("utf-8", "replace")
+        _, _, refs = _live_execution_items(text.splitlines())
+        for reference in refs.values():
+            if not reference or not lifecycle.is_safe_relative_posix_path(reference):
+                continue
+            for prefix in (str(Path(path).parent), kit, str(Path(kit).parent)):
+                candidate = f"{prefix}/{reference}" if prefix != "." else reference
+                if candidate in entries:
+                    references.add(candidate)
+                    break
+    if len(references) > 256:
+        raise StagedValidationError("project evidence index closure exceeds 256 references")
+    pending = list(references)
+    seen = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        if len(seen) > 512:
+            raise StagedValidationError("project evidence index closure exceeds 512 paths")
+        entry = entries.get(path)
+        if entry is None:
+            continue
+        selected[path] = entry
+        if entry["mode"] == "120000":
+            data = _snapshot_blobs(repo_root, {path: entry})
+            blobs.update(data)
+            destination = data[entry["sha"]].decode("utf-8")
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), destination))
+            if not destination.startswith("/") and lifecycle.is_safe_relative_posix_path(target):
+                pending.append(target)
+    return selected
+
+
+def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/specs", *, progress=None) -> dict:
     """Validate inert files from one captured index, running only this trusted module.
 
     The scratch tree is not a checkout: no Git operations write it, no copied
@@ -2716,6 +3435,8 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
     the owning kit; invalid links remain findings rather than filesystem reads.
     """
     repo_root = Path(repo_root).resolve()
+    notify = progress or (lambda *args: None)
+    notify("capture_index")
     if not lifecycle.is_safe_relative_posix_path(specs_relative_dir):
         raise StagedValidationError("spec root must be a safe repository-relative path")
     entries = staged_index_entries(repo_root)
@@ -2739,12 +3460,17 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             _mode, _obj_type, sha = meta.split(" ")
             baseline_shas[tree_path] = sha
     blobs = _snapshot_blobs(repo_root, {path: entry for path, entry in entries.items() if path.startswith(kit + "/")})
+    selected_entries = _referenced_index_closure(repo_root, entries, blobs, kit, specs_relative_dir)
+    external_entries = {path: entry for path, entry in selected_entries.items() if not path.startswith(kit + "/")}
+    external_blobs = _snapshot_blobs(repo_root, external_entries)
+    if sum(len(data) for data in external_blobs.values()) > 8 * 1024 * 1024:
+        raise StagedValidationError("project evidence index closure exceeds 8 MiB")
+    blobs.update(external_blobs)
+    notify("materialize_snapshot")
     with tempfile.TemporaryDirectory(prefix="nightshift-index-") as scratch:
         snapshot = Path(scratch).resolve()
         links = []
-        for path, entry in entries.items():
-            if not path.startswith(kit + "/"):
-                continue
+        for path, entry in selected_entries.items():
             if not lifecycle.is_safe_relative_posix_path(path):
                 raise StagedValidationError(f"unsafe index path: {path!r}")
             target = snapshot / path
@@ -2755,7 +3481,8 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 target.write_bytes(blobs[entry["sha"]])
         for target, destination in links:
             resolved = (target.parent / destination).resolve()
-            if Path(destination).is_absolute() or not resolved.is_relative_to(snapshot / kit):
+            permitted_root = snapshot / kit if target.is_relative_to(snapshot / kit) else snapshot
+            if Path(destination).is_absolute() or not resolved.is_relative_to(permitted_root):
                 results[target.relative_to(snapshot).as_posix()] = [
                     "state_rationale_evidence_path_escape: staged symlink escapes owning kit"]
             else:
@@ -2767,6 +3494,12 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 raise ValueError("configuration must contain YAML mappings")
         except (OSError, ValueError, yaml.YAMLError) as exc:
             results[f"{kit}/config.yaml"] = [f"staged_configuration_invalid: {exc}"]
+        else:
+            # SPEC-419: a staged config carrying an invalid spec_metadata policy is refused with its diagnostic.
+            policy_errors = spec_frontmatter.load_spec_metadata_policy(config).errors
+            if policy_errors:
+                results[f"{kit}/config.yaml"] = [f"spec_metadata policy: {error}" for error in policy_errors]
+        notify("load_corpus")
         corpus = _load_directory_frontmatters(snapshot / specs_relative_dir)
         # SPEC-386 R4: the warning key (the store path) is resolved lazily,
         # only if some staged spec's status actually changed this commit --
@@ -2800,8 +3533,13 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             if not has_head:
                 return []
             if not _baseline_snapshot_holder:
-                baseline_kit_entries = _git_tree_entries(repo_root, baseline_revision, kit + "/")
+                baseline_entries = _git_tree_entries(repo_root, baseline_revision, ".")
+                baseline_kit_entries = {name: entry for name, entry in baseline_entries.items()
+                                        if name.startswith(kit + "/")}
                 baseline_blobs = _snapshot_blobs(repo_root, baseline_kit_entries)
+                baseline_kit_entries = _referenced_index_closure(
+                    repo_root, baseline_entries, baseline_blobs, kit, specs_relative_dir)
+                baseline_blobs.update(_snapshot_blobs(repo_root, baseline_kit_entries))
                 base_dir = Path(tempfile.mkdtemp(prefix="nightshift-index-baseline-"))
                 _materialize_kit_snapshot(base_dir, kit, baseline_kit_entries, baseline_blobs)
                 _baseline_snapshot_holder.append(base_dir)
@@ -2817,10 +3555,14 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
             )
             return [finding.replace(str(base_dir), "<index>") for finding in base_findings]
 
+        skip_tokens = _untouched_spec_skip_tokens(repo_root, kit, entries, baseline_revision)
+        staged_id_candidates: list[tuple[str, Path]] = []
+        spec_paths = [path for path in sorted(entries) if path.startswith(prefix)
+                      and path.endswith(".md") and not Path(path).name.startswith("_")]
+        notify("validate_specs", 0, len(spec_paths))
         try:
-            for path in sorted(entries):
-                if not path.startswith(prefix) or not path.endswith(".md") or Path(path).name.startswith("_"):
-                    continue
+            for position, path in enumerate(spec_paths):
+                notify("validate_specs", position, len(spec_paths))
                 # R2 (SPEC-380): determine is_new/bytes_changed from the blob sha
                 # up front -- by index sha, not decoded text -- so the gate below
                 # applies uniformly to every branch that can populate `results`
@@ -2836,16 +3578,22 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                     continue
                 spec_path = snapshot / path
                 text = spec_path.read_bytes().decode("utf-8")
+                if not reportable and skip_tokens is not None and not any(token in text for token in skip_tokens):
+                    # SPEC-397-001 R1: unchanged bytes, and no changed spec or
+                    # report directory is named in this spec's text, so its
+                    # findings equal its baseline findings -- nothing to report.
+                    continue
                 fm, body, parse_errors, _ = parse_frontmatter_and_body(text)
                 if parse_errors:
                     if reportable:
                         results[path] = parse_errors
                     continue
                 findings = validate_file(spec_path, config_path=config, all_specs=corpus, check_adoption=False, git_root=repo_root)
-                base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
-                baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
-                base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
                 if reportable:
+                    staged_id_candidates.append((path, spec_path))
+                    base_blob = subprocess.run(["git", "-C", str(repo_root), "show", f"{baseline_revision}:{path}"], capture_output=True) if has_head else None
+                    baseline_text = base_blob.stdout.decode("utf-8") if base_blob is not None and base_blob.returncode == 0 else None
+                    base_fm, base_body, _, _ = parse_frontmatter_and_body(baseline_text) if baseline_text is not None else (None, None, [], None)
                     # R2 (SPEC-380): only these adoption findings depend purely on
                     # this path's own bytes vs its own baseline, never on the rest
                     # of the corpus -- keep them scoped to reportable paths, as
@@ -2915,20 +3663,94 @@ def validate_staged(repo_root: Path, specs_relative_dir: str = ".nightshift/spec
                 new_findings = [finding for finding in normalized if finding not in baseline_findings]
                 if new_findings:
                     results[path] = new_findings
+            # SPEC-416 R4: one fleet pass for every spec this commit adds or edits.
+            notify("validate_specs", len(spec_paths), len(spec_paths))
+            if staged_id_candidates:
+                notify("check_fleet_ids", 0, len(staged_id_candidates))
+                id_findings = new_id_findings(
+                    snapshot / specs_relative_dir,
+                    [spec_path for _, spec_path in staged_id_candidates],
+                    owner_specs_dir=repo_root / specs_relative_dir,
+                )
+                for rel_path, spec_path in staged_id_candidates:
+                    extra = id_findings.get(spec_path.name, [])
+                    if extra:
+                        results.setdefault(rel_path, []).extend(
+                            finding.replace(str(snapshot), "<index>") for finding in extra)
         finally:
+            notify("cleanup")
             if _baseline_snapshot_holder:
                 shutil.rmtree(_baseline_snapshot_holder[0], ignore_errors=True)
     return {"baseline": "head" if has_head else "none", "results": results,
             "counts": rationale_counts(results), "finding_families": finding_family_summary(results, [])}
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if any(arg == "--staged" for arg in argv):
-        rest = [arg for arg in argv if arg != "--staged"]
-        repo_root = Path(rest[0]) if rest else Path(".")
-        if len(rest) > 1:
-            specs_relative_dir = rest[1]
+def _spec_metadata_audit_main(args: list[str]) -> int:
+    """SPEC-419/420 R5: list the specs a spec_metadata policy would flag, before enforcement (read-only).
+
+    ``--field version|tags`` (default version) with ``--required`` / ``--allowed a,b`` previews that
+    field's policy on top of the project's own config without editing it; nothing is written and no spec metadata is touched.
+    """
+    if not args or args[0].startswith("--"):
+        print("Usage: python3 validate_specs.py --spec-metadata-audit <specs-dir> [--config PATH] "
+              "[--field version|tags] [--required] [--allowed v1,v2]", file=sys.stderr)
+        return 1
+    specs_dir = Path(args[0])
+    if not specs_dir.is_dir():
+        print(f"Error: {specs_dir} is not a directory", file=sys.stderr)
+        return 1
+    config = Path(args[args.index("--config") + 1]) if "--config" in args and args.index("--config") + 1 < len(args) \
+        else spec_frontmatter.project_config_path_for_specs_dir(specs_dir)
+    policy = spec_frontmatter.load_spec_metadata_policy(config)
+    field = args[args.index("--field") + 1] if "--field" in args and args.index("--field") + 1 < len(args) else "version"
+    if field not in spec_frontmatter.SPEC_METADATA_FIELD_NAMES:
+        print(f"Error: --field must be one of {', '.join(spec_frontmatter.SPEC_METADATA_FIELD_NAMES)}", file=sys.stderr)
+        return 1
+    if "--required" in args or "--allowed" in args:
+        base = policy.field(field)
+        allowed = base.allowed_values
+        if "--allowed" in args and args.index("--allowed") + 1 < len(args):
+            allowed = tuple(item for item in args[args.index("--allowed") + 1].split(","))
+        fields = {name: {"required": item.required,
+                         "allowed_values": list(item.allowed_values) if item.allowed_values is not None else None}
+                  for name, item in policy.fields.items()}
+        fields[field] = {"required": base.required or "--required" in args,
+                         "allowed_values": list(allowed) if allowed is not None else None}
+        policy = spec_frontmatter.parse_spec_metadata_policy({"spec_metadata": {"fields": fields}})
+    rows = spec_frontmatter.spec_metadata_audit(_load_directory_frontmatters(specs_dir), policy)
+    print(json.dumps({
+        "specs_dir": str(specs_dir), "config": str(config), "policy_errors": list(policy.errors),
+        "affected": rows, "affected_count": len(rows),
+    }, indent=2, ensure_ascii=False))
+    return 1 if policy.errors or any(row["severity"] == "error" for row in rows) else 0
+
+
+def _positive_progress_interval(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("progress interval must be finite and positive")
+    return number
+
+
+def _staged_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Validate the captured Git index")
+    parser.add_argument("repo_root", nargs="?", default=".", type=Path)
+    parser.add_argument("specs_dir", nargs="?")
+    parser.add_argument("--events-out", type=Path)
+    parser.add_argument("--progress-interval", type=_positive_progress_interval, default=5.0)
+    args = parser.parse_args([arg for arg in argv if arg != "--staged"])
+    repo_root = args.repo_root.resolve()
+    observer = ValidationProgress(repo_root, events_out=args.events_out,
+                                  interval=args.progress_interval)
+    observer.start()
+    old_term = None
+    if threading.current_thread() is threading.main_thread():
+        def interrupted(signum, frame):
+            raise SystemExit(128 + signum)
+        old_term = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        if args.specs_dir is not None:
+            specs_relative_dir = args.specs_dir
         else:
             # Explicit hook calls use BUG-338's per-path resolver. A standalone
             # invocation without a spec root retains preflight's single-root
@@ -2943,28 +3765,73 @@ def main(argv: list[str] | None = None) -> int:
                     kit_root = _preflight.resolve_kit_root(repo_root)
                 except _preflight.KitRootError as exc:
                     # R4: ambiguity/no-root refuses rather than choosing silently.
-                    print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
-                    return 1
+                    raise StagedValidationError(str(exc)) from exc
                 specs_relative_dir = f"{kit_root.relative_to(Path(repo_root).resolve()).as_posix()}/specs"
-        try:
-            report = validate_staged(repo_root, specs_relative_dir)
-        except StagedValidationError as exc:
-            print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr)
-            return 1
+        report = validate_staged(repo_root, specs_relative_dir, progress=observer.update)
         has_errors = any(
             any(not _is_warning(finding) for finding in findings)
             for findings in report["results"].values()
         )
-        print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 1 if has_errors else 0
+        print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
+        code = 1 if has_errors else 0
+        observer.finish("failed" if has_errors else "passed", code, report=report)
+        return code
+    except StagedValidationError as exc:
+        print(f"[validate_specs --staged] REFUSED: {exc}", file=sys.stderr, flush=True)
+        observer.finish("refused", 1)
+        return 1
+    except KeyboardInterrupt:
+        observer.finish("interrupted", 130)
+        return 130
+    except SystemExit as exc:
+        code = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+        observer.finish("interrupted" if code >= 128 else "error", code)
+        raise
+    except BaseException:
+        observer.finish("error", 1)
+        raise
+    finally:
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if any(arg == "--staged" for arg in argv):
+        return _staged_main(argv)
+    if argv and argv[0] == "--generate-legacy-ids":
+        # SPEC-416 R5: freeze each registered project's legacy-ID list (generated, never hand-written).
+        rest = argv[1:]
+        if not rest or rest[0].startswith("--"):
+            print("Usage: python3 validate_specs.py --generate-legacy-ids <projects-registry.json> "
+                  "[--out DIR]", file=sys.stderr)
+            return 1
+        out_dir = LEGACY_ID_DIR
+        if "--out" in rest and rest.index("--out") + 1 < len(rest):
+            out_dir = Path(rest[rest.index("--out") + 1])
+        try:
+            counts = generate_legacy_ids(Path(rest[0]), out_dir)
+        except (OSError, ValueError) as exc:
+            print(f"[validate_specs --generate-legacy-ids] REFUSED: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"legacy_ids": counts}, indent=2, sort_keys=True))
+        return 0
+    if argv and argv[0] == "--spec-metadata-audit":
+        return _spec_metadata_audit_main(argv[1:])
     if any(arg in {"--help", "-h"} for arg in argv):
         print(
             "Usage: python3 validate_specs.py <file_or_directory> [...] [--format json|text] "
             "[--promotion-gap-summary] [--ownership-summary] [--baseline PATH] [--base-revision REV]\n"
-            "       python3 validate_specs.py --staged <repo-root> [<kit>/specs]\n"
+            "       python3 validate_specs.py --staged <repo-root> [<kit>/specs] "
+            "[--events-out FILE] [--progress-interval SECONDS]\n"
+            "       python3 validate_specs.py --spec-metadata-audit <specs-dir> [--config PATH] "
+            "[--field version|tags] [--required] [--allowed v1,v2]\n"
             "       python3 validate_specs.py --check-report-headings <report.md_or_dir> [--format json|text]"
         )
         print("Fleet-wide spec ID collisions are warning-only findings in validation output.")
+        print("SPEC-416: a NEW spec ID (not on the project's legacy list) that breaks the ID grammar, "
+              "the project code or fleet uniqueness is an error.")
+        print("       python3 validate_specs.py --generate-legacy-ids <projects-registry.json> [--out DIR]")
         return 0
     if not argv:
         print(
@@ -3062,6 +3929,9 @@ def main(argv: list[str] | None = None) -> int:
             path_results[path.name].extend(
                 fleet_uniqueness_findings(path.parent, [path]).get(path.name, [])
             )
+            for name, new_findings in new_id_findings(path.parent, [path]).items():
+                if new_findings:
+                    path_results.setdefault(name, []).extend(new_findings)
         else:
             path_results = {
                 str(path): ["path does not exist or is not a Markdown spec file"]

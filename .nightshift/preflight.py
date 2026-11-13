@@ -14,13 +14,256 @@ Exit code is 0 when no blocking preflight failures are found, 1 otherwise.
 
 from __future__ import annotations
 
+import dependency_registry
+
 import argparse
+import hashlib
+import importlib.util
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+GUIDE_MAX_BYTES = 24 * 1024
+RELEASE_INVENTORY_RECORD = "tests/fixtures/spec-229-006/le2-installed-allow.json"
+GUIDE_FRONT_KEYS = ("Load when:", "Covers:", "Not here:", "Requires:")
+GUIDE_UI_ONLY = frozenset({
+    ("POST", "/api/performance/client"), ("POST", "/api/reports/read"),
+    ("POST", "/api/reports/read-all"), ("POST", "/api/open/spec/{spec_id}"),
+    ("POST", "/api/open/spec/{spec_id}/finder"), ("POST", "/api/open/spec/{spec_id}/terminal"),
+    ("POST", "/api/open/report/{filename}"), ("GET", "/api/prompts"),
+    ("GET", "/api/prompts/{scope}/{id}"), ("POST", "/api/prompts/{scope}"),
+    ("PUT", "/api/prompts/{scope}/{id}"), ("DELETE", "/api/prompts/{scope}/{id}"),
+    ("POST", "/api/prompts/{scope}/{id}/render"),
+    ("POST", "/api/spec/{spec_id}/transfer-refusal"),
+    ("DELETE", "/api/spec/{spec_id}/transfer-refusal"),
+})
+_ROUTE_DECORATOR_RE = re.compile(r"@app\.(get|post|put|patch|delete)\(")
+_ROUTE_RE = re.compile(r'@app\.(get|post|put|patch|delete)\(\s*"([^"]+)"')
+
+
+def guide_size_problems(text: str) -> list[str]:
+    size = len(text.encode("utf-8"))
+    return [f"guide is {size} bytes (max {GUIDE_MAX_BYTES})"] if size > GUIDE_MAX_BYTES else []
+
+
+def guide_front_block_problems(text: str) -> list[str]:
+    """Validate the bounded guide front block shared by release and guide tests."""
+    block = []
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        block.append(line)
+    problems = []
+    if len(block) > 5:
+        problems.append(f"front block has {len(block)} lines (max 5)")
+    found = [next((key for key in GUIDE_FRONT_KEYS if line.startswith(key)), None) for line in block]
+    problems.extend(f"front block lacks '{key}'" for key in GUIDE_FRONT_KEYS if key not in found)
+    return problems
+
+
+def _normal_route(path: str) -> str:
+    return re.sub(r"\{(\w+):\w+\}", r"{\1}", path)
+
+
+def board_routes(board_text: str) -> set[tuple[str, str]]:
+    """Read literal board routes plus inert shared-service registration."""
+    found = {(match.group(1).upper(), _normal_route(match.group(2))) for match in _ROUTE_RE.finditer(board_text)}
+    decorators = len(_ROUTE_DECORATOR_RE.findall(board_text))
+    if not decorators or decorators != len(_ROUTE_RE.findall(board_text)) or decorators < len(found):
+        raise ValueError("board route decorator parse is incomplete")
+    if "prompt_snippets.register_library_routes(app," in board_text:
+        from fastapi import FastAPI
+        import prompt_snippets
+        registered = FastAPI()
+        prompt_snippets.register_library_routes(registered, lambda request: None)
+        found.update((method, _normal_route(route.path))
+                     for route in registered.routes if route.path.startswith("/api/prompt-library")
+                     for method in route.methods)
+    return found
+
+
+def guide_route_problems(board_text: str, guide_text: str,
+                         ui_only: frozenset[tuple[str, str]] = GUIDE_UI_ONLY) -> list[str]:
+    routes = board_routes(board_text)
+    table = {}
+    for line in guide_text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            table[(cells[0], _normal_route(cells[1].strip("`")))] = line
+    problems = [f"route not in the guide table: {method} {path}"
+                for method, path in sorted(routes - set(table) - set(ui_only))]
+    problems += [f"stale ui_only entry (no such route): {method} {path}"
+                 for method, path in sorted(set(ui_only) - routes)]
+    problems += [f"guide row for a route that does not exist: {method} {path}"
+                 for method, path in sorted(set(table) - routes)]
+    problems += [f"ui-only route not marked UI-only in the guide: {method} {path}"
+                 for key, row in sorted(table.items()) if key in ui_only and "UI-only" not in row]
+    return problems
+
+
+def guide_enrollment_problems(canonical: Path, manifest: dict, guide_paths: list[Path]) -> list[tuple[str, str]]:
+    """Check manifest, sync, and public classification through their authorities."""
+    import observability_enroll
+    import release
+    sync_path = canonical.parent / "nightshift-sync.py"
+    if not sync_path.is_file():
+        return []
+    try:
+        module_spec = importlib.util.spec_from_file_location("nightshift_sync_preflight", sync_path)
+        if module_spec is None or module_spec.loader is None:
+            raise ValueError("sync module unavailable")
+        sync = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(sync)
+        sync_paths = set(sync.CANONICAL_PROTOCOL_FILES)
+    except (OSError, ValueError, ImportError) as error:
+        return [("sync_enrollment", f"nightshift-sync.py: {error}")]
+    manifest_paths = {str(item.get("path")) for item in release.release_entries(manifest)}
+    problems = []
+    for guide in guide_paths:
+        relative = guide.relative_to(canonical).as_posix()
+        install_path = ".nightshift/" + relative
+        if relative not in manifest_paths:
+            problems.append(("guide_manifest_enrollment", f"{relative} is absent from the managed manifest"))
+        if relative not in sync_paths:
+            problems.append(("guide_sync_enrollment", f"{relative} is absent from CANONICAL_PROTOCOL_FILES"))
+        if observability_enroll.classify_path(install_path) != "managed_public_kit":
+            problems.append(("guide_public_classification", f"{install_path} is not managed_public_kit"))
+    return problems
+
+
+def registry_guide_problems(skill_path: Path, guides_dir: Path) -> list[str]:
+    import skill_tutorial
+    problems = []
+    for entry in skill_tutorial.load_registry(skill_path):
+        guide = entry.get("guide")
+        if guide is None:
+            continue
+        prefix = ".nightshift/guides/"
+        if not isinstance(guide, str) or not guide.startswith(prefix):
+            problems.append(f"{entry['name']}: guide must be an install path under {prefix}")
+        elif not (guides_dir / guide[len(prefix):]).is_file():
+            problems.append(f"{entry['name']}: guide file {guide} is not in canonical/guides/")
+    return problems
+
+
+def release_invariant_preflight(canonical: Path, manifest: dict, *, previous: dict | None = None,
+                                profile: str = "canonical") -> dict[str, Any]:
+    """Read-only canonical release checks, never installed admission or suite evidence."""
+    if profile != "canonical":
+        return {"applicable": False, "status": "not_applicable", "profile": profile, "reused": False}
+    import stat
+    import artifact_reachability
+    import observability_enroll
+    import skill_tutorial
+    import release
+    import release_handoff
+
+    canonical = canonical.resolve()
+    findings = []
+    inputs = {}
+    def finding(rule, path, detail):
+        findings.append({"rule": rule, "path": path, "detail": detail})
+    def bind(path):
+        relative = path.relative_to(canonical).as_posix()
+        if path.is_file():
+            data = path.read_bytes()
+            inputs[relative] = {"sha256": hashlib.sha256(data).hexdigest(),
+                                "mode": stat.S_IMODE(path.stat().st_mode)}
+            return data
+        inputs[relative] = None
+        return None
+    guides = canonical / "guides"
+    guide_paths = sorted(guides.rglob("*.md"))
+    for path in guide_paths:
+        data = bind(path)
+        if len(data) > GUIDE_MAX_BYTES:
+            finding("guide_byte_cap", path.relative_to(canonical).as_posix(), f"{len(data)} bytes exceeds {GUIDE_MAX_BYTES}")
+        for problem in guide_front_block_problems(data.decode("utf-8")):
+            finding("guide_front_block", path.relative_to(canonical).as_posix(), problem)
+    skill = canonical / "Skills/nightshift/SKILL.md"
+    if bind(skill) is not None:
+        try:
+            for problem in registry_guide_problems(skill, guides):
+                finding("guide_registration", "Skills/nightshift/SKILL.md", problem)
+        except (ValueError, OSError) as error:
+            finding("guide_registration", "Skills/nightshift/SKILL.md", str(error))
+    elif any(str(row.get("path", "")).startswith("guides/") for row in manifest.get("files", [])):
+        finding("guide_registration", "Skills/nightshift/SKILL.md", "managed guides require the commands registry")
+    for rule, detail in guide_enrollment_problems(canonical, manifest, guide_paths):
+        finding(rule, "guides", detail)
+    board = canonical / "board.py"
+    board_data = bind(board)
+    board_guide = guides / "board-and-api.md"
+    if board_data is not None and board_guide.is_file():
+        try:
+            for problem in guide_route_problems(board_data.decode("utf-8"), board_guide.read_text(encoding="utf-8")):
+                finding("guide_route_contract", "guides/board-and-api.md", problem)
+        except (ImportError, ValueError, OSError) as error:
+            finding("guide_route_contract", "guides/board-and-api.md", str(error))
+    specs, errors = _load_specs(canonical / "specs")
+    for error in errors:
+        finding("report_reachability", "specs", error)
+    handoff_reachability = release_handoff.pending_handoff_reachability(canonical, manifest)
+    for item in handoff_reachability:
+        handoff = canonical / "release-handoffs" / item["path"]
+        bind(handoff)
+        if item["classification"] in {"stranded", "unresolved"}:
+            finding("handoff_reachability", f"release-handoffs/{item['path']}", item["reason"])
+    tracked = subprocess.run(["git", "-C", str(canonical), "ls-files", "-z", "--", "reports"], capture_output=True)
+    tracked_paths = [p.decode("utf-8", "surrogateescape") for p in tracked.stdout.split(b"\0") if p] if tracked.returncode == 0 else None
+    report_findings = artifact_reachability.sweep_reports_directory(canonical, specs, tracked_paths=tracked_paths)
+    for path, problems in report_findings.items():
+        for problem in problems:
+            finding("report_reachability", path, problem)
+    report_entries = []
+    if (canonical / "reports").is_dir():
+        report_entries = sorted(p.name for p in (canonical / "reports").iterdir()
+                                if not p.name.startswith(".") and p.name not in artifact_reachability.REPORTS_EXCLUDED_NAMES)
+        if tracked_paths is None and report_entries:
+            finding("report_ownership", "reports", "Git index ownership unavailable")
+    entries = release.release_entries(manifest)
+    inventory = {"status": "not_present", "comparison_performed": False}
+    record = canonical / RELEASE_INVENTORY_RECORD
+    data = bind(record)
+    if data is not None:
+        try:
+            saved = json.loads(data)
+            if saved.get("spec") == "SPEC-229-006" and saved.get("scenario") == "LE2":
+                observed = saved.get("stable", {}).get("manifest_files_checked")
+                expected = len(entries)  # validate_install's authoritative installed payload inventory count
+                inventory = {"status": "compatible" if type(observed) is int and observed == expected else "stale",
+                             "comparison_performed": True, "observed": observed, "expected": expected,
+                             "admission_proved": False}
+                if inventory["status"] == "stale":
+                    finding("saved_inventory", RELEASE_INVENTORY_RECORD, f"stable.manifest_files_checked={observed}; sealed inventory={expected}")
+            else:
+                inventory = {"status": "unrelated", "comparison_performed": False, "admission_proved": False}
+        except (ValueError, AttributeError, TypeError) as error:
+            finding("saved_inventory", RELEASE_INVENTORY_RECORD, f"unreadable selected record: {error}")
+    identity = {"schema_version": 1, "inputs": inputs, "spec_ids": sorted(specs),
+                "report_entries": report_entries, "tracked_reports": sorted(tracked_paths or []),
+                "sealed_inventory": sorted((row["path"], bool(row.get("executable"))) for row in entries),
+                "handoff_reachability": handoff_reachability,
+                "policy": {
+                    **{Path(module.__file__).name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                       for module in (artifact_reachability, observability_enroll, skill_tutorial)},
+                    "nightshift-sync.py": (
+                        hashlib.sha256((canonical.parent / "nightshift-sync.py").read_bytes()).hexdigest()
+                        if (canonical.parent / "nightshift-sync.py").is_file() else None
+                    ),
+                },
+                "producer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"applicable": True, "profile": "canonical", "ok": not findings, "findings": findings,
+            "identity_digest": digest, "identity": identity, "inventory": inventory,
+            "checks_executed": True, "reuse_scope": "validated unchanged success lineage; no native suite evidence",
+            "reused": bool(not findings and previous and previous.get("ok") is True and previous.get("identity_digest") == digest)}
 
 try:
     import yaml
@@ -212,6 +455,98 @@ def _run(cmd: str, cwd: Path, timeout: int | None = None) -> tuple[int, str]:
         return 127, str(exc)
 
 
+def _repository_head(repo: Path) -> str | None:
+    """Return the exact commit checked out at *repo*, or None when unavailable."""
+    code, output = _run("git rev-parse --verify HEAD^{commit}", repo)
+    head = output.strip()
+    return head if code == 0 and _GIT_OBJECT_ID_RE.fullmatch(head) else None
+
+
+_GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_SPEC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_INVOCATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_ADMISSION_VALUES = frozenset({"allow", "deny", "indeterminate"})
+PROJECTION_SCHEMA_VERSION = "1.0.0"
+
+
+def _pattern_or_none(value: Any, pattern: re.Pattern[str]) -> str | None:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _count_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def sanitized_preflight_projection(result: Any, *, result_sha256: str) -> dict[str, Any]:
+    """Project a retained preflight result onto an allowlist of parsed fields (SPEC-390-002 R1).
+
+    The retained result holds local paths, command lines and test output, so it
+    never crosses a verifier boundary. This projection is built field by field:
+    every value is re-validated against a closed shape (a digest, an enum, a
+    boolean, a count, an identifier) and replaced by ``None`` when it is not one.
+    A field therefore cannot smuggle free text or a host path through, and a
+    value the result did not carry is reported as unset rather than invented.
+
+    ``result_sha256`` is the digest of the retained bytes the caller parsed.
+    ``repository_head`` is the raw commit the run executed against; it is for the
+    parent to turn into a protocol digest and must not reach a verifier as-is.
+    """
+    if not isinstance(result, dict):
+        raise ValueError("preflight result is not a mapping")
+    if not isinstance(result_sha256, str) or not _SHA256_RE.fullmatch(result_sha256):
+        raise ValueError("result digest must be a lowercase SHA-256")
+    checks = result.get("checks") if isinstance(result.get("checks"), dict) else {}
+    admission = checks.get("install_admission")
+    admission = admission if isinstance(admission, dict) else {}
+    git = checks.get("git") if isinstance(checks.get("git"), dict) else {}
+    commands = checks.get("commands") if isinstance(checks.get("commands"), dict) else {}
+    test = commands.get("test") if isinstance(commands.get("test"), dict) else {}
+    coverage = admission.get("coverage")
+    coverage_projection = (
+        {
+            key: _count_or_none(coverage.get(key))
+            for key in ("applicable", "checked", "passed", "failed")
+        }
+        if isinstance(coverage, dict)
+        else None
+    )
+    failures = result.get("blocking_failures")
+    return {
+        "schema_version": PROJECTION_SCHEMA_VERSION,
+        "result_sha256": result_sha256,
+        "spec_id": _pattern_or_none(result.get("spec_id"), _SPEC_ID_RE),
+        "timestamp": _pattern_or_none(result.get("timestamp"), _TIMESTAMP_RE),
+        "ok": _bool_or_none(result.get("ok")),
+        "blocking_failure_count": len(failures) if isinstance(failures, list) else None,
+        "git_clean": _bool_or_none(git.get("clean")),
+        "install_admission": {
+            "ok": _bool_or_none(admission.get("ok")),
+            "admission": admission.get("admission")
+            if admission.get("admission") in _ADMISSION_VALUES else None,
+            "invocation_id": _pattern_or_none(
+                admission.get("integrity_run_id"), _INVOCATION_ID_RE
+            ),
+            "artifact_sha256": _pattern_or_none(admission.get("artifact_sha256"), _SHA256_RE),
+            "integrity_receipt_sha256": _pattern_or_none(
+                admission.get("integrity_receipt_sha256"), _SHA256_RE
+            ),
+            "coverage": coverage_projection,
+        },
+        "declared_test": {
+            "configured": bool(test) and test.get("cmd") is not None and test.get("skipped") is False,
+            "exit": _count_or_none(test.get("exit")),
+            "skipped": _bool_or_none(test.get("skipped")),
+        },
+        "repository_head": _pattern_or_none(result.get("repository_head"), _GIT_OBJECT_ID_RE),
+    }
+
+
 def _git_status(repo: Path) -> dict[str, Any]:
     code, out = _run("git status --porcelain --untracked-files=all", repo)
     paths = [line for line in out.splitlines() if line.strip()]
@@ -228,6 +563,8 @@ def _load_specs(specs_dir: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if parse_spec_file is None:
         return specs, ["spec_frontmatter.py is unavailable"]
     for path in sorted(specs_dir.glob("*.md")):
+        if path.name.startswith("_"):
+            continue  # Same corpus boundary as validate_specs; templates are not specs.
         try:
             parsed = parse_spec_file(path)
         except FrontmatterError as exc:
@@ -462,6 +799,9 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
         "spec_id": spec_id,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "repo": str(repo),
+        # SPEC-390-002: the commit this run executed against, so a retained
+        # result can be bound to an exact candidate instead of an author's claim.
+        "repository_head": _repository_head(repo),
         "checks": {},
         "blocking_failures": [],
         "warnings": [],
@@ -517,6 +857,11 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
                 f"Spec {spec_id} has status {status!r}; expected one of: {allowed}."
             )
 
+        if status in {"ready", "in_progress"}:
+            cross = dependency_registry.start_gate(specs_dir, frontmatter)
+            result["checks"]["cross_project_dependencies"] = cross
+            result["blocking_failures"].extend(reason["message"] for reason in cross["reasons"])
+
         deps = _dependency_state(frontmatter, specs)
         result["checks"]["dependencies"] = deps
         if not deps["ok"]:
@@ -524,6 +869,17 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
                 f"{item['id']} ({item['status'] or 'missing'})" for item in deps["unresolved"]
             )
             result["blocking_failures"].append(f"Unresolved after: dependencies: {unresolved}.")
+
+        # SPEC-419: the sequential run route applies the same project spec_metadata policy
+        # (version first) as promotion and parallel dispatch; an invalid policy refuses too.
+        if status in {"planned", "ready", "in_progress"}:
+            try:
+                from spec_frontmatter import load_spec_metadata_policy, spec_metadata_problems
+                metadata_problems = spec_metadata_problems(frontmatter, load_spec_metadata_policy(config_path))
+            except ImportError:  # pragma: no cover - a kit without the shared policy reader
+                metadata_problems = ["spec_metadata_validation_unavailable: sync the managed spec_frontmatter.py"]
+            result["checks"]["spec_metadata"] = {"ok": not metadata_problems, "problems": metadata_problems}
+            result["blocking_failures"].extend(metadata_problems)
 
         # SPEC-358 R6: route planned/ready/in_progress preflight through the
         # same '## State rationale' static rules as the CLI validator and the
@@ -547,6 +903,21 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
             result["blocking_failures"].append("state_rationale_validation_unavailable: sync the managed validator")
 
     commands = load_commands(config_path)
+    # SPEC-NS-KIT-162: canonical packaging is checked before any configured
+    # command. Installed copies have their separate admission contract.
+    if config_path.parent.resolve() == repo / "canonical":
+        try:
+            import release
+            final_manifest = release.check_final_manifest(config_path.parent)
+        except (ImportError, OSError, ValueError) as exc:
+            final_manifest = {"ok": False, "errors": [f"final manifest check unavailable: {exc}"],
+                              "affected_paths": []}
+        result["checks"]["final_manifest"] = final_manifest
+        if not final_manifest["ok"]:
+            result["blocking_failures"].extend(final_manifest["errors"])
+            result["ok"] = False
+            return result
+
     command_results = _command_state(commands, repo)
     result["checks"]["commands"] = command_results
     if command_results["test"]["skipped"]:
@@ -572,6 +943,39 @@ def run_preflight(spec_id: str, repo: Path, specs_dir: Path, config_path: Path) 
 
     result["ok"] = not result["blocking_failures"]
     return result
+
+
+PREFLIGHT_DIGEST_DIR = Path("_wip") / "preflight-digests"
+
+
+def write_preflight_digest_record(
+    metrics_dir: Path, spec_id: str, repository_head: str | None, body: bytes,
+) -> Path | None:
+    """Record the retained result's SHA-256 out of band (SPEC-390-002-002 R1).
+
+    The record lives under ``<metrics_dir>/_wip/`` (untracked, parent-private),
+    never in the spec, a report or any committed file, so the digest stays an
+    out-of-band reference. Nothing is written when the head is unknown.
+    """
+    if not repository_head:
+        return None
+    record_dir = metrics_dir / PREFLIGHT_DIGEST_DIR
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record = record_dir / f"{spec_id}.json"
+    record.write_text(
+        json.dumps(
+            {
+                "spec_id": spec_id,
+                "repository_head": repository_head,
+                "result_sha256": hashlib.sha256(body).hexdigest(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -619,7 +1023,9 @@ def main(argv: list[str] | None = None) -> int:
     metrics_dir.mkdir(parents=True, exist_ok=True)
     out = metrics_dir / f"{args.spec_id}.preflight.json"
     result["artifact_path"] = str(out)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    body = (json.dumps(result, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    out.write_bytes(body)
+    write_preflight_digest_record(metrics_dir, args.spec_id, result.get("repository_head"), body)
 
     if result["ok"]:
         print(f"Wrote {out} (preflight ok)")
@@ -632,3 +1038,347 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+_SUITE_ENVIRONMENT_PROBE = r'''
+import importlib, importlib.metadata, json, os, pathlib, tempfile, sys, hashlib
+request = json.loads(sys.stdin.read())
+failures, modules = [], {}
+for name in request['imports']:
+    try:
+        module = importlib.import_module(name)
+        origin = getattr(module, '__file__', None)
+        try:
+            version = importlib.metadata.version({'yaml': 'PyYAML', 'xdist': 'pytest-xdist'}.get(name, name))
+        except importlib.metadata.PackageNotFoundError:
+            version = getattr(module, '__version__', None)
+        modules[name] = {'origin': origin, 'version': version,
+                         'sha256': hashlib.sha256(pathlib.Path(origin).read_bytes()).hexdigest() if origin and pathlib.Path(origin).is_file() else None}
+    except Exception:
+        failures.append('dependency_import:' + name)
+for raw in request['caches']:
+    path = pathlib.Path(raw)
+    try:
+        if not path.is_dir() or not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            raise OSError()
+        with os.scandir(path) as entries:
+            next(entries, None)
+    except OSError:
+        failures.append('cache_access')
+try:
+    with tempfile.TemporaryFile(dir=request['output']) as probe:
+        probe.write(b'setup-capability'); probe.flush(); os.fsync(probe.fileno())
+except OSError:
+    failures.append('output_access')
+print(json.dumps({'failures': failures, 'modules': modules, 'executable': sys.executable,
+                  'prefix': sys.prefix, 'version': sys.version}))
+sys.exit(1 if failures else 0)
+'''
+
+
+_SUITE_NATIVE_ENVIRONMENT_PROBE = r'''
+output=$1
+probe=$2
+shift 2
+failures=''
+for cache do
+    if ! test -d "$cache" || ! test -r "$cache" || ! test -w "$cache" || ! test -x "$cache"; then
+        failures='"cache_access",'
+    fi
+done
+if ! (umask 077; set -C; printf setup-capability > "$output/$probe") 2>/dev/null; then
+    failures="$failures\"output_access\","
+elif ! /bin/rm -- "$output/$probe"; then
+    failures="$failures\"output_access\","
+fi
+case "$failures" in
+    '') printf '{"failures":[],"runtime_kind":"native"}\n' ;;
+    *) printf '{"failures":[%s],"runtime_kind":"native"}\n' "${failures%,}"; exit 1 ;;
+esac
+'''
+
+
+def _suite_executable(value: str, root: Path, env: dict[str, str]) -> str | None:
+    """Resolve with the same cwd/PATH semantics as the eventual suite launch."""
+    import os
+    import shutil
+    if '/' in value:
+        candidate = Path(os.path.abspath(root / value))
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    search = os.pathsep.join(str(root / item) if not Path(item).is_absolute() else item
+                             for item in env.get('PATH', os.defpath).split(os.pathsep))
+    return shutil.which(value, path=search)
+
+
+def _suite_native_runtime(executable: str, selected: list[str], root: Path, env: dict[str, str]):
+    """Inspect identities only; never execute a declared suite or script."""
+    import os
+    import shlex
+    import stat
+    scripts, interpreters, failures = [], [], []
+
+    def bind_script(path):
+        candidate = Path(os.path.abspath(root / path))
+        try:
+            if not candidate.is_file() or not os.access(candidate, os.R_OK):
+                raise OSError()
+            content = candidate.read_bytes()
+            scripts.append({'path_sha256': hashlib.sha256(str(candidate).encode()).hexdigest(),
+                            'sha256': hashlib.sha256(content).hexdigest(),
+                            'mode': stat.S_IMODE(candidate.stat().st_mode)})
+            return content
+        except OSError:
+            failures.append('script_unavailable')
+            return b''
+
+    runtime = executable
+    try:
+        with Path(executable).open('rb') as handle:
+            header = handle.read(4096)
+    except OSError:
+        return None, 'native', scripts, interpreters, ['runtime_unavailable']
+    if header.startswith(b'#!'):
+        bind_script(executable)
+        try:
+            # Kernels do not apply shell quoting to the interpreter or split its one argument.
+            words = header.split(b'\n', 1)[0][2:].decode().strip().split(None, 1)
+        except UnicodeError:
+            words = []
+        interpreter = _suite_executable(words[0], root, env) if words else None
+        if interpreter and Path(words[0]).name == 'env':
+            interpreters.append({'path_sha256': hashlib.sha256(interpreter.encode()).hexdigest(),
+                                 'sha256': hashlib.sha256(Path(interpreter).read_bytes()).hexdigest()})
+            argument = words[1] if len(words) == 2 else ''
+            try:
+                words = shlex.split(argument[2:].lstrip()) if argument.startswith('-S') else [argument] if argument else []
+            except ValueError:
+                words = []
+            interpreter = _suite_executable(words[0], root, env) if words and not words[0].startswith('-') else None
+        runtime = interpreter
+        if runtime is None:
+            failures.append('runtime_unavailable')
+    elif not header.startswith((b'\x7fELF', b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe',
+                                b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce',
+                                b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                                b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')):
+        failures.append('runtime_unresolved')
+        runtime = None
+    if Path(selected[0]).name in ('sh', 'bash'):
+        operands = selected[1:]
+        while operands and operands[0].startswith('-'):
+            flag = operands.pop(0)
+            if flag == '--': break
+            if flag not in ('--noprofile', '--norc') and not (flag.startswith('-') and
+                    len(flag) > 1 and set(flag[1:]) <= set('euxvfn')):
+                failures.append('runtime_unresolved')
+                break
+        if operands and not failures:
+            bind_script(operands[0])
+    kind = 'python' if runtime and Path(runtime).name.startswith('python') else 'native'
+    return runtime, kind, scripts, interpreters, failures
+
+
+def suite_environment_public(result: dict) -> dict:
+    """Only reason codes and digests cross the verifier boundary; native records stay private."""
+    return {key: result[key] for key in ('schema_version', 'status', 'launch_allowed', 'is_suite_sample',
+                                         'reason_codes', 'binding_sha256', 'proof_sha256', 'reused_refusal')}
+
+
+def suite_environment_preflight(command: list[str], *, arm_root: Path, arm_revision: str,
+                                config_identity: str, output_root: Path, timeout_s: float,
+                                environment: dict[str, str] | None = None,
+                                required_imports: list[str] | None = None,
+                                cache_paths: list[Path] | None = None, previous: dict | None = None) -> dict:
+    """Bounded setup only, under the actual launch identity; never run the suite or uv sync."""
+    import os
+    import shutil
+    import shlex
+    import stat
+    import math
+    env = dict(os.environ if environment is None else environment)
+    if not command or any(not isinstance(item, str) or not item for item in command):
+        raise ValueError('setup requires an exact non-empty argv')
+    if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError('setup uses the existing positive configured helper timeout')
+    arm_root, output_root = Path(arm_root).resolve(), Path(output_root).resolve()
+    selected = list(command)
+    launcher = _suite_executable(selected[0], arm_root, env)
+    reasons = []
+    if os.name != 'posix':
+        reasons.append('platform_capability_unavailable')
+    if not isinstance(arm_revision, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', arm_revision):
+        reasons.append('arm_revision_unavailable')
+    if launcher is None:
+        reasons.append('executable_unavailable')
+    # A simple shell wrapper preserves its actual child argv; shell expressions are unavailable.
+    if Path(selected[0]).name in ('sh', 'bash') and len(selected) == 3 and selected[1] == '-c':
+        expression = selected[2]
+        try:
+            lexer = shlex.shlex(expression, posix=True, punctuation_chars=';&|<>()')
+            lexer.whitespace_split = True
+            lexer.commenters = ''
+            tokens = list(lexer)
+            selected = shlex.split(expression)
+        except ValueError:
+            selected, tokens = [], []
+        if (not selected or any(token and set(token) <= set(';&|<>()') for token in tokens)
+                or any(character in expression for character in ('$','`','\n'))):
+            selected = []
+            reasons.append('runtime_unresolved')
+    executable = _suite_executable(selected[0], arm_root, env) if selected else None
+    if selected and executable is None:
+        reasons.append('executable_unavailable')
+    caches = [Path(path).resolve() for path in (cache_paths or [])]
+    runtime = executable
+    runtime_kind, scripts, interpreters = 'python', [], []
+    imports = list(required_imports or [])
+    if selected and Path(selected[0]).name == 'uv':
+        # --with can build an ephemeral environment. A read-only setup check must not invoke it.
+        if env.get('UV_CACHE_DIR'):
+            caches.append(Path(env['UV_CACHE_DIR']).resolve())
+        uv_flags = selected[2:]
+        supported_flags = {'--active', '--no-sync', '--offline', '--no-project'}
+        unknown_flags = any(item.startswith('-') and item not in supported_flags for item in uv_flags[:next((i for i,v in enumerate(uv_flags) if not v.startswith('-')), len(uv_flags))])
+        if (len(selected) < 2 or selected[1] != 'run' or unknown_flags or '--no-sync' not in selected or '--with' in selected or '--with-requirements' in selected
+                or not env.get('VIRTUAL_ENV') or '--active' not in selected):
+            reasons.append('uv_runtime_unresolved')
+            runtime = None
+        else:
+            runtime_path = Path(env['VIRTUAL_ENV']) / 'bin/python'
+            runtime = str(runtime_path) if runtime_path.is_file() else None
+            if not runtime:
+                reasons.append('runtime_unavailable')
+        imports = imports or ['fastapi', 'httpx', 'playwright', 'pytest', 'uvicorn', 'xdist', 'yaml']
+    elif runtime and not Path(runtime).name.startswith('python'):
+        try:
+            runtime, runtime_kind, scripts, interpreters, runtime_failures = _suite_native_runtime(executable, selected, arm_root, env)
+            reasons.extend(runtime_failures)
+        except OSError:
+            runtime, runtime_kind = None, 'native'
+            reasons.append('runtime_unavailable')
+    if selected and (Path(selected[0]).name == 'pytest' or any(selected[index:index + 2] == ['-m', 'pytest'] for index in range(len(selected)))):
+        imports = sorted(set(imports + ['pytest'] + (['xdist'] if any(item == '-n' or item.startswith('-n') and item[2:] in {'auto', 'logical', '2', '3', '4'} for item in selected) else [])))
+    if runtime_kind == 'native':
+        imports = []
+    if runtime and not os.access(runtime, os.X_OK):
+        reasons.append('runtime_unavailable')
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in imports):
+        raise ValueError('setup imports must be explicit top-level runtime modules')
+    def path_identity(path):
+        try:
+            info = Path(path).stat()
+            return {'path_sha256': hashlib.sha256(str(path).encode()).hexdigest(), 'mode': stat.S_IMODE(info.st_mode),
+                    'uid': info.st_uid, 'gid': info.st_gid, 'device': info.st_dev, 'inode': info.st_ino,
+                    'read': os.access(path, os.R_OK), 'write': os.access(path, os.W_OK), 'search': os.access(path, os.X_OK)}
+        except OSError:
+            return {'path_sha256': hashlib.sha256(str(path).encode()).hexdigest(), 'missing': True}
+    for cache in caches:
+        identity = path_identity(cache)
+        if (not cache.is_dir() or not all(identity.get(key) for key in ('read', 'write', 'search'))
+                or not identity.get('mode', 0) & 0o444 or not identity.get('mode', 0) & 0o222 or not identity.get('mode', 0) & 0o111):
+            reasons.insert(0, 'cache_access')
+        if runtime_kind == 'native':
+            try:
+                with os.scandir(cache) as entries:
+                    next(entries, None)
+            except OSError:
+                reasons.insert(0, 'cache_access')
+    if (not output_root.is_dir() or runtime_kind == 'native' and
+            (not path_identity(output_root).get('mode', 0) & 0o222 or not os.access(output_root, os.W_OK | os.X_OK))):
+        reasons.append('output_access')
+    runtime_sha = None
+    if runtime:
+        try:
+            runtime_sha = hashlib.sha256(Path(runtime).read_bytes()).hexdigest()
+        except OSError:
+            reasons.append('runtime_unavailable')
+    relevant = {key: value for key, value in env.items() if key.startswith(('UV_', 'PYTHON', 'PYTEST_')) or key in
+                ('PATH', 'VIRTUAL_ENV', 'TMPDIR', 'TEMP', 'TMP', 'HOME', 'LANG', 'LC_ALL')}
+    if runtime_kind == 'native':
+        relevant = env
+    probe = _SUITE_NATIVE_ENVIRONMENT_PROBE if runtime_kind == 'native' else _SUITE_ENVIRONMENT_PROBE
+    probe_runtime = runtime
+    if runtime_kind == 'native' and (not runtime or Path(runtime).name not in ('sh', 'bash')):
+        probe_runtime = _suite_executable('/bin/sh', arm_root, env)
+    if runtime_kind == 'native' and not probe_runtime:
+        reasons.append('probe_launch_unavailable')
+    def identity_sha(path, failure):
+        if path is None:
+            return None
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            reasons.append(failure)
+            return None
+    launcher_sha = identity_sha(launcher, 'runtime_unavailable')
+    probe_runtime_sha = identity_sha(probe_runtime, 'probe_launch_unavailable')
+    binding = {'arm_revision': arm_revision, 'arm_root_sha256': hashlib.sha256(str(arm_root).encode()).hexdigest(),
+               'command_sha256': hashlib.sha256(json.dumps(command).encode()).hexdigest(), 'config_identity': config_identity,
+               'environment_sha256': hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest(),
+               'runtime_sha256': runtime_sha, 'runtime_path_sha256': hashlib.sha256(str(runtime).encode()).hexdigest(),
+               'launcher_sha256': launcher_sha,
+               'caches': [path_identity(path) for path in caches], 'output': path_identity(output_root),
+               'imports': imports, 'probe_sha256': hashlib.sha256(probe.encode()).hexdigest(), 'timeout_s': timeout_s,
+               'runtime_kind': runtime_kind, 'scripts': scripts, 'interpreters': interpreters,
+               'probe_runtime_sha256': probe_runtime_sha}
+    key = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    if (isinstance(previous, dict) and previous.get('binding_sha256') == key
+            and previous.get('launch_allowed') is False and previous.get('status') == 'unavailable'):
+        return {**previous, 'reused_refusal': True}
+    import time
+    import uuid
+    started = datetime.now(timezone.utc).isoformat()
+    moment = time.monotonic()
+    native = {'invocation_identity': uuid.uuid4().hex, 'started_at': started,
+              'exit_code': None, 'timed_out': False, 'launched': False}
+    observed = {}
+    stdout, stderr = '', ''
+    if not reasons and runtime:
+        try:
+            probe_env = {**env, 'PYTHONDONTWRITEBYTECODE': '1'}
+            native['launched'] = True
+            import signal
+            probe_argv = [runtime, '-I', '-B', '-c', probe]
+            if runtime_kind == 'native':
+                probe_argv = [probe_runtime, '-c', probe, 'nightshift-setup', str(output_root),
+                              '.nightshift-setup-' + native['invocation_identity'], *[str(path) for path in caches]]
+            process = subprocess.Popen(probe_argv, cwd=arm_root, env=probe_env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            native['process_group_id'] = process.pid
+            try:
+                stdout, stderr = process.communicate(json.dumps({'imports': imports, 'caches': [str(path) for path in caches],
+                                                    'output': str(output_root)}), timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                native['timed_out'] = True
+                os.killpg(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+                reasons.append('probe_timeout')
+            native['exit_code'] = process.returncode
+            try:
+                observed = json.loads(stdout)
+                reasons.extend(observed['failures'])
+                if selected and Path(selected[0]).name == 'uv' and Path(observed.get('prefix', '')).resolve() != Path(env['VIRTUAL_ENV']).resolve():
+                    reasons.append('runtime_binding_mismatch')
+            except (ValueError, KeyError, TypeError):
+                if not native['timed_out']:
+                    reasons.append('probe_result_unavailable')
+            if process.returncode and not reasons:
+                reasons.append('probe_failed')
+        except subprocess.TimeoutExpired as error:
+            native['timed_out'] = True
+            stdout = error.stdout.decode(errors='replace') if isinstance(error.stdout, bytes) else error.stdout or ''
+            stderr = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr or ''
+            reasons.append('probe_timeout')
+        except OSError:
+            reasons.append('probe_launch_unavailable')
+    elif not reasons:
+        reasons.append('runtime_unresolved')
+    native.update(ended_at=datetime.now(timezone.utc).isoformat(), duration_s=round(time.monotonic() - moment, 6))
+    native.update(stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(), stderr_sha256=hashlib.sha256(stderr.encode()).hexdigest())
+    result = {'schema_version': 1, 'status': 'unavailable' if reasons else 'pass', 'launch_allowed': not reasons,
+              'is_suite_sample': False, 'reason_codes': sorted(set(reasons)), 'binding_sha256': key,
+              'binding': binding, 'native': native, 'reused_refusal': False,
+              'dependency_runtime_sha256': hashlib.sha256(json.dumps(observed, sort_keys=True).encode()).hexdigest(),
+              'native_stdout': stdout, 'native_stderr': stderr}
+    result['proof_sha256'] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+    return result

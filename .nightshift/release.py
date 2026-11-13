@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import fnmatch
 import hashlib
@@ -10,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Optional
@@ -25,14 +27,22 @@ CANONICAL_SUITE = {
         "fastapi",
         "uvicorn[standard]",
         "httpx",
-        "playwright",
+        "playwright==1.62.0",
+        "pytest-xdist",
+        "psutil==7.2.2",
     ],
     "probe": [
         "python",
         "-c",
-        "import fastapi,httpx,playwright,pytest,uvicorn,yaml",
+        "import fastapi,httpx,playwright,psutil,pytest,uvicorn,xdist,yaml",
     ],
-    "command": ["python", "-m", "pytest", "-q", "tests"],
+    # SPEC-395: per-test parallelism, default capped at 4 workers. The worker
+    # count can be lowered per run with PYTEST_XDIST_AUTO_NUM_WORKERS=<n>.
+    "command": [
+        "python", "-m", "pytest", "-q",
+        "-n", "auto", "--maxprocesses", "4", "--dist", "loadgroup",
+        "tests",
+    ],
 }
 
 
@@ -393,6 +403,75 @@ def managed_local_resource_gaps(canonical: Path, names: list[str]) -> list[str]:
     return sorted(set(gaps))
 
 
+def source_cut_metadata(canonical: Path) -> dict:
+    """Bind source-cut wording; this metadata never attests delivery completion."""
+    from datetime import date
+
+    path = canonical / 'CHANGELOG.md'
+    version = kit_version(canonical)
+    if not path.is_file():
+        return {'status': 'unknown', 'version': version, 'reason': 'missing CHANGELOG.md'}
+    blob = path.read_bytes()
+    rows = re.findall(r'^##\s+' + re.escape(version) + r'\s+\(([^\n]*)\)\s*$', blob.decode(), re.MULTILINE)
+    result = {'status': 'unknown', 'version': version, 'delivery': 'not_attested',
+              'changelog_sha256': hashlib.sha256(blob).hexdigest()}
+    if len(rows) != 1:
+        return {**result, 'reason': 'current version needs exactly one heading'}
+    value = rows[0]
+    if value == 'unreleased':
+        return {**result, 'status': 'development'}
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        return {**result, 'status': 'legacy', 'reason': 'date does not explicitly identify source cut'}
+    match = re.fullmatch(r'source cut: (\d{4}-\d{2}-\d{2})', value)
+    if match:
+        try:
+            date.fromisoformat(match.group(1))
+            return {**result, 'status': 'finalized', 'date': match.group(1)}
+        except ValueError:
+            pass
+    return {**result, 'reason': 'invalid source-cut date/heading'}
+
+
+def source_cut_errors(canonical: Path, manifest: dict, *, require_finalized: bool) -> list[str]:
+    metadata = source_cut_metadata(canonical)
+    errors = []
+    if metadata['status'] == 'unknown' or (require_finalized and metadata['status'] != 'finalized'):
+        errors.append('RELEASE.SOURCE_CUT: CHANGELOG.md: finalized source-cut date required for apply; '
+                      + metadata.get('reason', metadata['status']))
+    if manifest.get('source_cut') != metadata:
+        errors.append('RELEASE.SOURCE_CUT: CHANGELOG.md: manifest source-cut binding differs from current bytes')
+    return errors
+
+
+def finalize_source_cut(canonical: Path, source_cut_date: str) -> dict:
+    """Explicit authorized pre-seal step; never rewrite a completed same-version cut."""
+    from datetime import date
+
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', source_cut_date):
+        raise ValueError('source-cut date must be an ISO calendar date')
+    date.fromisoformat(source_cut_date)
+    path = canonical / 'CHANGELOG.md'
+    version = kit_version(canonical)
+    blob = path.read_bytes()
+    pattern = rb'(?m)^##[ \t]+' + re.escape(version.encode()) + rb'[ \t]+\([^\r\n]*\)[ \t]*'
+    if len(re.findall(pattern, blob)) != 1:
+        raise ValueError('CHANGELOG.md needs one current-version release heading')
+    updated = re.sub(pattern, f'## {version} (source cut: {source_cut_date})'.encode(), blob)
+    receipt = {'version': version, 'date': source_cut_date, 'delivery': 'not_attested',
+               'changed': updated != blob, 'old_sha256': hashlib.sha256(blob).hexdigest(),
+               'new_sha256': hashlib.sha256(updated).hexdigest(), 'manifest': 'generate_after_finalization'}
+    if updated == blob:
+        return receipt
+    previous_path = canonical / 'release-manifest.json'
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_bytes())
+        if (previous.get('kit_version') == version
+                and completed_records_on_fingerprint(canonical, previous.get('fingerprint', ''))):
+            raise SameVersionResealError('completed same-version source-cut metadata is immutable; bump version first')
+    path.write_bytes(updated)
+    return receipt
+
+
 def build_manifest(
     canonical: Path,
     names: list[str],
@@ -403,6 +482,7 @@ def build_manifest(
 ) -> dict:
     payload = {
         "kit_version": kit_version(canonical),
+        "source_cut": source_cut_metadata(canonical),
         "schema_version": schema_version(canonical),
         "files": manifest_files(canonical, names),
         "smoke_checks": smoke_checks
@@ -828,6 +908,19 @@ def finding_family_regression_errors(canonical: Path, manifest: dict) -> list[st
     return errors
 
 
+def finding_floor_check(canonical: Path, manifest: dict) -> tuple[list[str], str | None]:
+    """SPEC-NS-KIT-124: the floor check shared by the coordinator and the CLI.
+
+    Returns ``(errors, skipped_reason)``. A canonical with no baseline declares
+    no floor, so there is nothing to enforce: no errors and a skip reason
+    (the same degrade-safe choice as BUG-334 R3).
+    """
+    baseline = canonical / "metrics" / "validation-error-floor-baseline.json"
+    if not baseline.is_file():
+        return [], f"no finding-family floor declared at {baseline}; nothing to enforce"
+    return finding_family_regression_errors(canonical, manifest), None
+
+
 def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
     """All SPEC-324 checks, in the order a reader would want to fix them.
 
@@ -858,7 +951,7 @@ def payload_gate_errors(canonical: Path, manifest: dict) -> list[str]:
 
 
 def validate_manifest(
-    canonical: Path, names: list[str]
+    canonical: Path, names: list[str], *, require_finalized: bool = False
 ) -> tuple[bool, list[str], dict | None]:
     path = canonical / "release-manifest.json"
     if not path.exists():
@@ -874,8 +967,9 @@ def validate_manifest(
         retained_manifests=manifest.get("retained_manifests", []),
         unretained_manifests=manifest.get("unretained_manifests", []),
     )
-    errors = []
+    errors = source_cut_errors(canonical, manifest, require_finalized=require_finalized)
     for key in (
+        "source_cut",
         "kit_version",
         "schema_version",
         "files",
@@ -912,6 +1006,95 @@ def validate_manifest(
     errors.extend(payload_gate_errors(canonical, manifest))
     errors.extend(managed_local_resource_gaps(canonical, names))
     return not errors, errors, manifest
+
+
+
+def check_final_manifest(canonical: Path) -> dict:
+    """Read-only canonical packaging gate for one imminent configured launch.
+
+    Selection comes from the repository's release registry, never the manifest
+    being checked. No green record is cached: every caller observes final bytes.
+    """
+    canonical = canonical.resolve()
+    errors: list[str] = []
+    affected: set[str] = set()
+    names: list[str] = []
+    manifest = None
+    manifest_digest = None
+    payload_digest = None
+    handoffs: list[dict] = []
+    try:
+        selection = _load_module_from(
+            canonical.parent / "nightshift-sync.py", "_final_manifest_selection"
+        ).CANONICAL_PROTOCOL_FILES
+        if not isinstance(selection, list) or not selection or not all(
+            isinstance(name, str) and name and not PurePosixPath(name).is_absolute()
+            and ".." not in PurePosixPath(name).parts for name in selection
+        ) or len(selection) != len(set(selection)):
+            raise ValueError("invalid canonical managed selection")
+        names = list(selection)
+    except (OSError, ImportError, AttributeError, ValueError) as exc:
+        errors.append(f"canonical managed selection unavailable: {exc}")
+        affected.add("nightshift-sync.py")
+    path = canonical / "release-manifest.json"
+    try:
+        manifest_digest = sha256(path)
+        manifest = json.loads(path.read_text())
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+    except (OSError, ValueError) as exc:
+        errors.append(f"release manifest unavailable: {exc}")
+        affected.add("release-manifest.json")
+        manifest = None
+    if names:
+        missing = [name for name in names if not (canonical / name).is_file()]
+        affected.update(missing)
+        errors.extend(f"managed file missing: {name}" for name in missing)
+        if not missing:
+            try:
+                live_entries = manifest_files(canonical, names)
+                payload_digest = hashlib.sha256(json.dumps(
+                    live_entries, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest()
+                if manifest is not None:
+                    recorded = {entry["path"]: entry for entry in manifest.get("files", [])}
+                    current = {entry["path"]: entry for entry in live_entries}
+                    affected.update(name for name in recorded.keys() | current.keys()
+                                    if recorded.get(name) != current.get(name))
+                    valid, validation_errors, _ = validate_manifest(canonical, names)
+                    if not valid:
+                        errors.extend(validation_errors)
+                        affected.add("release-manifest.json")
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                errors.append(f"final managed payload validation unavailable: {exc}")
+                affected.add("release-manifest.json")
+    for record_path in sorted((canonical / "release-handoffs").glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text())
+            if not isinstance(record, dict):
+                raise ValueError("handoff must be an object")
+            if record.get("status") == "pending":
+                handoffs.append({"path": record_path.name, "sha256": sha256(record_path),
+                                 "target_version": record.get("target_version"),
+                                 "manifest_fingerprint": record.get("manifest_fingerprint"),
+                                 "changed_managed_paths": record.get("changed_managed_paths")})
+        except (OSError, ValueError) as exc:
+            errors.append(f"release handoff {record_path.name} unavailable: {exc}")
+            affected.add(f"release-handoffs/{record_path.name}")
+    for error in errors:
+        for record in handoffs:
+            if record["path"] in error:
+                affected.add(f"release-handoffs/{record['path']}")
+    handoff_digest = hashlib.sha256(json.dumps(
+        handoffs, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    binding = {"manifest_sha256": manifest_digest, "managed_payload_sha256": payload_digest,
+               "handoff_membership_sha256": handoff_digest}
+    identity = hashlib.sha256(json.dumps(
+        binding, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    return {"schema_version": 1, "ok": not errors, "identity": identity,
+            **binding, "affected_paths": sorted(affected), "errors": errors}
 
 
 def verify_install(install: Path, manifest: dict) -> tuple[bool, list[str]]:
@@ -1024,3 +1207,137 @@ def apply_fleet(
             outcome["unexpected"].append({"install": str(install), "details": details})
             break  # unexpected failure stops later independent repositories
     return outcome
+
+
+SCAFFOLD_DIRS = (
+    "specs", "reports", "reports/_wip", "metrics", "metrics/_wip",
+    "knowledge", "red-proofs", "scenarios", "prompts", "checkpoints",
+)
+INSTALLED_HOOKS = ("pre-commit", "commit-msg")
+
+
+def _project_hooks_dir(project: Path) -> Optional[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(project), "rev-parse", "--git-path", "hooks"],
+        text=True, capture_output=True, check=False,
+    )
+    out = result.stdout.strip()
+    if result.returncode or not out:
+        return None
+    path = Path(out)
+    return path if path.is_absolute() else project / path
+
+
+def _seed_config(text: str, name: Optional[str], languages: list[str]) -> str:
+    """Fill the two identity placeholders the installed profile requires; nothing else."""
+    if name:
+        text = text.replace('  name: ""', f"  name: {json.dumps(name)}", 1)
+    if languages:
+        text = text.replace("  language: []", f"  language: {json.dumps(languages)}", 1)
+    return text
+
+
+def install_project(
+    canonical: Path, install: Path, *, dry_run: bool = False, force: bool = False,
+    name: Optional[str] = None, languages: Optional[list[str]] = None,
+) -> tuple[bool, list[str]]:
+    """Bootstrap a fresh project: managed set via apply_install, scaffold, hooks, verdict."""
+    canonical, install = canonical.resolve(), install.resolve()
+    manifest = json.loads((canonical / "release-manifest.json").read_text())
+    if (install / MARKER).exists() and not force:
+        return False, [f"{install / MARKER} exists; refusing without --force"]
+    hooks_dir = _project_hooks_dir(install.parent)
+    if hooks_dir is None:
+        return False, [f"{install.parent} is not a git repository (git init first)"]
+    ok, notes = apply_install(canonical, install, manifest, dry_run=dry_run)
+    if not ok:
+        return False, notes
+    lines = list(notes)
+    templates = sorted((canonical / "specs").glob("_TEMPLATE*.md"))
+    if dry_run:
+        lines.append(f"would create {len(SCAFFOLD_DIRS)} scaffold dirs, {len(templates)} spec templates")
+        lines += [f"would wire hooks {', '.join(INSTALLED_HOOKS)} into {hooks_dir}"]
+        return True, lines
+    for name in SCAFFOLD_DIRS:
+        (install / name).mkdir(parents=True, exist_ok=True)
+    for tpl in templates:
+        shutil.copyfile(tpl, install / "specs" / tpl.name)
+    config = install / "config.yaml"  # project-owned; seeded only when absent
+    if not config.exists():
+        config.write_text(_seed_config((canonical / "config.yaml").read_text(), name, languages or []))
+        lines.append("seeded config.yaml (fill it in)")
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in INSTALLED_HOOKS:
+        src, dst = install / "hooks" / name, hooks_dir / name
+        if dst.is_file() and dst.read_bytes() == src.read_bytes() and os.access(dst, os.X_OK):
+            lines.append(f"hook {name}: unchanged")
+            continue
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o755)
+        lines.append(f"hook {name}: wired at {dst}")
+    verdict = subprocess.run(
+        [sys.executable, str(install / "validate_install.py"), "--profile", "installed",
+         "--root", str(install.parent)],
+        text=True, capture_output=True, check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    lines += [ln for ln in verdict.stdout.splitlines() if ln.startswith(("ALLOW", "DENY", "  - "))]
+    if verdict.returncode:
+        lines.append(f"validate_install exit {verdict.returncode}: install not admitted")
+        return False, lines
+    return True, lines
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Nightshift release tooling")
+    sub = parser.add_subparsers(dest="command", required=True)
+    inst = sub.add_parser("install", help="bootstrap a project's .nightshift from the managed set")
+    inst.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    inst.add_argument("--install", type=Path, required=True)
+    inst.add_argument("--dry-run", action="store_true")
+    inst.add_argument("--force", action="store_true")
+    inst.add_argument("--name", help="project.name written into a newly seeded config.yaml")
+    inst.add_argument("--language", action="append", default=[], help="project.language entry (repeatable)")
+    floor = sub.add_parser("finding-floor", help="check the finding-family floor (exit 1 on regression)")
+    floor.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    final = sub.add_parser("check-final-manifest", help="read-only final canonical packaging gate before a configured suite")
+    final.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    invariants = sub.add_parser("check-release-invariants", help="read-only guide/report/saved-inventory preflight before expensive validation")
+    invariants.add_argument("--canonical", type=Path, default=Path(__file__).resolve().parent)
+    cut = sub.add_parser('finalize-source-cut', help='authorized source-cut date finalization before manifest generation')
+    cut.add_argument('--canonical', type=Path, default=Path(__file__).resolve().parent)
+    cut.add_argument('--date', required=True)
+    args = parser.parse_args(argv)
+    if args.command == 'finalize-source-cut':
+        try:
+            print(json.dumps(finalize_source_cut(args.canonical, args.date), indent=2))
+            return 0
+        except (ValueError, OSError, SameVersionResealError) as exc:
+            print(json.dumps({'status': 'refused', 'reason': str(exc)}))
+            return 1
+
+    if args.command == "check-release-invariants":
+        from preflight import release_invariant_preflight
+        result = release_invariant_preflight(args.canonical, json.loads((args.canonical / "release-manifest.json").read_bytes()))
+        print(json.dumps(result, indent=2))
+        return 0 if result["ok"] else 1
+    if args.command == "check-final-manifest":
+        result = check_final_manifest(args.canonical)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 1
+    if args.command == "finding-floor":
+        errors, skipped = finding_floor_check(args.canonical.resolve(), {})
+        if skipped:
+            print(f"SKIP: {skipped}")
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1 if errors else 0
+    ok, lines = install_project(args.canonical, args.install, dry_run=args.dry_run, force=args.force,
+        name=args.name, languages=args.language,
+    )
+    print("\n".join(lines), file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

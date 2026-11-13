@@ -13,6 +13,7 @@ Exit codes:
 
 import argparse
 import json
+import dependency_registry
 import os
 import re
 import sys
@@ -21,7 +22,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 
 import yaml
 
@@ -30,9 +31,11 @@ if str(CANONICAL_DIR) not in sys.path:
     sys.path.insert(0, str(CANONICAL_DIR))
 
 from model_stylesheet import resolve_model
+from scope_guard import AmbiguousSpecFile, find_spec_file  # BUG-NS-KIT-007
 from dependency_registry import (
     DependencyRegistryResolver,
     parse_requires_specs_text,
+    propose_new_id,
     qualified_dependency_key,
 )
 from parallel_executor import (
@@ -43,7 +46,13 @@ from parallel_executor import (
     write_admission_plan,
     ParallelLayer,
 )
-from spec_frontmatter import VALID_SPEC_STATUSES
+from spec_frontmatter import (
+    VALID_SPEC_STATUSES,
+    SPEC_METADATA_FIELD_NAMES,
+    load_spec_metadata_policy,
+    project_config_path_for_specs_dir,
+    spec_metadata_problems,
+)
 
 _STOP_WORDS = frozenset({
     "the", "a", "an", "to", "in", "for", "and", "or", "with",
@@ -53,6 +62,23 @@ _STOP_WORDS = frozenset({
 
 _BUGFIX_KEYWORDS = {"fix", "crash", "bug", "broken", "error", "fail", "regression"}
 _REFACTOR_KEYWORDS = {"refactor", "restructure", "reorganize", "clean up", "simplify", "extract", "decouple"}
+
+
+def _spec_metadata_values(yaml_text: str) -> Dict[str, Any]:
+    """The top-level ``spec_metadata`` field values (version, tags) of one frontmatter block."""
+    try:
+        data = yaml.safe_load(yaml_text)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: data[name] for name in SPEC_METADATA_FIELD_NAMES if name in data}
+
+
+def _admission_metadata_policy(args, specs_dir: Path):
+    """SPEC-419: the project's spec_metadata policy -- ``--config`` when given, else the project's own config.yaml."""
+    config = getattr(args, "config", None)
+    return load_spec_metadata_policy(Path(config) if config else project_config_path_for_specs_dir(specs_dir))
 
 
 def _parse_requires_specs_text(yaml_text: str) -> tuple[Tuple[Tuple[str, str], ...], Optional[str]]:
@@ -168,6 +194,9 @@ class SpecFrontmatter:
     touches: List[str] = field(default_factory=list)
     requires_specs: Tuple[Tuple[str, str], ...] = ()
     requires_specs_error: Optional[str] = None
+    # SPEC-419: raw spec_metadata field values (version/tags) read with a real YAML parse, for
+    # the shared policy checker; never rendered or serialized.
+    metadata: Dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass
@@ -373,6 +402,7 @@ class DAGBuilder:
             touches=data.get("touches", []),
             requires_specs=requires_specs,
             requires_specs_error=requires_specs_error,
+            metadata=_spec_metadata_values(yaml_text),
         )
 
     @staticmethod
@@ -417,13 +447,13 @@ class DAGBuilder:
 
         # Parse after (list - try multiline first)
         match = re.search(
-            r'^\s*after:\s*\n((?:^\s+-\s+.+$\n?)*)',
+            r'^\s*after:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)*)',
             yaml_text,
             re.MULTILINE
         )
         if match and match.group(1).strip():
             items_text = match.group(1)
-            items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+            items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
             data["after"] = [item.strip() for item in items]
         else:
             # Try inline list
@@ -434,13 +464,13 @@ class DAGBuilder:
 
         # Parse nfrs (list - try multiline first)
         match = re.search(
-            r'^\s*nfrs:\s*\n((?:^\s+-\s+.+$\n?)*)',
+            r'^\s*nfrs:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)*)',
             yaml_text,
             re.MULTILINE
         )
         if match and match.group(1).strip():
             items_text = match.group(1)
-            items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+            items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
             data["nfrs"] = [item.strip() for item in items]
         else:
             # Try inline list
@@ -456,13 +486,13 @@ class DAGBuilder:
 
         # Parse children (list - try multiline first)
         match = re.search(
-            r'^\s*children:\s*\n((?:^\s+-\s+.+$\n?)*)',
+            r'^\s*children:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)*)',
             yaml_text,
             re.MULTILINE
         )
         if match and match.group(1).strip():
             items_text = match.group(1)
-            items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+            items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
             data["children"] = [item.strip() for item in items]
         else:
             # Try inline list
@@ -512,13 +542,13 @@ class DAGBuilder:
 
         # Parse context.required_inputs (nested list under context:)
         match = re.search(
-            r'^\s*context:\s*\n(?:\s+\w+:.*\n)*?\s+required_inputs:\s*\n((?:^\s+-\s+.+$\n?)*)',
+            r'^\s*context:\s*\n(?:\s+\w+:.*\n)*?\s+required_inputs:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)*)',
             yaml_text,
             re.MULTILINE
         )
         if match and match.group(1).strip():
             items_text = match.group(1)
-            items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+            items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
             data["required_inputs"] = [item.strip().strip('"').strip("'") for item in items]
         else:
             # Try inline list under context
@@ -535,13 +565,13 @@ class DAGBuilder:
         # Parse OpenSpec-transfer stacking metadata lists (SPEC-054)
         for list_name in ("provides", "requires", "touches"):
             match = re.search(
-                rf'^\s*{list_name}:\s*\n((?:^\s+-\s+.+$\n?)*)',
+                rf'^\s*{list_name}:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)*)',
                 yaml_text,
                 re.MULTILINE,
             )
             if match and match.group(1).strip():
                 items_text = match.group(1)
-                items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+                items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
                 data[list_name] = [item.strip().strip('"').strip("'") for item in items]
             else:
                 match = re.search(rf'^\s*{list_name}:\s*\[(.*?)\]', yaml_text, re.MULTILINE)
@@ -551,13 +581,13 @@ class DAGBuilder:
 
         # Parse implementation_order (list - try multiline first)
         match = re.search(
-            r'^\s*implementation_order:\s*\n((?:^\s+-\s+.+$\n?)+)',
+            r'^\s*implementation_order:\s*\n((?:^[ \t]*-[ \t]+.+$\n?)+)',
             yaml_text,
             re.MULTILINE
         )
         if match:
             items_text = match.group(1)
-            items = re.findall(r'^\s+-\s+(.+)$', items_text, re.MULTILINE)
+            items = re.findall(r'^[ \t]*-[ \t]+(.+)$', items_text, re.MULTILINE)
             data["implementation_order"] = [item.strip() for item in items]
         else:
             # Try inline list
@@ -572,7 +602,34 @@ class DAGBuilder:
                     item.strip() for item in items if item.strip()
                 ]
 
+        # BUG-NS-KIT-004: the regexes above are the no-loader fallback (they accept
+        # inline, indented and column-0 block lists). A real YAML load of the
+        # top-level list fields wins when it parses cleanly.
+        data.update(DAGBuilder._yaml_list_fields(yaml_text))
         return data
+
+    _YAML_LIST_FIELDS = (
+        "after", "nfrs", "children", "provides", "requires", "touches",
+        "implementation_order",
+    )
+
+    @staticmethod
+    def _yaml_list_fields(yaml_text: str) -> Dict:
+        try:
+            loaded = yaml.safe_load(yaml_text)
+        except yaml.YAMLError:
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        out: Dict = {}
+        for name in DAGBuilder._YAML_LIST_FIELDS:
+            value = loaded.get(name)
+            if isinstance(value, list) and all(
+                isinstance(item, (str, int)) and not isinstance(item, bool)
+                for item in value
+            ):
+                out[name] = [str(item).strip() for item in value]
+        return out
 
     def build_graph(
         self, main_spec_id: str
@@ -742,9 +799,11 @@ class DAGBuilder:
         for spec_id, spec in specs.items():
             nfr_map[spec_id] = []
             for nfr_id in spec.nfrs:
-                nfr_file = self.specs_dir / f"{nfr_id}.md"
-                template_named_files = list(self.specs_dir.glob(f"{nfr_id}-*.md"))
-                if not nfr_file.exists() and not template_named_files:
+                try:
+                    nfr_found = find_spec_file(self.specs_dir, nfr_id) is not None
+                except AmbiguousSpecFile:
+                    nfr_found = True
+                if not nfr_found:
                     if debug:
                         print(
                             f"  Warning: NFR file {nfr_id}.md or {nfr_id}-*.md not found",
@@ -999,7 +1058,9 @@ def explain_spec_command(args) -> int:
     target, record = items[spec_id], corpus[spec_id]
     admission = hold = None
     if target.get("status") not in {"done", "superseded", "active", "retired"}:
-        admission = lifecycle.derive_admission(target, record["body"], admission_specs, resolution.errors)
+        admission = lifecycle.derive_admission(
+            target, record["body"], admission_specs, resolution.errors,
+            spec_metadata_policy=load_spec_metadata_policy(config_path))
         target["run_state"], target["run_state_reason"] = admission.state, admission.reason
         if target.get("status") == "in_progress":
             hold = deployment_tiers.pending_authorization_hold_detail(reports_root / "_wip", spec_id)
@@ -1008,7 +1069,8 @@ def explain_spec_command(args) -> int:
                 target["run_state"], target["run_state_reason"] = admission.state, admission.reason
 
     decisions, qualified = plan_parallel_decisions(
-        items, resolver, worker_limit=worker_limit, missing_touches_policy=policy)
+        items, resolver, worker_limit=worker_limit, missing_touches_policy=policy,
+        spec_metadata_policy=load_spec_metadata_policy(config_path))
     explanation = spec_artifacts.compose_run_state_explanation(
         target, file_frontmatter=record["fm"],
         rationale_parsed=spec_artifacts.parse_rationale_section(record["body"]),
@@ -1058,10 +1120,12 @@ def admission(args) -> int:
         if args.missing_touches_policy is not None
         else configured.get("missing_touches_policy", "exclusive")
     )
+    metadata_policy = _admission_metadata_policy(args, specs_dir)
     runnable_specs = [
         AdmissionSpec(
             spec_id=spec.id,
             status=spec.status,
+            metadata_problems=tuple(spec_metadata_problems(spec.metadata, metadata_policy)),
             after=tuple(spec.after) + tuple(
                 qualified_dependency_key(spec.id, project, required_id)
                 for project, required_id in spec.requires_specs
@@ -1080,6 +1144,12 @@ def admission(args) -> int:
         worker_limit,
         missing_touches_policy=missing_touches_policy,
         dependency_statuses={
+            # Excluded main/nfr specs are not runnable but still gate children.
+            **{
+                spec_id: specs[spec_id].status
+                for spec_id in builder.local_spec_ids
+                if specs[spec_id].type in ("main", "nfr")
+            },
             **builder.qualified_dependency_statuses,
         },
         dependency_errors=builder.qualified_dependency_errors,
@@ -1501,6 +1571,8 @@ def graph_command(args) -> int:
                 "requires": spec.requires,
                 "touches": spec.touches,
                 "unlocks": metadata["unlocks"].get(spec.id, []),
+                **({"version": spec.metadata["version"]} if spec.metadata.get("version") is not None else {}),
+                **({"tags": spec.metadata["tags"]} if spec.metadata.get("tags") else {}),
             }
             for spec in sorted(specs.values(), key=lambda s: s.id)
         ],
@@ -1530,13 +1602,20 @@ def next_command(args) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     metadata = build_stack_metadata(specs)
+    metadata_policy = _admission_metadata_policy(args, specs_dir)
     ready = []
+    refused = []
     for spec_id in sorted(builder.local_spec_ids):
         spec = specs[spec_id]
         if spec.status != "ready":
             continue
         unmet = [dep for dep in spec.after if dep not in specs or specs[dep].status != "done"]
         if unmet:
+            continue
+        # SPEC-419: a ready spec violating the project's spec_metadata policy is never suggested.
+        problems = spec_metadata_problems(spec.metadata, metadata_policy)
+        if problems:
+            refused.append({"id": spec.id, "problems": problems})
             continue
         warnings = [w for w in metadata["warnings"] if w.get("spec_id") == spec.id or spec.id in w.get("spec_ids", [])]
         ready.append({
@@ -1548,14 +1627,20 @@ def next_command(args) -> int:
             "touches": spec.touches,
             "unlocks": metadata["unlocks"].get(spec.id, []),
             "warnings": warnings,
+            **({"version": spec.metadata["version"]} if spec.metadata.get("version") is not None else {}),
+            **({"tags": spec.metadata["tags"]} if spec.metadata.get("tags") else {}),
         })
     ready.sort(key=lambda item: _spec_sort_key(specs[item["id"]]))
     payload = {"ready": ready, "warnings": metadata["warnings"]}
+    if refused:
+        payload["refused"] = refused
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         for item in ready:
             print(f"{item['id']} ready warnings={len(item['warnings'])}")
+        for item in refused:
+            print(f"{item['id']} refused: {'; '.join(item['problems'])}")
     return 0
 
 # ============================================================================
@@ -1657,6 +1742,9 @@ def ingest(args) -> int:
             if num > max_id:
                 max_id = num
     next_id = max_id + 1
+    # SPEC-416 R6/R7: a project with a registered code mints {KIND}-{CODE}-NNN,
+    # unique across the fleet; otherwise the legacy SPEC-NNN counter stands.
+    minted_id = propose_new_id(specs_dir, "SPEC")
 
     # Generate slug
     slug = _generate_slug(description)
@@ -1677,7 +1765,7 @@ def ingest(args) -> int:
         target_files_str = "- (none detected — fill in manually)"
 
     # Build spec content
-    spec_id = f"SPEC-{next_id:03d}"
+    spec_id = minted_id or f"SPEC-{next_id:03d}"
     filename = f"{spec_id}-{slug}.md"
     spec_path = specs_dir / filename
 
@@ -2312,6 +2400,11 @@ def dispatch_spec_command(args) -> int:
         )
         return 1
 
+    gate = dependency_registry.start_gate(specs_dir, spec_frontmatter)
+    if not gate["ok"]:
+        print(json.dumps({"spec_id": args.spec_id, "status": "refused", **gate}, indent=2))
+        return 1
+
     # Optional config load (for custom handlers + runner.domain fallback).
     config: Dict = {}
     if args.config:
@@ -2325,6 +2418,18 @@ def dispatch_spec_command(args) -> int:
                     config.update(document)
         except (OSError, yaml.YAMLError) as exc:
             print(f"Error: cannot read config {args.config}: {exc}", file=sys.stderr)
+            return 1
+
+    # SPEC-419: dispatch is an admission route; a spec violating the project's spec_metadata policy
+    # (or an invalid policy) launches no handler.
+    if spec_frontmatter.get("status") in {"planned", "ready", "in_progress"}:
+        metadata_problems = spec_metadata_problems(
+            spec_frontmatter, _admission_metadata_policy(args, specs_dir))
+        if metadata_problems:
+            print(json.dumps({
+                "spec_id": args.spec_id, "status": "refused", "reason": "spec_metadata_invalid",
+                "problems": metadata_problems,
+            }, indent=2))
             return 1
 
     # Build a per-invocation event log so CLI callers still get events.jsonl

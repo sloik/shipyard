@@ -39,7 +39,58 @@ set -euo pipefail
 # walking up to the repository root) that contains a readable
 # ".nightshift/config.yaml". Prints the resolved install root (e.g. "." or
 # "api") on stdout and returns 0, or returns 1 if no ancestor has one.
+#
+# SPEC-397-002: indexed_config used to spawn up to two `git cat-file -e`
+# processes per candidate directory per staged path.  prime_config_cache now
+# asks git ONCE (one `git cat-file --batch-check`, however many paths are
+# staged) about every candidate "<dir>/config.yaml" in both the index and HEAD,
+# and indexed_config answers from that cached result.  The decision is the
+# same: present in the index, or in HEAD, or a regular file on disk.
+CONFIG_PRESENT=$'\n'
+CONFIG_PROBED=$'\n'
+
+prime_config_cache() {
+    local path dir candidate rev answer
+    local -a queries=() names=()
+    local queued=$'\n'
+    queue_candidate() {
+        case "$1" in *$'\n'*) return 0 ;; esac  # not batch-safe; probed individually
+        case "$queued" in *$'\n'"$1"$'\n'*) return 0 ;; esac
+        queued+="$1"$'\n'
+        names+=("$1")
+        queries+=(":$1/config.yaml" "HEAD:$1/config.yaml")
+    }
+    queue_candidate .nightshift
+    queue_candidate canonical
+    for path in "$@"; do
+        dir=${path%/*}
+        if [ "$dir" = "$path" ]; then dir="."; fi
+        while :; do
+            if [ "$dir" = "." ]; then queue_candidate .nightshift; else queue_candidate "$dir/.nightshift"; fi
+            if [ "$dir" = "." ]; then break; fi
+            if [ "${dir%/*}" = "$dir" ]; then dir="."; else dir=${dir%/*}; fi
+        done
+    done
+    [ ${#queries[@]} -gt 0 ] || return 0
+    local i=0 present
+    local -a answers=()
+    while IFS= read -r answer; do answers+=("$answer"); done < <(printf '%s\n' "${queries[@]}" | git cat-file --batch-check 2>/dev/null)
+    for ((i = 0; i < ${#names[@]}; i++)); do
+        present=0
+        case "${answers[2*i]:-missing}" in *" missing"|"") ;; *) present=1 ;; esac
+        case "${answers[2*i+1]:-missing}" in *" missing"|"") ;; *) present=1 ;; esac
+        if [ "$present" -eq 1 ]; then CONFIG_PRESENT+="${names[i]}"$'\n'; fi
+        CONFIG_PROBED+="${names[i]}"$'\n'
+    done
+}
+
 indexed_config() {
+    case "$CONFIG_PROBED" in
+        *$'\n'"$1"$'\n'*)
+            case "$CONFIG_PRESENT" in *$'\n'"$1"$'\n'*) return 0 ;; esac
+            [ -f "$1/config.yaml" ]
+            return ;;
+    esac
     git cat-file -e ":$1/config.yaml" 2>/dev/null ||
         git cat-file -e "HEAD:$1/config.yaml" 2>/dev/null ||
         [ -f "$1/config.yaml" ]
@@ -60,6 +111,14 @@ resolve_install_root() {
         if [ "$dir" = "." ]; then candidate=".nightshift"; else candidate="$dir/.nightshift"; fi
         if indexed_config "$candidate"; then
             if [ "$dir" = "." ] && indexed_config canonical; then
+                # BUG-NS-KIT-130 R3: a repo-root path (formal/..., Skills/..., .gitignore) in a
+                # repository holding both installs belongs to canonical, so canonical's checks
+                # (the scanner included) run on it instead of the path being dropped. A
+                # specs/ or reports/-shaped path stays ambiguous (SPEC-381).
+                case "/$path" in
+                    */.nightshift/specs/*|*/.nightshift/reports/*|/canonical/specs/*|/canonical/reports/*) ;;
+                    *) printf '%s' canonical; return 0 ;;
+                esac
                 echo "[nightshift pre-commit] Ambiguous root ownership; use an explicit canonical or .nightshift path" >&2
                 return 2
             fi
@@ -75,11 +134,275 @@ install_path() {
     printf '%s/%s' "$1" "${2#.nightshift/}"
 }
 
+# Read only command scalar values through PyYAML.  In particular, do not let
+# shell parsing or a platform-specific text extractor reinterpret config text
+# before it reaches the intentionally configured eval below.
+#
+# SPEC-397: lint and type_check come from ONE Python invocation per install
+# (it used to be one per key, re-reading and re-parsing the same file).  Python
+# prints two shell-quoted assignments, so a value survives the hand-off to bash
+# byte for byte (quotes, "$()", backticks, newlines); they are evaluated only
+# after Python exited 0, so a parse failure still stops the hook with exit 1
+# and no assignment.  Trailing newlines are stripped exactly as the former
+# command substitution did.  Validation order is unchanged: lint is checked
+# before type_check, so the first invalid value is the one reported.
+extract_cmds() {
+    local config="$1"
+    local assignments
+    if ! assignments=$(python3 - "$config" <<'PY'
+import shlex
+import sys
+
+try:
+    import yaml
+except ImportError:
+    print("[nightshift pre-commit] Cannot parse config.yaml: PyYAML is unavailable", file=sys.stderr)
+    raise SystemExit(1)
+
+config_path = sys.argv[1]
+try:
+    with open(config_path, encoding="utf-8") as config_file:
+        config = {}
+        for document in yaml.safe_load_all(config_file):
+            if isinstance(document, dict):
+                config.update(document)
+except (OSError, yaml.YAMLError) as error:
+    print(f"[nightshift pre-commit] Cannot parse config.yaml: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(config, dict):
+    print("[nightshift pre-commit] Cannot parse config.yaml: top-level value must be a mapping", file=sys.stderr)
+    raise SystemExit(1)
+
+commands = config.get("commands", {})
+if commands is None:
+    commands = {}
+if not isinstance(commands, dict):
+    print("[nightshift pre-commit] Cannot parse config.yaml: commands must be a mapping", file=sys.stderr)
+    raise SystemExit(1)
+
+assignments = []
+# BUG-NS-KIT-135: lint_staged / lint_probe / type_check_probe are optional command
+# strings (absent = ""); they are validated after lint and type_check so the first
+# invalid value reported for a pre-existing key is unchanged.
+for key, variable in (("lint", "LINT_CMD"), ("type_check", "TYPE_CHECK_CMD"),
+                      ("lint_staged", "LINT_STAGED_CMD"), ("lint_probe", "LINT_PROBE"),
+                      ("type_check_probe", "TYPE_CHECK_PROBE")):
+    value = commands.get(key, "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        print(f"[nightshift pre-commit] Cannot parse config.yaml: commands.{key} must be a string", file=sys.stderr)
+        raise SystemExit(1)
+    value = value.replace("\0", "").rstrip("\n")
+    if key == "lint_staged" and value.strip() and "{files}" not in value:
+        print("[nightshift pre-commit] Cannot parse config.yaml: commands.lint_staged must contain the {files} placeholder", file=sys.stderr)
+        raise SystemExit(1)
+    assignments.append(f"{variable}={shlex.quote(value)}")
+# SPEC-NS-KIT-004 R2: optional commands.code_paths (list of globs, relative to the
+# project root).  Unset/empty keeps every gate as before.
+code_paths = commands.get("code_paths")
+if code_paths is None:
+    code_paths = []
+if not isinstance(code_paths, list) or not all(isinstance(item, str) and item.strip() for item in code_paths):
+    print("[nightshift pre-commit] Cannot parse config.yaml: commands.code_paths must be a list of non-empty strings", file=sys.stderr)
+    raise SystemExit(1)
+joined = "\n".join(item.strip().replace("\0", "") for item in code_paths)
+assignments.append(f"CODE_PATHS={shlex.quote(joined)}")
+# BUG-NS-KIT-135 R4: commands.lint_exclude (globs relative to the project root, `*`
+# matches `/`); absent keeps the default of excluding the vendored kit.
+lint_exclude = commands.get("lint_exclude")
+if lint_exclude is None:
+    lint_exclude = [".nightshift/*"]
+if not isinstance(lint_exclude, list) or not all(isinstance(item, str) and item.strip() for item in lint_exclude):
+    print("[nightshift pre-commit] Cannot parse config.yaml: commands.lint_exclude must be a list of non-empty strings", file=sys.stderr)
+    raise SystemExit(1)
+joined = "\n".join(item.strip().replace("\0", "") for item in lint_exclude)
+assignments.append(f"LINT_EXCLUDE={shlex.quote(joined)}")
+# BUG-NS-KIT-135 R3: commands.on_tool_unavailable is "block" (default) or "warn".
+policy = commands.get("on_tool_unavailable")
+if policy is None:
+    policy = "block"
+if policy not in ("block", "warn"):
+    print("[nightshift pre-commit] Cannot parse config.yaml: commands.on_tool_unavailable must be \"block\" or \"warn\"", file=sys.stderr)
+    raise SystemExit(1)
+assignments.append(f"ON_TOOL_UNAVAILABLE={shlex.quote(policy)}")
+sys.stdout.write("\n".join(assignments) + "\n")
+PY
+    ); then
+        return 1
+    fi
+    eval "$assignments"
+}
+
+
+# BUG-NS-KIT-135: classify a failed lint/type_check command.  A nonzero exit is
+# "tool unavailable" (the gate could not run) only when the evidence is
+# unambiguous: exit 126/127/78, or "<python> -m <module>" whose stderr says that
+# same module is missing.  Everything else is a finding and rejects the commit.
+is_python_word() {
+    case "${1##*/}" in python|python[0-9]|python[0-9].[0-9]*) return 0 ;; esac
+    return 1
+}
+
+# Prints the reason and returns 0 when the failure is "tool unavailable".
+classify_unavailable() {
+    local cmd="$1" status="$2" errfile="$3" w1="" w2="" w3="" line seen top
+    case "$status" in 126|127|78) printf 'exit %s' "$status"; return 0 ;; esac
+    read -r w1 w2 w3 _ <<< "$cmd" || true
+    if [ "$w2" = "-m" ] && [ -n "$w3" ] && [ -n "$errfile" ] && [ -s "$errfile" ] && is_python_word "$w1"; then
+        top=${w3%%.*}
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                *"No module named "*)
+                    seen=${line##*No module named }
+                    seen=${seen%%;*}
+                    seen=${seen//\'/}
+                    seen=${seen//\"/}
+                    seen=${seen%%[[:space:]]*}
+                    if [ "$seen" = "$w3" ] || [ "$seen" = "$top" ]; then
+                        printf "python module '%s' is not installed" "$w3"
+                        return 0
+                    fi ;;
+            esac
+        done < "$errfile"
+    fi
+    return 1
+}
+
+NOT_RUN=""
+
+# run_gate <TITLE> <key> <command> <probe> [<display-command>]
+# Runs a lint/type_check command from the project root and reports the outcome:
+# findings reject the commit; "tool unavailable" follows commands.on_tool_unavailable.
+run_gate() {
+    local title="$1" key="$2" cmd="$3" probe="$4" status=0 errfile="" reason="" unavailable=0
+    if [ -n "$probe" ]; then
+        if ! (cd -- "$PROJECT_ROOT" && eval "$probe") >/dev/null 2>&1; then
+            unavailable=1
+            reason="probe failed: $probe"
+        fi
+    fi
+    if [ "$unavailable" -eq 0 ]; then
+        errfile=$(mktemp "${TMPDIR:-/tmp}/nightshift-gate.XXXXXX" 2>/dev/null) || errfile=""
+        if [ -n "$errfile" ]; then
+            (cd -- "$PROJECT_ROOT" && eval "$cmd") 2>"$errfile" || status=$?
+            cat "$errfile" >&2
+        else
+            (cd -- "$PROJECT_ROOT" && eval "$cmd") || status=$?
+        fi
+        if [ "$status" -ne 0 ]; then
+            if reason=$(classify_unavailable "$cmd" "$status" "$errfile"); then unavailable=1; fi
+        fi
+        if [ -n "$errfile" ]; then rm -f -- "$errfile"; fi
+    fi
+    if [ "$unavailable" -eq 1 ]; then
+        local prefix=""
+        if [ "$ON_TOOL_UNAVAILABLE" = "warn" ]; then prefix="WARNING "; else FAILED=1; fi
+        echo "${prefix}[nightshift pre-commit] $title TOOL UNAVAILABLE ($reason): $cmd"
+        echo "[nightshift pre-commit] Install the tool, correct commands.$key, or set commands.on_tool_unavailable: warn to continue without this gate."
+        if [ "$ON_TOOL_UNAVAILABLE" = "warn" ]; then
+            NOT_RUN="${NOT_RUN:+$NOT_RUN, }$title ($PROJECT_ROOT)"
+        fi
+    elif [ "$status" -ne 0 ]; then
+        echo "[nightshift pre-commit] $title FAILED — commit rejected"
+        FAILED=1
+    fi
+}
+
+# --check-tools (R6): read-only report of every configured gate command per
+# install and whether its tool is usable.  Runs no lint/type command against
+# project code and writes nothing.
+tool_usable() {
+    local cmd="$1" probe="$2" w1="" w2="" w3="" rest="$1"
+    if [ -n "$probe" ]; then
+        if eval "$probe" >/dev/null 2>&1; then return 0; fi
+        printf 'probe failed: %s' "$probe"
+        return 1
+    fi
+    while :; do
+        rest=${rest#"${rest%%[![:space:]]*}"}
+        case "$rest" in
+            "cd "*"&&"*) rest=${rest#*&&} ;;
+            [A-Za-z_]*=*" "*) case "${rest%% *}" in *=*) rest=${rest#* } ;; *) break ;; esac ;;
+            *) break ;;
+        esac
+    done
+    read -r w1 w2 w3 _ <<< "$rest" || true
+    if [ -z "$w1" ]; then printf 'empty command'; return 1; fi
+    if ! command -v -- "$w1" >/dev/null 2>&1; then
+        printf "'%s' not found on PATH" "$w1"
+        return 1
+    fi
+    if [ "$w2" = "-m" ] && [ -n "$w3" ] && is_python_word "$w1"; then
+        if ! "$w1" -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)' "$w3" >/dev/null 2>&1; then
+            printf "python module '%s' is not installed" "$w3"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+check_tools() {
+    local top="" config install_dir project_root rc=0 found=0 reason gate cmd probe
+    export PYTHONDONTWRITEBYTECODE=1
+    if top=$(git rev-parse --show-toplevel 2>/dev/null); then cd -- "$top"; fi
+    local -a configs=()
+    if [ -n "$top" ]; then
+        while IFS= read -r -d '' config; do
+            case "$config" in
+                .nightshift/config.yaml|*/.nightshift/config.yaml|canonical/config.yaml) configs+=("$config") ;;
+            esac
+        done < <(git ls-files -z -- '.nightshift/config.yaml' '*/.nightshift/config.yaml' 'canonical/config.yaml' 2>/dev/null)
+    fi
+    if [ ${#configs[@]} -eq 0 ] && [ -f .nightshift/config.yaml ]; then configs+=(.nightshift/config.yaml); fi
+    for config in "${configs[@]+"${configs[@]}"}"; do
+        [ -f "$config" ] || continue
+        found=1
+        install_dir=${config%/config.yaml}
+        project_root=${install_dir%/*}
+        if [ "$project_root" = "$install_dir" ] || [ "${install_dir##*/}" != ".nightshift" ]; then project_root="."; fi
+        LINT_CMD=""; TYPE_CHECK_CMD=""; LINT_STAGED_CMD=""; LINT_PROBE=""; TYPE_CHECK_PROBE=""
+        if ! extract_cmds "$config"; then
+            printf '%s\t%s\t%s\n' "$install_dir" "config" "UNAVAILABLE (cannot parse config.yaml)"
+            rc=1
+            continue
+        fi
+        if [ -z "$LINT_CMD$LINT_STAGED_CMD$TYPE_CHECK_CMD" ]; then
+            printf '%s\t%s\t%s\n' "$install_dir" "-" "no lint/type_check command configured"
+            continue
+        fi
+        for gate in lint lint_staged type_check; do
+            case "$gate" in
+                lint) cmd=$LINT_CMD; probe=$LINT_PROBE ;;
+                lint_staged) cmd=$LINT_STAGED_CMD; probe=$LINT_PROBE ;;
+                *) cmd=$TYPE_CHECK_CMD; probe=$TYPE_CHECK_PROBE ;;
+            esac
+            [ -n "$cmd" ] || continue
+            if reason=$(cd -- "$project_root" && tool_usable "$cmd" "$probe"); then
+                printf '%s\t%s\t%s\t%s\n' "$install_dir" "$gate" "usable" "$cmd"
+            else
+                printf '%s\t%s\t%s\t%s\n' "$install_dir" "$gate" "UNAVAILABLE ($reason)" "$cmd"
+                rc=1
+            fi
+        done
+    done
+    if [ "$found" -eq 0 ]; then echo "[nightshift pre-commit] No install found"; fi
+    return "$rc"
+}
+
+if [ "${1:-}" = "--check-tools" ]; then
+    check_tools
+    exit $?
+fi
+
 STAGED_ALL=()
 # --no-renames reports both old and new sides, including artifact deletions.
 while IFS= read -r -d '' staged_path; do
     STAGED_ALL+=("$staged_path")
 done < <(git diff --cached --name-only -z --no-renames --diff-filter=ACDMRT)
+
+prime_config_cache "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"
 
 INSTALL_ROOTS=()
 for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
@@ -111,65 +434,35 @@ for staged_path in "${STAGED_ALL[@]+"${STAGED_ALL[@]}"}"; do
 done
 if [ "${1:-}" = "--resolve-owners" ]; then exit 0; fi
 
+# SPEC-NS-KIT-001: a live main-freeze lease held by another coordinator session
+# refuses a commit to the main branch. ONE probe per commit (never per staged
+# path or per install), run outside the per-install loop and only when an
+# install ships hooks/main-freeze.sh (a touched install, else a root-level
+# .nightshift/ or canonical/; synced with the hooks directory like the
+# write-scope guard).  A commit whose paths resolve to no install (e.g. root
+# files in a repo holding both) is still checked.  The probe is advisory: it fails open with a
+# warning when the coordinator is unreachable, so only its exit status 3 is a
+# refusal; every other status was already reported by the probe itself.
+FREEZE_PROBE=""
+for INSTALL_ROOT in "${INSTALL_ROOTS[@]+"${INSTALL_ROOTS[@]}"}" .nightshift canonical; do
+    candidate=$(install_path "$INSTALL_ROOT" ".nightshift/hooks/main-freeze.sh")
+    if [ -x "$candidate" ]; then FREEZE_PROBE="$candidate"; break; fi
+done
+FREEZE_REFUSED=0
+if [ -n "$FREEZE_PROBE" ]; then
+    freeze_status=0
+    "$FREEZE_PROBE" check || freeze_status=$?
+    if [ "$freeze_status" -eq 3 ]; then FREEZE_REFUSED=1; fi
+fi
+
 if [ ${#INSTALL_ROOTS[@]} -eq 0 ] && [ ${#STAGED_ALL[@]} -eq 0 ] && [ -f ".nightshift/config.yaml" ]; then
     INSTALL_ROOTS+=(".nightshift")
 fi
 if [ ${#INSTALL_ROOTS[@]} -eq 0 ]; then
     echo "[nightshift pre-commit] No config.yaml found — skipping checks"
+    if [ "$FREEZE_REFUSED" -ne 0 ]; then exit 1; fi
     exit 0
 fi
-
-# Read only command scalar values through PyYAML.  In particular, do not let
-# shell parsing or a platform-specific text extractor reinterpret config text
-# before it reaches the intentionally configured eval below.
-extract_cmd() {
-    local config="$1"
-    local key="$2"
-    local val
-    if ! val=$(python3 - "$config" "$key" <<'PY'
-import sys
-
-try:
-    import yaml
-except ImportError:
-    print("[nightshift pre-commit] Cannot parse config.yaml: PyYAML is unavailable", file=sys.stderr)
-    raise SystemExit(1)
-
-config_path, key = sys.argv[1:]
-try:
-    with open(config_path, encoding="utf-8") as config_file:
-        config = {}
-        for document in yaml.safe_load_all(config_file):
-            if isinstance(document, dict):
-                config.update(document)
-except (OSError, yaml.YAMLError) as error:
-    print(f"[nightshift pre-commit] Cannot parse config.yaml: {error}", file=sys.stderr)
-    raise SystemExit(1)
-
-if not isinstance(config, dict):
-    print("[nightshift pre-commit] Cannot parse config.yaml: top-level value must be a mapping", file=sys.stderr)
-    raise SystemExit(1)
-
-commands = config.get("commands", {})
-if commands is None:
-    commands = {}
-if not isinstance(commands, dict):
-    print("[nightshift pre-commit] Cannot parse config.yaml: commands must be a mapping", file=sys.stderr)
-    raise SystemExit(1)
-
-value = commands.get(key, "")
-if value is None:
-    value = ""
-if not isinstance(value, str):
-    print(f"[nightshift pre-commit] Cannot parse config.yaml: commands.{key} must be a string", file=sys.stderr)
-    raise SystemExit(1)
-sys.stdout.write(value)
-PY
-    ); then
-        return 1
-    fi
-    printf '%s' "$val"
-}
 
 FAILED=0
 
@@ -203,10 +496,15 @@ for INSTALL_ROOT in "${INSTALL_ROOTS[@]}"; do
     if [ "$PROJECT_ROOT" = "$INSTALL_ROOT" ]; then PROJECT_ROOT="."; fi
     CONFIG=$(install_path "$INSTALL_ROOT" ".nightshift/config.yaml")
 
-    if ! LINT_CMD=$(extract_cmd "$CONFIG" "lint"); then
-        exit 1
-    fi
-    if ! TYPE_CHECK_CMD=$(extract_cmd "$CONFIG" "type_check"); then
+    LINT_CMD=""
+    TYPE_CHECK_CMD=""
+    CODE_PATHS=""
+    LINT_STAGED_CMD=""
+    LINT_PROBE=""
+    TYPE_CHECK_PROBE=""
+    LINT_EXCLUDE=""
+    ON_TOOL_UNAVAILABLE="block"
+    if ! extract_cmds "$CONFIG"; then
         exit 1
     fi
 
@@ -268,22 +566,93 @@ for INSTALL_ROOT in "${INSTALL_ROOTS[@]}"; do
         TYPE_CHECK_CMD=""
     fi
 
-    if [ -n "$LINT_CMD" ]; then
-        echo "[nightshift pre-commit] Running lint: $LINT_CMD"
-        if ! (cd -- "$PROJECT_ROOT" && eval "$LINT_CMD"); then
-            echo "[nightshift pre-commit] LINT FAILED — commit rejected"
-            FAILED=1
+    # SPEC-NS-KIT-004 R2: with commands.code_paths configured, a commit whose
+    # staged paths match none of the globs (docs-only) skips type_check only;
+    # lint, scanner and spec validation above/below still run.  Unset = no change.
+    if [ -n "$CODE_PATHS" ] && [ -n "$TYPE_CHECK_CMD" ] && [ "$STAGED_COUNT" -gt 0 ]; then
+        CODE_TOUCHED=0
+        while IFS= read -r code_glob; do
+            [ -n "$code_glob" ] || continue
+            for staged_path in "${STAGED_ALL[@]}"; do
+                rel_path="$staged_path"
+                if [ "$PROJECT_ROOT" != "." ]; then rel_path="${staged_path#"$PROJECT_ROOT"/}"; fi
+                # shellcheck disable=SC2254
+                case "$rel_path" in $code_glob) CODE_TOUCHED=1 ;; esac
+            done
+        done <<< "$CODE_PATHS"
+        if [ "$CODE_TOUCHED" -eq 0 ]; then
+            echo "[nightshift pre-commit] No staged path matches commands.code_paths: type check skipped"
+            TYPE_CHECK_CMD=""
         fi
+    fi
+
+    # BUG-NS-KIT-135 R4: commands.lint_staged replaces commands.lint in this hook and
+    # receives {files}: this install's staged, existing (A/C/M/R) paths, relative to
+    # the project root, minus commands.lint_exclude, limited to commands.code_paths
+    # when set, each shell-quoted.  commands.lint is unchanged when it is unset.  A
+    # kit-only commit (BUG-329) stages no project file, so its list is empty.
+    if [ -n "$LINT_STAGED_CMD" ]; then
+        LINT_FILES=""
+        LINT_FILE_COUNT=0
+        while IFS= read -r -d '' staged_path; do
+            owner=$(resolve_install_root "$staged_path" 2>/dev/null) || continue
+            [ "$owner" = "$INSTALL_ROOT" ] || continue
+            rel_path="$staged_path"
+            if [ "$PROJECT_ROOT" != "." ]; then
+                case "$staged_path" in
+                    "$PROJECT_ROOT"/*) rel_path="${staged_path#"$PROJECT_ROOT"/}" ;;
+                    *) continue ;;
+                esac
+            fi
+            skip=0
+            while IFS= read -r lint_glob; do
+                [ -n "$lint_glob" ] || continue
+                # shellcheck disable=SC2254
+                case "$rel_path" in $lint_glob) skip=1 ;; esac
+            done <<< "$LINT_EXCLUDE"
+            if [ "$skip" -eq 0 ] && [ -n "$CODE_PATHS" ]; then
+                skip=1
+                while IFS= read -r code_glob; do
+                    [ -n "$code_glob" ] || continue
+                    # shellcheck disable=SC2254
+                    case "$rel_path" in $code_glob) skip=0 ;; esac
+                done <<< "$CODE_PATHS"
+            fi
+            [ "$skip" -eq 0 ] || continue
+            LINT_FILES+="${LINT_FILES:+ }$(printf '%q' "$rel_path")"
+            LINT_FILE_COUNT=$((LINT_FILE_COUNT + 1))
+        done < <(if [ "$KIT_ONLY" -eq 1 ]; then :; else git diff --cached --name-only -z --diff-filter=ACMR; fi)
+        if [ "$LINT_FILE_COUNT" -eq 0 ]; then
+            echo "[nightshift pre-commit] No staged files for lint: skipped"
+        else
+            # Substitute by splitting, not ${var//pat/rep}: bash 5.2 treats "&" and
+            # backslashes in a replacement specially, bash 3.2 does not.
+            LINT_RUN=""
+            LINT_REST="$LINT_STAGED_CMD"
+            while [[ "$LINT_REST" == *"{files}"* ]]; do
+                LINT_RUN+="${LINT_REST%%"{files}"*}$LINT_FILES"
+                LINT_REST=${LINT_REST#*"{files}"}
+            done
+            LINT_RUN+="$LINT_REST"
+            echo "[nightshift pre-commit] Running lint on $LINT_FILE_COUNT staged file(s): $LINT_RUN"
+            run_gate "LINT" "lint_staged" "$LINT_RUN" "$LINT_PROBE"
+        fi
+    elif [ -n "$LINT_CMD" ]; then
+        echo "[nightshift pre-commit] Running lint: $LINT_CMD"
+        run_gate "LINT" "lint" "$LINT_CMD" "$LINT_PROBE"
     fi
 
     if [ -n "$TYPE_CHECK_CMD" ]; then
         echo "[nightshift pre-commit] Running type check: $TYPE_CHECK_CMD"
-        if ! (cd -- "$PROJECT_ROOT" && eval "$TYPE_CHECK_CMD"); then
-            echo "[nightshift pre-commit] TYPE CHECK FAILED — commit rejected"
-            FAILED=1
-        fi
+        run_gate "TYPE CHECK" "type_check" "$TYPE_CHECK_CMD" "$TYPE_CHECK_PROBE"
     fi
 done
+
+if [ "$FREEZE_REFUSED" -ne 0 ]; then FAILED=1; fi
+
+if [ -n "$NOT_RUN" ]; then
+    echo "[nightshift pre-commit] gates not run: $NOT_RUN"
+fi
 
 if [ "$FAILED" -ne 0 ]; then
     echo "[nightshift pre-commit] Fix the above errors and try again."

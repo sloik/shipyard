@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "project_code": "LMACRN",
+  "ids": [
+    "BUG-LMAC-001",
+    "SPEC-LMAC-001",
+    "SPEC-LMAC-002",
+    "SPEC-LMAC-003",
+    "SPEC-LMAC-004",
+    "SPEC-LMAC-005",
+    "SPEC-LMAC-006",
+    "SPEC-LMAC-007",
+    "SPEC-LMAC-008",
+    "SPEC-LMAC-009",
+    "SPEC-LMAC-010",
+    "SPEC-LMAC-011",
+    "SPEC-LMAC-012",
+    "SPEC-LMAC-013",
+    "SPEC-LMAC-014",
+    "SPEC-LMAC-015"
+  ]
+}

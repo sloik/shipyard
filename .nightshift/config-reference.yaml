@@ -115,7 +115,7 @@ schema_version: "3.2.0"
 # When `stacks:` is present, schema_version MUST be "3.0.0" or higher.
 # A config with stacks: but schema_version below 3.0.0 is a validation error.
 
-kit_version: "3.24.12"
+kit_version: "3.26.11"
 
 # Terminal managed-payload receipts are freshness- and run-bound. Shared
 # control-plane drift stops later dispatch and integration for the run.
@@ -310,7 +310,21 @@ commands:
   # Required: yes (but can be "")
   # Default:  ""
   # Run the full test suite.
+  # The canonical kit's own suite runs per test through pytest-xdist
+  # (`-n auto --maxprocesses 4 --dist loadgroup`): at most 4 workers by default.
+  # Set the environment variable PYTEST_XDIST_AUTO_NUM_WORKERS=<n> for one run to
+  # lower the worker count (1 = a single worker). The cap is a ceiling, so the
+  # variable cannot raise the count above 4.
   test: "pytest"
+
+  # Type:     string
+  # Required: no
+  # Default:  absent (workers fall back to `test`)
+  # Fast worker hand-back tier (SPEC-396): the same command as `test` minus the
+  # tests marked `slow` or `browser`, e.g. `pytest -m "not slow and not browser"`.
+  # Workers run it at hand-back. Verifiers, preflight dispatch and the release gate
+  # keep running `test`, the complete suite, which remains the release proof.
+  # test_fast: "pytest -m 'not slow and not browser'"
 
   # Type:     string
   # Required: no
@@ -325,6 +339,16 @@ commands:
   # project.name and project.language remain required.
   # test_not_applicable: "markdown-only skill: nothing to test"
 
+  # Type:     list of strings
+  # Required: no
+  # Default:  absent (every commit that stages project code runs type_check)
+  # Globs, relative to the project root, naming project CODE paths (SPEC-NS-KIT-004).
+  # When set, a commit whose staged paths match none of them (docs-only) skips
+  # `type_check` in the pre-commit hook; lint, the secret/PII scanner and spec
+  # validation still run, and a commit staging any matching path runs everything.
+  # `*` also matches `/`. Must be a list of non-empty strings.
+  # code_paths: ["src/*", "Sources/*", "*.swift"]
+
   # Type:     integer
   # Required: no
   # Default:  300
@@ -335,12 +359,67 @@ commands:
   # Required: yes (but can be "")
   # Default:  ""
   # Static analysis. Configure to fail on warnings.
+  # The pre-commit hook runs it from the install's project root (the whole tree
+  # unless the command names paths). Before BUG-NS-KIT-135 the flat lint and
+  # type_check commands had no "tool missing" outcome: any nonzero exit rejected the
+  # commit as findings. Now a command that cannot run is reported as
+  # "<GATE> TOOL UNAVAILABLE" instead of "<GATE> FAILED": exit 127 or 126, exit 78
+  # (the "unavailable" convention: a wrapper script that finds its tool missing
+  # should `exit 78`), `<python> -m <module>` whose stderr says that module is not
+  # installed, or a failing lint_probe / type_check_probe. By default an
+  # unavailable tool BLOCKS the commit (see on_tool_unavailable below); a missing
+  # tool only warns when `on_tool_unavailable: warn` is set. A real finding always
+  # blocks. `hooks/pre-commit --check-tools` lists the configured commands and
+  # whether each tool is usable (read-only).
   lint: "ruff check ."
+
+  # Type:     string (must contain the placeholder {files})
+  # Required: no
+  # Default:  absent (the hook runs `lint` unchanged)
+  # Opt-in changed-files lint for the pre-commit hook only; replaces `lint` there
+  # (`lint` stays what run_validation.py and full-tree gates run). {files} becomes the
+  # shell-quoted staged paths of this install (added, copied, modified or renamed;
+  # never deleted), relative to the project root, minus `lint_exclude`, and limited
+  # to `code_paths` when that is set. No path left = "No staged files for lint:
+  # skipped". A path starting with "-" is passed as written; put `--` before
+  # {files} if the linter needs it.
+  # lint_staged: "python3 -m ruff check {files}"
+
+  # Type:     list of strings
+  # Required: no
+  # Default:  [".nightshift/*"] (the vendored kit)
+  # Globs, relative to the project root, of staged paths `lint_staged` never lints
+  # (`*` also matches `/`). `[]` excludes nothing.
+  # lint_exclude: [".nightshift/*", "vendor/*"]
+
+  # Type:     string
+  # Required: no
+  # Default:  absent
+  # Command that exits 0 when the lint tool is usable (e.g. `python3 -m ruff --version`).
+  # Runs before `lint` / `lint_staged`; a nonzero exit marks the gate "tool unavailable"
+  # and the gate command is not run.
+  # lint_probe: "python3 -m ruff --version"
+
+  # Type:     string
+  # Required: no
+  # Default:  absent
+  # Same as lint_probe, for `type_check`.
+  # type_check_probe: "python3 -m mypy --version"
+
+  # Type:     "block" | "warn"
+  # Required: no
+  # Default:  "block"
+  # What the pre-commit hook does when a lint or type_check tool is unavailable
+  # (see `lint`). "block" rejects the commit; "warn" prints a WARNING, lets the
+  # commit through and repeats "gates not run: ..." at the end. Findings are never
+  # downgraded. Any other value is a config parse error.
+  # on_tool_unavailable: block
 
   # Type:     string
   # Required: yes for typed languages (but can be "")
   # Default:  ""
   # Type checking: tsc, mypy, pyright, etc. "" if the language is untyped.
+  # A missing type checker is reported as TYPE CHECK TOOL UNAVAILABLE (see `lint`).
   type_check: "mypy ."
 
   # Type:     string
@@ -576,6 +655,60 @@ unblock:
   to_done:
     max_rung: 5                    # integer, 1..5; default 5
     dry_run: false                 # boolean; default false
+
+---
+
+# =============================================================================
+# Spec metadata policy (SPEC-419 version, SPEC-420 tags)
+# =============================================================================
+# Each project decides whether an optional spec metadata field is mandatory and
+# which values it accepts. Nothing here is inferred from a release or another
+# project, and a missing block means every field is optional and unrestricted
+# (no existing spec has to change). The policy is read from THIS project's own
+# config only.
+#
+# `version` is the intended PRODUCT RELEASE a spec belongs to ("v1", "v2"). It is
+# not the spec's revision, `template_version`, the config `schema_version`, the
+# Nightshift `kit_version`, or a release-handoff version. A spec carries at most
+# one label (`version: v2`); labels are opaque, case-sensitive strings with no
+# SemVer or ordering rules. A missing or null value means "unassigned".
+#
+#   required: true       -> a nonblank `version:` is mandatory
+#   allowed_values: null -> any nonblank string; a list (e.g. [v1, v2]) -> exact match only
+#
+# An empty list, a non-boolean `required`, or a blank/duplicate/non-string entry is
+# a configuration error: promotion and dispatch refuse with a spec_metadata
+# diagnostic until it is fixed. Severity follows the validator convention: a
+# violation is a WARNING on a draft, an error on planned/ready/in_progress (it
+# blocks promotion and dispatch), and an audit warning on done/superseded specs
+# (their history is never rewritten). Preview the specs a policy would flag with
+# `python3 validate_specs.py --spec-metadata-audit <specs-dir> --required --allowed v1,v2`.
+# The registered config migration/sync never adds, changes, or removes this block; opt in
+# explicitly with config_migrations.opt_in_spec_metadata_version (it edits no spec).
+#
+# `tags` (SPEC-420) are organizational labels for concerns such as ux, backend or security: a
+# YAML list of unique, nonblank, unpadded, case-sensitive strings (`tags: [ux, accessibility]`).
+# Missing, null or [] means untagged. A scalar, a non-string member, a duplicate, a blank or padded
+# member is invalid (no comma splitting, no case folding, nothing normalized). Tags are separate from
+# `touches`, capabilities, NFR scope_tags, domain and dependencies, and never imply scheduling
+# compatibility.
+#
+#   required: true       -> at least one valid tag is mandatory
+#   allowed_values: null -> any valid tag; a list (e.g. [ux, backend, security]) -> every tag must match exactly
+#
+# Same severity convention, config-error behavior and audit as `version`
+# (`validate_specs.py --spec-metadata-audit <specs-dir> --field tags --required --allowed ux,backend`);
+# `config_migrations.opt_in_spec_metadata_tags` is the explicit opt-in. Removing a value from
+# allowed_values leaves the tags in place and makes the specs that carry it visible as violations.
+
+spec_metadata:
+  fields:
+    version:
+      required: false              # boolean; default false
+      allowed_values: null         # null (any nonblank string) or a non-empty list of exact labels, e.g. [v1, v2]
+    tags:
+      required: false              # boolean; default false (true = at least one tag)
+      allowed_values: null         # null (any valid tag) or a non-empty list of exact tags, e.g. [ux, backend, security]
 
 ---
 
@@ -963,6 +1096,23 @@ git:
   # optional for single-agent inline runs. Blocked/failed worktrees can be
   # pinned for inspection with a .nightshift-keep file at the worktree root.
   worktrees: "auto"
+
+  # Type: mapping; Required: no. Default values are shown below.
+  # Copies untracked local configuration after worktree ownership verify and
+  # before launch. Never edits permissions, tracked files or existing content.
+  worktree_local_config:
+    # Type: list[string]; Required: no; Default: [".claude/settings.local.json"].
+    # Valid: exact repo-relative file paths only; no globs, absolute paths,
+    # parent traversal, directories, symlinks or outside-root resolutions.
+    copy: [".claude/settings.local.json"]
+    # Type: list[string]; Required: no; Default: []. Gitignore-style deny globs
+    # extend (cannot remove) .env, .env.*, *.pem, *.key, .netrc, id_rsa*,
+    # *credentials*. Content is also checked by the existing secret scanner.
+    deny: []
+    # Type: boolean; Required: no; Default: false; Valid: true | false.
+    # True stops preparation before launch for refused/failed copies. False
+    # leaves those as warnings. Missing files report absent and are non-errors.
+    required: false
 
   # Type:     string
   # Required: no
@@ -1568,3 +1718,30 @@ extensions: []
 
 # This file is the canonical schema reference for config.yaml.
 # Update it as the config schema evolves.
+
+
+# Optional main test-status ledger (BUG-NS-KIT-197).
+# Absent inputs preserves the existing identity exactly. Opt-in input declarations
+# are hashed with the resolved tracked paths; changing the declaration invalidates
+# reuse even when its current blob set is unchanged. Choose ONE form only.
+# A project owner must declare the actual command's non-input boundary; do not
+# exclude documents/resources the tests read. This is not dependency discovery.
+# Supported direct runners: pytest, python[3[.N]] -m pytest/unittest, swift test,
+# cargo test; uv run [--with PACKAGE ...] may prefix them. Arbitrary shell/script
+# commands, symlinks and submodules force conservative identity and a real run.
+# Tracked source/executable files, hooks, tests/resources, build/config files and
+# lockfiles remain mandatory regardless of either declaration. Matching preserves
+# exact Git path identity. No declaration can waive independent full head tests.
+# The identity-file and --ledger-identity-file JSON use this same inputs mapping;
+# coordinator fresh-main comparison reads this exact configuration mapping.
+# test_status_ledger:
+#   enabled: true
+#   path: .nightshift/test-status-ledger.json
+#   identity:
+#     command: python3 -m pytest -q
+#     inputs:
+#       exclude: ["docs/**", "decisions/**"]
+#       # Alternative: include: ["app/**", "tests/**", "resources/**"]
+# Reused decisions/dispatch plans carry inputs_digest, identity_digest and
+# inputs (schema_version, declaration, mode, resolved_paths). Invalid declarations
+# refuse identity creation; ordinary dispatch/coordinator consumers run for real.

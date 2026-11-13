@@ -151,35 +151,17 @@ SAFE_SPEC_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 ARTIFACT_LOCK_NAME = ".validate_install.lock"
 
 
-class DuplicateKeyLoader(yaml.SafeLoader):
-    """Multi-document YAML loader that rejects duplicate/conflicting keys.
-
-    ``yaml.safe_load`` silently keeps the last value on a repeated mapping
-    key, which lets the *effective* owner of a config value become
-    ambiguous. R4 requires that ambiguity to be a structural parse error,
-    not a silent overwrite.
-    """
+DuplicateKeyLoader = config_migrations.DuplicateKeyLoader
 
 
 def _construct_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict:
-    mapping: dict[str, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=True)
-        if key in mapping:
-            raise yaml.constructor.ConstructorError(
-                None, None, f"duplicate/conflicting key: {key!r}", node.start_mark
-            )
-        mapping[key] = loader.construct_object(value_node, deep=True)
-    return mapping
+    return config_migrations._construct_mapping(loader, node)
 
 
-DuplicateKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping
-)
 
 
-class ConfigParseError(ValueError):
-    """config.yaml cannot be parsed under the shared strict-duplicate-key loader."""
+
+ConfigParseError = config_migrations.ConfigParseError
 
 
 @dataclass
@@ -249,39 +231,14 @@ def _rel(base: Path, target: Path) -> str:
 
 
 def _load_config_documents(config_path: Path) -> list[dict[str, Any]]:
-    """Parse every YAML document with the shared strict loader.
-
-    Raises ``ConfigParseError`` on missing file, empty file, invalid syntax,
-    a non-mapping document, or a duplicate/conflicting key — the exact ERROR
-    row at the top of the Configuration Severity Contract.
-    """
+    """Read the existing shared strict configuration contract."""
     if not config_path.is_file():
         raise ConfigParseError("config.yaml absent")
-    text = config_path.read_text(encoding="utf-8")
-    if not text.strip():
-        raise ConfigParseError("config.yaml empty")
-    try:
-        documents = list(yaml.load_all(text, Loader=DuplicateKeyLoader))
-    except yaml.YAMLError as exc:
-        raise ConfigParseError(f"config.yaml YAML syntax invalid: {exc.__class__.__name__}") from exc
-    documents = [doc for doc in documents if doc is not None]
-    if not documents:
-        raise ConfigParseError("config.yaml has no documents")
-    for doc in documents:
-        if not isinstance(doc, dict):
-            raise ConfigParseError("config.yaml document is not a mapping")
-    return documents
+    return config_migrations.load_config_documents(config_path.read_text(encoding="utf-8"))
 
 
 def _merge_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for doc in documents:
-        repeated = merged.keys() & doc.keys()
-        if repeated:
-            key = sorted(repeated, key=str)[0]
-            raise ConfigParseError(f"duplicate/conflicting top-level key across documents: {key!r}")
-        merged.update(doc)
-    return merged
+    return config_migrations.merge_config_documents(documents)
 
 
 def _is_placeholder_name(name: Any) -> bool:

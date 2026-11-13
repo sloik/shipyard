@@ -48,6 +48,13 @@ While the main loop agent works through specs (steps 1-16 of LOOP.md), a watcher
 
 ### Stop Conditions
 
+An active `waiting_on_approval` heartbeat is owner-needed, not a stall. Display
+its sanitized command and wait age; an absent/invalid wait timestamp means an
+unknown wait age. Do not stop, kill, restart or retry this worker because the
+approval wait is old. Ask the worker and the owner before any stall action.
+Terminal heartbeat states still win; a stale heartbeat without a valid declared
+wait retains the existing stop condition and ladder below.
+
 The watcher stops when:
 
 - All specs in queue are `done` or `blocked`
