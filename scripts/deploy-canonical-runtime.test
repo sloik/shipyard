@@ -73,6 +73,8 @@ EOF
 #!/usr/bin/env zsh
 if [[ "${SHIPYARD_TEST_HEALTH:-ok}" == ok ]]; then
   print '{"servers":[{"name":"child","tool_count":2}]}'
+elif [[ "${SHIPYARD_TEST_HEALTH}" == partial ]]; then
+  print '{"servers":[{"name":"child","tool_count":2},{"name":"idle","tool_count":0}]}'
 else
   print '{"servers":[{"name":"child","tool_count":0}]}'
 fi
@@ -117,6 +119,7 @@ run_fixture() {
   SHIPYARD_TEST_LOG="$fixture_root/launchctl.log" \
   SHIPYARD_TEST_CANONICAL_BIN="$fixture_root/repo/bin/shipyard" \
   SHIPYARD_TEST_HEALTH="$health" \
+  SHIPYARD_HEALTH_ALLOW_EMPTY="${ALLOW_EMPTY:-}" \
   "$fixture_root/repo/scripts/deploy-canonical-runtime.sh"
 }
 
@@ -146,5 +149,17 @@ if run_fixture no-plist loaded ok none 2>/dev/null; then
   fail "deploy without any plist unexpectedly passed"
 fi
 [[ ! -s "$test_root/no-plist/launchctl.log" ]] || fail "deploy without any plist touched launchctl"
+
+# A child reporting 0 tools fails the gate unless explicitly exempted.
+if run_fixture partial-strict loaded partial 2>/dev/null; then
+  fail "a child with 0 tools unexpectedly passed the strict gate"
+fi
+[[ "$(<"$test_root/partial-strict/repo/bin/shipyard")" == prior-runtime ]] || fail "strict gate failure did not restore prior runtime"
+ALLOW_EMPTY=idle run_fixture partial-allowed loaded partial
+[[ "$(<"$test_root/partial-allowed/repo/bin/shipyard")" == new-runtime ]] || fail "exempted empty child did not deploy"
+# Exempting every child is not enough: one non-exempt child must have tools.
+if ALLOW_EMPTY=idle,child run_fixture all-exempt loaded partial 2>/dev/null; then
+  fail "gate passed with every child exempted"
+fi
 
 print "canonical deployment shell fixtures passed"

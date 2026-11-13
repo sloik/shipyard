@@ -434,6 +434,13 @@ archiving former binaries under `archive/runtime/`. On failure it restores the
 prior canonical runtime and service (or the legacy service during a failed
 first install) and retains the prior binaries.
 
+Knobs: `SHIPYARD_HEALTH_ATTEMPTS` (seconds to wait for health, default 15;
+raise it when a first start runs a one-time capture DB VACUUM),
+`SHIPYARD_UNLOAD_ATTEMPTS` (seconds to wait for the old job to unload, default
+120) and `SHIPYARD_HEALTH_ALLOW_EMPTY` (comma-separated server names allowed to
+report 0 tools, e.g. an offline backend; at least one other child must still
+have tools).
+
 #### launchd log rotation
 
 launchd appends the gateway's stdout/stderr to

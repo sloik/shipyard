@@ -149,12 +149,17 @@ for _ in {1..$health_attempts}; do
   if "$curl_cmd" --fail --silent --show-error "$health_url" > "$live_payload"; then
     if python3 - "$live_payload" <<'PY'
 import json
+import os
 import sys
 
+# SHIPYARD_HEALTH_ALLOW_EMPTY: comma-separated server names allowed to report
+# tool_count 0 (e.g. a backend that is offline). They must still publish an
+# integer tool_count, and at least one non-exempt child must have tools.
+allow_empty = {n.strip() for n in os.environ.get("SHIPYARD_HEALTH_ALLOW_EMPTY", "").split(",") if n.strip()}
 payload = json.load(open(sys.argv[1]))
 servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
 children = [server for server in servers if not server.get("is_self")]
-if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and server["tool_count"] > 0 for server in children):
+if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and (server["tool_count"] > 0 or server.get("name") in allow_empty) for server in children) and any(server.get("name") not in allow_empty and server["tool_count"] > 0 for server in children):
     print(f"live child tool counts verified for {len(children)} managed servers")
     raise SystemExit(0)
 raise SystemExit(1)
@@ -167,12 +172,17 @@ PY
 done
 if ! python3 - "$live_payload" <<'PY'
 import json
+import os
 import sys
 
+# SHIPYARD_HEALTH_ALLOW_EMPTY: comma-separated server names allowed to report
+# tool_count 0 (e.g. a backend that is offline). They must still publish an
+# integer tool_count, and at least one non-exempt child must have tools.
+allow_empty = {n.strip() for n in os.environ.get("SHIPYARD_HEALTH_ALLOW_EMPTY", "").split(",") if n.strip()}
 payload = json.load(open(sys.argv[1]))
 servers = payload.get("servers", payload) if isinstance(payload, dict) else payload
 children = [server for server in servers if not server.get("is_self")]
-raise SystemExit(0 if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and server["tool_count"] > 0 for server in children) else 1)
+raise SystemExit(0 if children and all(isinstance(server.get("tool_count"), int) and not isinstance(server.get("tool_count"), bool) and (server["tool_count"] > 0 or server.get("name") in allow_empty) for server in children) and any(server.get("name") not in allow_empty and server["tool_count"] > 0 for server in children) else 1)
 PY
 then
   fail_and_restore "Shipyard did not expose populated managed-child tool counts; restored the prior runtime and service"
