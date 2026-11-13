@@ -196,7 +196,7 @@ func ensureIncrementalVacuum(db *sql.DB, dbPath string, cfg Config, now func() t
 	_ = db.QueryRow("PRAGMA page_count").Scan(&pageCount)
 	_ = db.QueryRow("PRAGMA freelist_count").Scan(&freePages)
 	_ = db.QueryRow("PRAGMA page_size").Scan(&pageSize)
-	live := uint64((pageCount - freePages) * pageSize)
+	live := liveDBBytes(pageCount, freePages, pageSize)
 	// VACUUM rebuilds into a temp file and then through the WAL: budget the
 	// live size plus headroom on the DB volume and the temp volume.
 	need := live + live/4 + 64<<20
