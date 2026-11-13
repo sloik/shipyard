@@ -1,0 +1,12 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-002",
+  "type": "validation-evidence",
+  "created": "2026-11-13T11:21:16Z",
+  "actor": "coordinator",
+  "summary": "validation performed for promotion to ready",
+  "evidence": [
+    "GitHub Actions run 43407198224"
+  ]
+}

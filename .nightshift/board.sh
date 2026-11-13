@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Launch Nightshift Board for this project.
 # Port is hash-based per project (range 7800-7999) — same project always gets the same port.
-# Usage: board.sh [--port N] [extra args passed to board.py]
+# Usage: board.sh [--no-open] [--port N] [extra args passed to board.py]
+#        --no-open: start without opening a browser (SPEC-417-003; board_ctl.py uses it)
 #        board.sh stop
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -77,6 +78,13 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
+OPEN_ARGS=(--open)
+PASS_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--no-open" ]]; then OPEN_ARGS=(); else PASS_ARGS+=("$arg"); fi
+done
+set -- ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
+
 if [[ -f "$PID_FILE" ]]; then
   existing_pid="$(<"$PID_FILE")"
   if [[ "$existing_pid" =~ ^[0-9]+$ ]] && kill -0 "$existing_pid" 2>/dev/null && board_process_matches "$existing_pid"; then
@@ -90,17 +98,11 @@ if ! "$PYTHON_RUNTIME" -c 'import fastapi, uvicorn, yaml' 2>/dev/null; then
   echo "Board runtime lacks required dependencies. Set NIGHTSHIFT_BOARD_PYTHON to a supported project Python." >&2
   exit 1
 fi
-nohup "$PYTHON_RUNTIME" "$DIR/board.py" --open "$@" >>"$LOG_FILE" 2>&1 < /dev/null &
+# Ask board.py before spawning; argparse owns --specs/--port resolution too.
+# run_path preserves a script's imports while keeping the selected runtime.
+port="$("$PYTHON_RUNTIME" -c 'import os, runpy, sys; sys.argv = sys.argv[1:]; sys.path.insert(0, os.path.dirname(sys.argv[0])); runpy.run_path(sys.argv[0], run_name="__main__")' "$DIR/board.py" --print-port "$@")"
+nohup "$PYTHON_RUNTIME" "$DIR/board.py" ${OPEN_ARGS[@]+"${OPEN_ARGS[@]}"} "$@" >>"$LOG_FILE" 2>&1 < /dev/null &
 pid="$!"
-port=""
-previous=""
-for argument in "$@"; do
-  if [[ "$previous" == "--port" ]]; then port="$argument"; break; fi
-  previous="$argument"
-done
-if [[ -z "$port" ]]; then
-  port="$("$PYTHON_RUNTIME" -c "print(7800 + sum(ord(c) for c in '${DIR##*/}'.lstrip('.').upper()) % 200)" 2>/dev/null || true)"
-fi
 for _ in {1..50}; do
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "Board failed to start; see $LOG_FILE. No PID record was written." >&2

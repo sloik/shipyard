@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-004",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-11-13T11:41:36Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Written from the failing gosec step of run 43417695636 on 2026-11-13 and reproduced locally",
+      "path": "artifacts/20261113T114136Z-decision-state-rationale-authored-draft-written-f.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-11-13T11:41:47Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: Reproduced locally with the CI toolchain for darwin and linux; owner asked for green CI on 2026-11-13",
+      "path": "artifacts/20261113T114147Z-status-transition-draft-ready-reproduced-locally-with-the-.json"
+    },
+    {
+      "type": "validation-evidence",
+      "created": "2026-11-13T11:41:47Z",
+      "actor": "coordinator",
+      "summary": "validation performed for promotion to ready",
+      "path": "artifacts/20261113T114147Z-validation-evidence-validation-performed-for-promotion-to-re.json"
+    }
+  ]
+}

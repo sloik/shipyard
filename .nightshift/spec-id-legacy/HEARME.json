@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "project_code": "HEARME",
+  "ids": [
+    "SPEC-001",
+    "SPEC-002",
+    "SPEC-003",
+    "SPEC-004",
+    "SPEC-005",
+    "SPEC-006"
+  ]
+}

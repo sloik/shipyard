@@ -104,8 +104,28 @@ def accept_instruction_result(
         **({"authoring_provider": authoring_provider} if authoring_provider is not None else {}),
     ).to_dict()
     if not acceptance["ok"]:
+        if acceptance.get("reason_code") == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+            # SPEC-NS-KIT-007 R3: superseded closes the run (re-admit and re-run); never accepted.
+            acceptance = {**acceptance, "acceptance_outcome": acceptance["outcome"], "outcome": "superseded"}
         return acceptance, None
     return acceptance, coordinator_action(acceptance)
+
+
+def abandon_instruction_run(packet: dict[str, Any], *, nightshift_dir: Path,
+                            spec_file: Path, official_path: str, abandonment_provider) -> dict[str, Any]:
+    """One parent recovery contract for official instruction routes.
+
+    The provider is injected separately by the parent; no worker packet can
+    supply authorization, a result callback, merge or cleanup authority.
+    """
+    import unblock_spec
+    if official_path not in OFFICIAL_INSTRUCTION_RESULT_PATHS:
+        raise InstructionAdmissionError("unknown administrative recovery path")
+    selected = parse_spec_file(Path(spec_file)).frontmatter
+    if selected.get("id") != packet.get("spec_id"):
+        raise InstructionAdmissionError("administrative recovery selected spec mismatch")
+    return unblock_spec.abandon_invalid_run(Path(spec_file), Path(nightshift_dir),
+        abandonment_provider=abandonment_provider)
 
 
 @dataclass(frozen=True)
@@ -332,8 +352,16 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         else:
             blockers.append(_blocker("spec.after", "dependency cannot be verified", f"{spec_id} references missing dependency {dep}", f"Create {dep}, remove it from after:, or correct the dependency id."))
 
+    from verification_report import EXTERNAL_INPUT_PREFIX, verifier_input_readiness
+    input_readiness = verifier_input_readiness(project_root, located.path)
+    if not input_readiness["eligible"]:
+        blockers.append(_blocker("context.required_external_inputs", input_readiness["reason"],
+                                 input_readiness["category"],
+                                 "Commit required declarations before a new run; restore clean anchored sources."))
     knowledge_files = []
     for raw_path in required_inputs:
+        if isinstance(raw_path, str) and raw_path.startswith(EXTERNAL_INPUT_PREFIX):
+            continue
         p = Path(str(raw_path))
         path = p if p.is_absolute() else project_root / p
         if path.exists():
@@ -406,6 +434,7 @@ def generate_packet(spec_id: str, *, nightshift_dir: Path, specs_dir: Path, proj
         "recommendedNextAction": next_action,
         "resultAcceptance": acceptance_binding,
         "artifactIndex": artifact_index,
+        "verifierInputReadiness": input_readiness,
     }
 
 

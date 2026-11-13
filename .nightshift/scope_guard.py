@@ -62,9 +62,19 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import yaml
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import spec_id as spec_id_grammar  # noqa: E402  (SPEC-416: the one shared ID grammar)
+except ImportError:  # pragma: no cover - exercised by test_spec_id_scope_guard_fallback.py
+    # This guard is copied alone into scratch kits and fails OPEN when it cannot
+    # load, so a missing sibling must not disable it. The literals below mirror
+    # spec_id.SPEC_FILENAME_RE / BUG_FILENAME_RE / id_from_stem; a test pins them.
+    spec_id_grammar = None
 
 # Controlled reason codes (SPEC-300 R2). Every Decision.reason is one of these.
 REASONS = frozenset({
@@ -94,14 +104,25 @@ _IMPLICIT_KIT_GLOBS = (
 # canonical-payload exception below. Never widen this tuple.
 _CANONICAL_PAYLOAD_EXCEPTION_FILES = frozenset({"CHANGELOG.md", "release-manifest.json"})
 
-_SPEC_HOME_RE = re.compile(r"^(SPEC-.+|NFR-.+|.+-QUESTIONS-.+)\.md$")
+# SPEC-416: spec-home filename shapes come from the shared parser so legacy and
+# R1 IDs (SPEC-/NFR-/QUESTIONS-/<CODE>-QUESTIONS-) are recognised in one place.
+_SPEC_HOME_RE = (
+    spec_id_grammar.SPEC_FILENAME_RE if spec_id_grammar is not None
+    else re.compile(r"^(?:SPEC-.+|NFR-.+|QUESTIONS-.+|.+-QUESTIONS-.+)\.md$")
+)
 # BUG-341-002: a bug spec (`BUG-<digits>[-suffix].md`, sub-IDs included) is
 # spec-shaped too. BUG only -- not EVAL or any other prefix. Kept separate from
 # `_SPEC_HOME_RE` because bug-named REPORT artifacts are legitimate under a
 # `reports` directory and that carve-out must not reach the existing patterns.
-_BUG_SPEC_HOME_RE = re.compile(r"^BUG-\d+(?:-.+)?\.md$")
+_BUG_SPEC_HOME_RE = (
+    spec_id_grammar.BUG_FILENAME_RE if spec_id_grammar is not None
+    else re.compile(r"^BUG-(?:[A-Z][A-Z0-9]*-)*\d+(?:-.+)?\.md$")
+)
+_FALLBACK_STEM_ID_RE = re.compile(
+    r"^((?:SPEC|BUG|NFR|QUESTIONS|EVAL|FART)-(?:[A-Z][A-Z0-9]*-)*\d+(?:-\d+)*)"
+)
 _HEARTBEAT_RE = re.compile(r"(?:^|/)reports/_wip/orchestrator-progress-(?P<spec_id>.+)\.md$")
-# SPEC-301 R1/R2: this only matches the manually-documented SKILL.md Step 5
+# SPEC-301 R1/R2: this only matches the manually-documented guides/run-3.md Step 5
 # convention (`git worktree add -b nightshift/<SPEC-ID>-<run-id>`), used when
 # a platform requires the parent to create the worktree by hand. It is
 # deliberately NOT widened to also parse the harness's own
@@ -110,7 +131,7 @@ _HEARTBEAT_RE = re.compile(r"(?:^|/)reports/_wip/orchestrator-progress-(?P<spec_
 # that hex ID has no derivable relationship to any spec ID — option (a) from
 # SPEC-301 R2 is not viable. `NIGHTSHIFT_ACTIVE_SPEC` (checked first, below)
 # is the only reliable resolution path for a harness-launched worker; see
-# SKILL.md Step 4e for the boilerplate that tells every worker to set it
+# guides/run-2.md Step 4e for the boilerplate that tells every worker to set it
 # inline on every `git commit` invocation.
 _BRANCH_RE = re.compile(r"^nightshift/(?P<spec_id>.+)-(?P<run_id>\d{8}T\d+Z?)$")
 
@@ -351,13 +372,82 @@ def _commit_date(repo: Path, commit: str) -> str | None:
     return stamp[:10] if len(stamp) >= 10 else None
 
 
+def _widening_date_resolver(
+    repo: Path, spec_relpath: str, main_branch: str, ready_commit: str
+) -> Callable[[Callable[[Scope], bool]], str | None]:
+    """SPEC-409: build ``date_of(present)``, the ``YYYY-MM-DD`` of the commit on
+    ``main_branch`` that introduced one widened item.
+
+    ``present(scope)`` is true while the widened state holds in a commit's
+    ``Scope`` (an item in ``write``/``read``, an item missing from ``deny``, or
+    the root/unrestricted collapse). Walking this spec file's history
+    newest-first from head, the introducing commit is the *oldest* commit of the
+    unbroken run in which ``present`` holds; an item dropped and later re-added
+    is therefore dated by the re-add. The walk stops at ``ready_commit`` (the
+    baseline, where no grant is present by construction).
+
+    When a commit in the run cannot be read, the date falls back **strict** to
+    the newest commit's date, never to the last-``ready`` date, so a row that
+    predates head cannot cover an item whose introducing commit is unknown.
+    ``None`` means no date could be determined at all (treated as uncovered).
+    """
+    history: list[tuple[str, Scope | None]] | None = None
+
+    def load() -> list[tuple[str, Scope | None]]:
+        nonlocal history
+        if history is not None:
+            return history
+        history = []
+        try:
+            log = subprocess.run(
+                ["git", "log", "--format=%H", "--follow", main_branch, "--", spec_relpath],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return history
+        if log.returncode != 0:
+            return history
+        for commit in log.stdout.split():
+            if commit == ready_commit:
+                break
+            try:
+                show = subprocess.run(
+                    ["git", "show", f"{commit}:{spec_relpath}"],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError:
+                history.append((commit, None))
+                continue
+            history.append((commit, resolve_scope(show.stdout) if show.returncode == 0 else None))
+        return history
+
+    def date_of(present: Callable[[Scope], bool]) -> str | None:
+        commits = load()
+        if not commits:
+            return None
+        introducing = commits[0][0]
+        for commit, scope in commits:
+            if scope is None:
+                return _commit_date(repo, commits[0][0])
+            if not present(scope):
+                break
+            introducing = commit
+        return _commit_date(repo, introducing)
+
+    return date_of
+
+
 def _valid_amendment_rows(spec_text: str) -> list[tuple[str, str]]:
     """``(date, glob)`` pairs from every ``## Scope Amendments`` row with a
     parseable ``Date`` and a human ``Approved by`` (mirrors
     ``validate_specs.py``'s row-shape rules — same heading regex, same
     skip-header/separator/short-row logic — but this is R1's widening-gate
     read of the table, a different consumer than the pre-existing per-path
-    ``amend_globs`` read in the embedded SKILL.md gate script).
+    ``amend_globs`` read in the embedded pinned-checks.md gate script).
     """
     match = _SCOPE_AMENDMENTS_HEADING_RE.search(spec_text)
     if not match:
@@ -384,6 +474,9 @@ def _valid_amendment_rows(spec_text: str) -> list[tuple[str, str]]:
 def _covered_by_amendment(item: str, rows: list[tuple[str, str]], min_date: str | None) -> bool:
     """Is ``item`` (a literal glob string this widening newly grants) covered
     by some valid amendment row dated on or after ``min_date``?
+
+    SPEC-409: ``min_date`` is the date of the commit that introduced ``item``
+    (see ``_widening_date_resolver``), not the last-``ready`` commit's date.
 
     Coverage is string-level via the same ``_glob_match`` used for path
     classification (an amendment row's glob pattern matching the granted
@@ -420,6 +513,9 @@ def _reconcile_scope_widening(
     (drops an existing item) and widens (adds an uncovered item) the *same*
     field only reverts the specific uncovered addition — the dropped item
     stays dropped, because the human never asked to keep it.
+
+    SPEC-409 (SPEC-302 R1): each widened item is judged against its *own*
+    widening commit's date, so an older approval cannot cover a later widening.
     """
     baseline_info = _scope_at_last_ready(repo, spec_relpath, main_branch)
     if baseline_info is None:
@@ -427,8 +523,15 @@ def _reconcile_scope_widening(
     baseline, ready_commit = baseline_info
     if baseline == current:
         return current
-    min_date = _commit_date(repo, ready_commit)
     rows = _valid_amendment_rows(spec_text_main)
+    date_of = _widening_date_resolver(repo, spec_relpath, main_branch, ready_commit)
+
+    def covered(item: str, present: Callable[[Scope], bool]) -> bool:
+        # SPEC-409 (SPEC-302 R1): the row must be dated on or after the commit
+        # that introduced *this* item, not the last-ready commit. An item whose
+        # introducing commit has no determinable date is never covered.
+        introduced = date_of(present)
+        return introduced is not None and _covered_by_amendment(item, rows, introduced)
 
     # write: baseline.write == [] is already the project-root default (the
     # widest possible value) — nothing can widen it further, so any current
@@ -439,14 +542,21 @@ def _reconcile_scope_widening(
             # widening with no per-item list to partially narrow. Binary by
             # construction: either the collapse itself is covered, or the
             # whole field reverts to baseline.
-            write = current.write if _covered_by_amendment("**", rows, min_date) else baseline.write
+            write = current.write if covered("**", lambda s: not s.write) else baseline.write
         else:
             grants = [g for g in current.write if g not in baseline.write]
-            uncovered = [g for g in grants if not _covered_by_amendment(g, rows, min_date)]
+            uncovered = [g for g in grants if not covered(g, lambda s, g=g: g in s.write)]
             # Drop only the uncovered new grants; anything the commit already
             # narrowed out of `current.write` stays dropped (R2) — never
             # restored as a side effect of blocking the uncovered addition.
             write = [g for g in current.write if g not in uncovered]
+            if not write:
+                # SPEC-408: every grant in `current.write` was an uncovered
+                # addition (an all-uncovered same-field swap, e.g. [a/**] ->
+                # [b/**]). An empty list means the project-root default, i.e.
+                # the widest possible scope, so the rollback must not end
+                # there. Owner decision: enforce the last-ready value.
+                write = list(baseline.write)
     else:
         write = current.write
 
@@ -455,7 +565,9 @@ def _reconcile_scope_widening(
     # only the specific uncovered removals — an entry the commit newly added
     # to `deny` in the same commit is never discarded as a side effect.
     removed = [g for g in baseline.deny if g not in current.deny]
-    uncovered_removed = [g for g in removed if not _covered_by_amendment(g, rows, min_date)]
+    uncovered_removed = [
+        g for g in removed if not covered(g, lambda s, g=g: g not in s.deny)
+    ]
     deny = current.deny + [g for g in uncovered_removed if g not in current.deny]
 
     # read: baseline.read == "unrestricted" is already maximal; a list
@@ -464,10 +576,18 @@ def _reconcile_scope_widening(
         if current.read == "unrestricted":
             # Collapsed to unrestricted — binary for the same reason as the
             # write collapse above: there is no per-item list to narrow.
-            read = current.read if _covered_by_amendment("**", rows, min_date) else baseline.read
+            read = (
+                current.read
+                if covered("**", lambda s: s.read == "unrestricted")
+                else baseline.read
+            )
         elif isinstance(current.read, list):
             grants = [g for g in current.read if g not in baseline.read]
-            uncovered = [g for g in grants if not _covered_by_amendment(g, rows, min_date)]
+            uncovered = [
+                g
+                for g in grants
+                if not covered(g, lambda s, g=g: isinstance(s.read, list) and g in s.read)
+            ]
             read = [g for g in current.read if g not in uncovered]
         else:
             read = current.read
@@ -913,7 +1033,9 @@ def _spec_id_from_path(spec_path: str, project_root: Path | None = None) -> str 
                         return line.split(":", 1)[1].strip().strip("'\"") or None
     basename = _basename(str(spec_path))
     stem = basename[:-3] if basename.endswith(".md") else basename
-    match = re.match(r"^((?:SPEC|NFR|BUG|EVAL|FART)-\d+(?:-\d+)*)", stem)
+    if spec_id_grammar is not None:
+        return spec_id_grammar.id_from_stem(stem)
+    match = _FALLBACK_STEM_ID_RE.match(stem)
     return match.group(1) if match else None
 
 
@@ -994,6 +1116,66 @@ def _touches_managed_canonical_payload(scope: Scope, project_root: Path, kit_dir
 # ---------------------------------------------------------------------------
 
 
+class AmbiguousSpecFile(ValueError):
+    """BUG-NS-KIT-007: several files answer to one spec ID; fail closed, name them."""
+
+    def __init__(self, spec_id: str, candidates: Iterable[Path]):
+        self.candidates = sorted(candidates)
+        super().__init__(
+            f"ambiguous spec file for {spec_id}: " + ", ".join(c.name for c in self.candidates)
+        )
+
+
+def _frontmatter_id(path: Path) -> str | None:
+    """The frontmatter ``id`` of ``path`` (reads only the leading block), else None."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            if fh.readline().strip() != "---":
+                return None
+            lines = []
+            for line in fh:
+                if line.strip() == "---":
+                    break
+                lines.append(line)
+            else:
+                return None
+        data = yaml.safe_load("".join(lines))
+    except Exception:
+        return None
+    value = data.get("id") if isinstance(data, dict) else None
+    return str(value) if value is not None else None
+
+
+def find_spec_file(specs_dir: Path, spec_id: str) -> Path | None:
+    """The one spec file whose frontmatter ``id`` is exactly ``spec_id``.
+
+    Candidates are ``<ID>.md`` and ``<ID>-*.md`` (compared literally, no glob). A
+    file declaring a child ``id`` (``<ID>-...``) never matches. With no exact-id
+    match, files whose frontmatter is unreadable, lacks an ``id`` or declares an
+    unrelated one match only if the name is ``<ID>.md`` or ``<ID>-<non-digit
+    slug>.md``. Raises ``AmbiguousSpecFile`` (naming the candidates) on 2+ hits.
+    """
+    if not Path(specs_dir).is_dir():
+        return None
+    prefix = spec_id + "-"
+    exact: list[Path] = []
+    unknown: list[Path] = []
+    for p in Path(specs_dir).iterdir():
+        if not (p.name.endswith(".md") and (p.name[:-3] == spec_id or p.name.startswith(prefix))):
+            continue
+        found_id = _frontmatter_id(p)
+        if found_id == spec_id:
+            exact.append(p)
+        elif (found_id is None or not found_id.startswith(prefix)) and (
+            p.name[:-3] == spec_id or not p.name[len(prefix):][:1].isdigit()
+        ):
+            unknown.append(p)
+    hits = exact or unknown
+    if len(hits) > 1:
+        raise AmbiguousSpecFile(spec_id, hits)
+    return hits[0] if hits else None
+
+
 def _locate_spec_file(project_root: Path, spec: str) -> Path | None:
     if "/" in spec or spec.endswith(".md"):
         candidate = project_root / spec
@@ -1001,15 +1183,19 @@ def _locate_spec_file(project_root: Path, spec: str) -> Path | None:
     for specs_dir in (project_root / "canonical" / "specs", project_root / "specs", project_root / ".nightshift" / "specs"):
         if not specs_dir.is_dir():
             continue
-        matches = sorted(specs_dir.glob(f"{spec}-*.md")) + sorted(specs_dir.glob(f"{spec}.md"))
-        if matches:
-            return matches[0]
+        found = find_spec_file(specs_dir, spec)
+        if found is not None:
+            return found
     return None
 
 
 def _cli_check(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
-    spec_file = _locate_spec_file(project_root, args.spec)
+    try:
+        spec_file = _locate_spec_file(project_root, args.spec)
+    except AmbiguousSpecFile as exc:
+        print(f"DENY ambiguous_spec {exc}")
+        return 1
     if spec_file is not None:
         spec_relpath = _norm(str(spec_file.relative_to(project_root)))
         kit_dir = spec_file.parent.parent
