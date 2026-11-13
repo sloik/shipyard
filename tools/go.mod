@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/rhysd/actionlint v1.7.12
-	honnef.co/go/tools v0.8.1
+	honnef.co/go/tools v0.8.2
 )
 
 require (
@@ -19,8 +19,8 @@ require (
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.3 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
-	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/tools v0.44.1-0.20260420230617-19499e7caabc // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 )
