@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-181",
+  "type": "status-transition",
+  "created": "2026-10-03T15:47:54Z",
+  "actor": "coordinator",
+  "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run kickoff-20261003-bug181",
+  "from": "ready",
+  "to": "in_progress",
+  "reason": "mechanical transition to 'in_progress' via run kickoff-20261003-bug181",
+  "evidence": [],
+  "run_id": "kickoff-20261003-bug181",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "in_progress",
+    "reason": "mechanical transition to 'in_progress' via run kickoff-20261003-bug181",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

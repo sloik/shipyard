@@ -1,0 +1,13 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-181",
+  "type": "context",
+  "created": "2026-10-03T15:46:29Z",
+  "actor": "coordinator",
+  "summary": "2 finding(s) gathered for promotion to ready",
+  "findings": [
+    "go-sdk v1.8.0 mcp/shared.go supports 2026-07-28 and 2025-11-25",
+    "@modelcontextprotocol/conformance stable 0.1.16 on npm"
+  ]
+}

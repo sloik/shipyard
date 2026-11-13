@@ -3,12 +3,13 @@
 # Validates ordinary spec commits and parent lifecycle transitions.
 # Policy source of truth: .nightshift/GIT.md
 #
-# Ordinary format: [SPEC-ID] type: subject
-# Lifecycle format: chore: mark SPEC-ID done|blocked
+# Ordinary format: [SPEC-ID] type: subject  (other accepted forms: see GIT.md Coordinator subjects)
+# Lifecycle format: chore: mark SPEC-ID done|blocked (trailers) | in_progress (none)
 # Examples:
 #   [SPEC-033] feat: handler registry with pluggable domains
 #   [SPEC-004-002] test: add NFR hierarchy tests
 #   chore: mark SPEC-033 done
+#   chore: mark SPEC-033 in_progress
 #
 # Install: cp .nightshift/hooks/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
 # Disable: set git.commit_prefix: "none" in config.yaml
@@ -18,17 +19,55 @@ set -euo pipefail
 COMMIT_MSG_FILE="$1"
 FIRST_LINE=$(head -1 "$COMMIT_MSG_FILE")
 
+# SPEC-416: the ID group below is spec_id.COMMIT_ID_ERE (SPEC|BUG|NFR|QUESTIONS kinds,
+# legacy and project-prefixed shapes); test_spec_id.py pins this text to the parser.
+
+# BUG-NS-KIT-246: keep the grammar fallback when no registered frozen list is
+# available. The helper reads only local registry/list data. Release replay supplies
+# explicit read-only identity; its cwd stays an empty disposable directory.
+COMMIT_ID_ERE='(SPEC|BUG|NFR|QUESTIONS)-([A-Z0-9]+-)*[0-9]+'
+GRAMMAR_ID_ERE="$COMMIT_ID_ERE"
+PROJECT_ROOT="${NIGHTSHIFT_COMMIT_PROJECT_ROOT:-$PWD}"
+ID_INSTALL="${NIGHTSHIFT_COMMIT_ID_INSTALL:-$PROJECT_ROOT/.nightshift}"
+ID_HELPER="$(cd "$(dirname "$0")/.." && pwd)/spec_id.py"
+if [ ! -f "$ID_HELPER" ]; then ID_HELPER="$ID_INSTALL/spec_id.py"; fi
+if [ ! -f "$ID_HELPER" ] && [ -f "$PROJECT_ROOT/canonical/spec_id.py" ]; then
+    ID_HELPER="$PROJECT_ROOT/canonical/spec_id.py"
+    ID_INSTALL="$PROJECT_ROOT/canonical"
+    PROJECT_ROOT="$PROJECT_ROOT/canonical"
+fi
+if [ "$ID_INSTALL" = "$PROJECT_ROOT/.nightshift" ] && [ -f "$PROJECT_ROOT/spec_id.py" ]; then
+    ID_INSTALL="$PROJECT_ROOT"
+fi
+if [ -f "$ID_HELPER" ] && command -v python3 >/dev/null 2>&1; then
+    if EXTENDED_ID_ERE=$(python3 "$ID_HELPER" --commit-id-ere --install "$ID_INSTALL" --project-root "$PROJECT_ROOT") && [ -n "$EXTENDED_ID_ERE" ]; then
+        COMMIT_ID_ERE="$EXTENDED_ID_ERE"
+    fi
+fi
+
 # Allow merge commits and reverts without prefix
 if echo "$FIRST_LINE" | grep -qE "^(Merge|Revert) "; then
     exit 0
 fi
 
+# SPEC-NS-KIT-118 R4: record_metrics reads lifecycle marks only in the exact `chore: mark <ID> ...`
+# form, so a bracketed `[<ID>] chore: mark ...` commit (any status, trailers or not) would pass
+# this hook and then be silently skipped by metrics. Reject it before any other rule.
+if echo "$FIRST_LINE" | grep -qE "^\[${COMMIT_ID_ERE}\] chore: mark "; then
+    echo ""
+    echo "[nightshift commit-msg] ERROR: bracketed lifecycle subject is not accepted; use \`chore: mark <ID> done|blocked|in_progress\`"
+    echo ""
+    echo "  Got:      $FIRST_LINE"
+    echo ""
+    exit 1
+fi
+
 # Terminal lifecycle commits are emitted by the parent and consumed by
 # record_metrics.py.  The evidence contract is author-independent: a worker
 # cannot bypass it by writing a canonical lifecycle subject itself.
-if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|blocked)$'; then
-    SPEC_ID=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark (SPEC-([A-Z0-9]+-)*[0-9]+) (done|blocked)$/\1/p')
-    TERMINAL=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|blocked)$/\2/p')
+if echo "$FIRST_LINE" | grep -qE "^chore: mark ${COMMIT_ID_ERE} (done|blocked)$"; then
+    SPEC_ID=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ([^ ]+) (done|blocked)$/\1/p')
+    TERMINAL=$(printf '%s\n' "$FIRST_LINE" | sed -nE 's/^chore: mark ([^ ]+) (done|blocked)$/\2/p')
     REQUIRED_LIFECYCLE_TRAILERS=(
         "Nightshift-Evidence-Report"
         "Nightshift-Evidence-Tests"
@@ -52,6 +91,26 @@ if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|bl
         echo "[nightshift commit-msg] ERROR: terminal lifecycle commit is missing required trailer(s): ${missing[*]}" >&2
         exit 1
     fi
+    RESOLUTION_KIND=$(sed -nE 's/^Nightshift-Resolution-Kind:[[:space:]]*//p' "$COMMIT_MSG_FILE")
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*self-verified[[:space:]]*$' "$COMMIT_MSG_FILE"; then
+        echo "[nightshift commit-msg] ERROR: plain self-verified is forbidden for new terminal commits" >&2
+        exit 1
+    fi
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*self-verified-experimental[[:space:]]*$' "$COMMIT_MSG_FILE" && ! grep -qE '^Nightshift-Experimental-Sample-For:[[:space:]]*[^[:space:]]' "$COMMIT_MSG_FILE"; then
+        echo "[nightshift commit-msg] ERROR: experimental self-verification requires its prior designation" >&2
+        exit 1
+    fi
+    if grep -qE '^Nightshift-Resolution-Kind:[[:space:]]*implementer-assessed-blocked[[:space:]]*$' "$COMMIT_MSG_FILE"; then
+        ASSESSMENT_TOOL=".nightshift/terminal_outcomes.py"
+        ASSESSMENT_PATH=$(sed -nE 's/^Nightshift-Evidence-Assessment:[[:space:]]*//p' "$COMMIT_MSG_FILE")
+        case "$ASSESSMENT_PATH" in canonical/*) ASSESSMENT_TOOL="canonical/terminal_outcomes.py" ;; esac
+        if [ ! -f "$ASSESSMENT_TOOL" ]; then ASSESSMENT_TOOL="canonical/terminal_outcomes.py"; fi
+        if [ ! -f "$ASSESSMENT_TOOL" ]; then
+            echo "[nightshift commit-msg] ERROR: implementer assessment validator unavailable" >&2
+            exit 1
+        fi
+        python3 "$ASSESSMENT_TOOL" --check-assessment-resolution "$COMMIT_MSG_FILE" --repo . || exit $?
+    fi
     # SPEC-224 terminal-outcome-record: projects explicitly opting into terminal_outcomes receive a
     # second boundary. The Python module reads the configured adapter and staged
     # data, so this shell hook never duplicates a record parser. A deliberate
@@ -60,6 +119,14 @@ if echo "$FIRST_LINE" | grep -qE '^chore: mark SPEC-([A-Z0-9]+-)*[0-9]+ (done|bl
         python3 .nightshift/terminal_outcomes.py --check-staged --repo . \
             --config .nightshift/config.yaml --spec-id "$SPEC_ID" --terminal "$TERMINAL"
     fi
+    exit 0
+fi
+
+# BUG-NS-KIT-106 / SPEC-NS-KIT-118: the non-terminal status marks (in_progress, draft, planned, ready,
+# superseded, retired) the run guide (Step 2b/2c) commits and
+# record_metrics.find_in_progress_sha reads. Anchored, so it cannot match done|blocked and
+# carries no terminal trailer requirement.
+if echo "$FIRST_LINE" | grep -qE "^chore: mark ${COMMIT_ID_ERE} (draft|planned|ready|in_progress|superseded|retired)$"; then
     exit 0
 fi
 
@@ -109,19 +176,59 @@ if [ -f "$CONFIG_FILE" ] && [ -f "$SCANNER" ] && command -v python3 >/dev/null 2
     fi
 fi
 
-# Ordinary commits require a spec prefix, separator, and non-empty subject.
-if ! echo "$FIRST_LINE" | grep -qE '^\[SPEC-([A-Z0-9]+-)*[0-9]+\] .+'; then
+# SPEC-NS-KIT-118: the remaining subjects, in order.
+# B. A `chore: mark ` or `chore(scope): mark ` subject that is not an exact lifecycle form (done|blocked|in_progress
+#    with a valid ID, handled above) is a malformed lifecycle subject. Never let the
+#    maintenance rule (C) absorb it.
+if echo "$FIRST_LINE" | grep -qE '^chore(\([^)]*\))?!?: mark '; then
     echo ""
-    echo "[nightshift commit-msg] ERROR: Commit message must use a Nightshift subject."
+    echo "[nightshift commit-msg] ERROR: malformed lifecycle subject."
     echo ""
     echo "  Got:      $FIRST_LINE"
-    echo "  Ordinary: [SPEC-ID] type: description"
-    echo "  Lifecycle: chore: mark SPEC-ID done|blocked"
-    echo ""
-    echo "  This ensures every commit is traceable to its spec."
-    echo "  To bypass (not recommended): git commit --no-verify"
+    echo "  Expected: chore: mark <ID> done|blocked|in_progress   (<ID> like SPEC-123, BUG-NS-KIT-45)"
+    echo "            done|blocked also need the Nightshift-* lifecycle trailers."
     echo ""
     exit 1
 fi
 
-exit 0
+# Ordinary commits: spec prefix, separator, and non-empty subject.
+if echo "$FIRST_LINE" | grep -qE "^\[${COMMIT_ID_ERE}\] .+"; then
+    exit 0
+fi
+
+# E. `<ID>: description`
+if echo "$FIRST_LINE" | grep -qE "^${COMMIT_ID_ERE}: .+"; then
+    exit 0
+fi
+
+# C. Maintenance subjects need no ID.
+if echo "$FIRST_LINE" | grep -qE '^(chore|telemetry|release|merge): .+'; then
+    exit 0
+fi
+
+# D. Conventional subjects are accepted only when the subject line carries an ID
+#    (in the scope or the text, unanchored).
+if echo "$FIRST_LINE" | grep -qE '^(feat|fix|docs|test|refactor|perf|build|ci|style|chore|spec|evidence|audit|draft|formal|research|wip)(\([^)]*\))?!?: .+' && \
+   { echo "$FIRST_LINE" | grep -qE "$GRAMMAR_ID_ERE" ||
+     echo "$FIRST_LINE" | grep -qE "(^|[^[:alnum:]-])${COMMIT_ID_ERE}([^[:alnum:]-]|$)"; }; then
+    exit 0
+fi
+
+echo ""
+echo "[nightshift commit-msg] ERROR: Commit message must use a Nightshift subject."
+echo ""
+echo "  Got:      $FIRST_LINE"
+echo "  Accepted forms:"
+echo "    [<ID>] type: description               (ordinary; ID kinds: SPEC, BUG, NFR, QUESTIONS)"
+echo "    <ID>: description"
+echo "    chore: mark <ID> done|blocked|in_progress|draft|planned|ready|superseded|retired   (done|blocked need lifecycle trailers)"
+echo "    chore|telemetry|release|merge: description  (maintenance, no ID needed)"
+echo "    type(scope): description                    (type: feat fix docs test refactor perf build ci chore"
+echo "                                                 style spec evidence audit draft formal research wip;"
+echo "                                                 the subject must contain an <ID>)"
+echo "    Merge ... / Revert ..                       (git-generated)"
+echo ""
+echo "  This ensures every commit is traceable to its spec."
+echo "  To bypass (not recommended): git commit --no-verify"
+echo ""
+exit 1

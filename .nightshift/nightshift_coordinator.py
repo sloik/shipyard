@@ -23,6 +23,7 @@ Exit codes:
 """
 
 import json
+import dependency_registry
 import re
 import sys
 import hashlib
@@ -31,7 +32,7 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 import subprocess
 import yaml
 
@@ -50,8 +51,9 @@ from integration_broker import (
 )
 import deployment_tiers
 from spec_artifacts import reports_root_for_spec_path
+from scope_guard import AmbiguousSpecFile, find_spec_file  # BUG-NS-KIT-007
 from spec_frontmatter import parse_spec_file
-from status_store import StatusStore
+from status_store import StatusStore, StatusStoreError
 from worktree_janitor import run_startup_janitor
 from verifier_feedback import (
     FeedbackRuntimeAdapter,
@@ -100,7 +102,7 @@ class GitError(Exception):
 class SpecContractError(CoordinatorError):
     """Raised when a spec's required input or output artifact contract fails."""
 
-    def __init__(self, message: str, *, status: str, error_type: str):
+    def __init__(self, message: str, *, status: str | None, error_type: str):
         super().__init__(message)
         self.status = status
         self.error_type = error_type
@@ -112,6 +114,14 @@ class ValidationError(CoordinatorError):
 
 class ManagedPayloadIntegrityError(CoordinatorError):
     """Raised when the admitted control-plane payload cannot be accepted."""
+
+
+class ManagedPayloadSupersededError(ManagedPayloadIntegrityError):
+    """The admitted release was superseded (SPEC-NS-KIT-007): re-admit and re-run, never accept."""
+
+    def __init__(self, message: str, *, attempt_artifact: Optional[str] = None):
+        super().__init__(message)
+        self.attempt_artifact = attempt_artifact
 
 
 class RunTokenCeilingExceeded(CoordinatorError):
@@ -145,6 +155,79 @@ def observed_token_spend(agent_result: Dict[str, Any]) -> int:
         return max(0, int(usage))
     except (TypeError, ValueError):
         return 0
+
+
+# SPEC-NS-KIT-001 R3: the merge-to-main step honours the same advisory freeze
+# lease as the pre-commit hook.  The read side has ONE implementation,
+# hooks/main-freeze.sh (exit 3 = refuse, anything else = allow, warning on
+# stderr); this seam only runs it.  A coordinator outage fails open (R5).
+MAIN_FREEZE_REFUSED_EXIT = 3
+MAIN_FREEZE_PROBE_TIMEOUT_S = 3.0
+
+
+class MainFreezeVerdict(NamedTuple):
+    blocked: bool
+    message: str
+    warning: str = ""
+
+
+def _main_freeze_script(repo_root: Path) -> Optional[Path]:
+    for candidate in (
+        Path(__file__).resolve().parent / "hooks" / "main-freeze.sh",
+        Path(repo_root) / ".nightshift" / "hooks" / "main-freeze.sh",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def probe_main_freeze(
+    repo_root: Path,
+    *,
+    script: Optional[Path] = None,
+    runner: Callable[..., Any] = subprocess.run,
+    timeout: float = MAIN_FREEZE_PROBE_TIMEOUT_S,
+) -> MainFreezeVerdict:
+    """One bounded freeze check for a merge into the checkout at ``repo_root``."""
+    script = script or _main_freeze_script(repo_root)
+    if script is None:
+        return MainFreezeVerdict(False, "", "main-freeze probe not installed; freeze not checked")
+    try:
+        done = runner(
+            [str(script), "check", "--assume-main"], cwd=str(repo_root),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return MainFreezeVerdict(False, "", f"main-freeze probe failed ({type(error).__name__}); freeze not checked")
+    if done.returncode == MAIN_FREEZE_REFUSED_EXIT:
+        return MainFreezeVerdict(True, (done.stderr or "").strip())
+    return MainFreezeVerdict(False, "", (done.stderr or "").strip())
+
+
+def main_freeze_gate(
+    repo_root: Path,
+    inner: Optional[Callable[..., Any]],
+    *,
+    probe: Optional[Callable[[Path], MainFreezeVerdict]] = None,
+) -> Callable[..., Any]:
+    """Wrap the integration queue's authorization gate with the freeze check.
+
+    The queue calls the gate before every merge attempt, so a refusal holds the
+    candidate (``authorization_required``) and no merge commit lands.
+    """
+    check = probe or probe_main_freeze
+
+    def gate(handle: Any, candidate_sha: str, head_drift: bool) -> Any:
+        verdict = check(Path(repo_root))
+        if verdict.warning:
+            print(f"[nightshift coordinator] {verdict.warning}", file=sys.stderr)
+        if verdict.blocked:
+            return deployment_tiers.AuthorizationStatus(True, False, verdict.message, "main_freeze")
+        if inner is not None:
+            return inner(handle, candidate_sha, head_drift)
+        return deployment_tiers.AuthorizationStatus(False, True, "no main freeze", None)
+
+    return gate
 
 
 class ExactSubstepCache:
@@ -400,12 +483,29 @@ def set_spec_status(spec_file: Path, status: str) -> None:
     write_spec_frontmatter(spec_file, mutate)
 
 
-def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any]) -> List[Path]:
+def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any], *, spec_file: Path | None = None) -> List[Path]:
     """Ensure required input files exist before a spec launches."""
+    from verification_report import EXTERNAL_INPUT_PREFIX, required_external_input_findings, verifier_input_readiness
     required_inputs = extract_required_inputs(frontmatter)
+    findings = required_external_input_findings(frontmatter)
+    external = any(value.startswith(EXTERNAL_INPUT_PREFIX) for value in required_inputs)
+    if findings or external or spec_file is not None:
+        if findings:
+            readiness = {"eligible": False, "reason": findings[0]}
+        elif spec_file is None:
+            readiness = {"eligible": False, "reason": "spec_baseline_missing"}
+        else:
+            readiness = verifier_input_readiness(project_root, spec_file)
+        if not readiness["eligible"]:
+            error = SpecContractError("verifier input readiness: " + readiness["reason"],
+                                      status=None, error_type=readiness["reason"])
+            error.readiness = readiness
+            raise error
     resolved: List[Path] = []
 
     for rel_path in required_inputs:
+        if rel_path.startswith(EXTERNAL_INPUT_PREFIX):
+            continue
         path = project_root / rel_path
         if not path.exists():
             raise SpecContractError(
@@ -418,10 +518,10 @@ def verify_required_inputs(project_root: Path, frontmatter: Dict[str, Any]) -> L
     return resolved
 
 
-def load_required_input_context(project_root: Path, frontmatter: Dict[str, Any]) -> List[Dict[str, str]]:
+def load_required_input_context(project_root: Path, frontmatter: Dict[str, Any], *, spec_file: Path | None = None) -> List[Dict[str, str]]:
     """Load required input file contents for injection into the implementation brief."""
     payloads: List[Dict[str, str]] = []
-    for path in verify_required_inputs(project_root, frontmatter):
+    for path in verify_required_inputs(project_root, frontmatter, spec_file=spec_file):
         payloads.append(
             {
                 'path': str(path.relative_to(project_root)),
@@ -514,10 +614,11 @@ CONTEXT_FOLDER_NAMES = ('.agent-context', '.argo')
 class ContextPointerAssembler:
     """Builds context pointer list for implementation agent."""
 
-    def __init__(self, project_root: Path, config: Dict[str, Any], spec: Dict[str, Any], argo_home: Path):
+    def __init__(self, project_root: Path, config: Dict[str, Any], spec: Dict[str, Any], argo_home: Path, *, spec_file: Path | None = None):
         self.project_root = project_root
         self.config = config
         self.spec = spec
+        self.spec_file = spec_file
         self.argo_home = argo_home
 
     def assemble(self) -> Dict[str, Any]:
@@ -628,7 +729,7 @@ class ContextPointerAssembler:
 
     def _required_input_payloads(self) -> List[Dict[str, str]]:
         """Load required input artifacts into context so the implementation agent can read them."""
-        return load_required_input_context(self.project_root, self.spec)
+        return load_required_input_context(self.project_root, self.spec, spec_file=self.spec_file)
 
 
 class CoordinatorMetrics:
@@ -837,6 +938,7 @@ class PostMergeValidator:
     def __init__(self, project_root: Path, config: Dict[str, Any]):
         self.project_root = project_root
         self.config = config
+        self.activity_context = None
 
     def _stack_profile(self, frontmatter: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Resolve a stack profile for the given spec frontmatter, if any."""
@@ -866,6 +968,21 @@ class PostMergeValidator:
         if not normalized:
             return True, f"{label} skipped (not configured)"
 
+        import uuid
+        episode_id = 'command-' + uuid.uuid4().hex
+        category = 'tests' if 'test' in label.lower() else 'scripts' if 'build' in label.lower() else 'tool'
+        def boundary(kind):
+            if self.activity_context is None:
+                return
+            store, spec_id, run_id = self.activity_context
+            try:
+                store.record_activity_event(spec_id=spec_id, run_id=run_id, episode_id=episode_id,
+                    event_id=episode_id + ':' + kind, category=category, kind=kind, at=datetime.now(timezone.utc).isoformat(),
+                    actor='agent:coordinator', source='coordinator',
+                    phase=category + ('_execution' if kind == 'start' else '_complete'), next_action='inspect_result')
+            except Exception:
+                pass  # Unavailable telemetry cannot change command acceptance; missing boundaries stay unclassified.
+        boundary('start')
         try:
             result = subprocess.run(
                 normalized,
@@ -879,6 +996,8 @@ class PostMergeValidator:
             return False, f"{label} timed out ({timeout}s)"
         except Exception as exc:  # pragma: no cover - defensive wrapper
             return False, f"{label} error: {exc}"
+        finally:
+            boundary('end')
 
         combined_output = "\n".join(
             chunk for chunk in [result.stdout.strip(), result.stderr.strip()] if chunk
@@ -1017,7 +1136,11 @@ class Coordinator:
         completion_evidence_provider: Optional[Callable[[WorktreeHandle], Dict[str, Any]]] = None,
         authoring_provider: Optional[managed_payload_provenance.AuthoringProvider] = None,
         integrity_install: Optional[Path] = None,
+        abandonment_provider: Optional[managed_payload_provenance.AbandonmentProvider] = None,
+        main_freeze_probe: Optional[Callable[[Path], MainFreezeVerdict]] = None,
     ):
+        # SPEC-NS-KIT-001: injectable seam; the default runs hooks/main-freeze.sh.
+        self._main_freeze_probe = main_freeze_probe
         self.project_root = project_root
         self.spec_files = spec_files
         self.argo_home = argo_home
@@ -1034,6 +1157,7 @@ class Coordinator:
         self._completion_evidence_provider = completion_evidence_provider
         self._authoring_provider = authoring_provider
         self._integrity_install = integrity_install
+        self._abandonment_provider = abandonment_provider
 
     def _install_root(self) -> Path:
         if getattr(self, "_integrity_install", None) is not None:
@@ -1066,6 +1190,126 @@ class Coordinator:
         installed = handle.worktree_path / ".nightshift"
         return installed if installed.is_dir() else Path(__file__).resolve().parent
 
+    def _ensure_shared_admission(self, *, fresh: bool = False) -> Dict[str, Any]:
+        """Control-plane receipt against the parent install (SPEC-NS-KIT-007 R1/R2)."""
+        if self._shared_admission is None or fresh:
+            self._shared_admission = run_install_admission(
+                None, install_root=self._install_root(), invocation_kind="coordinator",
+                run_id=f"{self.metrics.run_id}-shared{'-re' if fresh else ''}",
+            )
+        return self._shared_admission
+
+    def _check_shared_control_plane(self) -> Dict[str, Any] | None:
+        """Return a failure dict, or None when the control plane is still the admitted one.
+
+        A superseded control plane gets exactly one fresh shared admission and one
+        re-check (R2). The worker's result receipt is never touched here.
+        """
+        for attempt in (0, 1):
+            shared = self._ensure_shared_admission(fresh=attempt == 1)
+            if not shared.get("ok"):
+                self._shared_integrity_failed = True
+                return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-SHARED-ADMISSION", "scope": "shared"}
+            result = managed_payload_provenance.verify_terminal_integrity(
+                self._install_root(),
+                spec_id="unselected",
+                receipt_ref=str(shared.get("integrity_receipt_path")),
+                receipt_sha256=str(shared.get("integrity_receipt_sha256")),
+                run_id=str(shared.get("integrity_run_id") or f"{self.metrics.run_id}-shared"),
+            )
+            if result.ok:
+                return None
+            if attempt == 0 and result.reason_code == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+                continue
+            self._shared_integrity_failed = True
+            return {**result.to_dict(), "scope": "shared"}
+        return None  # pragma: no cover
+
+    def _close_worker_superseded(self, handle: WorktreeHandle, result: Dict[str, Any], specs_dir: Path | None) -> None:
+        """R3: record the `superseded` outcome and return the spec to ready; keep branch and worktree."""
+        spec_id = handle.spec_id
+        attempt = result.get("artifact_path")
+        run_id = str(handle.integrity_run_id or handle.terminal_run_id or self.metrics.run_id)
+        payload = {
+            "outcome": "superseded", "reason_code": result.get("reason_code"),
+            "attempt_artifact": attempt, "attempt_sha256": result.get("artifact_sha256"),
+            "branch": handle.branch_name, "worktree": str(handle.worktree_path),
+        }
+        spec_path = (specs_dir / f"{spec_id}.md") if specs_dir is not None else None
+        store = StatusStore.for_specs_dir(specs_dir) if specs_dir is not None else None
+        if store is None:
+            return
+        state = store.get_state(spec_id) or {}
+        if state.get("status") == "ready" and (state.get("payload") or {}).get("attempt_artifact") == attempt:
+            return  # already closed for this attempt; the gate may be re-entered
+        reason = (f"outcome superseded: result receipt superseded by a sealed release "
+                  f"(attempt artifact {attempt}); re-admit and re-run, old candidate not accepted")
+        if spec_path is not None and spec_path.is_file():
+            store.transition_commit_backed(
+                spec_path, "ready", run_id=run_id, source="coordinator", reason=reason,
+                evidence=[str(attempt)] if attempt else (), extra_payload=payload,
+            )
+        else:
+            store.update_state(spec_id, "ready", run_id=run_id, source="coordinator", note=reason, payload=payload)
+
+    def terminal_integrity_gate(self, handle: WorktreeHandle, *, specs_dir: Path | None = None) -> Dict[str, Any]:
+        """Parent-owned terminal check: control plane first, then the worker-bound result receipt."""
+        failure = self._check_shared_control_plane()
+        if failure is not None:
+            return failure
+        install = self._worker_install_root(handle)
+        if not handle.integrity_receipt_path or not handle.integrity_receipt_sha256:
+            return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-RECEIPT-MISSING", "scope": "worker"}
+        worker = managed_payload_provenance.verify_terminal_integrity(
+            install,
+            spec_id=handle.spec_id,
+            receipt_ref=handle.integrity_receipt_path,
+            receipt_sha256=handle.integrity_receipt_sha256,
+            run_id=handle.integrity_run_id,
+            **({"authoring_provider": self._authoring_provider}
+               if getattr(self, "_authoring_provider", None) is not None else {}),
+        )
+        result = {**worker.to_dict(), "scope": "worker"}
+        if worker.reason_code == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+            # O1: never re-admit the result receipt and never accept the old candidate.
+            result["acceptance_outcome"] = worker.outcome
+            result["outcome"] = "superseded"
+            self._close_worker_superseded(handle, result, specs_dir)
+        elif worker.ok:
+            # R4: a stored allow is logged and accepted, citing its artifact and prior attempts.
+            self.metrics.data.setdefault("managed_payload_acceptance", []).append({
+                "spec_id": handle.spec_id, "outcome": worker.outcome, "reason_code": worker.reason_code,
+                "artifact_path": worker.artifact_path, "artifact_sha256": worker.artifact_sha256,
+                "receipt_check": (worker.receipt_check or {}).get("check"),
+                "prior_attempts": self._prior_attempt_refs(install, worker.artifact_path),
+            })
+        return result
+
+    @staticmethod
+    def _prior_attempt_refs(install: Path, artifact_path: Optional[str]) -> List[str]:
+        """Attempt files recorded before this allow (slot artifact `prior_attempts` digests)."""
+        if not artifact_path:
+            return []
+        try:
+            digests = json.loads((install / artifact_path).read_text(encoding="utf-8")).get("prior_attempts") or []
+        except (OSError, ValueError):
+            return []
+        attempts = install / managed_payload_provenance.ATTEMPTS_DIR
+        return sorted(
+            path.relative_to(install).as_posix() for path in attempts.glob("*.json")
+            if any(path.name.endswith(f"-{digest}.json") for digest in digests)
+        )
+
+    def abandon_invalid_run(self, spec_id: str) -> Dict[str, Any]:
+        """Parent-owned rejected-run recovery; never invoke acceptance or merge."""
+        import unblock_spec
+        selected = [path for path in self.spec_files
+                    if str(read_spec_frontmatter(path)[0].get("id")) == spec_id]
+        if len(selected) != 1:
+            raise CoordinatorError("administrative recovery requires one selected spec")
+        return unblock_spec.abandon_invalid_run(selected[0], self._install_root(),
+            abandonment_provider=getattr(self, "_abandonment_provider", None))
+
     def _accept_managed_payload(self, spec_id: str) -> Dict[str, Any]:
         admission = self._integrity_receipts.get(spec_id)
         if admission is None:
@@ -1079,6 +1323,12 @@ class Coordinator:
             **({"authoring_provider": self._authoring_provider}
                if getattr(self, "_authoring_provider", None) is not None else {}),
         )
+        if result.reason_code == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+            raise ManagedPayloadSupersededError(
+                f"Managed-payload result receipt superseded ({result.reason_code}); preserve the branch and "
+                "worktree, take a new admission and re-run. The old candidate is never accepted.",
+                attempt_artifact=result.artifact_path,
+            )
         if not result.ok:
             raise ManagedPayloadIntegrityError(
                 f"Managed-payload result acceptance denied ({result.reason_code}); preserve the divergent install and route the fix through canonical release."
@@ -1124,6 +1374,11 @@ class Coordinator:
         def admit_worker(spec_id, handle, _worker_run_id):
             if self._shared_integrity_failed:
                 return {"ok": False, "admission": "deny", "reason": "shared managed payload integrity is untrusted"}
+            # SPEC-NS-KIT-007 R1: the control-plane receipt is taken at launch against the
+            # parent install; the worker's result receipt is bound to its own install below.
+            if not self._ensure_shared_admission().get("ok"):
+                self._shared_integrity_failed = True
+                return {"ok": False, "admission": "deny", "reason": "shared managed payload admission failed"}
             install = self._worker_install_root(handle)
             return run_install_admission(
                 spec_id, install_root=install, invocation_kind="coordinator",
@@ -1165,9 +1420,9 @@ class Coordinator:
         except ValueError:
             worker_spec = source
         frontmatter, _ = read_spec_frontmatter(worker_spec)
-        verify_required_inputs(handle.worktree_path, frontmatter)
+        verify_required_inputs(handle.worktree_path, frontmatter, spec_file=worker_spec)
         context = ContextPointerAssembler(
-            handle.worktree_path, self.config, frontmatter, self.argo_home,
+            handle.worktree_path, self.config, frontmatter, self.argo_home, spec_file=worker_spec,
         ).assemble()
         result = self._delegate_spec(
             spec_id, worker_spec,
@@ -1389,6 +1644,8 @@ class Coordinator:
             report_bytes, report_path = self._completion_artifact_bytes(
                 handle, revision, artifacts.get('report'),
             )
+            if not report_bytes.strip():
+                raise ValueError('parent report evidence is empty')
             tests_bytes, tests_path = self._completion_artifact_bytes(
                 handle, revision, artifacts.get('tests'),
             )
@@ -1463,6 +1720,8 @@ class Coordinator:
             verifier_bytes = verifier_file.read_bytes()
             if hashlib.sha256(verifier_bytes).hexdigest() != verifier_descriptor.get('sha256'):
                 raise ValueError('verifier artifact hash mismatch')
+            if len(verifier_bytes) > 1024 * 1024:
+                raise ValueError('parent verifier evidence exceeds 1 MiB')
             verdict = json.loads(verifier_bytes)
             candidate_digest = candidate_revision_digest(revision)
             if (
@@ -1479,6 +1738,44 @@ class Coordinator:
                 verifier_id=str(receipt.get('verifier_id', '')),
                 implementer_ids=receipt.get('implementer_ids') or (),
             )
+            premise_acceptance = receipt.get('premise_acceptance')
+            accepted_dispute = False
+            if verdict.get('verdict') == 'disputes_premise' and premise_acceptance is not None:
+                def parent_proof(descriptor):
+                    if not isinstance(descriptor, dict) or set(descriptor) != {'path', 'sha256'}:
+                        raise ValueError('parent dispute proof descriptor is invalid')
+                    unresolved = self.project_root / descriptor['path']
+                    path = unresolved.resolve()
+                    if path.parent != evidence_root or not path.is_file() or unresolved.is_symlink():
+                        raise ValueError('parent dispute proof is outside parent evidence root')
+                    data = path.read_bytes()
+                    if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != descriptor['sha256']:
+                        raise ValueError('parent dispute proof hash mismatch')
+                    return json.loads(data)
+                parent_decision = parent_proof(premise_acceptance)
+                common = subprocess.run(['git', 'rev-parse', '--git-common-dir'],
+                    cwd=self.project_root, capture_output=True, text=True, check=True).stdout.strip()
+                repository_digest = hashlib.sha256((str((self.project_root / common).resolve())
+                    + '\0' + str(self.project_root.resolve())).encode()).hexdigest()
+                if (not isinstance(parent_decision, dict)
+                    or parent_decision.get('decision') != 'accepted'
+                    or parent_decision.get('spec_id') != handle.spec_id
+                    or parent_decision.get('run_id') != handle.integrity_run_id
+                    or parent_decision.get('candidate_revision') != revision
+                    or parent_decision.get('repository_sha256') != repository_digest
+                    or parent_decision.get('verifier_sha256') != verifier_descriptor['sha256']
+                    or parent_decision.get('spec_defect') is not False
+                    or not isinstance(verdict.get('premise_dispute'), dict)
+                    or verdict['premise_dispute'].get('spec_defect') is not False
+                    or any(not isinstance(verdict['premise_dispute'].get(key), str)
+                           or not verdict['premise_dispute'][key].strip() for key in ('claim', 'evidence'))):
+                    raise ValueError('parent accepted-premise decision binding mismatch')
+                followup = parent_proof(parent_decision.get('non_spec_followup'))
+                if (not isinstance(followup, dict) or followup.get('spec_id') != handle.spec_id
+                    or followup.get('run_id') != handle.integrity_run_id
+                    or not isinstance(followup.get('action'), str) or not followup['action'].strip()):
+                    raise ValueError('parent premise decision lacks recorded non-spec follow-up')
+                accepted_dispute = True
         except (ValueError, TypeError, KeyError, json.JSONDecodeError,
                 subprocess.CalledProcessError, FeedbackValidationError) as exc:
             return {
@@ -1493,7 +1790,7 @@ class Coordinator:
             failed.append('tests_passed')
         if not checklist.get('all_pass') or any(not item.get('passes') for item in ac_items):
             failed.append('acs_covered')
-        if verdict.get('verdict') != 'pass' or any(
+        if (verdict.get('verdict') != 'pass' and not accepted_dispute) or any(
             item.get('status') != 'pass' for item in verdict.get('acs') or ()
         ):
             failed.append('verifier')
@@ -1509,10 +1806,67 @@ class Coordinator:
             'reason_code': 'NS-COMP-EVIDENCE-ACCEPTED',
             'candidate_revision': revision,
             'changed_files': observed_files,
+            'evidence_values': {'report': 'pass', 'tests': 'pass', 'code': 'pass'},
+            'verifier': {
+                'verdict': verdict['verdict'], 'acs': verdict['acs'],
+                'sha256': verifier_descriptor['sha256'],
+            },
+            'parent_tool_calls': receipt.get('parent_tool_calls', 'unavailable'),
+            'le_evidence': receipt.get('le_evidence'),
+            'premise_acceptance': premise_acceptance if accepted_dispute else None,
             'artifacts': {
                 'report': report_path, 'tests': tests_path,
                 'ac_checklist': checklist_path, 'verifier': verifier_path,
             },
+        }
+
+    def _first_projection_inputs(self, handle, decision, base_head):
+        """Parent queue envelope from retained acceptance and immutable proof blobs."""
+        from validate_specs import _live_execution_items
+        from lifecycle import is_safe_relative_posix_path
+        root = Path(self.project_root).resolve()
+        completion = decision['payload']['completion_evidence']
+        source = next(path for path in self.spec_files
+                      if read_spec_frontmatter(path)[0].get('id') == handle.spec_id)
+        relative = source.resolve().relative_to(root)
+        def blob(path):
+            return subprocess.run(['git', 'show', f'{base_head}:{path}'], cwd=root,
+                                  capture_output=True, check=True).stdout
+        text = blob(relative.as_posix()).decode('utf-8')
+        checked, _, references = _live_execution_items(text.splitlines())
+        evidence = completion.get('le_evidence')
+        if evidence is None:
+            evidence = {}
+            for item in checked:
+                reference = references.get(item)
+                if not reference or not is_safe_relative_posix_path(reference):
+                    raise ValueError(f'checked {item} needs parent hash-bound LE evidence')
+                for prefix in (relative.parent, relative.parent.parent, relative.parent.parent.parent):
+                    name = (prefix / reference).as_posix()
+                    if not is_safe_relative_posix_path(name):
+                        continue
+                    try:
+                        content = blob(name)
+                    except subprocess.CalledProcessError:
+                        continue
+                    evidence[item] = {'path': name, 'sha256': hashlib.sha256(content).hexdigest()}
+                    break
+                else:
+                    raise ValueError(f'checked {item} evidence is absent from accepted base')
+        common = subprocess.run(['git', 'rev-parse', '--git-common-dir'], cwd=root,
+                                capture_output=True, text=True, check=True).stdout.strip()
+        created = datetime.fromisoformat(decision['created_at'].replace('Z', '+00:00'))
+        return {
+            'schema_version': 1, 'spec_id': handle.spec_id,
+            'run_id': handle.terminal_run_id or handle.integrity_run_id,
+            'decision_id': decision['decision_id'],
+            'repo_common_dir': str((root / common).resolve()), 'checkout_root': str(root),
+            'base_head': base_head, 'candidate_revision': completion['candidate_revision'],
+            'reason': decision.get('reason') or completion['reason_code'],
+            'created': created.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'le_evidence': evidence, 'evidence_values': completion['evidence_values'],
+            'verifier': completion['verifier'],
+            'parent_tool_calls': completion['parent_tool_calls'],
         }
 
     @staticmethod
@@ -1730,6 +2084,86 @@ class Coordinator:
             return 3
         return 2 if failed_ids else 0
 
+    def ledger_fresh_main_decision(
+        self, spec_id: str, *, repo_root: Path, main_branch: str, now: Any = None,
+        observation: dict | None = None,
+    ) -> Dict[str, Any]:
+        """SPEC-NS-KIT-002-002 R6: may the verifier's head run stand in for fresh-main?
+
+        Opt-in (`test_status_ledger.enabled`). Reuse only when the merged tree's identity
+        equals the identity recorded for the verifier's head run; the ledger update is
+        staged under reports/_wip (never written into the tracked ledger here, so the
+        main checkout stays clean for the next gate). Every doubt -- disabled feature,
+        missing module, absent/garbled head record, any identity difference -- returns
+        `run_full_fresh_main`, i.e. today's behaviour. Never raises.
+        """
+        fallback: Dict[str, Any] = {"action": "run_full_fresh_main", "reuse": False}
+        head_record = None
+
+        def finish(decision):
+            # Decisions are observable even when missing proof requires the real run.
+            try:
+                if not re.fullmatch(r"[A-Z][A-Z0-9-]*", spec_id):
+                    return {**fallback, "reason": "invalid_spec_identity"}
+                wip = self.project_root / 'reports' / '_wip'
+                wip.mkdir(parents=True, exist_ok=True)
+                if decision.get('action') == 'run_full_fresh_main':
+                    (wip / f"ledger-pending-{spec_id}.json").unlink(missing_ok=True)
+                path = wip / f"ledger-decision-{spec_id}.json"
+                temporary = path.with_suffix('.tmp')
+                payload = decision
+                # Advisory metadata is outside the existing ledger receipt and return value.
+                try:
+                    from loop_events import delivery_observation_context, normalize_delivery_observation
+                    reason = 'missing_transport' if head_record is None and decision.get('reason') == 'head_proof_untrusted' else decision.get('reason')
+                    native = head_record.get('native_result', {}) if isinstance(head_record, dict) and head_record.get('receipt_digest') == decision.get('record_digest') else {}
+                    demand = normalize_delivery_observation({**delivery_observation_context(self.project_root),
+                        'spec_id': spec_id, 'run_id': self.metrics.run_id,
+                        'observation_id': 'fresh-main-demand', 'action_id': 'fresh-main',
+                        'eligibility': decision.get('reuse') is True, 'reason_code': reason,
+                        'source_receipt_digest': decision.get('record_digest'),
+                        'demand_receipt_digest': hashlib.sha256(json.dumps(decision, sort_keys=True).encode()).hexdigest(),
+                        'native_created_at': native.get('created') if isinstance(native, dict) else None})
+                    if demand is not None:
+                        payload = {**decision, 'delivery_demand': demand}
+                        if isinstance(observation, dict):
+                            observation.update(demand)
+                except Exception:
+                    pass
+                temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding='utf-8')
+                temporary.replace(path)
+            except OSError:
+                pass
+            return decision
+        settings = self.config.get('test_status_ledger')
+        if not isinstance(settings, dict) or not settings.get('enabled'):
+            return {**fallback, "reason": "ledger_disabled"}
+        try:
+            import verification_report as ledger
+        except ImportError:
+            return finish({**fallback, "reason": "ledger_module_unavailable"})
+        try:
+            wip = self.project_root / 'reports' / '_wip'
+            head_record = ledger.load_ledger(wip / f"ledger-head-{spec_id}.json")
+            errors = ledger.head_run_errors(head_record, require_admission=True, spec_id=spec_id)
+            if errors:
+                return finish({**fallback, "reason": "head_proof_untrusted", "detail": errors[0]})
+            extras = dict(settings.get('identity') or {})
+            extras.setdefault('command', normalize_command((self.config.get('commands') or {}).get('test')))
+            relative = str(settings.get('path') or ledger.LEDGER_RELATIVE_PATH)
+            merged = ledger.identity_from_extras(
+                Path(repo_root), main_branch, extras, exempt=[relative], ledger_path=relative)
+            updated, decision = ledger.dedup_fresh_main(
+                head_record, merged, now=now or ledger.utc_now(), run_id=self.metrics.run_id,
+            )
+            if updated is not None:
+                (wip / f"ledger-pending-{spec_id}.json").write_text(
+                    json.dumps(updated, indent=2, sort_keys=True) + "\n", encoding='utf-8',
+                )
+            return finish(decision)
+        except Exception as exc:  # noqa: BLE001 - fail closed to the real run
+            return finish({**fallback, "reason": f"ledger_error:{type(exc).__name__}"})
+
     def build_integration_queue(self, *, request_repair=None, dependency_graph=None) -> SerializedIntegrationQueue:
         """Create the sole main-branch integration owner for parallel workers.
 
@@ -1751,45 +2185,35 @@ class Coordinator:
         protected_surfaces = (self.config.get("parallel_integration") or {}).get("protected_release_surfaces", [])
 
         def validate(handle):
+            observation = {}
+            reuse = self.ledger_fresh_main_decision(
+                handle.spec_id, repo_root=repo_root, main_branch=main_branch, observation=observation,
+            )
+            def observed(disposition, passed):
+                try:
+                    from loop_events import observe_delivery_boundary
+                    fields = {key: value for key, value in observation.items()
+                        if key not in {'event', 'schema_version', 'observation_id', 'spec_id', 'run_id', 'action_id', 'disposition', 'eligibility', 'product_outcome'}}
+                    fields.setdefault('reason_code', reuse.get('reason'))
+                    observe_delivery_boundary(self.project_root, handle.spec_id,
+                        run_id=self.metrics.run_id, action_id='fresh-main', **fields,
+                        disposition=disposition, eligibility=reuse.get('reuse') is True,
+                        product_outcome='passed' if passed else 'failed')
+                except Exception:
+                    pass
+            if reuse.get("action") == "reuse_head_run":
+                observed('consumed', True)
+                return True, (
+                    "main validation reused the verifier head run (label: reused, ledger receipt "
+                    f"{reuse.get('record_digest')}); merged identity equals the verified head identity"
+                )
             passed, error, metadata = self.validator.validate()
             output = error or metadata.get("output") or "main validation passed"
+            observed('native_fallback', passed)
             return passed, output
 
         def terminal_gate(handle):
-            # First prove the coordinator/shared control plane is still the
-            # admitted one.  A failure stops every integration decision.
-            if self._shared_admission is None:
-                self._shared_admission = run_install_admission(
-                    None, install_root=self._install_root(), invocation_kind="coordinator",
-                    run_id=f"{self.metrics.run_id}-shared",
-                )
-            shared = self._shared_admission
-            if not shared.get("ok"):
-                self._shared_integrity_failed = True
-                return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-SHARED-ADMISSION", "scope": "shared"}
-            shared_result = managed_payload_provenance.verify_terminal_integrity(
-                self._install_root(),
-                spec_id="unselected",
-                receipt_ref=str(shared.get("integrity_receipt_path")),
-                receipt_sha256=str(shared.get("integrity_receipt_sha256")),
-                run_id=str(shared.get("integrity_run_id") or f"{self.metrics.run_id}-shared"),
-            )
-            if not shared_result.ok:
-                self._shared_integrity_failed = True
-                return {**shared_result.to_dict(), "scope": "shared"}
-            install = self._worker_install_root(handle)
-            if not handle.integrity_receipt_path or not handle.integrity_receipt_sha256:
-                return {"ok": False, "outcome": "indeterminate", "reason_code": "NS-MPI-RECEIPT-MISSING", "scope": "worker"}
-            worker_result = managed_payload_provenance.verify_terminal_integrity(
-                install,
-                spec_id=handle.spec_id,
-                receipt_ref=handle.integrity_receipt_path,
-                receipt_sha256=handle.integrity_receipt_sha256,
-                run_id=handle.integrity_run_id,
-                **({"authoring_provider": self._authoring_provider}
-                   if getattr(self, "_authoring_provider", None) is not None else {}),
-            ).to_dict()
-            return {**worker_result, "scope": "worker"}
+            return self.terminal_integrity_gate(handle, specs_dir=specs_dir)
 
         status_store = StatusStore.for_specs_dir(specs_dir)
 
@@ -1829,8 +2253,11 @@ class Coordinator:
             release_surface_lease=ReleaseSurfaceLease(self.project_root),
             terminal_frontmatter_projector=TrackedTerminalFrontmatterProjector(
                 repo_root, status_store,
+                completion_inputs_provider=self._first_projection_inputs,
             ),
-            authorization_gate=authorization_gate,
+            authorization_gate=main_freeze_gate(
+                repo_root, authorization_gate, probe=self._main_freeze_probe,
+            ),
         )
 
     def build_integration_broker(self, *, request_repair=None, dependency_graph=None) -> IntegrationBroker:
@@ -1959,11 +2386,24 @@ class Coordinator:
             except SpecReadyError as e:
                 raise CoordinatorError(f"Spec {spec_id} not ready: {e}")
 
+            # Opt-in parallel dispatch already filters each consumer through
+            # its frontier. A batch-level refusal here would stop independent
+            # siblings (NFR-001 I4); this backstop is for the sequential path.
+            if not self.parallel_dispatch_enabled():
+                gate = dependency_registry.start_gate(spec_file.parent, frontmatter)
+                if not gate["ok"]:
+                    raise CoordinatorError("; ".join(reason["message"] for reason in gate["reasons"]))
+
             if frontmatter.get('type') == 'main':
                 for child_spec_id in frontmatter.get('implementation_order') or frontmatter.get('children') or []:
                     child_spec_file = self._child_spec_path(spec_file, child_spec_id)
                     if not child_spec_file.exists():
                         raise CoordinatorError(f"Child spec file not found for {child_spec_id}: {child_spec_file}")
+                    child_fm, _ = read_spec_frontmatter(child_spec_file)
+                    if not self.parallel_dispatch_enabled():
+                        gate = dependency_registry.start_gate(child_spec_file.parent, child_fm)
+                        if not gate["ok"]:
+                            raise CoordinatorError("; ".join(reason["message"] for reason in gate["reasons"]))
                     try:
                         validate_spec_readiness(child_spec_file, child_spec_id)
                     except SpecReadyError as e:
@@ -2051,15 +2491,14 @@ class Coordinator:
         if exact.exists():
             return exact
 
-        matches = sorted(parent_file.parent.glob(f"{child_spec_id}*.md"))
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
+        try:
+            match = find_spec_file(parent_file.parent, child_spec_id)
+        except AmbiguousSpecFile as exc:
             raise CoordinatorError(
                 f"Multiple child spec files match {child_spec_id}: "
-                + ", ".join(str(path.name) for path in matches)
-            )
-        return exact
+                + ", ".join(path.name for path in exc.candidates)
+            ) from exc
+        return match if match is not None else exact
 
     def _detect_related_stacks(self, child_results: List[Dict[str, Any]]) -> List[str]:
         """Detect additional stacks affected by shared-file changes."""
@@ -2157,6 +2596,12 @@ class Coordinator:
         # Keep the exact admission receipt for this selected spec.  A later
         # admission would bless changed bytes and is not a terminal check.
         self._admit_managed_payload(spec_id)
+        # Bind only this coordinator's owned validation subprocesses; other harness activity is not inferred.
+        from status_store import StatusStore
+        try:
+            self.validator.activity_context = (StatusStore.for_specs_dir(spec_file.parent), spec_id, self.metrics.run_id)
+        except Exception:
+            self.validator.activity_context = None  # Telemetry cannot add a new execution gate.
 
         if frontmatter.get('type') == 'main':
             self._run_main_spec(spec_id, spec_file, frontmatter)
@@ -2168,21 +2613,28 @@ class Coordinator:
             }
 
         try:
-            verify_required_inputs(self.project_root, frontmatter)
+            verify_required_inputs(self.project_root, frontmatter, spec_file=spec_file)
         except SpecContractError as exc:
-            update_spec_status(spec_file, status=exc.status, message=str(exc), error_type=exc.error_type)
+            if hasattr(exc, 'readiness'):
+                self.metrics.data.setdefault('verifier_input_readiness', {})[spec_id] = exc.readiness
+            if exc.status is not None:
+                update_spec_status(spec_file, status=exc.status, message=str(exc), error_type=exc.error_type)
             raise
+
+        from verification_report import verifier_input_readiness
+        self.metrics.data.setdefault('verifier_input_readiness', {})[spec_id] = verifier_input_readiness(self.project_root, spec_file)
 
         # Step 1: Assemble context pointers
         assembler = ContextPointerAssembler(
-            self.project_root, self.config, frontmatter, self.argo_home
+            self.project_root, self.config, frontmatter, self.argo_home, spec_file=spec_file
         )
         context_pointers = assembler.assemble()
 
         # Step 2: Generate brief for implementation agent
         brief = self._generate_agent_brief(spec_id, spec_file, context_pointers)
 
-        # Step 3: Delegate to implementation agent
+        # Step 3: Recheck at launch, then delegate to implementation agent.
+        verify_required_inputs(self.project_root, frontmatter, spec_file=spec_file)
         agent_result = self._delegate_spec(spec_id, spec_file, brief)
         self._enforce_run_token_ceiling(spec_id, spec_file, agent_result)
 
@@ -2195,6 +2647,7 @@ class Coordinator:
                 'reason_code': acceptance['reason_code'],
                 'artifact_path': acceptance['artifact_path'],
                 'artifact_sha256': acceptance['artifact_sha256'],
+                'receipt_check': (acceptance.get('receipt_check') or {}).get('check'),
             })
             try:
                 verification = verify_output_artifact(self.project_root, frontmatter)

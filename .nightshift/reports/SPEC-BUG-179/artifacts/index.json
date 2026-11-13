@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-179",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T15:29:25Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Authored to fix duplicate spec IDs found during backlog review; mechanical rename executed directly ",
+      "path": "artifacts/20261003T152925Z-decision-state-rationale-authored-draft-authored-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:30:27Z",
+      "actor": "coordinator",
+      "summary": "draft -> ready: Mechanical, fully specified rename; user asked for it to be done now.",
+      "path": "artifacts/20261003T153027Z-status-transition-draft-ready-mechanical-fully-specified-r.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:30:27Z",
+      "actor": "coordinator",
+      "summary": "ready -> in_progress: mechanical transition to 'in_progress' via run coord-20261003-bug179",
+      "path": "artifacts/20261003T153027Z-status-transition-ready-in-progress-mechanical-transition-.json"
+    },
+    {
+      "type": "status-transition",
+      "created": "2026-10-03T15:32:38Z",
+      "actor": "coordinator",
+      "summary": "in_progress -> done: mechanical transition to 'done' via run coord-20261003-bug179",
+      "path": "artifacts/20261003T153238Z-status-transition-in-progress-done-mechanical-transition-t.json"
+    }
+  ]
+}

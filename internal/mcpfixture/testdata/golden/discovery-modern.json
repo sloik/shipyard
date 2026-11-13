@@ -1,0 +1,73 @@
+[
+  {
+    "http": "POST",
+    "status": 200,
+    "request_headers": {
+      "Content-Type": "application/json",
+      "Mcp-Method": "server/discover",
+      "Mcp-Protocol-Version": "2026-07-28"
+    },
+    "request": {
+      "kind": "request",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              }
+            },
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "shipyard-mcp-fixture",
+              "version": "1.0.0"
+            },
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    },
+    "response_headers": {
+      "Content-Type": "text/event-stream"
+    },
+    "responses": [
+      {
+        "kind": "response",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "resultType": "complete",
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "shipyard-mcp-fixture",
+                "version": "1.0.0"
+              }
+            },
+            "ttlMs": 0,
+            "cacheScope": "public",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {
+              "completions": {},
+              "logging": {},
+              "prompts": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true,
+                "subscribe": true
+              },
+              "tools": {
+                "listChanged": true
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+]

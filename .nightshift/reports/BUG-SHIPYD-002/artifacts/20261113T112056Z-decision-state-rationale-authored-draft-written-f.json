@@ -1,0 +1,30 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "BUG-SHIPYD-002",
+  "type": "decision",
+  "created": "2026-11-13T11:20:56Z",
+  "actor": "coordinator",
+  "summary": "state rationale authored: draft -- Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+  "decision": {
+    "trigger": "state_rationale_authoring",
+    "current_state": "draft",
+    "candidate_states": [
+      "draft"
+    ],
+    "ambiguity_reason": "Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+    "static_findings": [],
+    "resolution": "Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+    "rationale": "Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+    "decision_authority": "coordinator",
+    "reusable_rule_gap": false
+  },
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "draft",
+    "reason": "Written from the failing CI log on 2026-11-13; main is red in make script-check on the Linux runner",
+    "reconsider_when": "Validation of this spec passes",
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

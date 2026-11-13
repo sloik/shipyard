@@ -1,0 +1,63 @@
+[
+  {
+    "http": "POST",
+    "status": 200,
+    "request_headers": {
+      "Content-Type": "application/json"
+    },
+    "request": {
+      "kind": "request",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "shipyard-mcp-fixture",
+            "version": "1.0.0"
+          },
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "roots": {
+              "listChanged": true
+            }
+          }
+        }
+      }
+    },
+    "response_headers": {
+      "Content-Type": "text/event-stream",
+      "Mcp-Session-Id": "redacted"
+    },
+    "responses": [
+      {
+        "kind": "response",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "capabilities": {
+              "completions": {},
+              "logging": {},
+              "prompts": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true,
+                "subscribe": true
+              },
+              "tools": {
+                "listChanged": true
+              }
+            },
+            "protocolVersion": "2025-11-25",
+            "serverInfo": {
+              "name": "shipyard-mcp-fixture",
+              "version": "1.0.0"
+            }
+          }
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,22 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-181",
+  "type": "status-transition",
+  "created": "2026-10-03T17:33:46Z",
+  "actor": "coordinator",
+  "summary": "in_progress -> done: mechanical transition to 'done' via run kickoff-20261003-bug181",
+  "from": "in_progress",
+  "to": "done",
+  "reason": "mechanical transition to 'done' via run kickoff-20261003-bug181",
+  "evidence": [],
+  "run_id": "kickoff-20261003-bug181",
+  "state_rationale": {
+    "schema_version": 1,
+    "status": "done",
+    "reason": "mechanical transition to 'done' via run kickoff-20261003-bug181",
+    "reconsider_when": null,
+    "evidence": [],
+    "provenance": "authored"
+  }
+}

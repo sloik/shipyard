@@ -106,6 +106,8 @@ def run_validation(
         ).to_dict()
         result["managed_payload_acceptance"] = acceptance
         if not acceptance["ok"]:
+            if acceptance.get("reason_code") == managed_payload_provenance.REASON_RELEASE_SUPERSEDED:
+                result["integrity_outcome"] = "superseded"  # SPEC-NS-KIT-007: re-admit and re-run, never accept
             result["build_pass"] = False
             result["commands_skipped_reason"] = "managed_payload_integrity"
             return result

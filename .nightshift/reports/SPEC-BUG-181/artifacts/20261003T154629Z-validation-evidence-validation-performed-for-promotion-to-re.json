@@ -1,0 +1,13 @@
+{
+  "kind": "spec_artifact",
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-181",
+  "type": "validation-evidence",
+  "created": "2026-10-03T15:46:29Z",
+  "actor": "coordinator",
+  "summary": "validation performed for promotion to ready",
+  "evidence": [
+    "go-sdk@v1.8.0/mcp/shared.go",
+    "go-sdk@v1.8.0/conformance/baseline.yml"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "spec_id": "SPEC-BUG-186",
+  "entries": [
+    {
+      "type": "decision",
+      "created": "2026-10-03T15:32:25Z",
+      "actor": "coordinator",
+      "summary": "state rationale authored: draft -- Drafted 2026-08-12 as a child of the MCP 2026 migration plan (SPEC-BUG-180); not yet reviewed for pr",
+      "path": "artifacts/20261003T153225Z-decision-state-rationale-authored-draft-drafted-2.json"
+    }
+  ]
+}
