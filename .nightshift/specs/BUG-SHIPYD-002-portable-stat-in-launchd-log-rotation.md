@@ -4,7 +4,7 @@ template_version: 3
 priority: 1
 layer: 2
 type: bugfix
-status: in_progress
+status: done
 after:
 - SPEC-SHIPYD-001
 violates:
@@ -62,25 +62,25 @@ the first GNU environment to execute them.
 
 ## Requirements
 
-- [ ] R1: `scripts/rotate-launchd-logs.sh` reads a file's size without any `stat` call, using only
+- [x] R1: `scripts/rotate-launchd-logs.sh` reads a file's size without any `stat` call, using only
       POSIX utilities, and keeps its current behaviour (copy-truncate in place, same inode,
       `SHIPYARD_LOG_MAX_BYTES` and `SHIPYARD_LOG_KEEP` semantics).
-- [ ] R2: `scripts/rotate-launchd-logs.test` reads size and inode without any `stat` call, using
+- [x] R2: `scripts/rotate-launchd-logs.test` reads size and inode without any `stat` call, using
       only POSIX utilities, and keeps every existing assertion.
-- [ ] R3: The test fails if either file starts depending on `stat` again, on macOS as well as on
+- [x] R3: The test fails if either file starts depending on `stat` again, on macOS as well as on
       Linux, so the regression is caught before it reaches CI.
 
 ## Acceptance Criteria
 
-- [ ] AC1: `sh scripts/rotate-launchd-logs.test` prints `PASS: rotate-launchd-logs` and exits 0 on
+- [x] AC1: `sh scripts/rotate-launchd-logs.test` prints `PASS: rotate-launchd-logs` and exits 0 on
       macOS (BSD userland).
-- [ ] AC2: The CI job `test` passes the step "Run canonical quality gate" on `ubuntu-latest` for
+- [x] AC2: The CI job `test` passes the step "Run canonical quality gate" on `ubuntu-latest` for
       the commit that carries this fix.
-- [ ] AC3: The test runs the script with a `stat` shim first on `PATH` that always fails, and still
+- [x] AC3: The test runs the script with a `stat` shim first on `PATH` that always fails, and still
       passes. Non-vacuity: with the fix reverted in either file, the same test fails on macOS.
-- [ ] AC4: No assertion in `scripts/rotate-launchd-logs.test` is removed or loosened; the diff to
+- [x] AC4: No assertion in `scripts/rotate-launchd-logs.test` is removed or loosened; the diff to
       the test only replaces the two helpers and adds the shim.
-- [ ] AC5: `make script-check` passes locally. SPEC-SHIPYD-001 AC5 holds again in CI.
+- [x] AC5: `make script-check` passes locally. SPEC-SHIPYD-001 AC5 holds again in CI.
 
 ## Scope Amendments
 
@@ -111,10 +111,10 @@ the first GNU environment to execute them.
 
 ```yaml
 schema_version: 1
-status: in_progress
-reason: mechanical transition to 'in_progress' via run run-20261113-shipyd002
+status: done
+reason: mechanical transition to 'done' via run run-20261113-shipyd002
 reconsider_when: null
 evidence: []
 provenance: authored
-record: artifacts/20261113T174737Z-status-transition-ready-in-progress-mechanical-transition-.json
+record: artifacts/20261113T180123Z-status-transition-in-progress-done-mechanical-transition-t.json
 ```
